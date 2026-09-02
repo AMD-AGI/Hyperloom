@@ -137,37 +137,11 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
     return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
 
 
-# Phase ↔ LLM-proposable set: allowlist minus Coordinator-managed and
-# robustness-delegate-only actions (what PolicyGate accepts for Orchestration).
-PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
-    phase: actions - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
-    for phase, actions in PHASE_ALLOWED_ACTIONS.items()
-}
-
-
-def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny)."""
-    return _action_in_phase_map(action_name, phase, PHASE_LLM_PROPOSABLE_ACTIONS)
-
-
-def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` sorted (deterministic).
-
-    Args:
-        phase (str): Phase name; stripped and upper-cased before lookup.
-
-    Returns:
-        tuple[str, ...]: The phase's LLM-proposable actions sorted ascending,
-        or an empty tuple for an unknown phase.
-    """
-    return tuple(sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())))
-
-
-def render_phase_proposable_bullets(
+def render_phase_action_bullets(
     *,
     disabled_suffix: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render per-phase LLM-proposable action bullets (shared by the prompt builders).
+    """Render per-phase action bullets for the prompt (informational, not enforced).
 
     Args:
         disabled_suffix (dict[str, str] | None): Optional ``phase -> flag`` map;
@@ -180,12 +154,12 @@ def render_phase_proposable_bullets(
     suffix = disabled_suffix or {}
     out: list[str] = []
     for phase in PHASE_NAMES:
-        proposable = llm_proposable_actions_for(phase)
+        actions = allowed_actions_for(phase)
         flag = suffix.get(phase)
         if flag:
-            out.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
+            out.append(f"- **{phase}**: {', '.join(actions)} (DISABLED: {flag} — phase skipped)")
         else:
-            out.append(f"- **{phase}**: {', '.join(proposable)}")
+            out.append(f"- **{phase}**: {', '.join(actions)}")
     return out
 
 
@@ -3380,7 +3354,6 @@ __all__ = [
     "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
     "PHASE_ALLOWED_ACTIONS",
-    "PHASE_LLM_PROPOSABLE_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_FRAMEWORK_AGENT",
@@ -3429,9 +3402,8 @@ __all__ = [
     "prelude_can_afford",
     "prelude_exit_viability",
     "session_usable_seconds",
+    "render_phase_action_bullets",
     "is_action_allowed_in_phase",
-    "is_action_llm_proposable_in_phase",
-    "llm_proposable_actions_for",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",

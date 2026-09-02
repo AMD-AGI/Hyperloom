@@ -34,8 +34,6 @@ from ..phases.machine_state import (
     PHASE_KERNEL_AGENT,
     PHASE_NAMES,
     is_action_allowed_in_phase,
-    is_action_llm_proposable_in_phase,
-    llm_proposable_actions_for,
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -149,9 +147,6 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
-
-# Reference measurement action; named constant for the ``baseline_phase_singleton`` rule.
-BASELINE_ACTION_NAME: str = "baseline"
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -682,16 +677,9 @@ class PolicyGate:
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
-    # R1 phase enforcement: False (default) warns only; ``INFERENCE_OPTIMIZER_STRICT_PHASE=1`` fails closed.
-    strict_phase: bool = False
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
-        """Apply environment overrides for strict-mode flags.
-
-        Lets ``INFERENCE_OPTIMIZER_STRICT_PATHS`` and
-        ``INFERENCE_OPTIMIZER_STRICT_PHASE`` enable strict behavior
-        without threading a constructor argument through every caller.
-        """
+        """Apply environment overrides for strict-mode flags."""
         import os as _os
 
         if not self.strict_paths and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PATHS", "").strip() in (
@@ -700,12 +688,6 @@ class PolicyGate:
             "yes",
         ):
             self.strict_paths = True
-        if not self.strict_phase and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PHASE", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
-            self.strict_phase = True
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
@@ -728,10 +710,6 @@ class PolicyGate:
                 f"role={role.name!r} cannot emit intent_type={intent.type.value!r}",
                 rule="role",
             )
-
-        closing_denied = self._closing_phase_denial(from_agent, intent)
-        if closing_denied is not None:
-            raise closing_denied
 
         payload = intent.payload or {}
 
@@ -803,53 +781,14 @@ class PolicyGate:
             trusted_framework_targets=trusted_framework_targets,
         )
         # Coordinator-managed internal actions (roofline / profile /
-        # replay_warm_recipe / conc_sweep) are dispatched by the Coordinator
-        # itself, never LLM-delegated, so they receive path checks only.
+        # replay_warm_recipe / conc_sweep) are dispatched by
+        # the Coordinator itself, never LLM-delegated, so they receive path
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        skip_baseline_singleton = (
-            kind == BASELINE_ACTION_NAME
-            and bool(task_id)
-            and str(task_id) == str(getattr(self.shared_state.enablement, "revalidation_task_id", "") or "")
-        )
         self._validate_delegate_body(
             role,
             payload,
-            check_phase=False,
             check_source=False,
-            skip_baseline_singleton=skip_baseline_singleton,
-        )
-
-    def _closing_phase_denial(
-        self,
-        source: str,
-        intent: Intent,
-    ) -> PolicyDenied | None:
-        """During closing phase, allow only harmless intents and ``report`` proposals.
-
-        Args:
-            source (str): the identity of the emitting agent.
-            intent (Intent): the intent being evaluated.
-
-        Returns:
-            PolicyDenied | None: ``None`` when the intent is permitted (or no
-                closing phase is active); otherwise a :class:`PolicyDenied`
-                describing the wind-down rejection.
-        """
-        state = self.shared_state
-        if state is None or not getattr(state, "closing_phase", False):
-            return None
-        if intent.type in (
-            IntentType.SEND_MESSAGE,
-            IntentType.ALERT,
-        ):
-            return None
-        if intent.type == IntentType.PROPOSE_ACTION and (intent.payload or {}).get("action_name") == "report":
-            return None
-        return PolicyDenied(
-            f"closing_phase: {intent.type.value} denied (only `report` proposals allowed during wind-down)",
-            rule="closing_phase_only_report",
-            hint="run is winding down; new tasks are dropped",
         )
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
@@ -901,16 +840,14 @@ class PolicyGate:
             PolicyDenied: if any delegate rule fails; the ``rule``
                 attribute identifies which guard fired.
         """
-        self._validate_delegate_body(role, payload, check_phase=True)
+        self._validate_delegate_body(role, payload)
 
     def _validate_delegate_body(
         self,
         role: "AgentRole",
         payload: dict[str, Any],
         *,
-        check_phase: bool,
         check_source: bool = True,
-        skip_baseline_singleton: bool = False,
     ) -> None:
         """Shared delegate validation for intents and dispatched task rows.
 
@@ -918,10 +855,6 @@ class PolicyGate:
             role: The resolved role of the emitting agent.
             payload: Delegate payload with ``action_name`` and optional
                 ``params``.
-            check_phase: When True, enforce the phase-compatibility gate
-                (intent ingress). Dispatch-time replay passes False so
-                legitimately queued tasks are not rejected after a phase
-                transition.
             check_source: When True, enforce the role-scoped source rules.
                 Dispatch replay passes False because the task row does not
                 persist the originating role.
@@ -945,14 +878,10 @@ class PolicyGate:
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
-            if check_phase:
-                self._validate_phase_action(role, action_name, intent_kind="delegate")
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
-        if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
-            self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         if check_source:
             # Robustness delegates nothing beyond its own declared action set.
@@ -988,9 +917,6 @@ class PolicyGate:
                         "'evidence': {...}})"
                     ),
                 )
-        # R1 phase_incompatible; after structural checks so cheaper denials win.
-        if check_phase:
-            self._validate_phase_action(role, action_name, intent_kind="delegate")
         # R5 — block a delegate whose action_name invokes an external tool.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -1031,8 +957,6 @@ class PolicyGate:
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
             )
-        if action_name == BASELINE_ACTION_NAME:
-            self._validate_baseline_singleton(payload)
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -1046,8 +970,6 @@ class PolicyGate:
                 ),
             )
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
-        # R1 phase_incompatible.
-        self._validate_phase_action(role, action_name, intent_kind="propose_action")
         # R5 — defense in depth on propose_action.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -1166,11 +1088,6 @@ class PolicyGate:
                     "source-level kernel instead."
                 ),
             )
-        # R1 phase_incompatible: gate the resolved action against the phase.
-        if (
-            target == "kernel_agent" and owned_action in KERNEL_AGENT_OWNED_ACTIONS
-        ) or owned_action in COORDINATOR_INTERNAL_ACTIONS:
-            self._validate_phase_action(role, owned_action, intent_kind="request")
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(
@@ -1274,98 +1191,6 @@ class PolicyGate:
                 )
 
     # R1 phase_incompatible
-    def _validate_phase_action(
-        self,
-        role: "AgentRole",
-        action_name: str,
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Reject an action the LLM cannot propose in the current phase (``strict_phase`` True raises, False warns; no-op when phase missing).
-
-        Args:
-            role (AgentRole): the resolved role of the emitting agent.
-            action_name (str): the action name being checked against the phase
-                contract.
-            intent_kind (str): the channel the action arrived on (``delegate`` /
-                ``propose_action`` / ``request``), used in audit and error
-                messages.
-
-        Raises:
-            PolicyDenied: when the action is Coordinator-managed, ``explore`` is
-                disabled for the run, or (under ``strict_phase``) the action is
-                not LLM-proposable in the current phase.
-        """
-        if action_name in COORDINATOR_INTERNAL_ACTIONS:
-            raise PolicyDenied(
-                f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
-                rule="phase_incompatible",
-                hint=(
-                    f"{' / '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are driven "
-                    "by the Coordinator — PRELUDE bootstrap, +10% watermark refresh, "
-                    "warm-recipe replay, FRAMEWORK pump, SWEEP-entry CONC ladder and "
-                    "off-loop component builds — and never appear in any phase's "
-                    "LLM-proposable set. Propose ``specialist`` or ``explore`` instead."
-                ),
-            )
-        state = self.shared_state
-        if state is None:
-            return
-        phase = (getattr(state, "phase", "") or "").strip().upper()
-        if not phase or phase not in PHASE_NAMES:
-            return
-        optimize_enabled = bool(getattr(state, "framework_agent_phase_enabled", True))
-        # Skipping the optimisation phase must not let KERNEL reintroduce an
-        # ``explore`` grid. Fail-closed independent of ``strict_phase``.
-        if not optimize_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
-            raise PolicyDenied(
-                f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
-                f"(--no-framework-agent); KERNEL may not run an explore grid",
-                rule="explore_disabled",
-                hint=(
-                    "--no-framework-agent skips the optimisation phase, so "
-                    "`explore` cannot be reintroduced into KERNEL. Use "
-                    "kernel_agent-owned actions (kernel_opt / integrate / ...), "
-                    "or `specialist` / `integrate_patch` if you need patch "
-                    "research/integration."
-                ),
-            )
-        # Robustness-delegate-only actions (e.g. ``recover``) are absent from the LLM-proposable set but still delegatable by robustness; accept if phase-allowed.
-        if (
-            intent_kind == "delegate"
-            and action_name in ROBUSTNESS_DELEGATE_ONLY_ACTIONS
-            and is_action_allowed_in_phase(action_name, phase)
-        ):
-            return
-        if is_action_llm_proposable_in_phase(action_name, phase):
-            return
-        allowed = llm_proposable_actions_for(phase)
-        hint = (
-            f"you are in phase={phase}; action {action_name!r} is not in "
-            f"the LLM-proposable set {list(allowed)!r}. Either propose an "
-            f"action from that list, or wait for the Coordinator to "
-            f"advance the phase."
-        )
-        if not self.strict_phase:
-            # Warn-only: keep the run flowing but record the denial.
-            try:
-                state.record_policy_denial(
-                    action_name=action_name,
-                    rule="phase_incompatible",
-                    hint=hint,
-                    intent_type=intent_kind,
-                    tick=int(getattr(state, "tick", 0) or 0),
-                    intent_payload={"phase": phase},
-                )
-            except Exception:  # noqa: BLE001 — best-effort audit, must not block the run
-                log.debug("record_policy_denial (phase_incompatible) failed", exc_info=True)
-            return
-        raise PolicyDenied(
-            f"action {action_name!r} not allowed in phase={phase}",
-            rule="phase_incompatible",
-            hint=hint,
-        )
-
     # GEMM tuning ownership
     def _validate_gemm_tuning_action(
         self,
@@ -1432,56 +1257,7 @@ class PolicyGate:
             ),
         )
 
-    def _validate_baseline_singleton(
-        self,
-        payload: dict[str, Any],
-    ) -> None:
-        """Deny a baseline proposal when an enablement round is in flight or the anchor is established.
-
-        "Established" is the whole rule: a repeat baseline is refused because it
-        re-measures a reference the run already has. A cold anchor is the case
-        where it does not. The session kept a warmup's figure because the clock
-        could not fund the hot pass that would have made it comparable, and
-        marked it as such; PRELUDE will not finish while the mark is set, because
-        every variant read against a depressed denominator reads as an
-        improvement over a baseline that never existed. Refusing the round that
-        would clear the mark leaves the phase with no way forward and no way out,
-        which is the state a session resumed on a fresh clock arrives in --
-        exactly the one the mark exists to make recoverable.
-        """
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        _en = getattr(ss, "enablement", None)
-        inflight_tid = str(getattr(_en, "inflight_task_id", "") or "") if _en is not None else ""
-        if inflight_tid:
-            raise PolicyDenied(
-                f"baseline: an enablement authoring round is currently in flight (task={inflight_tid})",
-                rule="enablement_round_in_flight",
-                hint=("Wait for the enablement specialist to finish and rearm before re-running baseline."),
-            )
-        # Checked after the authoring round, which is a reason to wait whatever
-        # the anchor says: a specialist rewriting the framework underneath a
-        # baseline would have this round measuring a stack that changes as it
-        # runs.
-        if bool(getattr(ss, "baseline_measure_round_dropped", False)):
-            return
-        anchor = getattr(ss, "baseline_tput", 0.0)
-        if not isinstance(anchor, (int, float)) or anchor <= 0:
-            return
-        raise PolicyDenied(
-            (
-                f"baseline: the session anchor is already established "
-                f"(baseline_tput={float(anchor):.1f}); a repeat baseline "
-                f"re-measures a reference the run already has."
-            ),
-            rule="baseline_phase_singleton",
-            hint=(
-                "PRELUDE is done with baseline; let the phase advance and "
-                "re-measure the candidate rather than the reference."
-            ),
-        )
-
+    # ``sweep_phase_singleton``
     def _validate_integrate_patch_critic_gate(
         self,
         payload: dict[str, Any],
@@ -2451,7 +2227,6 @@ __all__ = [
     "DELEGATE_ACTION_REQUIRED_PAYLOAD",
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
-    "BASELINE_ACTION_NAME",
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",

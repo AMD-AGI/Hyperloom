@@ -178,7 +178,7 @@ def _section_phase_semantics(
     Returns:
         Markdown lines for the phase-contract section.
     """
-    from ..phases.machine_state import render_phase_proposable_bullets
+    from ..phases.machine_state import render_phase_action_bullets
 
     # phase name -> the flag that disabled it (None => always enabled).
     disabled_suffix: dict[str, str] = {}
@@ -192,7 +192,8 @@ def _section_phase_semantics(
         "",
         "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
-        "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
+        "phase. Per-phase action sets (informational — the Coordinator",
+        "auto-manages these, but you may also propose them):",
         "",
     ]
     if disabled_suffix:
@@ -200,17 +201,17 @@ def _section_phase_semantics(
         lines.append(f"Phases SKIPPED this run (never entered): {skipped}.")
         lines.append("")
     lines.extend(
-        render_phase_proposable_bullets(
+        render_phase_action_bullets(
             disabled_suffix=disabled_suffix,
         )
     )
     lines.extend(
         [
             "",
-            f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
-            "sets above: the Coordinator auto-manages them and PolicyGate denies",
-            "any attempt to propose them. Denial of any action",
-            "lands in your inbox as a `policy_denied` event.",
+            f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are Coordinator-managed",
+            "(auto-dispatched); you can also propose them if the situation",
+            "warrants it. Denial of any action lands in your inbox as a",
+            "`policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
@@ -488,9 +489,6 @@ def _section_action_catalogue(actions: list[ActionMetadata], *, phase: str = "")
     Returns:
         list[str]: Markdown lines for the action catalogue.
     """
-    from ..phases.machine_state import llm_proposable_actions_for
-
-    proposable = frozenset(llm_proposable_actions_for(phase)) if phase else frozenset()
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
         "",
@@ -518,9 +516,6 @@ def _section_action_catalogue(actions: list[ActionMetadata], *, phase: str = "")
                 f"crash_risk={meta.crash_risk:.2f}  "
                 f"family={meta.family}"
             )
-            if phase and name not in proposable:
-                lines.append(f"    (not proposable in {phase} — see PHASE CONTRACT for its phase)")
-                continue
             lines.append(f"    EMIT: {_format_emit_hint(meta)}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
