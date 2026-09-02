@@ -347,6 +347,41 @@ async def test_primary_rank_missing_is_not_retried(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "api_port_allocation_failed",
+        "capture_status_missing",
+        "phase_gate_missing",
+        "profiler_output_unconfigured",
+    ],
+)
+async def test_deterministic_capture_failures_are_not_retried(tmp_path, reason):
+    calls = 0
+
+    async def fake_profile(_ctx):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "failed",
+            "error_class": "profile_capture_failed",
+            "error": reason,
+            "trace_input_ready": False,
+            "trace_capture": {"status": "failed", "reason": reason},
+        }
+
+    executor = RooflineExecutor(shared_state=_state())
+    with patch(
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        new=fake_profile,
+    ):
+        result = await executor(_ctx(tmp_path))
+
+    assert calls == 1
+    assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_profile_no_trace_path(tmp_path):
     """Profile succeeded but result lacks main_trace_path / trace_files."""
     state = _state()

@@ -196,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument("--phase", default="profiling")
     wait_parser.add_argument("--pid", required=True, type=int)
     wait_parser.add_argument("--timeout-seconds", required=True, type=float)
-    wait_parser.add_argument("--poll-interval-seconds", default=0.2, type=float)
+    wait_parser.add_argument("--poll-interval-seconds", default=1.0, type=float)
 
     capture_parser = subparsers.add_parser(
         "wait-capture-stop",

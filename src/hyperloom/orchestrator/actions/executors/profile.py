@@ -502,7 +502,7 @@ def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
 
 
 _TRACE_RANK_RE = re.compile(
-    r"(?:^|[-_.])(?:tp|rank)[-_](\d+)(?=[-_.]|$)",
+    r"(?:^|[-_.])(?:tp|rank)[-_]?(\d+)(?=[-_.]|$)",
     re.IGNORECASE,
 )
 
@@ -1145,6 +1145,12 @@ class ProfileExecutor(BaselineExecutor):
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with. Single-node uses workspace/torch_trace.
         workspace_str = result.get("workspace")
+        shared_state = (extra.get("shared_state") if isinstance(extra, dict) else None) or getattr(
+            self, "shared_state", None
+        )
+        agentx_profile = (
+            "submission_valid" in result or str(getattr(shared_state, "benchmark_mode", "") or "").lower() == "agentx"
+        )
         capture_status: dict[str, Any] | None = None
         if workspace_str:
             capture_status_path = Path(workspace_str) / "agentx_profile_capture.json"
@@ -1171,9 +1177,15 @@ class ProfileExecutor(BaselineExecutor):
                     safe_mtime(capture_status_path),
                     int(task_started_unix),
                 )
-        from ._workload_envs import agentx_enabled
-
-        agentx_profile = capture_status is not None or "submission_valid" in result or agentx_enabled()
+        agentx_profile = agentx_profile or capture_status is not None
+        if agentx_profile and not round_trace_root and capture_status is None:
+            capture_status = {
+                "status": "failed",
+                "reason": "capture_status_missing",
+            }
+            result["trace_capture_status"] = "missing"
+            result["trace_capture"] = capture_status
+            log.error("profile_executor: AgentX profile produced no current-round agentx_profile_capture.json")
         try:
             tensor_parallel_size = int(os.environ.get("TP") or 0) or None
         except (TypeError, ValueError):
@@ -1290,16 +1302,26 @@ class ProfileExecutor(BaselineExecutor):
                 result["trace_files"] = [str(p) for p in selected_trace_files]
                 _record_trace_topology(result, selected_trace_files)
                 if capture_only:
-                    # Pass the dir so TraceLens picks its own ingest order over
-                    # the capture sidecars (it accepts *.json.gz).
-                    main_trace = selected_trace_dir
                     result["profile_trace_selection_reason"] = "capture_only_fallback"
-                    log.info(
-                        "profile_executor: no *.trace.json.gz; falling back to "
-                        "%d SGLang capture sidecar(s) in %s (#575)",
-                        len(selected_trace_files),
-                        selected_trace_dir,
-                    )
+                    if agentx_profile:
+                        main_trace = None
+                        result["trace_input_ready"] = False
+                        result["status"] = "failed"
+                        result["error_class"] = "profile_capture_only"
+                        result["error"] = (
+                            "AgentX profile produced only graph-capture sidecars; "
+                            "a single-rank workload trace is required"
+                        )
+                    else:
+                        # Legacy profiles pass the directory so TraceLens can
+                        # choose among the available capture sidecars.
+                        main_trace = selected_trace_dir
+                        log.info(
+                            "profile_executor: no *.trace.json.gz; falling back to "
+                            "%d SGLang capture sidecar(s) in %s (#575)",
+                            len(selected_trace_files),
+                            selected_trace_dir,
+                        )
                 else:
                     main_trace = _preferred_main_trace_path(
                         selected_trace_dir,
@@ -1363,7 +1385,12 @@ class ProfileExecutor(BaselineExecutor):
             result["error"] = (
                 f"AgentX trace capture failed: {capture_status.get('reason') or 'unknown capture failure'}"
             )
-        elif agentx_profile and result.get("trace_files") and not result.get("main_trace_path"):
+        elif (
+            agentx_profile
+            and result.get("trace_files")
+            and not result.get("main_trace_path")
+            and result.get("error_class") != "profile_capture_only"
+        ):
             result["trace_input_ready"] = False
             result["status"] = "failed"
             result["error_class"] = "primary_rank_trace_missing"

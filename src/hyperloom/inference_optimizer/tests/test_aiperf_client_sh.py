@@ -595,7 +595,7 @@ def test_profile_phase_wait_covers_dataset_configuration_and_warmup(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     argv = json.loads(marker.read_text())
-    assert argv[argv.index("--timeout-seconds") + 1] == "18"
+    assert argv[argv.index("--timeout-seconds") + 1] == "3618"
 
 
 def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
@@ -646,7 +646,7 @@ def test_missing_phase_gate_still_writes_capture_status(tmp_path):
     assert r.returncode == 0, r.stderr
     capture = json.loads((res / "agentx_profile_capture.json").read_text())
     assert capture["status"] == "failed"
-    assert capture["reason"] == "profiling_phase_unavailable"
+    assert capture["reason"] == "phase_gate_missing"
 
 
 def test_agentx_server_script_override_without_framework(tmp_path):
@@ -1110,6 +1110,8 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     assert "trace flush did not settle" in out, out[-1500:]
     assert "TRUNCATED" in out
     assert "AGENTX_TRACE_FLUSH_TIMEOUT_S" in out
+    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    assert capture["reason"] == "trace_flush_timeout"
 
 
 def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
@@ -1157,6 +1159,8 @@ def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
     # Crucially, it must not have entered the polling loop at all: the default
     # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
     assert "waiting for the profiler trace" not in out
+    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    assert capture["reason"] == "profiler_output_unconfigured"
 
 
 def test_configured_trace_dir_is_waited_on_before_it_exists(tmp_path):
@@ -1176,6 +1180,8 @@ def test_configured_trace_dir_is_waited_on_before_it_exists(tmp_path):
     assert "waiting for the profiler trace" in out
     assert "no trace file appeared" in out
     assert "no profiler output directory is configured" not in out
+    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    assert capture["reason"] == "trace_files_missing"
 
 
 def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):

@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
   Hyperloom and KernelForge.
 
+- **AgentX profiling now follows AIPerf's measured phase.** Trace capture opens
+  from the pinned client's progress API instead of a fixed warmup delay, records
+  an independent capture status, and keeps single-rank TraceLens analysis off
+  merged multi-rank traces.
+
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP
   `${KB_STORE_URL}/pr-monitor/mcp/` URLs for Framework discovery,

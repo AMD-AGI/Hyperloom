@@ -2036,12 +2036,11 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
         rank_zero.write_bytes(b"rank-zero")
         rank_one.write_bytes(b"rank-one")
         merged.write_bytes(b"merged")
-        stale_status = workspace / "agentx_profile_capture.json"
-        stale_status.write_text(
-            json.dumps({"status": "failed", "reason": "stale"}),
+        capture_status = workspace / "agentx_profile_capture.json"
+        capture_status.write_text(
+            json.dumps({"status": "succeeded", "reason": "capture_complete"}),
             encoding="utf-8",
         )
-        os.utime(stale_status, (1, 1))
         return {
             "status": "succeeded",
             "framework": "sglang",
@@ -2066,7 +2065,7 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
     assert res.result["profile_trace_selection_reason"] == "primary_rank_trace"
     assert res.result["merged_trace_paths"] == [str(trace_dir / "merged-177.trace.json.gz")]
     assert sorted(res.result["rank_trace_paths"]) == ["0", "1"]
-    assert "trace_capture_status" not in res.result
+    assert res.result["trace_capture_status"] == "succeeded"
     db.close()
 
 
@@ -2108,6 +2107,44 @@ async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path):
     assert res.result["error_class"] == "profile_capture_failed"
     assert res.result["trace_capture_status"] == "failed"
     assert res.result["trace_capture"]["reason"] == "trace_flush_failed"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path):
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_missing_status"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "rank-0.trace.json.gz").write_bytes(b"trace")
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+            "submission_valid": True,
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture-status-missing",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "profile_capture_failed"
+    assert res.result["trace_capture_status"] == "missing"
+    assert res.result["trace_capture"]["reason"] == "capture_status_missing"
     db.close()
 
 
@@ -4938,6 +4975,7 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
     [
         ("177-TP-0-DECODE.trace.json.gz", 0),
         ("worker-rank-3.pt.trace.json.gz", 3),
+        ("worker-rank0.pt.trace.json.gz", 0),
         ("rank_5/trace.pt.trace.json.gz", 5),
         ("benchmark_sglang_tp_8/torch_trace/trace.pt.trace.json.gz", None),
         ("merged-177.trace.json.gz", None),

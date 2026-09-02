@@ -157,7 +157,7 @@ def test_capture_stops_when_phase_completes():
     assert result["stop_reason"] == "phase_complete"
 
 
-def test_capture_stops_at_wall_clock_limit_without_request_coverage():
+def test_capture_stops_at_wall_clock_limit_without_phase_completion():
     class NoCoverageHandler(_ProgressHandler):
         def do_GET(self):  # noqa: N802
             body = b'{"phases":{"profiling":{"start_ns":1,"requests_completed":0,"requests_end_ns":null}}}'
@@ -231,10 +231,10 @@ def test_write_capture_status_is_structured_and_atomic(tmp_path):
         reason="capture_complete",
         phase_start_ns=123,
         requested_window_seconds=20,
-        decision_json='{"stop_reason":"request_coverage"}',
+        decision_json='{"stop_reason":"wall_clock_limit"}',
     )
     payload = json.loads(output.read_text())
     assert payload["status"] == "succeeded"
     assert payload["phase_start_ns"] == 123
-    assert payload["decision"]["stop_reason"] == "request_coverage"
+    assert payload["decision"]["stop_reason"] == "wall_clock_limit"
     assert not list(tmp_path.glob(".agentx_profile_capture.*"))

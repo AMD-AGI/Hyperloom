@@ -47,6 +47,8 @@
 #     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
 #     landed at t+350s on that same GLM-5.3 capture),
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
+#   AGENTX_PROFILE_WARMUP_S (deprecated and ignored; phase-gated profiling
+#     replaced the fixed warmup delay),
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -512,10 +514,13 @@ if [ "${PROFILE:-0}" = "1" ]; then
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
-  PHASE_WAIT_TIMEOUT=$(( DATASET_CONFIG_TIMEOUT + WARMGRACE ))
+  # Include the measured-phase duration as bounded scheduling margin around
+  # AIPerf's own dataset-configuration and warmup deadlines.
+  PHASE_WAIT_TIMEOUT=$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))
   CAPTURE_STATUS_FILE="${RESULT_DIR}/agentx_profile_capture.json"
   rm -f "$CAPTURE_STATUS_FILE"
   AIPERF_API_PORT=""
+  PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
   _write_profile_capture_status() {
     _status="$1"
     _reason="$2"
@@ -535,8 +540,11 @@ if [ "${PROFILE:-0}" = "1" ]; then
     fi
     if [ "$_written" -ne 1 ]; then
       _status_tmp="${CAPTURE_STATUS_FILE}.tmp.$$"
-      if printf '{"schema_version":1,"status":"%s","reason":"%s","phase":"profiling","phase_start_ns":%s,"requested_window_seconds":%s}\n' \
-        "$_status" "$_reason" "$_phase_start_ns" "$PWIN" > "$_status_tmp"; then
+      _decision_json="$_decision"
+      [ -n "$_decision_json" ] || _decision_json='{}'
+      _recorded_at_ns="$(date +%s%N)"
+      if printf '{"schema_version":1,"status":"%s","reason":"%s","phase":"profiling","phase_start_ns":%s,"requested_window_seconds":%s,"decision":%s,"recorded_at_ns":%s}\n' \
+        "$_status" "$_reason" "$_phase_start_ns" "$PWIN" "$_decision_json" "$_recorded_at_ns" > "$_status_tmp"; then
         if ! mv -f "$_status_tmp" "$CAPTURE_STATUS_FILE"; then
           rm -f "$_status_tmp"
           log "WARN failed to publish trace-capture status"
@@ -554,9 +562,11 @@ if [ "${PROFILE:-0}" = "1" ]; then
     if AIPERF_API_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
       AIPERF_API_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_API_PORT")
     else
+      PHASE_GATE_FAILURE_REASON="api_port_allocation_failed"
       log "WARN failed to allocate an AIPerf progress API port; the measurement will run without trace capture"
     fi
   else
+    PHASE_GATE_FAILURE_REASON="phase_gate_missing"
     log "WARN missing AIPerf phase gate ${PHASE_GATE}; the measurement will run without trace capture"
   fi
   # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
@@ -574,6 +584,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # reported as a trace is worse than no trace, because TraceLens will read it.
   _trace_dirs() {
     _seen="|"
+    # Configured profiler paths are valid before the server creates them; the
+    # RESULT_DIR fallback is only evidence when that directory already exists.
     for d in "${SGLANG_TORCH_PROFILER_DIR:-}" "${VLLM_TORCH_PROFILER_DIR:-}"; do
       [ -n "$d" ] || continue
       case "$_seen" in *"|${d}|"*) continue ;; esac
@@ -629,7 +641,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
         _stable=0
       fi
       if [ "$_cnt" -eq 0 ] && [ "$_el" -ge "$_first" ]; then
-        log "WARN no trace file appeared within ${_first}s of stop_profile; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. Not treating this as a round failure -- the measurement itself is unaffected."
+        log "WARN no trace file appeared within ${_first}s of stop_profile; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. The benchmark measurement remains available, but trace capture will be marked failed."
         return 3
       fi
       # Three identical samples AND, when TP is known, one file per rank. The
@@ -640,7 +652,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
         return 0
       fi
       if [ "$_el" -ge "$_budget" ]; then
-        log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. Not treating this as a round failure -- the measurement itself is unaffected."
+        log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
         return 4
       fi
       _prev="$_now"
@@ -699,7 +711,13 @@ if [ "${PROFILE:-0}" = "1" ]; then
       elif [ "$STOP_OK" -ne 1 ]; then
         _write_profile_capture_status "failed" "stop_profile_failed" "$PHASE_START_NS" "$CAPTURE_RESULT"
       else
-        _write_profile_capture_status "failed" "trace_flush_failed" "$PHASE_START_NS" "$CAPTURE_RESULT"
+        case "$FLUSH_RC" in
+          2) FLUSH_REASON="profiler_output_unconfigured" ;;
+          3) FLUSH_REASON="trace_files_missing" ;;
+          4) FLUSH_REASON="trace_flush_timeout" ;;
+          *) FLUSH_REASON="trace_flush_failed" ;;
+        esac
+        _write_profile_capture_status "failed" "$FLUSH_REASON" "$PHASE_START_NS" "$CAPTURE_RESULT"
       fi
     else
       log "WARN start_profile failed (trace may be empty)"
@@ -707,7 +725,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     fi
   else
     log "WARN AIPerf did not expose a measured phase; the measurement will finish without trace capture"
-    _write_profile_capture_status "failed" "profiling_phase_unavailable"
+    _write_profile_capture_status "failed" "$PHASE_GATE_FAILURE_REASON"
   fi
   wait "$APID" || AIPERF_RC=$?
 else
