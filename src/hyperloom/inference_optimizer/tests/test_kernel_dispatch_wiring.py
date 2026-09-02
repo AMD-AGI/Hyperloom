@@ -9,9 +9,10 @@ that the pieces still fit together. Moving kernel selection into forge rewires
 exactly this chain, so its current shape is pinned first.
 
 Nothing here runs a GPU or a subprocess. What is pinned is the wiring: what the
-selector hands the dispatcher, what the dispatcher hands the per-kernel tool,
-what a batch does with several results, and what reaches the pending-integration
-queue.
+selector hands the dispatcher, what the dispatcher hands the per-kernel tool, and
+what reaches the pending-integration queue. The which-kernel fan-out is gone --
+selection moved into forge nomination -- so the surviving path dispatches one
+resolved candidate, not one per row.
 """
 
 from __future__ import annotations
@@ -80,31 +81,15 @@ def forge_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
 
-async def test_default_backend_order_dispatches_nothing(
-    monkeypatch: pytest.MonkeyPatch, session_dir: Path, three_candidates: str
-) -> None:
-    """The whole per-kernel ring is unreachable unless forge is selected.
-
-    The backend-order resolver yields either ``["forge"]`` or nothing, and the
-    default phase backend is the whole-pipeline GEAK delegate. So on a default
-    run the ladder is empty and no candidate is dispatched at all.
-    """
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    seen: list[str] = []
-
-    async def _fake_single(payload: dict, **kwargs: Any) -> dict[str, Any]:
-        seen.append(str(payload.get("kernel_id") or ""))
-        return _ok_result(str(payload.get("kernel_id") or ""))
-
-    monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    await krh.run_optimization_handler({"candidates_path": three_candidates}, session_dir=session_dir)
-    assert seen == []
-
-
 async def test_selector_output_feeds_the_dispatcher(
     monkeypatch: pytest.MonkeyPatch, session_dir: Path, three_candidates: str, forge_backend: None
 ) -> None:
-    """Every row the selector keeps is dispatched exactly once."""
+    """The selector resolves the candidate set and the dispatcher runs one kernel.
+
+    The which-kernel fan-out is gone: selection now lives in forge nomination, so
+    the surviving single-kernel path dispatches exactly one resolved candidate --
+    not one per row -- and that one must be a real member of the selected set.
+    """
     seen: list[str] = []
 
     async def _fake_single(payload: dict, **kwargs: Any) -> dict[str, Any]:
@@ -114,7 +99,8 @@ async def test_selector_output_feeds_the_dispatcher(
 
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
     await krh.run_optimization_handler({"candidates_path": three_candidates}, session_dir=session_dir)
-    assert sorted(seen) == ["k001", "k002", "k003"]
+    assert len(seen) == 1
+    assert seen[0] in {"k001", "k002", "k003"}
 
 
 async def test_a_row_without_source_file_never_reaches_the_dispatcher(
@@ -132,63 +118,6 @@ async def test_a_row_without_source_file_never_reaches_the_dispatcher(
     candidates = _candidates_file(tmp_path, [_row("k001", source_file=""), _row("k002")])
     await krh.run_optimization_handler({"candidates_path": candidates}, session_dir=session_dir)
     assert seen == ["k002"]
-
-
-async def test_batch_reports_one_best_and_carries_every_sub_result(
-    monkeypatch: pytest.MonkeyPatch, session_dir: Path, three_candidates: str, forge_backend: None
-) -> None:
-    """The aggregate names one winner but the full list rides along."""
-
-    async def _fake_single(payload: dict, **kwargs: Any) -> dict[str, Any]:
-        kernel_id = str(payload.get("kernel_id") or "")
-        speedups = {"k001": 1.1, "k002": 1.9, "k003": 1.4}
-        return _ok_result(kernel_id, speedup=speedups[kernel_id])
-
-    monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    result = await krh.run_optimization_handler({"candidates_path": three_candidates}, session_dir=session_dir)
-    assert result.get("status") == "ok"
-    assert len(result.get("batch_results") or []) == 3
-    assert {str(row.get("kernel_id") or "") for row in result["batch_results"]} == {"k001", "k002", "k003"}
-
-
-async def test_forge_backend_forces_serial_dispatch(
-    monkeypatch: pytest.MonkeyPatch, session_dir: Path, three_candidates: str
-) -> None:
-    """Forge edits sources in place, so the batch must not run them concurrently."""
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    concurrent = 0
-    peak = 0
-
-    async def _fake_single(payload: dict, **kwargs: Any) -> dict[str, Any]:
-        nonlocal concurrent, peak
-        concurrent += 1
-        peak = max(peak, concurrent)
-        concurrent -= 1
-        return _ok_result(str(payload.get("kernel_id") or ""))
-
-    monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    result = await krh.run_optimization_handler({"candidates_path": three_candidates}, session_dir=session_dir)
-    assert result.get("max_parallel") == 1
-    assert peak == 1
-
-
-async def test_a_failing_candidate_does_not_stop_the_batch(
-    monkeypatch: pytest.MonkeyPatch, session_dir: Path, three_candidates: str, forge_backend: None
-) -> None:
-    """One raising sub-task becomes a failed result, not a failed round."""
-
-    async def _fake_single(payload: dict, **kwargs: Any) -> dict[str, Any]:
-        kernel_id = str(payload.get("kernel_id") or "")
-        if kernel_id == "k002":
-            raise RuntimeError("boom")
-        return _ok_result(kernel_id)
-
-    monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    result = await krh.run_optimization_handler({"candidates_path": three_candidates}, session_dir=session_dir)
-    assert len(result.get("batch_results") or []) == 3
-    statuses = {str(row.get("kernel_id") or ""): str(row.get("status") or "") for row in result["batch_results"]}
-    assert statuses["k002"] == "failed"
-    assert statuses["k001"] == "ok"
 
 
 async def test_empty_selection_skips_cleanly(
