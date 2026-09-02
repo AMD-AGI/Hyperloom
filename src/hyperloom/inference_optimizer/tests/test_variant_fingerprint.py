@@ -10,7 +10,10 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
     variant_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._canonical_fingerprint import canonical_fingerprint
+from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    canonical_fingerprint,
+    workload_signature,
+)
 
 
 def test_fingerprint_ignores_name() -> None:
@@ -139,6 +142,46 @@ def test_variant_result_to_dict_carries_fingerprint() -> None:
     d = vr.to_dict()
     assert d["fingerprint"] == vr.fingerprint
     assert len(d["fingerprint"]) == 16
+
+
+def test_workload_signature_stable_and_order_independent() -> None:
+    """Same contract fields always digest to the same 12-char value regardless
+    of keyword-argument order."""
+    sig1 = workload_signature(conc=8, isl=128, osl=256, precision="fp8", tp=1)
+    sig2 = workload_signature(tp=1, precision="fp8", osl=256, isl=128, conc=8)
+    assert sig1 == sig2
+    assert isinstance(sig1, str)
+    assert len(sig1) == 12
+
+
+def test_workload_signature_differs_on_field_change() -> None:
+    base = workload_signature(conc=8, isl=128, osl=256, precision="fp8", tp=1)
+    changed_conc = workload_signature(conc=16, isl=128, osl=256, precision="fp8", tp=1)
+    changed_tp = workload_signature(conc=8, isl=128, osl=256, precision="fp8", tp=2)
+    assert base != changed_conc
+    assert base != changed_tp
+
+
+def test_workload_signature_int_and_str_collide() -> None:
+    """``8`` and ``"8"`` both coerce to the shell string ``"8"``, so they must
+    fingerprint identically -- mirrors the canonical_fingerprint TP behavior."""
+    fp_int = workload_signature(conc=8, isl=128, osl=256, precision="fp8", tp=1)
+    fp_str = workload_signature(conc="8", isl=128, osl=256, precision="fp8", tp=1)
+    assert fp_int == fp_str
+
+
+def test_workload_signature_falls_back_to_env_vars(monkeypatch) -> None:
+    """Omitted args default to the matching $CONC/$ISL/$OSL/$PRECISION/$TP env
+    vars so callers can rely on process-wide workload env without threading
+    every field through explicitly."""
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setenv("ISL", "128")
+    monkeypatch.setenv("OSL", "256")
+    monkeypatch.setenv("PRECISION", "fp8")
+    monkeypatch.setenv("TP", "1")
+    from_env = workload_signature()
+    explicit = workload_signature(conc=8, isl=128, osl=256, precision="fp8", tp=1)
+    assert from_env == explicit
 
 
 def test_shared_state_normalizes_explore_search_tested() -> None:
