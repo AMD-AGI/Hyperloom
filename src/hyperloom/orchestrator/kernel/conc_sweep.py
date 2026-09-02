@@ -157,6 +157,12 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
 
     Returns:
         A dict of the variant's metrics keyed for the curve row.
+
+    ``intvty_p90`` and ``total_token_throughput`` are the pair an agentic run is
+    plotted on -- p90 interactivity against token throughput per chip, the axes
+    InferenceX ranks a submission by. They are null on a synthetic run, which
+    has no aiperf export to read them from and is plotted on output throughput
+    against ``output_throughput / conc``.
     """
     envs = v.extra_envs or {}
     try:
@@ -170,6 +176,9 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
         "total_token_throughput": v.total_token_throughput,
+        "input_throughput": v.input_throughput,
+        "intvty_p90": v.intvty_p90,
+        "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
         "duration_seconds": v.duration_seconds,
@@ -222,6 +231,9 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "output_throughput",
         "request_throughput",
         "total_token_throughput",
+        "input_throughput",
+        "intvty_p90",
+        "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
         "duration_seconds",
@@ -1151,6 +1163,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
             "isl": isl,
             "osl": osl,
             "tp": int(getattr(state, "tp", 0) or 0),
+            "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
             "concs_requested": concs,
             "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
             "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
@@ -1511,6 +1524,9 @@ async def run_conc_sweep(
         "isl": isl,
         "osl": osl,
         "tp": int(getattr(state, "tp", 0) or 0),
+        # Names the axis pair the points are drawn on, so a reader never has to
+        # infer it from whether intvty_p90 happens to be null.
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "concs_requested": concs,
         "baseline": {
             "extra_server_args": "",

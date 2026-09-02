@@ -30,6 +30,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _granted_cap_sec,
     _has_optimization,
     _order_concs_desc,
+    _point_from_variant,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
@@ -1246,6 +1247,79 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
     rows = list(csv.DictReader(csv_path.open()))
     assert len(rows) == 1
     assert rows[0]["arm"] == "baseline"
+
+
+# --- the chart's data contract ---
+
+
+class TestTheCurveCarriesBothAxisPairs:
+    """A point has to carry whichever pair its mode is plotted on.
+
+    Synthetic is plotted on output throughput against ``output_throughput/conc``;
+    an agentic run on token throughput per chip against p90 interactivity. Both
+    pairs live on the same record because the mode is a property of the session,
+    not of the point.
+    """
+
+    def _variant(self, **kw: Any) -> VariantResult:
+        base: dict[str, Any] = {
+            "name": "optimized_conc8",
+            "extra_server_args": "",
+            "extra_envs": {"CONC": "8"},
+            "status": "succeeded",
+        }
+        base.update(kw)
+        return VariantResult(**base)
+
+    def test_the_agentic_pair_reaches_the_point(self):
+        point = _point_from_variant(
+            self._variant(
+                output_throughput=183.44,
+                total_token_throughput=25984.8,
+                input_throughput=25801.36,
+                intvty_p90=447.2,
+                tpot_p90_ms=2.4,
+            ),
+            arm="optimized",
+        )
+        assert point["total_token_throughput"] == pytest.approx(25984.8)
+        assert point["intvty_p90"] == pytest.approx(447.2)
+        assert point["input_throughput"] == pytest.approx(25801.36)
+        assert point["tpot_p90_ms"] == pytest.approx(2.4)
+
+    def test_the_synthetic_pair_is_unaffected(self):
+        point = _point_from_variant(
+            self._variant(output_throughput=1200.0, e2el_mean_ms=850.0),
+            arm="baseline",
+        )
+        assert point["output_throughput"] == pytest.approx(1200.0)
+        assert point["e2el_mean_ms"] == pytest.approx(850.0)
+        assert point["intvty_p90"] is None
+
+    def test_the_csv_carries_the_agentic_axes_too(self, session_dir: Path):
+        """The CSV is the download button; it has to draw the same chart."""
+        rdir = session_dir / "reports"
+        rdir.mkdir(parents=True, exist_ok=True)
+        json_path = rdir / "conc_sweep_summary.json"
+        csv_path = rdir / "conc_sweep_raw.csv"
+        point = _point_from_variant(
+            self._variant(total_token_throughput=25984.8, intvty_p90=447.2),
+            arm="optimized",
+        )
+        _flush_conc_sweep_report(
+            {
+                "schema_version": "1.0",
+                "status": "succeeded",
+                "report_json_path": str(json_path),
+                "report_csv_path": str(csv_path),
+                "baseline": {"points": []},
+                "optimized": {"points": [point]},
+            },
+            session_dir,
+        )
+        row = next(iter(csv.DictReader(csv_path.open())))
+        assert row["intvty_p90"] == "447.2"
+        assert row["total_token_throughput"] == "25984.8"
 
 
 def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytest.MonkeyPatch):

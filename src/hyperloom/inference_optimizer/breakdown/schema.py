@@ -2122,9 +2122,13 @@ class ConcSweepSummary(TypedDict, total=False):
     isl: int
     osl: int
     tp: int
+    benchmark_mode: str  # "agentx" / "synthetic"; names the axis pair the points carry
     concs_requested: list[int]
-    baseline: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
-    optimized: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
+    # {extra_server_args, extra_envs, points[]}. A point carries output_throughput
+    # + e2el_mean_ms for a synthetic run, and total_token_throughput + intvty_p90
+    # for an agentic one -- the axes InferenceX ranks a submission by.
+    baseline: dict[str, Any]
+    optimized: dict[str, Any]
     comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
     summary: dict[str, Any]  # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
     workspace: str
