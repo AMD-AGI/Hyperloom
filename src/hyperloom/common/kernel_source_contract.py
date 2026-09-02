@@ -148,12 +148,14 @@ def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = 
     Args:
         reusable: The gate's ``reusable_native_kernel`` verdict.
         skip_reason: The gate's prose explanation, empty when reusable.
-        source_file: Resolved path, used only to disambiguate an empty reason.
+        source_file: Resolved path. A kernel can be reusable in principle yet
+            have no resolved source, so this gates ``resolved``: reusable alone is
+            not dispatch-ready.
 
     Returns:
         One of :data:`KNOWN_REASON_CLASSES`.
     """
-    if reusable is True:
+    if reusable is True and str(source_file or "").strip():
         return CLASS_RESOLVED
     text = str(skip_reason or "").strip().lower()
     if not text:

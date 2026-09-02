@@ -22,8 +22,22 @@ def _classify(skip_reason: str, *, reusable: Any = False, source_file: str = "/r
     return ksc.classify_skip_reason(reusable=reusable, skip_reason=skip_reason, source_file=source_file)
 
 
-def test_a_reusable_kernel_is_resolved() -> None:
+def test_a_reusable_kernel_with_a_resolved_source_is_resolved() -> None:
     assert _classify("", reusable=True) == ksc.CLASS_RESOLVED
+
+
+def test_a_reusable_kernel_without_a_source_is_not_resolved() -> None:
+    """Reusable-in-principle is not dispatch-ready without a resolved source:
+    such a row belongs in the search-budget bucket, not the located count, or the
+    "how many hotspots did we rescue" metric over-reports resolved."""
+    assert _classify("source file not resolved", reusable=True, source_file="") == ksc.CLASS_SOURCE_NOT_RESOLVED
+    # Even with no verdict text, a reusable row with no source is unresolved.
+    assert _classify("", reusable=True, source_file="") == ksc.CLASS_SOURCE_NOT_RESOLVED
+
+
+def test_a_reusable_kernel_with_a_none_source_does_not_raise() -> None:
+    """A missing (None) source is treated as unresolved, never a crash."""
+    assert ksc.classify_skip_reason(reusable=True, skip_reason="", source_file=None) == ksc.CLASS_SOURCE_NOT_RESOLVED
 
 
 @pytest.mark.parametrize(
