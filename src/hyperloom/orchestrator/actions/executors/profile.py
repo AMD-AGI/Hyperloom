@@ -1166,8 +1166,7 @@ class ProfileExecutor(BaselineExecutor):
                     result["trace_capture"] = capture_status
             elif capture_status_path.is_file():
                 log.warning(
-                    "profile_executor: ignoring stale AgentX capture status %s "
-                    "(mtime %.0f < round start second %d)",
+                    "profile_executor: ignoring stale AgentX capture status %s (mtime %.0f < round start second %d)",
                     capture_status_path,
                     safe_mtime(capture_status_path),
                     int(task_started_unix),
@@ -1191,6 +1190,7 @@ class ProfileExecutor(BaselineExecutor):
                 result["trace_files"] = [str(p) for p in trace_files]
                 _record_trace_topology(result, trace_files)
                 if trace_files:
+
                     def _safe_size(p: Path) -> int:
                         """Return ``p``'s size in bytes, or 0 on stat() failure.
 
@@ -1223,8 +1223,7 @@ class ProfileExecutor(BaselineExecutor):
                         main_trace = max(trace_files, key=_safe_size)
                         result["main_trace_path"] = str(main_trace)
                     log.info(
-                        "profile_executor: multi-node main trace selected: %s "
-                        "(%d candidate traces this round)",
+                        "profile_executor: multi-node main trace selected: %s (%d candidate traces this round)",
                         main_trace.name if main_trace is not None else "<none>",
                         len(trace_files),
                     )
@@ -1362,8 +1361,7 @@ class ProfileExecutor(BaselineExecutor):
             result["status"] = "failed"
             result["error_class"] = "profile_capture_failed"
             result["error"] = (
-                "AgentX trace capture failed: "
-                f"{capture_status.get('reason') or 'unknown capture failure'}"
+                f"AgentX trace capture failed: {capture_status.get('reason') or 'unknown capture failure'}"
             )
         elif agentx_profile and result.get("trace_files") and not result.get("main_trace_path"):
             result["trace_input_ready"] = False

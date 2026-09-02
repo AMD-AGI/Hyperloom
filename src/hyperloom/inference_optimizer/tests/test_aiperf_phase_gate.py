@@ -127,9 +127,7 @@ def test_capture_stops_when_phase_completes():
                     "phases": {
                         "profiling": {
                             "start_ns": 1,
-                            "requests_end_ns": (
-                                123456789 if type(self).requests_seen >= 3 else None
-                            ),
+                            "requests_end_ns": (123456789 if type(self).requests_seen >= 3 else None),
                         }
                     }
                 }
@@ -162,10 +160,7 @@ def test_capture_stops_when_phase_completes():
 def test_capture_stops_at_wall_clock_limit_without_request_coverage():
     class NoCoverageHandler(_ProgressHandler):
         def do_GET(self):  # noqa: N802
-            body = (
-                b'{"phases":{"profiling":{"start_ns":1,'
-                b'"requests_completed":0,"requests_end_ns":null}}}'
-            )
+            body = b'{"phases":{"profiling":{"start_ns":1,"requests_completed":0,"requests_end_ns":null}}}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

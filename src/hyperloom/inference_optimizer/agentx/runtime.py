@@ -65,9 +65,7 @@ def maybe_prepare_agentx(
     aiperf_bin = resolve_aiperf_bin(env)
     bench_envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     profiler = bench.get("profiler") if isinstance(bench.get("profiler"), dict) else {}
-    torch_profiler = (
-        profiler.get("torch_profiler") if isinstance(profiler.get("torch_profiler"), dict) else {}
-    )
+    torch_profiler = profiler.get("torch_profiler") if isinstance(profiler.get("torch_profiler"), dict) else {}
     require_progress_api = str(bench_envs.get("PROFILE") or "") == "1" or bool(torch_profiler.get("enabled"))
     preflight_key = aiperf_bin or ""
     previous_check = _PREFLIGHTED_BINS.get(preflight_key)
