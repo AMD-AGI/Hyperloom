@@ -18,6 +18,7 @@ from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.common.timeutil import now_iso
 
 from . import machine_state as _phase_state
+from ..actions.executors._latency_budget import latency_from_result
 from ..state.optimization_journal import (
     JournalEntry,
 )
@@ -2284,6 +2285,7 @@ class PreludePhase(PhaseHandler):
                     "source_phase": "PRELUDE",
                     "task_id": str(getattr(task, "task_id", "") or ""),
                     "workspace": str(result.get("workspace") or ""),
+                    "e2el_mean_ms": latency_from_result(result),
                 },
                 entry_extra=entry_extra,
             )

@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_KERNEL,
 )
 from ..kernel import collective_recovery as _collective_recovery
+from ..actions.executors._latency_budget import latency_from_result
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
@@ -1663,6 +1664,9 @@ class KernelPhase(PhaseHandler):
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
+            # Carried so a session under --max-latency-ms can gate this KEEP
+            # on a measurement instead of refusing it as untimed.
+            "e2el_mean_ms": latency_from_result(result),
             **graded_axes_of(result),
             "workspace": result.get("eval_dir"),
         }
@@ -3601,6 +3605,7 @@ class KernelPhase(PhaseHandler):
                         "source_phase": "KERNEL_AGENT",
                         **graded_axes_of(result),
                         "workspace": result.get("workspace"),
+                        "e2el_mean_ms": latency_from_result(integrate_verdict),
                     },
                     entry_extra={
                         "tuned_file": adopted_tuned_file,
@@ -4466,6 +4471,7 @@ class KernelPhase(PhaseHandler):
                 "provenance": "forge_collective",
                 **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
                 "workspace": integrate_result.get("workspace"),
+                "e2el_mean_ms": latency_from_result(integrate_result),
             },
             entry_extra={
                 "backend": "forge",
@@ -4741,6 +4747,7 @@ class KernelPhase(PhaseHandler):
                 "provenance": "forge_fusion",
                 **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
                 "workspace": integrate_result.get("workspace"),
+                "e2el_mean_ms": latency_from_result(integrate_result),
             },
             entry_extra={
                 "backend": "forge",

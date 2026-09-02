@@ -46,6 +46,12 @@ from ..state.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
+from ..actions.executors._latency_budget import (
+    latency_fields_from_result,
+    latency_from_result,
+    latency_keep_block,
+    resolve_latency_budget_ms,
+)
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -738,9 +744,7 @@ class WritebackCollaborator:
                 "candidate_extra_server_args": result.get("extra_server_args"),
                 "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
                 "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-                "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
-                "tpot_mean_ms": result.get("tpot_mean_ms"),
+                **latency_fields_from_result(result),
                 **graded_axes_of(result),
                 "workspace": result.get("workspace"),
             },
@@ -2744,7 +2748,8 @@ class WritebackCollaborator:
 
         Returns:
             ``True`` when the winner was lifted, ``False`` when it was refused
-            for not beating the current anchor.
+            for not beating the current anchor or for exceeding the session's
+            latency budget.
         """
         from hyperloom.common.perf_metric import graded_axes_of
 
@@ -2768,6 +2773,42 @@ class WritebackCollaborator:
                 graded.candidate,
             )
             return False
+        # The session's latency constraint, applied to every KEEP rather than
+        # only to explore's. Every action that promotes a config arrives here,
+        # so this is the one place that can enforce it without each lane
+        # remembering to. Explore also checks it a round earlier, to spare an
+        # over-budget variant a rebench it cannot survive.
+        #
+        # Lift dicts reach this gate with their latency normalized by
+        # ``latency_fields_from_result``, which matters because the gate fails
+        # closed: read off the top level alone, a lane that reports the field
+        # under another name or one layer down looks untimed, and the refusal
+        # would be a verdict on the plumbing rather than on the workload.
+        budget_ms = resolve_latency_budget_ms(None, self.shared_state)
+        if budget_ms > 0:
+            observed_ms = latency_from_result(bv)
+            blocked, reason = latency_keep_block(observed_ms, budget_ms=budget_ms)
+            if blocked:
+                log.warning(
+                    "current_best held at %.1f %s: %s winner measured %.1f but %s",
+                    graded.reference,
+                    graded.objective,
+                    task_kind,
+                    graded.candidate,
+                    reason,
+                )
+                self.shared_state.latency_refusals.append(
+                    {
+                        "action": task_kind,
+                        "variant_name": str((bv.get("name") if isinstance(bv, dict) else "") or ""),
+                        "tput": float(best_tput),
+                        "e2el_mean_ms": observed_ms,
+                        "budget_ms": float(budget_ms),
+                        "reason": reason,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                return False
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
@@ -3292,9 +3333,7 @@ class WritebackCollaborator:
                 "cold_tput": (
                     float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
                 ),
-                "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
-                "tpot_mean_ms": result.get("tpot_mean_ms"),
+                **latency_fields_from_result(result),
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
@@ -3315,6 +3354,23 @@ class WritebackCollaborator:
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
+            # The baseline is the reference, so the budget does not refuse it --
+            # but a baseline already over budget means every candidate that
+            # follows will be refused, and the session would otherwise spend its
+            # whole run discovering that one KEEP at a time.
+            _budget_ms = resolve_latency_budget_ms(None, self.shared_state)
+            if _budget_ms > 0:
+                _blocked, _reason = latency_keep_block(
+                    latency_from_result(result),
+                    budget_ms=_budget_ms,
+                )
+                if _blocked:
+                    log.warning(
+                        "baseline does not satisfy the session latency budget (%s). "
+                        "The budget still gates every KEEP, so nothing will be "
+                        "promoted until a candidate comes in under it.",
+                        _reason,
+                    )
         if anchor_accepted:
             audit_decision = "promoted"
         elif isinstance(tput, (int, float)) and tput > 0:
@@ -4266,6 +4322,7 @@ class WritebackCollaborator:
                 "workspace": result.get("workspace"),
                 "provenance": origin_provenance or "integrate_patch",
                 "scope": "source_patch",
+                **latency_fields_from_result(result),
                 # Durable source-layer handles so current_best stays relaunchable
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
@@ -5020,6 +5077,7 @@ class WritebackCollaborator:
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",
+                **latency_fields_from_result(result),
                 # Same durable source-layer handles as the primary KEEP lift so a
                 # source_patch recovered on THIS path is equally reproducible in
                 # the GEAK baseline (no path is left snapshot-less).

@@ -613,6 +613,17 @@ class ConversationCollaborator:
                 sections.append("=== Priors-match (advisory ordering) ===")
                 sections.append(priors_block)
 
+            # A latency budget changes what a KEEP even means, so it is a
+            # constraint the router has to see rather than telemetry it may skip.
+            try:
+                latency_block = self.shared_state.to_latency_budget_summary()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: latency_budget_summary failed")
+                latency_block = ""
+            if latency_block:
+                sections.append("=== Latency budget (constraint) ===")
+                sections.append(latency_block)
+
             # Surface the intervention-mix ledger (config vs code_patch counts) as neutral telemetry.
             try:
                 mix_block = self.shared_state.to_intervention_mix_summary()

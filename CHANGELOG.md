@@ -585,6 +585,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   persisted in `explore_search.tested`, `accepted`, `rejected`, and
   `name_index` inside `state.json` are invalidated.  On the next resume the
   session will re-bench its full explored history.
+- **`--max-latency-ms`: a latency constraint on every KEEP.** The optimizer
+  maximized `output_throughput` and nothing else; latency was measured,
+  reported and fed to the prompts, but no latency number could block a
+  promotion. That is survivable for a lever that raises throughput without
+  touching per-request latency, and unsafe for any lever that raises throughput
+  *by* making each stream slower — against a throughput-only gate, such a lever
+  does not merely tolerate a latency regression, it selects for the largest one
+  available.<br/>
+  The flag names a ceiling on mean end-to-end latency in milliseconds. It is a
+  constraint rather than a target, so it sits outside the `--target-*`
+  mutually-exclusive group and combines with them. Enforcement is at
+  `_lift_to_current_best`, the single choke point that writes `current_best`, so
+  it holds for explore, kernel, specialist and integrate winners alike rather
+  than only for the lane that happened to be wired first. Explore also applies
+  it a round earlier, which keeps an over-budget variant from being folded onto
+  the stack and becoming the anchor the rest of the batch is graded against, and
+  gives the ledger a latency reason for the REVERT rather than a promotion
+  refused later with no round to attribute it to.<br/>
+  **Off by default**, which leaves KEEP behaviour exactly as it was. When set,
+  the gate **fails closed**: a candidate that reported no end-to-end latency is
+  refused, since an unmeasured constraint is not a satisfied one. Operator note:
+  this makes end-to-end latency effectively mandatory for promotion under a
+  budget — a lane that never times its candidates will not promote one. Refused
+  winners are recorded in `latency_refusals` and listed in the report, so a
+  constrained session that ends near its baseline can be told apart from one
+  that simply found no headroom. A baseline already over budget warns at
+  promotion time rather than failing, since it is the reference the run is
+  measured against, but it does mean nothing will be kept until a candidate
+  comes in under the ceiling.<br/>
+  Because the gate fails closed, it is only as good as the plumbing that feeds
+  it, so every promoting lane now hands the choke point its measured latency
+  under one canonical set of names. The bench lanes carried no end-to-end
+  latency at all, and report the other two under the GEAK spellings (`ttft_ms` /
+  `itl_ms`) that the breakdown collectors read — so the gate, reading only the
+  canonical name off the top level, saw nothing. Under a budget that is not a
+  cosmetic gap but a lane whose every KEEP is refused for being untimed,
+  whatever it measured. Those dicts now carry end-to-end latency, and the lookup
+  resolves both the spellings in flight and the one layer of nesting the lanes
+  use, so the gate grades the workload rather than the wiring.
+  The report compares the kept configuration against the ceiling instead of
+  asserting it satisfies it, since the exempt baseline can legitimately occupy
+  that slot while over budget. The constraint and its refusals also render into
+  the orchestration prompt as `=== Latency budget (constraint) ===`, which is
+  what the routing guidance already told the model to read. On a resume the
+  documented `CLI > env > archived state` precedence now actually holds: the
+  launch-time export no longer clears the environment tier before the resume
+  path reads it.
 
 ### Removed
 

@@ -26,6 +26,11 @@ def _shared_state_module():
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
 
+# Latency-budget refusals rendered into the prompt. The most recent few, because
+# the signal is the trend rather than the roster: what a router needs is whether
+# the SLA is still turning down every gain, not the full list.
+_LATENCY_REFUSALS_RENDERED = 5
+
 # Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
 _VARIANT_ANCHOR_MAX_CHARS = 100
 
@@ -51,6 +56,42 @@ class _RenderMixin:
         from ...policy import gate as _m
 
         return _m.to_policy_denial_summary(self, top_k=top_k)
+
+    def to_latency_budget_summary(self) -> str:
+        """Render the latency constraint and what it has refused (``""`` when off).
+
+        The refusals are why this reaches the prompt at all. Under a budget a
+        throughput gain no longer predicts a KEEP, so a router that cannot see
+        the refusals reads a flat ``current_best`` as an exhausted configuration
+        space and proposes accordingly -- when what is happening is that the SLA
+        is turning down every gain on offer, which calls for the opposite move.
+        ``orchestration.md`` tells the model to read this; without it the
+        instruction pointed at a field no prompt contained.
+
+        Returns:
+            str: A short multi-line block, or ``""`` when no budget is set.
+        """
+        budget = float(getattr(self, "latency_budget_ms", 0.0) or 0.0)
+        if budget <= 0:
+            return ""
+        refusals = [r for r in (getattr(self, "latency_refusals", None) or []) if isinstance(r, dict)]
+        lines = [
+            f"budget    : {budget:.0f} ms mean end-to-end, enforced on every KEEP",
+            "unmeasured: refused (a constraint that was not measured is not satisfied)",
+            f"refused   : {len(refusals)} winner(s) so far",
+        ]
+        for ref in refusals[-_LATENCY_REFUSALS_RENDERED:]:
+            observed = ref.get("e2el_mean_ms")
+            shown = f"{float(observed):.0f} ms" if isinstance(observed, (int, float)) else "not measured"
+            name = _flatten_for_prompt(str(ref.get("variant_name") or "?"))
+            action = _flatten_for_prompt(str(ref.get("action") or "?"))
+            lines.append(f"  - {name} ({action}): {shown}")
+        if refusals:
+            lines.append(
+                "A list that keeps growing means the SLA is the binding limit, not an "
+                "exhausted search space: propose lower-latency shapes, not more of the same."
+            )
+        return "\n".join(lines)
 
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as a one-line counts summary (``""`` when empty).

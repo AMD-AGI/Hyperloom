@@ -84,6 +84,14 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--conc`, `--max-model-len`, `--profile-osl`.
 - **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
   `--target-tput`, `--compare-against-gpu`.
+- **Constraints:** `--max-latency-ms`. A ceiling on mean end-to-end latency, not
+  a target, so it combines with the `--target-*` flags instead of competing with
+  one. Off by default, leaving throughput the only gate on a KEEP. When set, it
+  is enforced on every KEEP whichever action produced it, and fails closed: a
+  candidate whose latency was never measured is refused, because an unmeasured
+  constraint is not a satisfied one. Set it whenever the search can buy
+  throughput by making each request slower — a throughput-only gate does not
+  merely tolerate that trade, it selects for the largest one available.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -925,6 +933,12 @@ internal-only — do not set them by hand:
 
 * `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
+* `HYPERLOOM_MAX_LATENCY_MS`: internal projection of `--max-latency-ms`,
+  written by the CLI so the in-process executors and a resume read the
+  validated value rather than re-deriving it from argv. Use the flag. On a
+  resume that omits the flag the budget is taken from this variable, and from
+  the archived session state when it is unset, unparseable or non-positive —
+  a stale shell value falls through rather than refusing the resume.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 

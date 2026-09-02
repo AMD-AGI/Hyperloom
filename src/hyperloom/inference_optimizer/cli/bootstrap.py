@@ -24,6 +24,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.actions.executors._latency_budget import read_session_budget
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
 )
@@ -383,6 +384,11 @@ def _seed_shared_state(
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
+        # Read back from the env the CLI published rather than re-derived from
+        # argv: that env is the validated, canonical form, and seeding from the
+        # raw flag would let the persisted manifest disagree with the budget the
+        # executors are actually gating on.
+        latency_budget_ms=read_session_budget(),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),

@@ -631,6 +631,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
     )
     opt.add_argument(
+        "--max-latency-ms",
+        type=float,
+        default=None,
+        metavar="MS",
+        help="Refuse any candidate whose mean end-to-end latency exceeds MS. A "
+        "constraint, not a target, so it is outside the --target-* group and "
+        "combines with them rather than replacing one. Off by default, which "
+        "leaves throughput the only gate on a KEEP. Set it whenever the "
+        "search can buy throughput by making each request slower, where a "
+        "throughput-only gate does not merely tolerate the regression but "
+        "selects for the largest one available. Enforced on every KEEP, "
+        "whichever action produced it, and in explore's decision round so an "
+        "over-budget variant never earns a rebench. The gate fails closed: a "
+        "candidate that reported no latency is refused, because an unmeasured "
+        "constraint is not a satisfied one.",
+    )
+    opt.add_argument(
         "--resume-from",
         type=str,
         default=None,
