@@ -7,6 +7,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **AgentX installs its own benchmark client instead of letting an agent guess
+  at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
+  dependency and `install.sh` already owned that install, but it was gated on a
+  *runtime* mode flag being true in the *installer's* process — provision
+  without `HYPERLOOM_AGENTX`/`INSTALL_AIPERF`, turn AgentX on later, and the box
+  has no aiperf. Both halves behaved as designed; the combination did not.
+  Measured: the runtime preflight caught it and printed exactly the right fix,
+  but that sentence is written for an operator and on that path there is no
+  operator — so a supply gap was handed to an LLM specialist as if it were a
+  framework bug, and the run's budget went to re-deriving an install this
+  repository already had.<br/>
+  The runtime now runs that install itself, once per process, when the
+  preflight finds aiperf missing or off the pinned `AIPERF_REF`; a failed repair
+  is folded into the preflight error alongside the original diagnosis, never
+  swallowed. An operator config error (a corpus pin the scenario does not admit)
+  does not trigger an install — reinstalling the same build cannot change that
+  verdict.<br/>
+  **Operator note**: `install.sh` gains `--only-aiperf`, which installs just the
+  pinned client and exits — use it to add AgentX support to a box provisioned
+  without it. And when AgentX is asked for by name (`INSTALL_AIPERF`,
+  `HYPERLOOM_AGENTX` or `--only-aiperf`), a failed aiperf install is now FATAL
+  rather than a warning. A default install never reaches that path, so the
+  synthetic route still grows no AgentX-only dependency it can be blocked by.
+
+- **A missing AgentX client stops the run instead of opening an enablement
+  round.** The enablement lane diagnoses things nobody knew about in advance;
+  a dependency AgentX declares for itself, that the runtime has already tried to
+  install, is not one of them. Measured: routed as an ordinary launch failure it
+  cost a full 24h budget — the specialist could not tell a supply gap from a
+  framework bug, its commands were rejected by the setup allowlist, and
+  PolicyGate's `enablement_round_in_flight` then blocked the baseline for the
+  rest of the run. The failure now stops on the first occurrence with the new
+  `agentx_client_unavailable` stop reason, and the report names the fix.
+  The grid runner also stops filing this abort as `no_benchmark_workspace`:
+  no workspace exists because Magpie never ran, and the generic class erased the
+  one fact that decides what to do next. Nothing about the enablement channel
+  itself changes.
+
+- **Enablement setup commands are judged by what they do, not how they are
+  spelled.** The install-only allowlist matched from the start of the command
+  and normalised only `sudo` and `KEY=VALUE` prefixes, so
+  `/opt/venv/bin/uv pip install X` was rejected while `uv pip install X` — the
+  same operation — was allowed. Measured: two sessions hit one missing
+  dependency and got opposite outcomes, decided by nothing but how the
+  specialist happened to spell the path. The executable's directory is now
+  stripped before matching, and `uv venv` / `python -m venv` are allowed:
+  without them the only spelling that survived was installing into the system
+  interpreter (`PIP_BREAK_SYSTEM_PACKAGES=1`), so the gate was steering repairs
+  toward the less safe of its two options. `rm`, `systemctl`, `./configure` and
+  `uv run` stay rejected with or without a path.<br/>
+  Rejected commands also reach the conclusion now, as
+  `setup_commands_skipped` and a named clause in the round's `reason`. They were
+  a lone log warning, so downstream saw an outcome with no link to the cause and
+  re-authored the same proposal until the budget ran out.
+
 - **Codex sandbox bypass uses a single env var.** Set
   `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
   enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
