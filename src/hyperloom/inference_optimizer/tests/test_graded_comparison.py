@@ -237,9 +237,7 @@ def test_a_round_without_the_env_var_still_grades_on_total(monkeypatch):
     """
     _synthetic(monkeypatch)
     state = _State(current_best=dict(_ANCHOR), benchmark_mode="agentx")
-    graded = resolve_graded_comparison(
-        state, _full_measurement(total=27000.0, output=190.0, intvty=447.20)
-    )
+    graded = resolve_graded_comparison(state, _full_measurement(total=27000.0, output=190.0, intvty=447.20))
     assert graded.objective == GRADED_TOTAL
     assert graded.candidate == pytest.approx(27000.0)
     assert graded.reference == pytest.approx(_ANCHOR["total_throughput"])
@@ -248,8 +246,6 @@ def test_a_round_without_the_env_var_still_grades_on_total(monkeypatch):
 def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
     _synthetic(monkeypatch)
     state = _State(current_best=dict(_ANCHOR))
-    graded = resolve_graded_comparison(
-        state, _full_measurement(total=27000.0, output=190.0, intvty=447.20)
-    )
+    graded = resolve_graded_comparison(state, _full_measurement(total=27000.0, output=190.0, intvty=447.20))
     assert graded.objective == GRADED_OUTPUT
     assert graded.reference == pytest.approx(resolve_grading_anchor_tput(state))
