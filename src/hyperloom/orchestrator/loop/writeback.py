@@ -667,10 +667,9 @@ class WritebackCollaborator:
                 cannot divide an output numerator by a total denominator.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
-            measurement_basis: ``e2e_rebench`` when ``new_tput`` came from a
-                full-stack revalidation, ``e2e_decision_round`` when it is the
-                round an explore variant was graded on, ``derived_speedup``
-                when it was inferred from a micro-benchmark.
+            measurement_basis: How the reading was obtained — ``e2e_rebench``
+                for a full-stack revalidation, ``e2e_decision_round`` for the
+                round an explore variant was graded on.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
@@ -726,7 +725,7 @@ class WritebackCollaborator:
         """
         from hyperloom.common.perf_metric import graded_axes_of
 
-        new_tput = result.get("new_tput")
+        new_tput = result.get("output_throughput") or result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
         lifted = self._lift_to_current_best(
