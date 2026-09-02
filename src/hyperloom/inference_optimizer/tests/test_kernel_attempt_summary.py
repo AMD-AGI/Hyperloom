@@ -454,8 +454,28 @@ def test_takeaway_names_the_dispatch_skip_instead_of_guessing(tmp_path: Path) ->
     out = build_kernel_optimization_summary(state, tmp_path)
     joined = " ".join(out["top_takeaways"])
     assert "no_candidate_table" in joined
-    assert "never dispatched" in joined
     assert "no candidates qualified" not in joined
+
+
+def test_takeaway_does_not_claim_a_dispatch_never_happened(tmp_path: Path) -> None:
+    """``no_eligible_kernels`` is written by a dispatch that did happen.
+
+    The two writers of this field disagree about what the skip was: the phase
+    records declining to ask, while this reason records a dispatch whose queue
+    came back empty. A sentence built around "never dispatched" is false for
+    the second, and a confident false statement is worse than the hedge it
+    replaced.
+    """
+    state = _make_state(top15=[])
+    state.last_kernel_opt_dispatch_skip = {
+        "reason": "no_eligible_kernels",
+        "kernels_considered": 7,
+        "ts": "2026-09-01T00:00:00+00:00",
+    }
+    out = build_kernel_optimization_summary(state, tmp_path)
+    joined = " ".join(out["top_takeaways"])
+    assert "no_eligible_kernels" in joined
+    assert "never dispatched" not in joined
 
 
 def test_takeaway_keeps_the_generic_line_without_a_recorded_reason(tmp_path: Path) -> None:

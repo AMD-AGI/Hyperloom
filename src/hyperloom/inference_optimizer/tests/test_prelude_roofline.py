@@ -467,7 +467,13 @@ async def test_kernel_entry_records_why_it_dispatched_nothing(coord: Coordinator
 
 @pytest.mark.asyncio
 async def test_kernel_entry_separates_an_empty_table_from_a_spent_one(coord: Coordinator, monkeypatch):
-    """A table whose kernels were all tried is not the same as no table."""
+    """A table whose kernels were all tried is not the same as no table.
+
+    The fixture has to satisfy the gate's own admission test, so the hot kernel
+    is reusable and above the floor, and the ledger records an attempt against
+    it. Anything less leaves the queue empty for want of a table, which is the
+    other reason entirely.
+    """
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
     monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
     monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
@@ -477,15 +483,88 @@ async def test_kernel_entry_separates_an_empty_table_from_a_spent_one(coord: Coo
         return None
 
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    # A snapshot exists; the dispatch floor is what declines it.
     coord.shared_state.last_trace_analyze = {
         "candidates_path": "/tmp/kernel_candidates.json",
-        "kernel_roofline_top15": [],
+        "hot_kernels_top15": [
+            {
+                "kernel_id": "k001",
+                "name": "hot_gemm",
+                "source_file": "/p/a.py",
+                "gpu_pct": 40.0,
+                "reusable_native_kernel": True,
+            }
+        ],
     }
+    coord.shared_state.kernel_opt_task_attempts = {
+        "task-1": {
+            "kernel_id": "k001",
+            "current_kernel_id": "k001",
+            "last_source_file": "/p/a.py",
+            "attempts": 1,
+        }
+    }
+    assert coord.shared_state.untried_hot_reusable_kernels() == [], "fixture must exercise the spent-table state"
 
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_untried_hot_kernels"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_trace_analyze_is_not_a_spent_table(coord: Coordinator, monkeypatch):
+    """A non-empty snapshot is not evidence of a table.
+
+    trace_analyze that ran and crashed leaves a status/error dict behind. Judged
+    on the dict being non-empty, that reads as "the table listed kernels and
+    they were all tried" -- the same false conclusion this breadcrumb exists to
+    prevent, relocated from the buckets into the reason.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    coord.shared_state.last_trace_analyze = {"status": "failed", "error": "roofline crashed"}
+
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+
+    assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_candidate_table"
+
+
+@pytest.mark.asyncio
+async def test_a_dispatch_retires_an_earlier_skip_breadcrumb(coord: Coordinator, monkeypatch):
+    """A batch dispatch names no kernel_id, so nothing else clears the field.
+
+    Left standing, a breadcrumb from an earlier entry outlives the dispatch and
+    the report asserts "never dispatched" for a round that dispatched and had
+    its candidates filtered by the handler's own floor.
+    """
+    coord.shared_state.last_kernel_opt_dispatch_skip = {"reason": "no_candidate_table"}
+    coord.shared_state.last_trace_analyze = {"candidates_path": "/tmp/kernel_candidates.json"}
+
+    async def _handler(_payload, **_kwargs):
+        return {"status": "ok", "batch_mode": True, "dispatched": 2}
+
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    monkeypatch.setattr(krh, "run_optimization_handler", _handler)
+
+    sent: list[Any] = []
+
+    class _Bus:
+        async def append_and_seq(self, message: Any) -> None:
+            sent.append(message)
+
+    coord.phase_kernel.bus = _Bus()
+
+    await coord.phase_kernel._run_kernel_opt_entry_batch()
+
+    assert coord.shared_state.last_kernel_opt_dispatch_skip == {}
+    assert sent, "the batch result is still reported on the bus"
 
 
 @pytest.mark.asyncio

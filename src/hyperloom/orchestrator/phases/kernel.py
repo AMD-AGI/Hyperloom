@@ -3574,6 +3574,12 @@ class KernelPhase(PhaseHandler):
         into one ``False``: the feature is off, no candidate table was ever
         produced, or the table's hot kernels have all been tried.
 
+        Reads the same field the gate reads. ``last_trace_analyze`` being a
+        non-empty dict does not mean it carries a table -- a trace_analyze that
+        ran and failed leaves ``{"status": "failed", ...}`` behind -- and
+        calling that "the kernels were all tried" states the very conclusion
+        this breadcrumb exists to prevent.
+
         Returns:
             str: One of ``auto_kernel_opt_disabled`` /
                 ``no_candidate_table`` / ``no_untried_hot_kernels``.
@@ -3582,7 +3588,9 @@ class KernelPhase(PhaseHandler):
         if not bool(getattr(state, "auto_kernel_opt_enabled", True)):
             return KERNEL_OPT_SKIP_DISABLED
         cached = getattr(state, "last_trace_analyze", None)
-        if not isinstance(cached, dict) or not cached:
+        cached = cached if isinstance(cached, dict) else {}
+        hot = cached.get("hot_kernels_top15") or cached.get("hot_kernels") or []
+        if not isinstance(hot, list) or not hot:
             return KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE
         return KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS
 
@@ -3624,6 +3632,15 @@ class KernelPhase(PhaseHandler):
             not cached,
             streak,
         )
+        # Persisted here rather than left to whichever later turn happens to
+        # save: the run this breadcrumb is for is the one that spends hours in
+        # the phase and is then killed or wedged, which is exactly when an
+        # unsaved breadcrumb is lost and the report falls back to reading as
+        # "nothing worth optimising".
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — a breadcrumb must never fail the phase
+            log.debug("KERNEL entry: saving the dispatch-skip breadcrumb failed", exc_info=True)
 
     def _kernel_opt_work_remains(self) -> bool:
         """Whether KERNEL entry should dispatch source-level kernel_opt itself.
@@ -3657,6 +3674,12 @@ class KernelPhase(PhaseHandler):
         log.info(
             "KERNEL entry: dispatching the source-level kernel_opt batch",
         )
+        # A dispatch retires any earlier skip breadcrumb. ``record_kernel_opt``
+        # clears it too, but only for a result naming a ``kernel_id``, and this
+        # batch names none by design -- so an earlier "never dispatched" would
+        # outlive the dispatch and the report would assert it as fact for a
+        # round whose candidates were merely filtered by the handler's floor.
+        self.shared_state.last_kernel_opt_dispatch_skip = {}
         try:
             from ..kernel.request_handlers import run_optimization_handler
 

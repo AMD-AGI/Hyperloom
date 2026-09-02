@@ -1335,9 +1335,14 @@ def _build_top_takeaways(
         # never produced, so nothing was ever asked -- unrepresented, and a
         # reader with every bucket at zero concluded the workload had no
         # headroom.
+        #
+        # Worded around the skip, not around "never dispatched": the reasons
+        # come from two writers with different meanings. The phase records why
+        # it declined to ask at all, while ``no_eligible_kernels`` comes from a
+        # dispatch that did happen and found nothing eligible.
         skip_reason = str((dispatch_skip or {}).get("reason") or "")
         if skip_reason:
-            out.append(f"No kernels were attempted in this session: kernel_opt was never dispatched ({skip_reason}).")
+            out.append(f"No kernels were attempted in this session (kernel_opt dispatch skip: {skip_reason}).")
         else:
             out.append(
                 "No kernels were attempted in this session "
