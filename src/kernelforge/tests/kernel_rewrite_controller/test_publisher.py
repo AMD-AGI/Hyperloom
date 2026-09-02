@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -41,6 +42,12 @@ def test_publish_operator_result_exposes_one_complete_operator_directory(
     assert destination.is_symlink()
     assert (destination / "change.patch").read_text(encoding="utf-8") == "first patch\n"
     assert "**Best commit:** `" + "b" * 40 + "`" in (destination / "report.md").read_text(encoding="utf-8")
+    metadata = json.loads((destination / "publication.json").read_text(encoding="utf-8"))
+    assert metadata["schema_version"] == 2
+    assert metadata["repo_root"] == str(publication.repo_root)
+    assert metadata["kernel_path"] == publication.kernel_path
+    assert metadata["identity"]["kernel_name"] == "fused_moe"
+    assert metadata["micro_validated"] is True
     assert [path.name for path in publisher.published_operator_dirs(layout)] == [publication.operator_id]
 
 

@@ -80,6 +80,7 @@ def _published_patch_count(output_dir: Path) -> int:
         and entry.is_dir()
         and (entry / "change.patch").is_file()
         and (entry / "report.md").is_file()
+        and (entry / "publication.json").is_file()
     )
 
 

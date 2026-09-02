@@ -22,7 +22,7 @@ from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 PATCH_FILENAME = "change.patch"
 REPORT_FILENAME = "report.md"
 PUBLICATION_FILENAME = "publication.json"
-PUBLICATION_SCHEMA_VERSION = 1
+PUBLICATION_SCHEMA_VERSION = 2
 
 
 class PublicationError(RuntimeError):
@@ -34,8 +34,12 @@ class OperatorPublication:
     """One micro-validated operator result ready for Hyperloom."""
 
     operator_id: str
+    identity: dict[str, str]
     base_commit: str
     best_commit: str
+    repo_root: str
+    kernel_path: str
+    operator_name: str
     patch: str
     report: str
     manifest: dict[str, Any]
@@ -44,8 +48,13 @@ class OperatorPublication:
         return {
             "schema_version": PUBLICATION_SCHEMA_VERSION,
             "operator_id": self.operator_id,
+            "identity": self.identity,
             "base_commit": self.base_commit,
             "best_commit": self.best_commit,
+            "repo_root": self.repo_root,
+            "kernel_path": self.kernel_path,
+            "operator_name": self.operator_name,
+            "micro_validated": True,
             "manifest": self.manifest,
         }
 
@@ -178,8 +187,19 @@ def publication_from_task(
     details = dict(manifest or {})
     return OperatorPublication(
         operator_id=task.operator_id,
+        identity={
+            "producer": task.identity.producer,
+            "kernel_name": task.identity.kernel_name,
+            "framework": task.identity.framework,
+            "framework_version": task.identity.framework_version,
+            "backend": task.identity.backend,
+            "gpu": task.identity.gpu,
+        },
         base_commit=task.base_commit,
         best_commit=str(best_commit).strip().lower(),
+        repo_root=str(task.repo_root),
+        kernel_path=task.kernel_path,
+        operator_name=task.operator_name,
         patch=patch,
         report=render_operator_report(task, best_commit=best_commit, manifest=details),
         manifest=details,

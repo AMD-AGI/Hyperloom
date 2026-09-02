@@ -40,6 +40,7 @@ def test_timeout_result_recovers_complete_patches_without_terminal_state(tmp_pat
     patch.mkdir(parents=True)
     (patch / "change.patch").write_text("diff\n", encoding="utf-8")
     (patch / "report.md").write_text("# Report\n", encoding="utf-8")
+    (patch / "publication.json").write_text("{}\n", encoding="utf-8")
     state = output / "controller" / "state.json"
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"status": "running", "task_count": 1}), encoding="utf-8")

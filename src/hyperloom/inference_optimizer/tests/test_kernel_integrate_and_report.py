@@ -289,6 +289,49 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_integrate_handler_validates_a_controller_preapplied_git_patch(
+    session_dir,
+    tmp_path,
+):
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=900.0)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "kernel:forge-loop:test",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "_preapplied_git_patch": True,
+    }
+    with (
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers._maybe_apply_kernel_patch",
+            side_effect=AssertionError("pre-applied patch must not be applied twice"),
+        ),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=_fake_run,
+        ),
+    ):
+        result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["decision"] == "KEEP"
+    assert result["apply_result"]["reason"] == "controller patch was pre-applied through Git"
+
+
+@pytest.mark.asyncio
 async def test_integrate_handler_keeps_positive_stack_increment(
     session_dir,
     tmp_path,

@@ -4073,6 +4073,32 @@ class KernelPhase(PhaseHandler):
             "budget_minutes": controller_budget_sec / 60.0,
             "hard_timeout_sec": hard_timeout_sec,
         }
+        if int(result.get("patch_count") or 0) > 0:
+            try:
+                from ..kernel.controller_patch_integration import (
+                    integrate_controller_patches,
+                )
+
+                integration = await integrate_controller_patches(
+                    patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                    session_dir=self.session_dir,
+                    shared_state=self.shared_state,
+                )
+                result["integration"] = integration.to_dict()
+            except Exception as error:  # noqa: BLE001
+                log.exception("KERNEL entry: Controller patch integration failed")
+                result["integration"] = {
+                    "status": "failed",
+                    "reason": str(error),
+                    "kept_count": 0,
+                }
+        else:
+            result["integration"] = {
+                "status": "completed",
+                "kept_count": 0,
+                "reverted_count": 0,
+                "skipped_count": 0,
+            }
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
         self.shared_state.set_pending_escalate_hint(

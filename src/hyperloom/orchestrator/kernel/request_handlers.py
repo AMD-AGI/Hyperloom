@@ -6191,7 +6191,8 @@ async def integrate_handler(
     env_only_validation = not _has_artifact and (
         bool(payload.get("extra_envs")) or bool(str(payload.get("extra_server_args") or "").strip())
     )
-    if not env_only_validation:
+    preapplied_git_patch = payload.get("_preapplied_git_patch") is True
+    if not env_only_validation and not preapplied_git_patch:
         payload, missing_inputs = _resolve_integrate_payload(
             payload,
             session_dir=session_dir,
@@ -6202,7 +6203,13 @@ async def integrate_handler(
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
     preapplied = payload.get("preapplied_apply_result")
-    if isinstance(preapplied, dict) and preapplied.get("status") == "ok":
+    if preapplied_git_patch:
+        apply_result = {
+            "status": "ok",
+            "reason": "controller patch was pre-applied through Git",
+            "kernel_id": kernel_id,
+        }
+    elif isinstance(preapplied, dict) and preapplied.get("status") == "ok":
         manifest_path = Path(str(preapplied.get("manifest_path") or ""))
         patches_root = (Path(session_dir) / "patches").resolve()
         try:
