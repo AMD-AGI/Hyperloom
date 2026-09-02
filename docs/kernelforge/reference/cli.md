@@ -43,8 +43,9 @@ local/remote environment contract and durable local layout.
 
 Initializes one fresh autonomous kernel-rewrite controller run. The current
 skeleton validates the Hyperloom handoff, creates the durable controller/result
-layout, records an absolute deadline, and exits cleanly with `no_opportunity`
-until analysis and task dispatch are added.
+layout, records an absolute deadline, and exposes sequential prepared-task
+dispatch for the analysis stage. It exits cleanly with `no_opportunity` until
+analysis task generation is connected.
 
 | Option | Default | Meaning |
 |:--|:--|:--|

@@ -6,12 +6,15 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
 
 from kernelforge import cli
 from kernelforge.kernel_rewrite_controller import ControllerRunError, run_controller
+from kernelforge.kernel_rewrite_controller import controller
+from kernelforge.kernel_rewrite_controller.scheduler import ScheduleResult
 from kernelforge.kernel_rewrite_controller.contracts import (
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
@@ -91,6 +94,33 @@ def test_handoff_may_live_inside_the_cycle_output_directory(tmp_path: Path) -> N
     assert state.status == "no_opportunity"
     assert (cycle / "controller" / "state.json").is_file()
     assert (cycle / "result" / "summary.md").is_file()
+
+
+def test_controller_summary_counts_prepared_task_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        controller,
+        "dispatch_prepared_tasks",
+        lambda *_args, **_kwargs: ScheduleResult(
+            task_count=2,
+            results=(
+                SimpleNamespace(status="succeeded"),
+                SimpleNamespace(status="failed"),
+            ),
+        ),
+    )
+
+    state = run_controller(
+        handoff_dir=_handoff(tmp_path),
+        budget_minutes=10,
+        output_dir=tmp_path / "output",
+    )
+
+    assert state.status == "completed"
+    assert state.task_count == 2
+    assert state.patch_count == 1
 
 
 def test_invalid_handoff_is_persisted_as_failed(tmp_path: Path) -> None:

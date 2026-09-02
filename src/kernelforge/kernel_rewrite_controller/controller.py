@@ -15,6 +15,7 @@ from pathlib import Path
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
+from kernelforge.kernel_rewrite_controller.scheduler import dispatch_prepared_tasks
 
 CONTROLLER_STATE_SCHEMA_VERSION = 1
 
@@ -127,6 +128,10 @@ def run_controller(
 
     try:
         read_handoff(handoff_path)
+        schedule = dispatch_prepared_tasks(
+            layout,
+            controller_deadline_unix=running.deadline_unix,
+        )
     except Exception as error:
         failed = ControllerRunState(
             **{
@@ -140,12 +145,26 @@ def run_controller(
         _write_summary(layout, failed)
         raise ControllerRunError(failed.reason) from error
 
+    if schedule.task_count == 0:
+        status = CONTROLLER_STATUS_NO_OPPORTUNITY
+        reason = "no prepared operator tasks are available"
+    elif schedule.stopped_for_budget:
+        status = CONTROLLER_STATUS_PARTIAL
+        reason = "controller stopped admitting tasks because less than 30 minutes remained"
+    elif schedule.succeeded_count:
+        status = CONTROLLER_STATUS_COMPLETED
+        reason = "all prepared operator tasks were processed"
+    else:
+        status = CONTROLLER_STATUS_NO_RESULT
+        reason = "prepared operator tasks produced no validated improvement"
     completed = ControllerRunState(
         **{
             **running.to_dict(),
-            "status": CONTROLLER_STATUS_NO_OPPORTUNITY,
+            "status": status,
             "finished_at": _now_iso(),
-            "reason": "no analysis tasks are available in the controller skeleton",
+            "reason": reason,
+            "task_count": schedule.task_count,
+            "patch_count": schedule.succeeded_count,
         }
     )
     _write_state(layout, completed)

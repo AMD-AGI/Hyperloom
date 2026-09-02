@@ -23,6 +23,13 @@ from kernelforge.kernel_rewrite_controller.dispatcher import (
 )
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout, TaskLayout
+from kernelforge.kernel_rewrite_controller.scheduler import (
+    ANALYSIS_BUDGET_SEC,
+    FORGE_LOOP_BUDGET_SEC,
+    MIN_TASK_START_REMAINING_SEC,
+    ScheduleResult,
+    dispatch_prepared_tasks,
+)
 from kernelforge.kernel_rewrite_controller.state import TaskStateStore
 from kernelforge.kernel_rewrite_controller.task import (
     discover_task_dirs,
@@ -32,7 +39,11 @@ from kernelforge.kernel_rewrite_controller.task import (
 )
 
 __all__ = [
+    "ANALYSIS_BUDGET_SEC",
     "ControllerLayout",
+    "FORGE_LOOP_BUDGET_SEC",
+    "MIN_TASK_START_REMAINING_SEC",
+    "ScheduleResult",
     "ControllerRunError",
     "ControllerRunState",
     "HandoffBundle",
@@ -47,6 +58,7 @@ __all__ = [
     "TaskStateStore",
     "discover_task_dirs",
     "dispatch_single_task",
+    "dispatch_prepared_tasks",
     "load_task",
     "parse_task_payload",
     "read_handoff",
