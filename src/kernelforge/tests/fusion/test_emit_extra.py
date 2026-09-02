@@ -242,6 +242,41 @@ def test_restore_removes_untracked_and_prunes_dirs(tmp_path):
     assert not (repo / "a").exists()
 
 
+def test_export_nongit_honors_custom_patch_name(tmp_path):
+    """A per-sibling ``patch_name`` writes ``out/<patch_name>`` and NOT the legacy
+    ``fusion.patch``, so N keepers exported into one dir do not clobber each other."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    src.write_text("FUSED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+    arts = export_artifacts(
+        str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_0.patch"
+    )
+    assert arts.patch == str(out / "fusion_0.patch")
+    assert (out / "fusion_0.patch").is_file()
+    assert not (out / "fusion.patch").exists()
+
+
+def test_export_nongit_two_siblings_do_not_overwrite(tmp_path):
+    """Exporting two recipes into the same out dir under distinct names keeps both
+    patch files intact (the multi-patch nomination invariant)."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    # sibling 0 edits the main source
+    src.write_text("A = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+    a0 = export_artifacts(
+        str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_0.patch"
+    )
+    text0 = (out / "fusion_0.patch").read_text()
+    # sibling 1 makes a different edit to the same source; exported under a new name
+    src.write_text("B = 2\ndef forward(x):\n    return x\n", encoding="utf-8")
+    a1 = export_artifacts(
+        str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_1.patch"
+    )
+    assert a0.patch != a1.patch
+    # sibling 0's file is untouched by sibling 1's export
+    assert (out / "fusion_0.patch").read_text() == text0
+    assert "+A = 1" in (out / "fusion_0.patch").read_text()
+    assert "+B = 2" in (out / "fusion_1.patch").read_text()
+
+
 def test_restore_checks_out_tracked_file(tmp_path):
     repo = tmp_path / "r"
     repo.mkdir()

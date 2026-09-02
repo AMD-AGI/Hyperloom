@@ -96,8 +96,10 @@ def _unified_file_diff(rel: str, old_text: str, new_text: str) -> str:
     return f"diff --git a/{rel} b/{rel}\n{body}"
 
 
-def _export_nongit(repo_root: str, source_file: str, out: Path, pristine_dir: Path) -> FusionArtifacts:
-    """Export ``fusion.patch`` without git, using a pre-authoring pristine snapshot.
+def _export_nongit(
+    repo_root: str, source_file: str, out: Path, pristine_dir: Path, patch_name: str = "fusion.patch"
+) -> FusionArtifacts:
+    """Export ``patch_name`` without git, using a pre-authoring pristine snapshot.
 
     Needed when the framework is a plain pip install (not a git checkout), where
     ``git diff`` yields nothing so the KEPT fusion would otherwise ship
@@ -156,7 +158,7 @@ def _export_nongit(repo_root: str, source_file: str, out: Path, pristine_dir: Pa
 
     diff = "\n".join(p.rstrip("\n") for p in parts if p)
     if diff:
-        patch_path = out / "fusion.patch"
+        patch_path = out / patch_name
         patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
         arts.patch = str(patch_path)
     arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
@@ -219,8 +221,9 @@ def export_artifacts(
     out_dir: str | Path,
     pristine_dir: str | Path | None = None,
     snapshot_diff_only: bool = False,
+    patch_name: str = "fusion.patch",
 ) -> FusionArtifacts:
-    """Export ``fusion.patch`` + a classified change list, scoped to the fusion.
+    """Export ``patch_name`` + a classified change list, scoped to the fusion.
 
     Best-effort: returns an empty ``FusionArtifacts`` when the repo is unavailable
     or there are no fusion-scoped changes. Only the fusion files (the edited model
@@ -235,6 +238,12 @@ def export_artifacts(
     git route diffs against HEAD, so on a checkout carrying unrelated uncommitted
     edits it would sweep them into the patch; callers that must ship exactly the
     change THIS run made (the compile-pass flip) require the snapshot baseline.
+
+    ``patch_name`` is the file the diff is written to under ``out_dir``. It
+    defaults to the legacy ``fusion.patch`` so single-patch (combine) callers and
+    the salvage/timeout paths that read that literal name are unchanged; the
+    multi-patch caller passes a distinct name per sibling (``fusion_0.patch`` ...)
+    so N keepers do not overwrite each other.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -242,7 +251,7 @@ def export_artifacts(
 
     def _nongit() -> FusionArtifacts | None:
         if pristine_dir and source_file:
-            return _export_nongit(repo_root, source_file, out, Path(pristine_dir))
+            return _export_nongit(repo_root, source_file, out, Path(pristine_dir), patch_name)
         return None
 
     # Take the git path ONLY when the source file is actually git-TRACKED. A pip
@@ -282,7 +291,7 @@ def export_artifacts(
         # ignores): try the pristine snapshot before giving up on the patch.
         return _nongit() or arts
 
-    patch_path = out / "fusion.patch"
+    patch_path = out / patch_name
     patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
     arts.patch = str(patch_path)
     arts.repo_root = str(Path(repo_root).resolve())
