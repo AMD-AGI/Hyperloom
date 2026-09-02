@@ -3498,7 +3498,7 @@ class TestForgeGemmPairedConfirmation:
         monkeypatch.setattr(
             coord,
             "_update_cumulative_gain_validated",
-            lambda tput, **kw: basis.update({"basis": kw.get("measurement_basis", ""), "tput": tput}),
+            lambda tput, measurement, **kw: basis.update({"basis": kw.get("measurement_basis", ""), "tput": tput}),
         )
         fake = self._run_e2e(coord, monkeypatch, [130.0])
 
@@ -3517,7 +3517,7 @@ class TestForgeGemmPairedConfirmation:
         monkeypatch.setattr(
             coord,
             "_update_cumulative_gain_validated",
-            lambda tput, **kw: basis.update({"basis": kw.get("measurement_basis", "")}),
+            lambda tput, measurement, **kw: basis.update({"basis": kw.get("measurement_basis", "")}),
         )
         # 1 validation call, then A,B,A,B: baseline ~100, candidate ~130.
         fake = self._run_e2e(coord, monkeypatch, [130.0, 100.0, 130.0, 101.0, 131.0])
@@ -3542,7 +3542,7 @@ class TestForgeGemmPairedConfirmation:
         monkeypatch.setattr(
             coord,
             "_update_cumulative_gain_validated",
-            lambda tput, **kw: basis.update({"basis": kw.get("measurement_basis", "")}),
+            lambda tput, measurement, **kw: basis.update({"basis": kw.get("measurement_basis", "")}),
         )
         # The pairs disagree about which side is faster: the machine moved.
         self._run_e2e(coord, monkeypatch, [130.0, 100.0, 130.0, 140.0, 120.0])

@@ -2740,3 +2740,28 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
         with caplog.at_level("ERROR"):
             gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
     assert any("CORRUPTED" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+# --- graded_objective field in VariantResult and explore decision records ---
+
+
+def test_variant_result_has_intvty_and_total_fields():
+    """VariantResult must carry both graded axes so the explore executor can stamp them."""
+    r = VariantResult(
+        name="v",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=183.0,
+        input_throughput=25800.0,
+        total_throughput=25983.0,
+        intvty_p90=447.2,
+    )
+    assert r.total_throughput == 25983.0
+    assert r.intvty_p90 == 447.2
+
+
+def test_variant_result_graded_axes_default_to_none():
+    r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded", output_throughput=100.0)
+    assert r.total_throughput is None
+    assert r.intvty_p90 is None

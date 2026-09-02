@@ -128,6 +128,28 @@ def output_tput_of(source: Mapping[str, Any] | None) -> float:
     return float(_positive(source.get("output_throughput")) or _positive(source.get("tput")) or 0.0)
 
 
+def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
+    """The graded axes *source* actually carries, for stamping onto a winner record.
+
+    A KEEP's ``current_best`` has to carry the axes of the measurement it was
+    promoted on: the next candidate anchors against it, and an anchor missing
+    an axis degrades the whole session to output grading. Absent rather than
+    ``None`` for an axis that was not measured, so a partial record is not
+    mistaken for a measured zero.
+    """
+    if not isinstance(source, Mapping):
+        return {}
+    axes: dict[str, float] = {}
+    total = _positive(source.get("total_throughput")) or _positive(source.get("total_token_throughput"))
+    if total is not None:
+        axes["total_throughput"] = total
+    for key in ("input_throughput", "tpot_p90_ms", "intvty_p90"):
+        value = _positive(source.get(key))
+        if value is not None:
+            axes[key] = value
+    return axes
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate and the figure it must beat, both read off one axis.
@@ -213,6 +235,7 @@ __all__ = [
     "GradedComparison",
     "GRADED_OUTPUT",
     "GRADED_TOTAL",
+    "graded_axes_of",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "passes_intvty_gate",

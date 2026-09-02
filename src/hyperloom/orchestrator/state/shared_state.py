@@ -27,7 +27,8 @@ Fields::
                                 extra_envs, workspace, latency means)
     cumulative_gain_validated float — % over baseline at the last measurement
                                 that promoted (an explore KEEP's decision round,
-                                or a full-stack revalidation)
+                                or a full-stack revalidation), on whichever axis
+                                the session grades (see resolve_graded_comparison)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -60,13 +61,16 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
+
+if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
+    from hyperloom.common.perf_metric import GradedComparison
 
 from . import kernel_decision_settings as _kernel_decision_settings
 from ._shared_state.enablement_round import EnablementRound
@@ -125,8 +129,22 @@ def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, 
     return snapshot_tput, False
 
 
+def framework_is_scriptable(framework: str | None) -> bool:
+    """Whether *framework* reports an image-quality gate instead of token throughput.
+
+    An unset name reads as a serving framework: a session that has not resolved
+    one yet is not scriptable until it says so.
+    """
+    name = str(framework or "").strip()
+    if not name:
+        return False
+    from hyperloom.inference_optimizer import framework_registry
+
+    return bool(framework_registry.is_scriptable(name))
+
+
 def resolve_grading_anchor_tput(state: Any) -> float:
-    """Throughput a new candidate must beat: the recipe it is composed on top of.
+    """Output throughput a new candidate is composed on top of.
 
     Candidates are launched with ``current_best``'s args/envs, so grading them
     against ``baseline_tput`` compares a measurement to a configuration it was
@@ -135,13 +153,19 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     ``current_best`` down. ``baseline_tput`` is the fallback only before any
     validated layer exists.
 
+    Always the output axis. This is not the KEEP grader -- that is
+    :func:`resolve_graded_comparison` -- and its consumers are not grading a
+    candidate: the ``base_tput`` seeded into task params, the drift check, and
+    the two objective resolvers, whose targets are operator-supplied output
+    figures.
+
     Args:
         state: Any object exposing ``current_best`` / ``baseline_tput``
             (``None`` and partial test doubles are tolerated).
 
     Returns:
-        ``current_best``'s throughput when positive, else ``baseline_tput``;
-        ``0.0`` when neither is established.
+        ``current_best``'s output throughput when positive, else
+        ``baseline_tput``; ``0.0`` when neither is established.
     """
     if state is None:
         return 0.0
@@ -150,6 +174,72 @@ def resolve_grading_anchor_tput(state: Any) -> float:
         return best
     baseline = getattr(state, "baseline_tput", 0.0)
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
+
+
+def resolve_graded_comparison(
+    state: Any,
+    measurement: Any,
+    *,
+    against_baseline: bool = False,
+) -> "GradedComparison":
+    """Resolve what a KEEP decision grades: candidate and reference, one axis.
+
+    Under total-token-throughput grading both sides come from perf snapshots,
+    which exist only when the axis pair (total, intvty p90) is present, so a
+    lane cannot half-apply the objective. When either side cannot supply the
+    pair both read the output axis and ``degrade_reason`` names why. The
+    interactivity constraint is resolved here as ``vetoed`` because it belongs
+    to the total-throughput objective rather than sitting beside it.
+
+    Args:
+        state: The session state (``current_best`` / ``baseline_tput`` /
+            ``baseline_perf`` / ``framework``).
+        measurement: The candidate's measurement mapping.
+        against_baseline: Grade against the session baseline (cumulative
+            realized gain) rather than the recipe the candidate was composed on.
+
+    Returns:
+        A :class:`GradedComparison` whose ``candidate`` and ``reference`` are
+        on the axis it names.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_OUTPUT,
+        GRADED_TOTAL,
+        GradedComparison,
+        output_tput_of,
+        passes_intvty_gate,
+        perf_snapshot_from_mapping,
+        resolve_grading_anchor_perf,
+        total_tput_of,
+        total_tput_serving_grading_enabled,
+    )
+
+    degrade_reason = ""
+    if total_tput_serving_grading_enabled(scriptable=framework_is_scriptable(getattr(state, "framework", None))):
+        if against_baseline:
+            ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
+            reason = "" if ref_perf else "baseline_axes_missing"
+        else:
+            ref_perf, reason = resolve_grading_anchor_perf(state)
+        cand_perf = perf_snapshot_from_mapping(measurement)
+        if ref_perf and cand_perf:
+            return GradedComparison(
+                objective=GRADED_TOTAL,
+                candidate=total_tput_of(cand_perf),
+                reference=total_tput_of(ref_perf),
+                vetoed=not passes_intvty_gate(cand_perf, ref_perf),
+            )
+        degrade_reason = reason or "candidate_axes_missing"
+
+    reference = (
+        float(getattr(state, "baseline_tput", 0.0) or 0.0) if against_baseline else resolve_grading_anchor_tput(state)
+    )
+    return GradedComparison(
+        objective=GRADED_OUTPUT,
+        candidate=output_tput_of(measurement),
+        reference=reference,
+        degrade_reason=degrade_reason,
+    )
 
 
 def _normalize_envs(value: Any) -> dict[str, str]:
@@ -600,6 +690,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Baseline AgentX perf snapshot: total tok/s objective plus the intvty p90
+    # the veto is measured against, and the reported axes the summary renders.
+    baseline_perf: dict[str, Any] = field(default_factory=dict)
     # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
