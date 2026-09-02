@@ -8,9 +8,19 @@ produced by :mod:`conc_sweep`.  The function is **best-effort**: any import
 failure (missing ``matplotlib``) or data / IO error is logged and ``None``
 is returned so callers can skip the chart without aborting the report.
 
-Axes:
-  x = output_throughput / conc  (tok/s per user — "interactivity")
-  y = output_throughput / tp    (tok/s per GPU   — "efficiency")
+The axis pair follows the payload's ``benchmark_mode``, because the two
+workloads are ranked on different quantities and plotting them on one pair
+would mean labelling one of them wrongly.
+
+Agentic (``benchmark_mode="agentx"``) — the pair InferenceX ranks a
+submission by, read straight off the aiperf export:
+  x = intvty_p90              (p90 E2E normalized interactivity, tok/s/user)
+  y = total_token_throughput / tp   (tok/s per chip)
+
+Synthetic — no aiperf export, so interactivity is approximated from the
+concurrency the ladder ran at:
+  x = output_throughput / conc  (tok/s per user)
+  y = output_throughput / tp    (tok/s per GPU)
 
 Rendered on a black background for a high-contrast dashboard look. Colours:
   baseline  — red        ``#FF4C4C``
@@ -22,10 +32,69 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 log = logging.getLogger(__name__)
+
+AGENTX_MODE = "agentx"
+
+
+def _positive(value: Any) -> float | None:
+    """Coerce to a strictly positive float, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced > 0 else None
+
+
+def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
+    """p90 interactivity against token throughput per chip."""
+    intvty = _positive(point.get("intvty_p90"))
+    total = _positive(point.get("total_token_throughput"))
+    if intvty is None or total is None:
+        return None
+    return intvty, total / tp_eff
+
+
+def _synthetic_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
+    """Output throughput per user against output throughput per GPU."""
+    tput = _positive(point.get("output_throughput"))
+    conc = _positive(point.get("conc"))
+    if tput is None or conc is None:
+        return None
+    return tput / conc, tput / tp_eff
+
+
+@dataclass(frozen=True)
+class _Axes:
+    """The pair one mode's points are plotted on."""
+
+    point_xy: Callable[[Mapping[str, Any], float], tuple[float, float] | None]
+    x_label: str
+    y_label: str
+    agentic: bool
+
+
+def _resolve_axes(benchmark_mode: Any, tp_eff: float) -> _Axes:
+    """Pick the axis pair the payload's mode is ranked on."""
+    if str(benchmark_mode or "").strip().lower() == AGENTX_MODE:
+        return _Axes(
+            point_xy=_agentx_xy,
+            x_label="P90 Interactivity  (tok/s/user)",
+            y_label=f"Token Throughput per Chip  (tok/s/chip, tp={int(tp_eff)})",
+            agentic=True,
+        )
+    return _Axes(
+        point_xy=_synthetic_xy,
+        x_label="Interactivity  (output_throughput / concurrency,  tok/s/user)",
+        y_label=f"Efficiency  (output_throughput / tp={int(tp_eff)},  tok/s/GPU)",
+        agentic=False,
+    )
 
 
 def render_conc_sweep_curve(
@@ -86,33 +155,25 @@ def _load_payload(payload: dict[str, Any] | str | Path) -> dict[str, Any]:
 def _arm_series(
     points: list[dict[str, Any]],
     tp_eff: float,
+    axes: _Axes | None = None,
 ) -> tuple[list[float], list[float]]:
     """Extract (x, y) series for one arm, skipping failed/missing points.
 
     Args:
         points: List of conc-sweep point dicts (``conc``, ``output_throughput``, ...).
         tp_eff: Effective TP size for y-axis normalisation (must be >= 1).
+        axes: The pair to read; defaults to the synthetic one.
 
     Returns:
-        ``(xs, ys)`` — interactivity (tok/s/user) and efficiency (tok/s/GPU)
-        for points with non-``None`` output_throughput, sorted ascending by x.
+        ``(xs, ys)`` for the points that carry the pair, sorted ascending by x.
+        A point missing either axis is dropped rather than plotted at zero.
     """
+    resolved = axes or _resolve_axes("", tp_eff)
     pairs: list[tuple[float, float]] = []
     for pt in points:
-        tput = pt.get("output_throughput")
-        conc = pt.get("conc")
-        if tput is None or not conc:
-            continue
-        try:
-            tput_f = float(tput)
-            conc_f = float(conc)
-        except (TypeError, ValueError):
-            continue
-        if tput_f <= 0 or conc_f <= 0:
-            continue
-        x = tput_f / conc_f  # tok/s per user (interactivity)
-        y = tput_f / tp_eff  # tok/s per GPU  (efficiency)
-        pairs.append((x, y))
+        xy = resolved.point_xy(pt, tp_eff)
+        if xy is not None:
+            pairs.append(xy)
     pairs.sort(key=lambda p: p[0])
     if not pairs:
         return [], []
@@ -174,12 +235,13 @@ def _render(
 
     data = _load_payload(payload)
     tp_eff = float(max(tp, 1))
+    axes = _resolve_axes(data.get("benchmark_mode"), tp_eff)
 
     baseline_pts = (data.get("baseline") or {}).get("points") or []
     optimized_pts = (data.get("optimized") or {}).get("points") or []
 
-    bx, by = _arm_series(baseline_pts, tp_eff)
-    ox, oy = _arm_series(optimized_pts, tp_eff)
+    bx, by = _arm_series(baseline_pts, tp_eff, axes)
+    ox, oy = _arm_series(optimized_pts, tp_eff, axes)
 
     # Need at least the baseline to draw something useful.
     if not bx and not ox:
@@ -198,7 +260,9 @@ def _render(
     fig.patch.set_facecolor(bg)
     ax.set_facecolor(bg)
 
-    if draw_ceiling:
+    # The roofline is a decode-only output_throughput bound computed from the
+    # placeholder ISL/OSL, so it sits on neither agentic axis.
+    if draw_ceiling and not axes.agentic:
         ceiling_data = data.get("roofline_ceiling") or {}
         cx, cy = _ceiling_series(ceiling_data, tp_eff)
         if cx:
@@ -230,13 +294,18 @@ def _render(
                 color=optimized_c,
             )
 
-    ax.set_xlabel("Interactivity  (output_throughput / concurrency,  tok/s/user)", fontsize=10, color=fg)
-    ax.set_ylabel(f"Efficiency  (output_throughput / tp={int(tp_eff)},  tok/s/GPU)", fontsize=10, color=fg)
+    ax.set_xlabel(axes.x_label, fontsize=10, color=fg)
+    ax.set_ylabel(axes.y_label, fontsize=10, color=fg)
 
     title_parts = [model_label or "Model"]
     if gpu_label:
         title_parts.append(gpu_label)
-    if isl or osl:
+    # An agentic replay takes its request shapes from the trace corpus, so the
+    # session's ISL/OSL are inert placeholders and naming them would misreport
+    # what was measured.
+    if axes.agentic:
+        title_parts.append("Agentic")
+    elif isl or osl:
         title_parts.append(f"ISL={isl} OSL={osl}")
     ax.set_title(
         "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts),

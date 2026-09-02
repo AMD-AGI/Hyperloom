@@ -1439,6 +1439,66 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
     assert result.exists()
 
 
+class TestTheChartFollowsTheMode:
+    """Two workloads, two rankings, two axis pairs.
+
+    Plotting an agentic ladder on ``output_throughput / conc`` would label a
+    number that is ~1% of the token budget as the thing being optimised.
+    """
+
+    def _payload(self, mode: str) -> dict[str, Any]:
+        return {
+            "benchmark_mode": mode,
+            "baseline": {
+                "points": [
+                    {
+                        "conc": 8,
+                        "output_throughput": 183.44,
+                        "total_token_throughput": 25984.8,
+                        "intvty_p90": 447.2,
+                    }
+                ]
+            },
+            "optimized": {"points": []},
+        }
+
+    def test_agentx_reads_interactivity_and_total(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._resolve_axes("agentx", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("agentx")["baseline"]["points"], 8.0, axes)
+        assert xs == [pytest.approx(447.2)]
+        assert ys == [pytest.approx(25984.8 / 8.0)]
+        assert "P90 Interactivity" in axes.x_label
+        assert "per Chip" in axes.y_label
+
+    def test_synthetic_keeps_the_output_pair(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._resolve_axes("synthetic", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("synthetic")["baseline"]["points"], 8.0, axes)
+        assert xs == [pytest.approx(183.44 / 8)]
+        assert ys == [pytest.approx(183.44 / 8.0)]
+
+    def test_an_unset_mode_reads_as_synthetic(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        assert plot._resolve_axes("", tp_eff=1.0).agentic is False
+        assert plot._resolve_axes(None, tp_eff=1.0).agentic is False
+
+    def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._resolve_axes("agentx", tp_eff=1.0)
+        points = [
+            {"conc": 8, "total_token_throughput": 25984.8},
+            {"conc": 4, "total_token_throughput": 20000.0, "intvty_p90": 500.0},
+        ]
+        xs, ys = plot._arm_series(points, 1.0, axes)
+        assert xs == [pytest.approx(500.0)]
+        assert ys == [pytest.approx(20000.0)]
+
+
 def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1226,13 +1226,21 @@ def _render_conc_sweep_curve_for_report(
         log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
         return None
 
-    # Quick check: need at least one arm with a non-None output_throughput.
+    # Quick check: at least one arm has to carry the axis the chart is drawn on,
+    # which is not the same axis in both modes -- an agentic ladder is plotted on
+    # total token throughput and would look empty on an output-throughput probe.
+    axis_key = (
+        "total_token_throughput"
+        if str(payload.get("benchmark_mode") or "").strip().lower() == "agentx"
+        else "output_throughput"
+    )
+
     def _has_data(arm_key: str) -> bool:
         pts = (payload.get(arm_key) or {}).get("points") or []
-        return any(p.get("output_throughput") is not None for p in pts)
+        return any(p.get(axis_key) is not None for p in pts)
 
     if not _has_data("baseline") and not _has_data("optimized"):
-        log.debug("report_executor: conc_sweep_summary has no throughput data — skipping plot")
+        log.debug("report_executor: conc_sweep_summary has no %s data — skipping plot", axis_key)
         return None
 
     png_path = output_dir / "conc_sweep_curve.png"
