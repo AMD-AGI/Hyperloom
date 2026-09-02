@@ -390,7 +390,6 @@ def test_run_codex_turn_forwards_the_output_schema_to_the_sdk(
                 "OPENAI_API_KEY": "key",
                 "OPENAI_BASE_URL": "https://gateway.invalid/v1",
                 "HYPERLOOM_CODEX_SANDBOX_MODE": "bypass",
-                "HYPERLOOM_CODEX_EXTERNAL_SANDBOX": "1",
                 "HYPERLOOM_RUNTIME_DIR": str(tmp_path / "runtime"),
             },
         )
@@ -420,7 +419,6 @@ def test_run_codex_turn_defaults_to_no_output_schema(
                 "OPENAI_API_KEY": "key",
                 "OPENAI_BASE_URL": "https://gateway.invalid/v1",
                 "HYPERLOOM_CODEX_SANDBOX_MODE": "bypass",
-                "HYPERLOOM_CODEX_EXTERNAL_SANDBOX": "1",
                 "HYPERLOOM_RUNTIME_DIR": str(tmp_path / "runtime"),
             },
         )

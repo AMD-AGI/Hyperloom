@@ -35,7 +35,6 @@ _CODEX_ENV = (
     "LLM_GATEWAY_KEY",
     "CODEX_HOME",
     "HYPERLOOM_CODEX_SANDBOX_MODE",
-    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
     "HYPERLOOM_RUNTIME_DIR",
 )
 
@@ -45,7 +44,6 @@ _SECRET = "sk-do-not-leak-this-value"
 # rename of the variable or of an accepted value is a breaking change for every
 # deployment that set it, so it has to fail here.
 _SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
-_EXTERNAL_SANDBOX_ENV = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 _WRITABLE_ROOTS = (Path("/tmp/out"),)
 
 
@@ -495,32 +493,15 @@ def test_resolve_codex_sandbox_mode_reads_the_operator_variable():
     assert cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: " Read-Only "}) == "read-only"
 
 
-def test_resolve_codex_sandbox_mode_requires_external_isolation_for_bypass():
-    """The mode opt-in alone cannot disable Codex's filesystem containment."""
-    with pytest.raises(cs.CodexSessionUnavailableError, match=_EXTERNAL_SANDBOX_ENV):
-        cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: "bypass"})
+def test_resolve_codex_sandbox_mode_allows_bypass_with_mode_opt_in():
+    """Explicit bypass in the deployment environment permits full access."""
+    assert cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: "bypass"}) == "bypass"
 
 
 def test_resolve_codex_sandbox_mode_requires_the_environment_mode_opt_in_for_bypass():
     """A caller argument cannot replace the operator-owned mode opt-in."""
     with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
-        cs.resolve_codex_sandbox_mode(
-            sandbox_mode="bypass",
-            env={_EXTERNAL_SANDBOX_ENV: "1"},
-        )
-
-
-def test_resolve_codex_sandbox_mode_allows_bypass_with_both_opt_ins():
-    """Explicit mode plus confirmed external isolation permits full access."""
-    assert (
-        cs.resolve_codex_sandbox_mode(
-            env={
-                _SANDBOX_MODE_ENV: "bypass",
-                _EXTERNAL_SANDBOX_ENV: "1",
-            }
-        )
-        == "bypass"
-    )
+        cs.resolve_codex_sandbox_mode(sandbox_mode="bypass", env={})
 
 
 def test_resolve_codex_sandbox_mode_reads_the_process_environment(monkeypatch):
@@ -681,7 +662,7 @@ def test_run_codex_turn_honors_an_explicit_sandbox_mode(tmp_path, monkeypatch):
     assert record["turn_options"]["sandbox"] == _FakeSandbox.read_only
 
 
-def test_run_codex_turn_uses_full_access_for_confirmed_bypass_without_write_roots(tmp_path, monkeypatch):
+def test_run_codex_turn_uses_full_access_for_bypass_without_write_roots(tmp_path, monkeypatch):
     """External isolation remains authoritative when no roots are declared."""
     record = _install_fake_sdk(monkeypatch)
 
@@ -692,12 +673,7 @@ def test_run_codex_turn_uses_full_access_for_confirmed_bypass_without_write_root
             cwd=tmp_path,
             model="m",
             timeout_sec=5.0,
-            env=_gateway_env(
-                **{
-                    _SANDBOX_MODE_ENV: "bypass",
-                    _EXTERNAL_SANDBOX_ENV: "1",
-                }
-            ),
+            env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
         )
     )
 
@@ -705,11 +681,11 @@ def test_run_codex_turn_uses_full_access_for_confirmed_bypass_without_write_root
     assert record["turn_options"]["sandbox"] == _FakeSandbox.full_access
 
 
-def test_run_codex_turn_rejects_unconfirmed_bypass_before_starting(tmp_path, monkeypatch):
-    """An unsafe bypass setting fails before the app-server is constructed."""
+def test_run_codex_turn_rejects_bypass_without_operator_mode_opt_in(tmp_path, monkeypatch):
+    """A caller argument cannot replace the operator-owned bypass opt-in."""
     record = _install_fake_sdk(monkeypatch)
 
-    with pytest.raises(cs.CodexSessionUnavailableError, match=_EXTERNAL_SANDBOX_ENV):
+    with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
         asyncio.run(
             cs.run_codex_turn(
                 prompt="inspect",
@@ -717,7 +693,8 @@ def test_run_codex_turn_rejects_unconfirmed_bypass_before_starting(tmp_path, mon
                 cwd=tmp_path,
                 model="m",
                 timeout_sec=5.0,
-                env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
+                sandbox_mode="bypass",
+                env=_gateway_env(),
             )
         )
 

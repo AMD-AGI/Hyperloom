@@ -4784,7 +4784,7 @@ def _resolve_forge_fusion_sandbox_mode(
     """Resolve and validate the sandbox policy recorded for forge-fusion.
 
     Codex delegates both defaults and validation to the canonical Hyperloom
-    resolver, including its double opt-in for ``bypass``. Claude records
+    resolver, including its operator opt-in for ``bypass``. Claude records
     ``workspace-write`` as the stable audit default; an explicit override is
     validated by that same resolver so both backends share one policy vocabulary
     and unsafe bypass cannot reach the subprocess.
@@ -4800,7 +4800,7 @@ def _resolve_forge_fusion_sandbox_mode(
 
     Raises:
         CodexSessionUnavailableError: If the mode is unknown or bypass lacks
-            either operator confirmation.
+            the operator mode confirmation.
     """
     explicit = str(payload.get("agent_sandbox_mode") or "").strip()
     if agent_backend == "claude" and not explicit:

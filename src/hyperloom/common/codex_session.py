@@ -21,9 +21,8 @@ Codex's ``read-only`` and ``workspace-write`` presets rely on bubblewrap.
 Hyperloom defaults to ``workspace-write`` and performs a real bubblewrap
 capability probe before starting the SDK, so a binary that exists but cannot
 create the required namespace fails closed. ``bypass`` is available only when
-the operator selects it with :data:`CODEX_SANDBOX_MODE_ENV` *and* confirms that
-an external sandbox is already enforcing isolation with
-:data:`CODEX_EXTERNAL_SANDBOX_ENV`.
+the operator selects it with :data:`CODEX_SANDBOX_MODE_ENV`, delegating
+containment to an external sandbox boundary.
 
 Provider credentials and headers remain environment-backed. Config overrides
 contain variable names only, because the SDK forwards every override through
@@ -72,10 +71,9 @@ _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _EXACT_ENV_REF_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 _PRIVATE_HEADER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
 
-# Sandbox preset selector. Full access is a double opt-in because it delegates
-# all containment to an external boundary.
+# Sandbox preset selector. ``bypass`` delegates all containment to an external
+# boundary and must be set explicitly by the operator.
 CODEX_SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
-CODEX_EXTERNAL_SANDBOX_ENV = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 DEFAULT_CODEX_SANDBOX_MODE = "workspace-write"
 # Ordered so the error raised for an unknown mode lists them predictably.
 CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", "workspace-write", "read-only")
@@ -417,9 +415,9 @@ def resolve_codex_sandbox_mode(*, sandbox_mode: str = "", env: dict[str, str] | 
     """Resolve which Codex sandbox preset family a session may use.
 
     ``bypass`` is deliberately different from the contained modes: the
-    deployment must set both ``HYPERLOOM_CODEX_SANDBOX_MODE=bypass`` and
-    ``HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1``. A caller argument may narrow the
-    deployment policy but cannot replace either operator-owned bypass opt-in.
+    deployment must set ``HYPERLOOM_CODEX_SANDBOX_MODE=bypass``. A caller
+    argument may narrow the deployment policy but cannot replace the
+    operator-owned bypass opt-in.
 
     Args:
         sandbox_mode (str): Mode stated by the caller; outranks the
@@ -432,7 +430,7 @@ def resolve_codex_sandbox_mode(*, sandbox_mode: str = "", env: dict[str, str] | 
 
     Raises:
         CodexSessionUnavailableError: If the resolved value names no known mode
-            or ``bypass`` lacks either required opt-in.
+            or ``bypass`` lacks the operator mode opt-in.
     """
     return _resolve_codex_sandbox_mode(
         sandbox_mode=sandbox_mode,
@@ -450,10 +448,6 @@ def _resolve_codex_sandbox_mode(*, sandbox_mode: str, source: Mapping[str, str])
     if configured != "bypass":
         raise CodexSessionUnavailableError(
             f"Codex sandbox bypass requires {CODEX_SANDBOX_MODE_ENV}=bypass in the effective environment"
-        )
-    if (source.get(CODEX_EXTERNAL_SANDBOX_ENV) or "").strip() != "1":
-        raise CodexSessionUnavailableError(
-            f"Codex sandbox bypass requires {CODEX_EXTERNAL_SANDBOX_ENV}=1 to confirm external isolation"
         )
     return resolved
 
@@ -1233,7 +1227,6 @@ async def run_codex_turn(
 
 
 __all__ = [
-    "CODEX_EXTERNAL_SANDBOX_ENV",
     "CODEX_PROVIDER_NAME",
     "CODEX_SANDBOX_MODES",
     "CODEX_SANDBOX_MODE_ENV",

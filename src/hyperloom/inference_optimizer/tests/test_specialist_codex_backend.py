@@ -55,7 +55,6 @@ _PROVIDER_ENV_KEYS: tuple[str, ...] = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
-    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
     "HYPERLOOM_CODEX_SANDBOX_MODE",
 )
 
@@ -168,7 +167,6 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
     """
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     bin_dir = _fake_agent_bin_dir(tmp_path)
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
 
@@ -225,7 +223,6 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
     """
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     bin_dir = tmp_path / "bin"
     _write_executable(
         bin_dir / "codex",
@@ -399,17 +396,13 @@ def test_codex_argv_uses_workspace_write_sandbox_by_default(
     assert "--dangerously-bypass-approvals-and-sandbox" not in default_cmd
 
 
-def test_codex_argv_bypass_requires_both_operator_opt_ins(
+def test_codex_argv_bypass_requires_mode_opt_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Full access is available only under the canonical double opt-in."""
+    """Full access is available only when the operator selects bypass."""
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-    with pytest.raises(SpecialistAgentUnavailableError, match="EXTERNAL_SANDBOX"):
-        _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
-
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     bypass_cmd = _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
     assert "--dangerously-bypass-approvals-and-sandbox" in bypass_cmd
     assert "--sandbox" not in bypass_cmd
@@ -544,7 +537,6 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
     """
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     monkeypatch.setattr(
         "hyperloom.orchestrator.specialists.subprocess_.resolve_codex_executable",
         lambda explicit="": "",
@@ -586,7 +578,6 @@ async def test_unconfigured_codex_gateway_fails_the_task(
     """
     _pin_provider_env(monkeypatch, {"OPENAI_API_KEY": "openai-side-key"})
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
     dispatcher = SpecialistSubprocessDispatcher(
         SpecialistSubprocessConfig(codex_executable="/usr/bin/codex", poll_interval_seconds=0.05)
     )
@@ -816,8 +807,6 @@ def test_codex_usage_returns_none_when_no_counters_are_reported(tmp_path: Path) 
 def _enable_codex_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
     """Select canonical bypass with both required operator opt-ins."""
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
-
 
 def _successful_codex_script(path: Path) -> Path:
     """Write a fake Codex CLI that consumes stdin and completes the contract."""
