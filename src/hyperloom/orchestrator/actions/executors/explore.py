@@ -1078,7 +1078,10 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
-        grade_on_total = total_tput_serving_grading_enabled(scriptable=framework_is_scriptable(framework))
+        grade_on_total = total_tput_serving_grading_enabled(
+            scriptable=framework_is_scriptable(framework),
+            benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
+        )
         _anchor_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_total else (None, "")
         if grade_on_total and _anchor_reason:
             log.info(

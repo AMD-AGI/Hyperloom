@@ -31,11 +31,20 @@ _ANCHOR = {
 class _State:
     """Minimal SharedState double: the attributes the resolvers read."""
 
-    def __init__(self, *, current_best=None, baseline_perf=None, baseline_tput=0.0, framework="vllm"):
+    def __init__(
+        self,
+        *,
+        current_best=None,
+        baseline_perf=None,
+        baseline_tput=0.0,
+        framework="vllm",
+        benchmark_mode="",
+    ):
         self.current_best = current_best if current_best is not None else {}
         self.baseline_perf = baseline_perf if baseline_perf is not None else {}
         self.baseline_tput = baseline_tput
         self.framework = framework
+        self.benchmark_mode = benchmark_mode
 
 
 def _agentx(monkeypatch) -> None:
@@ -213,3 +222,34 @@ def test_graded_axes_of_omits_what_was_not_measured():
     assert graded_axes_of({"output_throughput": 190.0}) == {}
     assert graded_axes_of({"total_token_throughput": 26500.0}) == {"total_throughput": 26500.0}
     assert graded_axes_of(None) == {}
+
+
+# --- the persisted marker reaches the chokepoint ---
+
+
+def test_a_round_without_the_env_var_still_grades_on_total(monkeypatch):
+    """A re-baseline or integrate round can be driven from a shell that never saw it.
+
+    ``benchmark_mode`` is stamped at seed for exactly this reason. Without it
+    the chokepoint would silently grade an agentic measurement on the synthetic
+    axis -- the same defect ``_workload_envs.agentx_active`` closed one layer
+    down for the timeout derivation.
+    """
+    _synthetic(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR), benchmark_mode="agentx")
+    graded = resolve_graded_comparison(
+        state, _full_measurement(total=27000.0, output=190.0, intvty=447.20)
+    )
+    assert graded.objective == GRADED_TOTAL
+    assert graded.candidate == pytest.approx(27000.0)
+    assert graded.reference == pytest.approx(_ANCHOR["total_throughput"])
+
+
+def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
+    _synthetic(monkeypatch)
+    state = _State(current_best=dict(_ANCHOR))
+    graded = resolve_graded_comparison(
+        state, _full_measurement(total=27000.0, output=190.0, intvty=447.20)
+    )
+    assert graded.objective == GRADED_OUTPUT
+    assert graded.reference == pytest.approx(resolve_grading_anchor_tput(state))

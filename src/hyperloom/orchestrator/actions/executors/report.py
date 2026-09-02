@@ -532,7 +532,7 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if gain is not None:
             lines.append(f"- total tput gain     : `{gain:+.2f}%`")
-    if total_tput_grading_enabled():
+    if total_tput_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
         lines.append(f"- grading mode        : `composite_v1` (intvty band `{parse_intvty_noise_pct():.1f}%`)")
     else:
         lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
@@ -577,6 +577,10 @@ def _build_summary_dict(
         "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
         "baseline_tput": state.baseline_tput,
         "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
+        # Read back by the graded-axes section: the persisted AgentX marker
+        # outlives the shell, so a report rendered from a resumed session
+        # still names the mode the run was graded under.
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
         # Validated gain (what the run actually delivered).

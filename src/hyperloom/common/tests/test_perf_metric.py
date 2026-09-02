@@ -14,6 +14,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
     total_tput_grading_enabled,
     total_tput_of,
+    total_tput_serving_grading_enabled,
 )
 
 _KEEP_THRESHOLD_PCT = 1.0
@@ -174,6 +175,37 @@ def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     assert total_tput_grading_enabled() is False
+
+
+# --- the persisted marker, for a round the ambient env var never reached ---
+
+
+def test_the_persisted_benchmark_mode_enables_grading_without_the_env_var(monkeypatch):
+    """An integrate/re-baseline round can run from a shell that never saw the var."""
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert total_tput_grading_enabled(benchmark_mode="agentx") is True
+    assert total_tput_serving_grading_enabled(benchmark_mode="AgentX") is True
+
+
+def test_a_synthetic_benchmark_mode_does_not_enable_grading(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    for mode in ("", "synthetic", "sweep", None):
+        assert total_tput_grading_enabled(benchmark_mode=mode or "") is False
+
+
+def test_an_explicit_metric_still_outranks_the_persisted_marker(monkeypatch):
+    """``HYPERLOOM_PERF_METRIC`` wins over either AgentX signal, in both directions."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    assert total_tput_grading_enabled(benchmark_mode="agentx") is False
+
+
+def test_a_scriptable_framework_still_grades_on_output_under_the_marker(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert total_tput_serving_grading_enabled(scriptable=True, benchmark_mode="agentx") is False
 
 
 # --- resolve_grading_anchor_perf ---

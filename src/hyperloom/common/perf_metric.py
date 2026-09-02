@@ -38,26 +38,42 @@ COMPOSITE_V1 = "composite_v1"
 # ``agentx_enabled`` lives. Both resolve ``common.env._TRUE_TOKENS``.
 _AGENTX_ENV = "HYPERLOOM_AGENTX"
 
+# The value ``SharedState.benchmark_mode`` carries for an AgentX session, stamped
+# at seed so it outlives the shell that started the run.
+_AGENTX_MODE = "agentx"
+
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the
 # concurrency regime, so the veto band opens to the top of that range instead of
 # rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
 
 
-def total_tput_grading_enabled() -> bool:
+def total_tput_grading_enabled(*, benchmark_mode: str = "") -> bool:
     """True when total-token-throughput grading applies.
 
     Reads ``HYPERLOOM_PERF_METRIC`` first; if set, returns True only when it
-    equals ``composite_v1``. When unset, follows ``HYPERLOOM_AGENTX``.
-    An explicit value wins in both directions.
+    equals ``composite_v1``. When unset, AgentX decides, by either signal:
+    the ambient ``HYPERLOOM_AGENTX`` or the session's persisted
+    ``benchmark_mode``. An explicit value wins in both directions.
+
+    ``benchmark_mode`` is a parameter for the same reason ``scriptable`` is --
+    ``hyperloom.common`` must not import the orchestrator, where SharedState
+    lives. Passing it matters: ``benchmark_mode`` is stamped at seed precisely
+    so it survives a restart, while the env var only describes the shell that
+    happens to be running, and a re-baseline or integrate round driven from a
+    subprocess that did not inherit it would otherwise grade the agentic
+    measurement on the synthetic axis. Mirrors
+    ``_workload_envs.agentx_active``.
     """
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == COMPOSITE_V1
-    return env_bool(_AGENTX_ENV)
+    if env_bool(_AGENTX_ENV):
+        return True
+    return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
 
 
-def total_tput_serving_grading_enabled(*, scriptable: bool = False) -> bool:
+def total_tput_serving_grading_enabled(*, scriptable: bool = False, benchmark_mode: str = "") -> bool:
     """Total-token-throughput grading, limited to non-scriptable serving runs.
 
     A scriptable framework reports an image-quality gate rather than token
@@ -65,7 +81,7 @@ def total_tput_serving_grading_enabled(*, scriptable: bool = False) -> bool:
     is a parameter because ``hyperloom.common`` must not import the framework
     registry; ``shared_state.framework_is_scriptable`` resolves it.
     """
-    return total_tput_grading_enabled() and not scriptable
+    return total_tput_grading_enabled(benchmark_mode=benchmark_mode) and not scriptable
 
 
 def parse_intvty_noise_pct() -> float:

@@ -193,7 +193,7 @@ def resolve_graded_comparison(
 
     Args:
         state: The session state (``current_best`` / ``baseline_tput`` /
-            ``baseline_perf`` / ``framework``).
+            ``baseline_perf`` / ``framework`` / ``benchmark_mode``).
         measurement: The candidate's measurement mapping.
         against_baseline: Grade against the session baseline (cumulative
             realized gain) rather than the recipe the candidate was composed on.
@@ -215,7 +215,10 @@ def resolve_graded_comparison(
     )
 
     degrade_reason = ""
-    if total_tput_serving_grading_enabled(scriptable=framework_is_scriptable(getattr(state, "framework", None))):
+    if total_tput_serving_grading_enabled(
+        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
+        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+    ):
         if against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
             reason = "" if ref_perf else "baseline_axes_missing"
