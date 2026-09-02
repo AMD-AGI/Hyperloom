@@ -45,6 +45,7 @@ from ..agent_ownership import (
     UNATTRIBUTED,
     agent_from_lever,
     agent_from_phase,
+    agent_from_provenance,
     patch_author,
     patch_lever_kind,
 )
@@ -221,6 +222,15 @@ def _resolve_agent(
     """
     name = str(action or "").strip().lower()
     result = result or {}
+
+    # Before the action name, because a proposer that is not an agent of the
+    # loop is graded by the loop's own actions: a predicted config is
+    # benchmarked as ``explore`` and a predicted source change lands as
+    # ``integrate_patch``. Matching on the action would credit the machinery
+    # that measured the proposal instead of whoever made it.
+    external = agent_from_provenance(result.get("provenance"))
+    if external:
+        return external
 
     if name.startswith("integrate_patch") or name == "integrate":
         return patch_author(result)

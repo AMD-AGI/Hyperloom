@@ -1093,6 +1093,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle's start, and the consecutive no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
+    # First-pass predictor chain: steps taken, and the macro-cycle they belong
+    # to. The cycle stamp is what resets the count on a cycle_reloop without a
+    # separate clear. Coordinator-only writers.
+    predictor_chain_steps: int = 0
+    predictor_chain_cycle: int = -1
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the
     # cycle down; the next macro-cycle's prompt surfaces a redirect advisory off
     # ``last_cycle_bottleneck``. Cleared once the live top bottleneck drifts off it.

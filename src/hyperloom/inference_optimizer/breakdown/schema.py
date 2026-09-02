@@ -1656,6 +1656,7 @@ class OptimizationStackEntry(TypedDict, total=False):
 # Canonical optimizations — single downstream read model
 OptimizationSource = Literal[
     "warm_replay",
+    "primatune",
     "explore",
     "framework_agent",
     "kernel_agent",
@@ -2681,6 +2682,10 @@ AgentBucket = Literal[
     "framework_agent",
     "explore",
     "warm_replay",
+    # An external first-pass proposer, not an agent of the loop. It earns its
+    # own bucket for the same reason warm_replay does: its proposals are graded
+    # by the loop's actions, so without one its gain reads as explore's.
+    "primatune",
     "coordinator",
     "critic",
     "robustness",

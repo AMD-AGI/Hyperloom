@@ -1613,6 +1613,48 @@ def _export_operator_launch_shape(
         os.environ.pop("INFERENCE_OPTIMIZER_EXTRA_ENV", None)
 
 
+def _export_predictor_settings(args: argparse.Namespace) -> None:
+    """Project the ``--primatune-*`` flags into the env the pump reads.
+
+    Unlike the launch shape above, an absent flag does **not** clear the
+    variable. The environment is a first-class interface for this feature (the
+    contract documents both), which is what lets a resume keep the predictor
+    configured without re-passing flags -- including the resume the robustness
+    monitor drives, which does not know the original command line.
+
+    ``--no-primatune`` is the exception: it forces the mode off whatever the
+    ambient value says, so an operator can disable the predictor for one run
+    without unsetting a shell they share with other sessions.
+
+    Args:
+        args: The parsed CLI namespace.
+    """
+    from hyperloom.orchestrator.predictor import config as predictor_config
+
+    if getattr(args, "no_primatune", False):
+        os.environ[predictor_config.ENV_MODE] = predictor_config.MODE_OFF
+        print("  predictor          : off (--no-primatune)")
+        return
+
+    endpoint = str(getattr(args, "primatune_endpoint", "") or "").strip()
+    if endpoint:
+        os.environ[predictor_config.ENV_ENDPOINT] = endpoint
+    mode = str(getattr(args, "primatune_mode", "") or "").strip().lower()
+    if mode:
+        os.environ[predictor_config.ENV_MODE] = mode
+    max_chain = getattr(args, "primatune_max_chain", None)
+    if max_chain is not None:
+        os.environ[predictor_config.ENV_MAX_CHAIN] = str(int(max_chain))
+
+    conf = predictor_config.load()
+    if conf.enabled:
+        print(
+            f"  predictor          : {conf.mode} at {conf.endpoint} "
+            f"(chain<={conf.max_chain}, <={conf.budget_pct:.0f}% of FRAMEWORK budget, "
+            f"phase label {conf.phase_label})"
+        )
+
+
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
     """Whether this framework's runner can place work per partition.
 
@@ -1967,6 +2009,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         server_args=str(getattr(args, "server_args", "") or "").strip(),
         extra_env=parse_operator_extra_env(args),
     )
+    _export_predictor_settings(args)
     # The partition shape is deliberately NOT exported here. It needs the
     # resolved framework, GPU type and post-quantization model path, none of
     # which exist yet, and each fresh-launch and resume branch calls it once at
@@ -2202,6 +2245,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         state.operator_server_args = _resume_server_args
         state.operator_extra_env = _resume_extra_env
+        # Predictor settings live in the environment, not in state, so a resume
+        # inherits whatever the shell carries. This lets an explicit flag on the
+        # resume still win -- notably --no-primatune, to turn the predictor off
+        # for a retry without touching the shell.
+        _export_predictor_settings(args)
         if _resume_server_args:
             print(f"  re-exported server_args   : {_resume_server_args}")
         if _resume_extra_env:

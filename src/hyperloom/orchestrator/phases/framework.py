@@ -66,6 +66,11 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         # A reopened macro-cycle re-measures before either arm spends anything.
         await self._on_cycle_start_reprofile(from_phase=from_phase)
+        # Ordered after the reprofile so the predictor sees fresh evidence, and
+        # before the arms so its task takes the serving lease first. Going first
+        # needs no suppression: an LLM-proposed explore only arrives on the next
+        # tick's reactor pass, while this runs inside the entry hook.
+        await self._pump_predictor(caller="entry")
         try:
             await self._pump_framework_agent_phase()
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -1984,6 +1989,19 @@ class FrameworkPhase(CoordinatorCollaborator):
             },
         )
 
+    async def _pump_predictor(self, *, caller: str) -> None:
+        """Consult the first-pass tuning predictor, when one is configured.
+
+        Off unless an endpoint is set, and shadow-only unless the mode says
+        otherwise, so a session that configures nothing behaves as before.
+
+        Args:
+            caller: Label identifying the caller ("entry" / "tick").
+        """
+        from ..predictor.pump import pump as _predictor_pump
+
+        await _predictor_pump(self, caller=caller)
+
     async def _pump_framework_agent_phase_safely(self, *, caller: str) -> None:
         """Best-effort FRAMEWORK pump wrapper shared by tick and run.
 
@@ -1991,6 +2009,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             caller: Label identifying the caller ("tick" / "run"), used only in
                 the failure log.
         """
+        # The chain's later steps land here: a KEEP deepens the stack, which
+        # changes the idempotency key, which lets the next prediction enqueue.
+        await self._pump_predictor(caller=caller)
         try:
             await self._pump_framework_agent_phase()
         except Exception:  # noqa: BLE001 — defensive

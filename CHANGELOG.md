@@ -5,6 +5,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **An external first-pass tuning predictor can propose at FRAMEWORK entry.**
+  `--primatune-endpoint` points Hyperloom at a service that answers with a
+  launch-configuration change or a prose source change, given the state of a
+  decision point. Config answers become ordinary `explore` variants and source
+  answers become free-form specialist mandates, so both are graded by the KEEP
+  threshold and accuracy gate that already grade `default_grid` and
+  `llm_direct` — the evaluation path gains no new branch.
+
+  The pump re-fires as the stack deepens, forming a greedy chain that ends by
+  itself: the idempotency key carries the macro-cycle and the stack depth, so
+  a step that fails to KEEP repeats a key and enqueues nothing. It is bounded
+  by `--primatune-max-chain` (3) and by the share of the phase budget the
+  chain may spend (`HYPERLOOM_PREDICTOR_BUDGET_PCT`, 25%).
+
+  Default mode is `shadow`: predict, parse and log without enqueueing.
+  Hyperloom's request is built from its own field names and the consumer owns
+  the mapping, and both ways that can go wrong are silent, so the default is
+  the mode that measures the connection rather than the one that spends
+  benchmark cycles on it.
+  `tools/predictor_probe.py` renders what a real session would send.
+
+  Adopted proposals land in a `primatune` agent bucket in
+  `session_breakdown.json`, following `warm_replay`. Without one their gain
+  would read as `explore`'s, since the action name records the machinery that
+  measured a proposal rather than whoever made it.
+  See [Predictor HTTP contract](docs/reference/primatune-predictor.md).
+
 ### Changed
 
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST

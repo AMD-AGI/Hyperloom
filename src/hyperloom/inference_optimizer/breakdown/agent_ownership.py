@@ -69,6 +69,20 @@ _PHASE_BY_LEVER = {
     LEVER_ENABLEMENT: "FRAMEWORK_AGENT",
 }
 
+#: Provenance label -> owning agent, for proposers that are not agents of the
+#: loop. This is the only evidence that separates them, because their work runs
+#: through the loop's own actions: a predicted launch config is benchmarked as
+#: an ``explore`` variant and a predicted source change lands as
+#: ``integrate_patch``. The action names the machinery that graded the
+#: proposal, not who made it, so it has to be consulted first.
+#:
+#: Keys stay a closed set on purpose. ``provenance`` itself is a free audit
+#: label with no allowlist, and promoting every value found in the wild to a
+#: headline bucket would let one mislabelled task invent an agent.
+AGENT_BY_PROVENANCE = {
+    "primatune": "primatune",
+}
+
 
 def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
     """Name the lever a unit of work moved, or ``""`` when nothing recorded one.
@@ -124,6 +138,19 @@ def agent_from_lever(value: Any) -> str:
     return AGENT_BY_LEVER.get(str(value or "").strip().lower(), "")
 
 
+def agent_from_provenance(value: Any) -> str:
+    """Map a provenance label to its owning agent, or ``""`` when unknown.
+
+    Args:
+        value: The ``provenance`` a dispatcher stamped on the work.
+
+    Returns:
+        The owning agent, or ``""`` for the free-form labels that are audit
+        trail only.
+    """
+    return AGENT_BY_PROVENANCE.get(str(value or "").strip().lower(), "")
+
+
 def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     """Resolve the immutable authoring phase from recorded ownership evidence."""
     evidence = evidence or {}
@@ -163,6 +190,7 @@ def patch_author(evidence: Mapping[str, Any] | None) -> str:
 __all__ = [
     "AGENT_BY_LEVER",
     "AGENT_BY_PHASE",
+    "AGENT_BY_PROVENANCE",
     "LEVER_CONFIG",
     "LEVER_ENABLEMENT",
     "LEVER_KERNEL",
@@ -172,6 +200,7 @@ __all__ = [
     "UNATTRIBUTED",
     "agent_from_lever",
     "agent_from_phase",
+    "agent_from_provenance",
     "patch_author",
     "patch_lever_kind",
     "patch_owner_phase",

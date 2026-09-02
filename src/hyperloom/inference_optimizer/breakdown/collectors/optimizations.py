@@ -26,6 +26,7 @@ OPTIMIZATIONS_SCHEMA_VERSION = 5
 
 _SOURCES = (
     "warm_replay",
+    "primatune",
     "explore",
     "framework_agent",
     "kernel_agent",

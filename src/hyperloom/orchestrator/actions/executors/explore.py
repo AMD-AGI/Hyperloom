@@ -1916,6 +1916,9 @@ class ExploreExecutor:
             "skipped_dup": skipped_dup,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
+            # Round-level proposer, for the recorder's per-operation agent
+            # stamp. Empty on a mixed grid; see _round_provenance.
+            "provenance": _round_provenance(per_variant_outcomes),
             "framework_lever_attributions": lever_attributions,
             "explore_search_update": search_update,
             "discovered_flags_update": None,
@@ -1926,6 +1929,34 @@ class ExploreExecutor:
             "gain_pct": best_gain_pct,
             "explore_grid_exhausted": not runnable,
         }
+
+
+def _round_provenance(per_variant_outcomes: list[dict[str, Any]]) -> str:
+    """The proposer of this round, when the whole grid agrees on one.
+
+    Per-variant provenance does not reach the breakdown recorder: it stamps an
+    agent per *operation*, and one explore task is one operation however many
+    variants it benchmarked. A round-level value is the only place a
+    non-loop proposer can be named, and it is only honest when every measured
+    variant came from the same proposer -- a mixed grid has no single owner, so
+    it reports none and the recorder falls back to the action.
+
+    Deduplicated variants are ignored: they were never measured, and they carry
+    no provenance to agree with.
+
+    Args:
+        per_variant_outcomes (list[dict[str, Any]]): This round's outcome rows.
+
+    Returns:
+        str: The shared provenance, or ``""`` when absent or mixed.
+    """
+    seen = {
+        str(row.get("provenance") or "").strip()
+        for row in per_variant_outcomes or []
+        if isinstance(row, dict) and str(row.get("outcome") or "") != "SKIPPED_DEDUP"
+    }
+    seen.discard("")
+    return seen.pop() if len(seen) == 1 else ""
 
 
 def _safe(name: str) -> str:

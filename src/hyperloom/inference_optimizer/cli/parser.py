@@ -983,6 +983,45 @@ def _build_parser() -> argparse.ArgumentParser:
         "Short-circuits the IR-3 PR Monitor probe; IR-3 sets this "
         "automatically when PR Monitor is unreachable (soft degrade).",
     )
+    # First-pass tuning predictor. Off unless an endpoint is given, so a
+    # session that passes none behaves exactly as it did before the feature.
+    opt.add_argument(
+        "--primatune-endpoint",
+        dest="primatune_endpoint",
+        type=str,
+        default=None,
+        help="Base URL of a first-pass tuning predictor consulted at FRAMEWORK "
+        "entry. Its answers become ordinary explore variants and free-form "
+        "specialist mandates, graded by the same KEEP threshold and accuracy "
+        "gate as every other proposal. Unset disables the feature. "
+        "See docs/reference/primatune-predictor.md.",
+    )
+    opt.add_argument(
+        "--primatune-mode",
+        dest="primatune_mode",
+        type=str,
+        choices=("off", "shadow", "active"),
+        default=None,
+        help="'shadow' (default) predicts and logs without enqueueing, which "
+        "costs no GPU time and is how you check the request lands inside the "
+        "predictor's trained distribution; 'active' enqueues; 'off' disables.",
+    )
+    opt.add_argument(
+        "--primatune-max-chain",
+        dest="primatune_max_chain",
+        type=int,
+        default=None,
+        help="Cap on consecutive predictions per macro-cycle. Each KEEP "
+        "deepens the stack, which is a new decision point the predictor can "
+        "answer; this bounds how far that chain runs (default 3).",
+    )
+    opt.add_argument(
+        "--no-primatune",
+        dest="no_primatune",
+        action="store_true",
+        default=False,
+        help="Force the predictor off regardless of endpoint or mode.",
+    )
     opt.add_argument(
         "--pr-feed-window-days",
         dest="pr_feed_window_days",
