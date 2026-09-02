@@ -928,15 +928,22 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
     total = duration + overhead
     # Log every input, so a timeout in the field can be read back to the value
-    # that produced it instead of guessing which knob was in play.
-    log.info(
-        "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
-        total,
-        duration,
-        overhead,
-        "explicit AGENTX_BASELINE_OVERHEAD_SEC"
-        if grace is None
-        else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
+    # that produced it instead of guessing which knob was in play. Once per
+    # distinct derivation, not once per call: a concurrency sweep resolves this
+    # for every rung, at each of the cap and budget-gate sites, so an
+    # unconditional line would repeat the same arithmetic tens of times per
+    # ladder and bury the one line per rung that carries information.
+    _say_once(
+        lambda: log.info(
+            "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
+            total,
+            duration,
+            overhead,
+            "explicit AGENTX_BASELINE_OVERHEAD_SEC"
+            if grace is None
+            else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
+        ),
+        ("baseline-timeout", total, duration, overhead, grace),
     )
     return total
 

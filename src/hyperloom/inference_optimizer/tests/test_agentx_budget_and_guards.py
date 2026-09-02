@@ -540,6 +540,31 @@ def test_the_variant_cap_prices_the_rung_it_launches(monkeypatch):
     assert agentx_variant_timeout_sec(1800, conc=None) == agentx_variant_timeout_sec(1800, conc=8)
 
 
+def test_the_derivation_does_not_narrate_once_per_call_site(monkeypatch, caplog):
+    """A ladder resolves this for every rung at several sites; one line each.
+
+    The same arithmetic repeated tens of times per sweep buries the one line
+    per rung that carries information.
+    """
+    from hyperloom.orchestrator.actions.executors import baseline as bl
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setattr(bl, "_AGENTX_SAID", set())
+
+    with caplog.at_level("INFO"):
+        for _ in range(4):
+            bl.agentx_baseline_timeout_sec({"CONC": "8", "AGENTX_WARMUP_GRACE_PERIOD": "3600"})
+        bl.agentx_baseline_timeout_sec(
+            {"CONC": "64", "AGENTX_WARMUP_GRACE_PERIOD": "3600", "AGENTX_WARMUP_GRACE_CONC": "8"}
+        )
+
+    lines = [r.getMessage() for r in caplog.records if "agentx_baseline_timeout_sec:" in r.getMessage()]
+    assert len(lines) == 2, lines
+
+
 def test_a_rung_that_names_no_concurrency_reads_the_session(monkeypatch):
     from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, variant_conc
 
