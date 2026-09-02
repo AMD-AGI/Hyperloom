@@ -96,8 +96,15 @@ _EXTERNAL_SANDBOX_CONFIRMATION = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 
 
 def _credential_shape() -> tuple[bool, bool]:
-    """Return whether OpenAI-side and Anthropic-side credentials are configured."""
-    openai = any(os.environ.get(name, "").strip() for name in ("OPENAI_API_KEY", "SAFE_API_KEY", "FORGE_API_KEY"))
+    """Return whether OpenAI-side and Anthropic-side credentials are configured.
+
+    Only keys the gateway actually authenticates with count. ``SAFE_API_KEY`` and
+    ``FORGE_API_KEY`` used to be accepted here; they no longer authenticate
+    anything (``resolve_openai_gateway`` ignores them), so counting them meant a
+    stale value routed ``auto`` to codex and failed downstream instead of raising
+    the "no credentials" error below.
+    """
+    openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
     anthropic = any(os.environ.get(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) or any(
         os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
         for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
