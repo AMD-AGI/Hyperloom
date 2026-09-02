@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
@@ -113,18 +114,17 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
-def _safe_mtime(path: Path) -> float:
-    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+def _integrate_server_logs(session_dir: Path, tuner_name: str) -> list[Path]:
+    """Server logs for a tuner's integrate run, retries included, oldest first.
 
-    Sorting server logs by mtime races the round that is still writing them, and
-    an ``exists()`` guard does not close the window. Ordering is a heuristic for
-    picking the newest log, so a vanished file is worth sorting last rather than
-    aborting the check that owns it.
+    Thin naming shim over
+    :func:`..kernel.gemm_shape_coverage.integrate_server_logs`, which owns the
+    retry-sibling and mtime-ordering rules; this side only knows that a dense
+    tuner's run directory is ``integrate-gemm_tune_<tuner>``.
     """
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+    from ..kernel.gemm_shape_coverage import integrate_server_logs
+
+    return integrate_server_logs(session_dir, f"integrate-gemm_tune_{tuner_name}")
 
 
 def _candidate_tuned_file(env: Any, env_var: str) -> str:
@@ -2216,6 +2216,7 @@ class KernelPhase(PhaseHandler):
         from ..kernel.gemm_shape_coverage import (
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
+            parse_aiter_shape_lookups_for_tables,
             tuned_config_coverage,
             tuned_csv_shapes,
         )
@@ -2223,8 +2224,7 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             return None
         try:
@@ -2248,24 +2248,32 @@ class KernelPhase(PhaseHandler):
                 csv_paths,
             )
 
-        missed, hit = parse_aiter_shape_lookups(log_text)
-        requested = missed | hit
-        if not requested:
+        all_missed, all_hit = parse_aiter_shape_lookups(log_text)
+        all_requested = all_missed | all_hit
+        if not all_requested:
             return None
+        wanted = {Path(path).name for path in csv_paths}
+        missed, hit = parse_aiter_shape_lookups_for_tables(log_text, wanted)
+        requested = missed | hit
+        scoped_to_candidate = bool(requested)
+        if not scoped_to_candidate:
+            # Preserve the existing artifact-not-consulted diagnostic when the
+            # server performed lookups, but none against this candidate's table.
+            missed, hit = all_missed, set()
+            requested = all_requested
         tuned: set[tuple[int, int, int]] = set()
         for path in csv_paths:
             tuned |= tuned_csv_shapes(path)
         if not tuned:
             _unreadable("dense")
             return None
-        report = tuned_config_coverage(tuned, requested)
+        report = tuned_config_coverage(tuned, requested, known_covered=hit)
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
         report["artifact_applied"] = bool(report.get("covered"))
         consulted = parse_aiter_consulted_tables(log_text)
         report["consulted_tables"] = sorted(consulted)[:8]
-        wanted = {Path(path).name for path in csv_paths}
         if consulted and not (wanted & {Path(name).name for name in consulted}):
             # The runtime resolved a different quantisation variant's table, so
             # the tuner targeted a kernel this server never dispatches to.
@@ -2453,14 +2461,13 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             # Say so. This whole change exists to stop checks from failing
             # quietly, and a missing log is the one way this one can.
             log.warning(
-                "forge gemm E2E: no server.log under %s; apply verification cannot run for %s",
-                run_dir,
+                "forge gemm E2E: no server.log under %s (retries included); apply verification cannot run for %s",
+                self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}",
                 tuner_name,
             )
             return None
@@ -3017,6 +3024,13 @@ class KernelPhase(PhaseHandler):
             for stale in ("recommended_env", "extra_envs"):
                 if result.get(stale):
                     result[stale] = {}
+            # ``record_gemm_tuning`` above stored a SHALLOW COPY, so the scalar
+            # rewrites just made (decision/micro_decision/...) do not reach the
+            # recorded entry on their own -- only the normal exit re-syncs it.
+            # Without this the state kept the bridge's KEEP for an arm that was
+            # never measured, and the on-disk result.json kept the pre-E2E
+            # snapshot too.
+            self._replace_latest_gemm_tuning_attempt(result)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -3086,8 +3100,43 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — journaling is best-effort
             log.exception("gemm_tuning journal append failed")
 
+    def _writeback_gemm_result_json(self, entry: dict[str, Any]) -> None:
+        """Overwrite ``<workspace>/result.json`` with the E2E-adjudicated envelope.
+
+        forge's CLI writes ``result.json`` the moment micro tuning ends, so on
+        disk it stays a pre-E2E snapshot (``status=ok`` /
+        ``requires_e2e_validation=true``) even after this phase has recorded a
+        REVERT. Anything that reads the file rather than ``state.json`` -- the
+        fusion/collective lanes treat ``result.json`` as the final verdict --
+        then sees a candidate that was already rejected. Writing the merged
+        envelope back keeps both ledgers on the same value.
+
+        Best-effort: the workspace lives on shared storage that can be read-only
+        or already reaped, and a failed writeback must not turn a recorded
+        verdict into a phase crash.
+        """
+        workspace = str(entry.get("workspace") or "").strip()
+        if not workspace:
+            return
+        path = Path(workspace) / "result.json"
+        try:
+            if not path.parent.is_dir():
+                return
+            atomic_write_json(path, entry, make_parents=False)
+        except (OSError, TypeError, ValueError):
+            log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
+
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
-        """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
+        """Sync the latest GEMM history row, and publish the verdict to disk.
+
+        Not a pure in-memory update: every call also overwrites
+        ``<workspace>/result.json`` via ``_writeback_gemm_result_json``. The two
+        are deliberately coupled because they are the two books that must agree
+        -- ``record_gemm_tuning`` stores a shallow copy, so a caller that
+        rewrote scalars on ``result`` has changed neither the history row nor
+        the on-disk snapshot until this runs. All three call sites are terminal
+        verdict points, which is the only place either write is correct.
+        """
         if not isinstance(result, dict):
             return
         entry = dict(result)
@@ -3100,6 +3149,7 @@ class KernelPhase(PhaseHandler):
             attempts.append(entry)
         self.shared_state.gemm_tuning_attempts = attempts
         self.shared_state.last_gemm_tuning = entry
+        self._writeback_gemm_result_json(entry)
 
     def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Reduce a GEMM tuning result to the env sets worth E2E-validating.
@@ -3210,6 +3260,27 @@ class KernelPhase(PhaseHandler):
         candidates = self._gemm_e2e_candidates(result)
         if not candidates:
             log.info("gemm tuning: no candidates to E2E validate")
+            # Close the books here too. Returning early left the recorded
+            # attempt and the on-disk result.json claiming
+            # ``requires_e2e_validation=true`` with ``micro_decision=candidate``
+            # forever -- the same two-books-disagree state the exception arm was
+            # fixed for, and at least as common: any run whose tuners produced
+            # no usable env lands here.
+            result["decision"] = "REVERT"
+            result["requires_e2e_validation"] = False
+            result["e2e_validated"] = False
+            # Only when the tuners left no verdict of their own. An existing
+            # ``micro_decision`` is load-bearing downstream --
+            # ``_should_run_bf16_dense_gemm_fallback`` keys the sglang bf16
+            # retry on ``no_improvement`` -- so overwriting it here cancels the
+            # fallback for exactly the runs that need it. Same trap as adding a
+            # new ``status``: the value is a routing key, not a label.
+            if not str(result.get("micro_decision") or "").strip():
+                result["micro_decision"] = "no_e2e_candidates"
+            # ``recommended_env``/``extra_envs`` stay as the tuners left them:
+            # they are the raw record of what was produced, and the eligibility
+            # checks downstream already read them as "must be empty".
+            self._replace_latest_gemm_tuning_attempt(result)
             return
 
         baseline_tput = float(self.shared_state.baseline_tput or 0.0)
@@ -3239,8 +3310,14 @@ class KernelPhase(PhaseHandler):
             model_supports_aiter_ck_fused_moe,
         )
 
-        triton_moe_inert = (
-            any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and self._runtime_uses_aiter_fused_moe()
+        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now
+        # byte-scans the whole runs/ tree for aiter evidence -- and then reads it
+        # whole, ~17MB on the fleet. This function is a coroutine on the
+        # orchestrator's only event loop, so doing that inline stalls every other
+        # coroutine, heartbeats included, for the duration. The short-circuit is
+        # kept: no Triton candidate means no reason to look at all.
+        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
+            self._runtime_uses_aiter_fused_moe
         )
 
         for cand in candidates:
@@ -3441,7 +3518,10 @@ class KernelPhase(PhaseHandler):
             # not run.
             apply_blockers: list[str] = []
 
-            coverage = self._gemm_tuned_config_coverage(tuner_name, env)
+            # Off the event loop for the same reason: this reads the integrate
+            # run's server.log in full and parses every tuned CSV named in the
+            # candidate env.
+            coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
             if coverage is not None:
                 cand = {**cand, "tuned_config_coverage": coverage}
                 if not coverage.get("artifact_applied") and coverage.get("conclusive", True):

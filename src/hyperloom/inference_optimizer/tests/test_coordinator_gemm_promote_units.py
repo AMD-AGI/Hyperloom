@@ -2869,9 +2869,36 @@ class TestValidateForgeGemmTuningE2E:
         await coord._validate_gemm_tuning_e2e(result)
 
         assert fake.calls == []
-        assert result["requires_e2e_validation"] is True
-        assert "e2e_validated" not in result
         assert coord.shared_state.optimization_stack == []
+        # No sweep ran, but the books still get closed. Leaving
+        # requires_e2e_validation=True on a result nothing will ever validate
+        # made the history row and result.json claim a pending verdict forever.
+        assert result["requires_e2e_validation"] is False
+        assert result["e2e_validated"] is False
+        assert result["decision"] == "REVERT"
+        assert result["micro_decision"] == "no_e2e_candidates"
+
+    @pytest.mark.asyncio
+    async def test_closing_the_books_does_not_overwrite_a_tuner_verdict(self, tmp_path, monkeypatch):
+        """``micro_decision`` is a routing key, not a label.
+
+        ``_should_run_bf16_dense_gemm_fallback`` keys the sglang bf16 retry on
+        ``no_improvement``. Stamping ``no_e2e_candidates`` over it cancelled the
+        fallback for exactly the fp8 runs that need it.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
+        fake = _make_integrate([])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+
+        result = {
+            "requires_e2e_validation": True,
+            "micro_decision": "no_improvement",
+            "tuners_run": [{"status": "ok", "improved_shapes": 0}],
+        }
+        await coord._validate_gemm_tuning_e2e(result)
+
+        assert result["micro_decision"] == "no_improvement"
+        assert result["requires_e2e_validation"] is False
 
     @pytest.mark.asyncio
     async def test_vllm_candidate_without_micro_count_validates_full_env_bundle(

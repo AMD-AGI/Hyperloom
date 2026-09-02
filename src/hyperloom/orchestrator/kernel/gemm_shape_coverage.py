@@ -37,8 +37,31 @@ _AITER_SHAPE_MISS_RE = re.compile(
     r"shape is M:(\d+), N:(\d+), K:(\d+)(?:[^\n]*?)not found tuned config in (\S+?),",
 )
 # Emitted by aiter (only under AITER_LOG_TUNED_CONFIG) on a lookup hit.
+#
+# ``K:`` and ``found padded_M:`` are *not* adjacent in practice: aiter prints the
+# dispatch kwargs between them, and only some of those are comma-separated --
+#
+#   shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' otype='torch.bfloat16'
+#   bias=False, scaleAB=False, bpreshuffle=False found padded_M: 8192, N:4608, ...
+#
+# An earlier pattern required a comma straight after ``K:<n>`` and so matched
+# none of the 5024 hit lines in a production Qwen3 log, which scored a fully
+# served tuned table as ``no_shape_key_matched`` and reverted it. The trailing
+# ``is tuned`` anchor keeps the lazy ``[^\n]*?`` from spanning an unrelated line.
+# ``found padded_M:`` is on its own sufficient to tell a hit from a miss: a miss
+# line reads "not found tuned config in <table>" and never carries a padded_M.
+# Measured on a real serving log, all 1168 ``found padded_M:`` occurrences were
+# hits and none of the 592 miss lines contained the token. So anchor on it and
+# nothing further -- requiring the trailing ", N:.., K:.. is tuned" would buy no
+# discrimination while dropping any line the log truncated mid-record, and one
+# missed hit is enough to grade a table that was serving as no_shape_key_matched.
 _AITER_SHAPE_HIT_RE = re.compile(
-    r"shape is M:(\d+), N:(\d+), K:(\d+), found padded_M: (\d+)",
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+)",
+)
+# The table-qualified form is used only when attributing hits to one candidate,
+# so it has to reach the table name; everything between stays unconstrained.
+_AITER_SHAPE_HIT_TABLE_RE = re.compile(
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+)[^\n]*? in (\S+?)\s*,",
 )
 
 Shape = tuple[int, int, int]
@@ -245,6 +268,31 @@ def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     return missed, hit
 
 
+def parse_aiter_shape_lookups_for_tables(
+    log_text: str,
+    table_names: Iterable[str | Path],
+) -> tuple[set[Shape], set[Shape]]:
+    """Return lookups attributed to the named tuned-config tables.
+
+    A GEMM validation run can carry previously KEEP'd tables alongside the
+    candidate under test. Shape-only hit parsing cannot distinguish those
+    tables, so an earlier candidate's hits would otherwise make a completely
+    unused current candidate look applied.
+    """
+    wanted = {Path(name).name for name in table_names if str(name).strip()}
+    missed = {
+        (int(m), int(n), int(k))
+        for m, n, k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")
+        if Path(table).name in wanted
+    }
+    hit = {
+        (int(m), int(n), int(k))
+        for m, n, k, _padded, table in _AITER_SHAPE_HIT_TABLE_RE.findall(log_text or "")
+        if Path(table).name in wanted
+    }
+    return missed, hit
+
+
 def _split_fmoe_tuple(raw: str) -> list[str]:
     """Split a fused-MoE dispatch tuple, respecting single-quoted fields."""
     parts: list[str] = []
@@ -427,16 +475,48 @@ def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
     return raw not in ("", "0", "false", "no", "off")
 
 
+def _safe_mtime(path: Path) -> float:
+    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+
+    Sorting server logs by mtime races the round that is still writing them, and
+    an ``exists()`` guard does not close the window. Ordering is a heuristic for
+    picking the newest log, so a vanished file is worth sorting last rather than
+    aborting the check that owns it.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def integrate_server_logs(
+    session_dir: Path,
+    integrate_name: str = FMOE_INTEGRATE_RUN,
+) -> list[Path]:
+    """Server logs for one integrate run, retries included, oldest first.
+
+    A retried integrate lands in a sibling directory with a ``-2``/``-3``
+    suffix rather than inside the original, so scanning only ``integrate_name``
+    grades the retry on the *first* attempt's log. Seven such retries exist on
+    the fleet, including every faulted post-merge session.
+
+    This is the one implementation: :mod:`hyperloom.orchestrator.phases.kernel`
+    grades dense candidates from the same directories, and when the two copies
+    drifted -- one of them ``exists()``-guarding the mtime, the other not -- a
+    log that vanished mid-scan ordered differently on each side, so the dense
+    and MoE lanes could grade the same session on different attempts.
+    """
+    parent = session_dir / "runs" / "integrate"
+    run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
+    return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
+
+
 def read_latest_integrate_server_log(
     session_dir: Path,
     integrate_name: str = FMOE_INTEGRATE_RUN,
 ) -> tuple[Path, str] | None:
     """Return the newest ``server.log`` under an integrate run, if readable."""
-    run_dir = session_dir / "runs" / "integrate" / integrate_name
-    logs = sorted(
-        run_dir.rglob("server.log"),
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-    )
+    logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
         return None
     try:
@@ -545,7 +625,9 @@ def parse_aiter_consulted_tables(log_text: str) -> set[str]:
     all -- a different failure from a CSV that is consulted but has no matching
     row, and one worth naming separately.
     """
-    return {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    missed = {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    hit = {table for _m, _n, _k, _padded, table in _AITER_SHAPE_HIT_TABLE_RE.findall(log_text or "")}
+    return missed | hit
 
 
 def tuned_csv_shapes(path: str | Path) -> set[Shape]:
@@ -579,15 +661,28 @@ def tuned_csv_shapes(path: str | Path) -> set[Shape]:
 def tuned_config_coverage(
     tuned_shapes: Iterable[Shape],
     requested_shapes: Iterable[Shape],
+    known_covered: Iterable[Shape] | None = None,
 ) -> dict[str, Any]:
     """Report how many requested shapes a tuned CSV can actually serve.
 
     Replays aiter's three-step lookup against the CSV keys, so the result
     answers "will this artifact ever be used?" rather than "did the micro
     benchmark look good?".
+
+    Args:
+        tuned_shapes: ``(M, N, K)`` keys present in the tuned CSV.
+        requested_shapes: ``(M, N, K)`` triples the runtime asked for.
+        known_covered: Shapes the runtime *itself* reported as resolved against
+            the tuned table. These count as covered without replaying the
+            ladder: aiter has already stated which row it used, and that is
+            better evidence than our reconstruction of its padding rules. Any
+            drift between the two -- a new rung, a variant with different
+            clamping -- would otherwise score a served shape as uncovered and
+            revert a run that worked.
     """
     tuned = {(int(m), int(n), int(k)) for m, n, k in tuned_shapes}
     requested = sorted({(int(m), int(n), int(k)) for m, n, k in requested_shapes})
+    confirmed = {(int(m), int(n), int(k)) for m, n, k in (known_covered or ())}
     if not requested:
         return {
             "requested": 0,
@@ -595,7 +690,9 @@ def tuned_config_coverage(
             "coverage_pct": None,
             "tuned_rows": len(tuned),
         }
-    covered = [shape for shape in requested if any(key in tuned for key in aiter_lookup_keys(shape))]
+    covered = [
+        shape for shape in requested if shape in confirmed or any(key in tuned for key in aiter_lookup_keys(shape))
+    ]
     return {
         "requested": len(requested),
         "covered": len(covered),

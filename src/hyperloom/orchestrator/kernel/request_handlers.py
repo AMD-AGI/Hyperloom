@@ -2041,11 +2041,176 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     return precision, quant_type
 
 
+#: An aiter dispatch line, hit or miss. Either one proves the process actually
+#: routed a GEMM through aiter, which is what makes a server log usable as a
+#: shape source; a log without one is silent about shapes no matter how recent
+#: or how well its workspace matches.
+_AITER_DISPATCH_MARKER = "shape is M:"
+#: The MoE half of the same question. The resolved log is not only a dense-shape
+#: source: ``kernelforge.gemm_tune.router`` reads it for MoE stage coverage and
+#: 1-stage ASM detection, and those parse ``[fused_moe]`` dispatch lines, which
+#: aiter prints from a different code path than the dense ``shape is M:`` ones.
+#: Requiring the dense marker alone would reject a log that is fully informative
+#: about MoE routing -- on a fleet where every model under tuning is MoE, that
+#: is the common case, and the router would silently fall back to "tune CK 2-stage
+#: unconditionally".
+_AITER_MOE_DISPATCH_MARKERS = (b"[fused_moe]", b"Mxfp4 MoE backend")
+#: Only the M of a dispatch line. Reading M straight off the serving log is the
+#: one token source grounded in what the model actually ran -- forge's fallback
+#: derives ``--tokens`` from ``conc`` alone, and real fleet logs reach M=15842,
+#: far outside anything that derivation produces.
+_AITER_M_RE = re.compile(rb"shape is M:(\d+),")
+#: Read logs in chunks: a fleet server.log is ~17MB and the evidence question
+#: is usually answered in the first few KB.
+_LOG_SCAN_CHUNK = 1 << 20
+
+
+#: Longest a dispatch prefix can be, so a match straddling a chunk boundary is
+#: carried into the next read. ``shape is M:`` plus its digits is far shorter.
+_LOG_SCAN_OVERLAP = 64
+
+
+def _scan_serving_log_m(path) -> dict[int, int]:
+    """Count the M values of the dense aiter dispatch lines in a serving log.
+
+    Chunks overlap by ``_LOG_SCAN_OVERLAP`` so a match spanning a boundary is
+    still seen, but the carry starts after the last match already counted:
+    re-feeding a fixed tail would count any match landing in it twice, which
+    skews the frequency ranking that picks ``--tokens``.
+
+    Any read error yields no counts -- an unreadable candidate is not a usable
+    shape source either way.
+    """
+    counts: dict[int, int] = {}
+    carry = b""
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(_LOG_SCAN_CHUNK)
+                if not chunk:
+                    break
+                buf = carry + chunk
+                last_end = 0
+                for match in _AITER_M_RE.finditer(buf):
+                    last_end = match.end()
+                    value = int(match.group(1))
+                    if value > 0:
+                        counts[value] = counts.get(value, 0) + 1
+                carry = buf[max(last_end, len(buf) - _LOG_SCAN_OVERLAP) :]
+    except (OSError, ValueError):
+        return {}
+    return counts
+
+
+def _log_has_aiter_evidence(path) -> bool:
+    """True when the log carries at least one aiter dispatch line, dense or MoE.
+
+    Kept separate from :func:`_scan_serving_log_m` rather than folded into it as
+    a ``first_only`` flag. Two reasons, both of which cost a real behaviour bug
+    when the two were one function:
+
+    * The M counter skips ``M:0``, so a log whose first dispatch line carried
+      one read as "no evidence at all".
+    * Evidence is not dense-only. ``[fused_moe]`` lines make a log fully usable
+      for the MoE routing decisions that consume the same path.
+
+    Stops at the first marker: a log with evidence usually proves it in the
+    first few KB, and only a silent log is read to the end.
+    """
+    markers = (_AITER_DISPATCH_MARKER.encode(), *_AITER_MOE_DISPATCH_MARKERS)
+    carry = b""
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(_LOG_SCAN_CHUNK)
+                if not chunk:
+                    return False
+                buf = carry + chunk
+                if any(marker in buf for marker in markers):
+                    return True
+                carry = buf[-_LOG_SCAN_OVERLAP:]
+    except OSError:
+        return False
+
+
+def _tokens_from_serving_log(path, limit: int = 16, reserve_largest: int = 4) -> str:
+    """Derive forge's ``--tokens`` from the M values the server actually saw.
+
+    Returns up to ``limit`` distinct M values, smallest first, as a
+    comma-separated string -- empty when the log carries no dispatch lines.
+
+    Selection is frequency-ranked, because tuning the M values the model spends
+    its time at beats tuning the largest one it ever reached. But frequency
+    alone is not enough: a serving warmup sweeps every M about equally often,
+    so on real logs the counts come out uniform and the ranking degenerates
+    into its tie-break. Measured on two fleet sessions, every distinct M
+    carried an identical count (17 values x4, and 44 values x40), so a plain
+    frequency cut kept the smallest M and dropped exactly the large prefill
+    shapes -- 16384/24576/32768 and 57344/65536 -- that the runtime then
+    missed. Reserve slots for the largest observed M so the prefill end
+    survives the cut; GEMM time scales with M, so those are also where the
+    end-to-end time actually is.
+    """
+    counts = _scan_serving_log_m(path)
+    if not counts:
+        return ""
+    # Never let the reservation crowd out the frequency ranking: at most a
+    # quarter of the budget goes to "largest", and always at least one slot.
+    reserve = min(max(reserve_largest, 0), max(1, limit // 4))
+    picked: list[int] = sorted(counts, reverse=True)[:reserve]
+    for value, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if len(picked) >= limit:
+            break
+        if value not in picked:
+            picked.append(value)
+    return ",".join(str(m) for m in sorted(picked))
+
+
+def _resolve_trace_shape_manifest(state, session_dir: Path) -> str:
+    """Find the newest TraceShapeManifest this session produced.
+
+    ``bypass_trace_analysis`` writes ``trace_shape_manifest.json`` next to its
+    other bypass artifacts; forge calls it the preferred dense-shape source but
+    nothing forwarded it, so the file was written and never read. Newest wins:
+    a later trace reflects the currently resolved server args.
+    """
+    # Deduplicate: state.session_dir is usually the same path we were handed,
+    # and an empty session then paid for two full-tree walks to find nothing.
+    seen_roots: set[str] = set()
+    roots: list[Path] = []
+    for raw in (session_dir, Path(str(getattr(state, "session_dir", "") or session_dir))):
+        if raw is None or not Path(raw).is_dir():
+            continue
+        key = str(Path(raw).resolve())
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        roots.append(Path(raw))
+    for root in roots:
+        best: tuple[float, str] | None = None
+        for found in Path(root).glob("**/trace_shape_manifest.json"):
+            try:
+                mtime = found.stat().st_mtime
+            except OSError:
+                continue
+            if best is None or mtime > best[0]:
+                best = (mtime, str(found))
+        if best is not None:
+            return best[1]
+    return ""
+
+
 def _resolve_forge_server_log(state, session_dir: Path) -> str:
     """Find the server log matching the current runtime configuration.
 
     Priority: current_best workspace (matches the resolved server args)
     → baseline workspace → most recent server.log under runs/.
+
+    Every candidate must carry aiter dispatch evidence. Picking on existence
+    alone made the first *present* log win, so a ``current_best`` workspace
+    whose log never routed a GEMM through aiter ended the search and the
+    ``runs/`` fallback became unreachable -- the tuner was then handed a log
+    that had no shapes in it at all.
 
     The server log is written by the benchmark server at startup and lives in
     the warmup_round benchmark directory (where the server process was first
@@ -2060,8 +2225,9 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             return None
         ws = Path(workspace_str)
         # Direct hit (server started in this exact dir).
-        if (ws / "server.log").is_file():
-            return str(ws / "server.log")
+        direct = ws / "server.log"
+        if direct.is_file() and _log_has_aiter_evidence(direct):
+            return str(direct)
         # Sibling warmup_round — benchmark dirs sit under
         # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
         parent = ws.parent  # e.g. measure_round/
@@ -2079,9 +2245,10 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
                         candidates.append((sl.stat().st_mtime, str(sl)))
                     except OSError:
                         continue
-            if candidates:
-                candidates.sort(reverse=True)
-                return candidates[0][1]
+            candidates.sort(reverse=True)
+            for _mtime, candidate in candidates:
+                if _log_has_aiter_evidence(candidate):
+                    return candidate
         return None
 
     current_best = getattr(state, "current_best", None) or {}
@@ -2096,27 +2263,41 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
         if found:
             return found
 
-    # Fallback: check known run subdirs with sufficient depth for the nested
-    # layout ({phase}/{hash}/{warmup_round|measure_round}/{bench_dir}/server.log).
+    # Fallback: the whole runs/ tree, newest first. Restricting this to a fixed
+    # (baseline, explore, gemm_tuning, roofline) tuple skipped runs/integrate/,
+    # which is where the GEMM validation runs put their logs -- those sessions
+    # got "" plus a warning telling them to enable a flag that was already on.
+    # Newest-first with an early return also means only the logs newer than the
+    # winner are scanned, instead of every log in the tree.
     runs_dir = session_dir / "runs"
+    candidates_by_age: list[tuple[float, Path]] = []
     if runs_dir.is_dir():
-        best: Path | None = None
-        best_mtime: float = 0.0
-        for sub in ("baseline", "explore", "gemm_tuning", "roofline"):
-            sub_dir = runs_dir / sub
-            if not sub_dir.is_dir():
+        for candidate_log in runs_dir.glob("**/server.log"):
+            try:
+                candidates_by_age.append((candidate_log.stat().st_mtime, candidate_log))
+            except OSError:
                 continue
-            for log in sub_dir.glob("**/server.log"):
-                try:
-                    mt = log.stat().st_mtime
-                except OSError:
-                    continue
-                if mt > best_mtime:
-                    best_mtime = mt
-                    best = log
-        if best is not None:
-            return str(best)
+        candidates_by_age.sort(key=lambda item: item[0], reverse=True)
+        for _mtime, candidate_log in candidates_by_age:
+            if _log_has_aiter_evidence(candidate_log):
+                return str(candidate_log)
 
+    # Separate the two ways this fails. No server.log at all is an upstream
+    # gap; logs that exist but never dispatched through aiter means the serving
+    # run had AITER_LOG_TUNED_CONFIG off. Both return "", but only the second is
+    # actionable, and one silent "" hid it. Reuse the listing above rather than
+    # walking the tree a second time.
+    if candidates_by_age:
+        log.warning(
+            "GEMM: %d server.log file(s) under %s but none contain aiter dispatch "
+            "lines (dense %r or MoE %s), so there is no runtime shape source. "
+            "Serving runs need AITER_LOG_TUNED_CONFIG enabled for shapes to be "
+            "observable",
+            len(candidates_by_age),
+            runs_dir,
+            _AITER_DISPATCH_MARKER,
+            " / ".join(repr(m.decode()) for m in _AITER_MOE_DISPATCH_MARKERS),
+        )
     return ""
 
 
@@ -3832,7 +4013,11 @@ async def _run_forge_gemm_tuning(
     # Resolve server log for 1-stage ASM detection.
     kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
     if not kernel_sig_log:
-        kernel_sig_log = _resolve_forge_server_log(state, session_dir)
+        # Off the event loop: this walks runs/ and byte-scans server logs that
+        # measure ~17MB apiece on the fleet. Inline, it stalled every other
+        # coroutine on this orchestrator -- heartbeats included -- for the
+        # duration.
+        kernel_sig_log = await asyncio.to_thread(_resolve_forge_server_log, state, session_dir)
 
     # Explicit operator/benchmark input wins. Automatic SGLang priority is:
     # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
@@ -3858,6 +4043,23 @@ async def _run_forge_gemm_tuning(
                 quant_type,
                 resolved_model_path,
             )
+
+    # forge's own fallback derives --tokens from ``conc``, which is a guess
+    # about M. The serving log records the M values the model actually ran, so
+    # prefer those whenever a log with dispatch evidence was resolved.
+    #
+    # This has to happen BEFORE the MoE untuned CSV is built, not just before
+    # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
+    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derive
+    # afterwards and the dense lane got the full observed sweep while the MoE
+    # lane got a table with a single M=1 row -- which then missed on every
+    # prefill and large-batch lookup and was reverted as no_shape_key_matched.
+    # That is precisely the failure this change set exists to remove, so leaving
+    # it in place on the MoE side would have fixed one lane and not the other.
+    if not tokens and kernel_sig_log:
+        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
+        if tokens:
+            log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, kernel_sig_log)
 
     # MoE shapes come from the runtime, never from inference. The dispatch tuple
     # in the server log states the quantisation pair, the per-partition inter_dim
@@ -3963,6 +4165,36 @@ async def _run_forge_gemm_tuning(
             # specialist CSV resolved before the capture pass.
             untuned_csv = ""
 
+    # forge prefers the manifest over shapes_json as a dense-shape source, and
+    # an explicit demand.json over re-deriving demand from the serving log.
+    # Both are optional: forge drops a path that is not there, with a warning.
+    shapes_manifest = str(payload.get("shapes_manifest") or "").strip()
+    if not shapes_manifest:
+        # Scavenge one from the session only when nothing more specific was
+        # produced for THIS run. forge ranks the manifest at priority 0 on the
+        # premise that it was explicitly supplied; a manifest found by walking
+        # the session tree carries no such promise -- it can come from an
+        # earlier run at a different precision or with different server args,
+        # and there is no consistency check to catch that. Letting it win would
+        # discard a block-FP8 profile capture or a TunableOp shape capture that
+        # deliberately cleared ``untuned_csv`` so the fresh result would be
+        # used, and would bypass ``_align_forge_shapes_for_aiter`` as well.
+        if untuned_csv or shapes_json:
+            log.debug(
+                "GEMM: not scavenging a trace shape manifest; this run already has "
+                "a workload-matched dense-shape source (%s)",
+                "untuned_csv" if untuned_csv else "shapes_json",
+            )
+        else:
+            # Off the event loop for the same reason: a ``**/`` walk of a
+            # session tree that holds thousands of run artifacts.
+            shapes_manifest = await asyncio.to_thread(_resolve_trace_shape_manifest, state, session_dir)
+    if shapes_manifest and not _path_is_existing_file(shapes_manifest):
+        shapes_manifest = ""
+    demand_json = str(payload.get("demand_json") or "").strip()
+    if demand_json and not _path_is_existing_file(demand_json):
+        demand_json = ""
+
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
@@ -3993,6 +4225,8 @@ async def _run_forge_gemm_tuning(
         "untuned_csv": untuned_csv,
         "moe_untuned_csv": moe_untuned_csv,
         "shapes_json": shapes_json,
+        "shapes_manifest": shapes_manifest,
+        "demand_json": demand_json,
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),

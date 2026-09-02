@@ -11,6 +11,7 @@ rather than to "the artifact did not apply".
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -24,6 +25,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     parse_aiter_consulted_tables,
     parse_aiter_fused_moe_dispatches,
     parse_aiter_shape_lookups,
+    parse_aiter_shape_lookups_for_tables,
     resolve_fmoe_candidate_csv,
     tuned_config_coverage,
     tuned_csv_shapes,
@@ -138,11 +140,44 @@ class TestServerLogParsing:
         "[aiter] shape is M:1082, N:5120, K:17408, found padded_M: 1088, N:5120, "
         "K:17408 is tuned on cu_num = 256 in /x/candidate.csv , kernel name is k!"
     )
+    # Verbatim from a production Qwen3 vLLM server.log. The dispatch kwargs sit
+    # between ``K:`` and ``found padded_M:``, which an earlier pattern did not
+    # allow -- it matched none of that log's 5024 hit lines.
+    HIT_WITH_KWARGS = (
+        "(Worker_TP7 pid=380239) [aiter] shape is M:16384, N:4608, K:8192 "
+        "dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, "
+        "bpreshuffle=False found padded_M: 8192, N:4608, K:8192 is tuned on "
+        "cu_num = 256 in /shared_nfs/x/merged_tuned_dense_bf16.csv,"
+    )
 
     def test_parses_misses_and_hits(self):
         missed, hit = parse_aiter_shape_lookups("\n".join([self.MISS, self.MISS_QUANT, self.HIT]))
         assert missed == {(8192, 7168, 5120), (512, 5120, 17408)}
         assert hit == {(1082, 5120, 17408)}
+
+    def test_parses_hit_with_dispatch_kwargs_between_k_and_padded_m(self):
+        missed, hit = parse_aiter_shape_lookups(self.HIT_WITH_KWARGS)
+        assert missed == set()
+        assert hit == {(16384, 4608, 8192)}
+
+    def test_scopes_hits_to_the_table_that_served_them(self):
+        assert parse_aiter_consulted_tables(self.HIT_WITH_KWARGS) == {"/shared_nfs/x/merged_tuned_dense_bf16.csv"}
+        missed, hit = parse_aiter_shape_lookups_for_tables(self.HIT_WITH_KWARGS, ["candidate.csv"])
+        assert missed == set()
+        assert hit == set()
+
+        missed, hit = parse_aiter_shape_lookups_for_tables(
+            self.HIT_WITH_KWARGS,
+            ["merged_tuned_dense_bf16.csv"],
+        )
+        assert missed == set()
+        assert hit == {(16384, 4608, 8192)}
+
+    def test_hit_pattern_does_not_span_lines(self):
+        """A miss on one line must not pair with a hit on the next."""
+        missed, hit = parse_aiter_shape_lookups("\n".join([self.MISS, self.HIT_WITH_KWARGS]))
+        assert missed == {(8192, 7168, 5120)}
+        assert hit == {(16384, 4608, 8192)}
 
     def test_empty_log(self):
         assert parse_aiter_shape_lookups("") == (set(), set())
@@ -329,6 +364,34 @@ class TestTunedCsvCoverage:
         assert report["requested"] == 0
         assert report["coverage_pct"] is None
 
+    def test_retry_integrate_dir_is_scanned(self, tmp_path):
+        """A ``-2`` retry replaces the first attempt; it must not be ignored."""
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import read_latest_integrate_server_log
+
+        integrate = tmp_path / "runs" / "integrate"
+        first = integrate / "integrate-gemm_tune_fmoe_ck" / "r"
+        retry = integrate / "integrate-gemm_tune_fmoe_ck-2" / "r"
+        for d in (first, retry):
+            d.mkdir(parents=True)
+        (first / "server.log").write_text("first attempt", encoding="utf-8")
+        (retry / "server.log").write_text("retry attempt", encoding="utf-8")
+        os.utime(retry / "server.log", (2_000_000_000, 2_000_000_000))
+        os.utime(first / "server.log", (1_000_000_000, 1_000_000_000))
+
+        found = read_latest_integrate_server_log(tmp_path, "integrate-gemm_tune_fmoe_ck")
+        assert found is not None
+        assert found[1] == "retry attempt"
+
+    def test_runtime_confirmed_hit_counts_as_covered(self):
+        """aiter saying it used a row beats our replay of its padding rules."""
+        requested = [(16384, 4608, 8192)]
+        # Deliberately empty: the ladder can prove nothing here.
+        assert tuned_config_coverage([], requested)["covered"] == 0
+        report = tuned_config_coverage([], requested, known_covered=requested)
+        assert report["covered"] == 1
+        assert report["coverage_pct"] == 100.0
+        assert report["uncovered_sample"] == []
+
 
 class TestCoverageGateDoesNotBlockOnMissingEvidence:
     """The coverage report can block a KEEP, so it must never guess.
@@ -406,6 +469,33 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
         assert report["artifact_applied"] is True
         assert report["coverage_pct"] == 100.0
 
+    def test_previous_candidate_hit_does_not_cover_current_candidate(self, tmp_path):
+        """A stacked table's hit is not evidence that this candidate applied."""
+        phase = self._phase(tmp_path)
+        run_log = tmp_path / "runs" / "integrate" / "integrate-gemm_tune_aiter_dense" / "server.log"
+        previous_hit = (
+            "[aiter] shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' "
+            "found padded_M: 8192, N:4608, K:8192 is tuned on cu_num = 256 "
+            "in /x/previous.csv,"
+        )
+        current_miss = (
+            "[aiter] shape is M:33, N:777, K:888, not found tuned config in /x/current.csv, will use default config!"
+        )
+        run_log.write_text("\n".join([previous_hit, current_miss]), encoding="utf-8")
+        current = tmp_path / "current.csv"
+        current.write_text(
+            f"{self.HEADER}\ngfx950,256,999,777,888,ck,0,0,1.0,name,1,1,0\n",
+            encoding="utf-8",
+        )
+
+        report = self._call(phase, current)
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["coverage_pct"] == 0.0
+        assert report["runtime_lookup_hit"] == 0
+        assert report["runtime_lookup_miss"] == 1
+
     def test_unexpected_failure_is_undetermined(self, tmp_path):
         """The wrapper swallows anything the body throws (it can block a KEEP)."""
         from types import SimpleNamespace
@@ -425,12 +515,12 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
 
 class TestSafeMtime:
     def test_missing_path_sorts_last_instead_of_raising(self, tmp_path):
-        from hyperloom.orchestrator.phases.kernel import _safe_mtime
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import _safe_mtime
 
         assert _safe_mtime(tmp_path / "gone.log") == 0.0
 
     def test_existing_path_returns_its_mtime(self, tmp_path):
-        from hyperloom.orchestrator.phases.kernel import _safe_mtime
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import _safe_mtime
 
         path = tmp_path / "server.log"
         path.write_text("x", encoding="utf-8")
@@ -446,7 +536,9 @@ class TestE2EValidationFailsOpen:
     """
 
     def _phase(self, tmp_path, validate):
-        from types import SimpleNamespace
+        from types import MethodType, SimpleNamespace
+
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         recorded: list[dict] = []
         saved: list[object] = []
@@ -454,13 +546,22 @@ class TestE2EValidationFailsOpen:
             record_gemm_tuning=recorded.append,
             save=saved.append,
             macro_cycle=0,
+            gemm_tuning_attempts=[],
+            last_gemm_tuning=None,
         )
-        return SimpleNamespace(
+        phase = SimpleNamespace(
             session_dir=tmp_path,
             shared_state=state,
             _sync_profile_state_after_gemm_roofline=lambda _r: None,
             _validate_gemm_tuning_e2e=validate,
-        ), recorded
+        )
+        # ``record_gemm_tuning`` stores a shallow copy, so the neutralising
+        # rewrites on the exception path only reach state (and result.json)
+        # through these two. Bind the real implementations rather than stubbing
+        # them out, so the test covers what actually runs.
+        for name in ("_replace_latest_gemm_tuning_attempt", "_writeback_gemm_result_json"):
+            setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
+        return phase, recorded
 
     @pytest.mark.asyncio
     async def test_exception_is_recorded_as_a_fault_not_raised(self, tmp_path):

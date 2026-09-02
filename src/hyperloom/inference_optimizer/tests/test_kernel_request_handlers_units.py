@@ -61,6 +61,16 @@ def _pin_fusion_provider_env(monkeypatch, shape):
         monkeypatch.setenv(key, value)
 
 
+#: A candidate server.log must now carry an aiter dispatch line; these tests
+#: are about priority order, so every candidate gets one.
+_AITER_LINE = (
+    "shape is M:128, N:512, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' "
+    "bias=False, scaleAB=False, bpreshuffle=False found padded_M: 128, N:512, "
+    "K:4096 is tuned on cu_num = 256 in /tmp/aiter_configs/bf16_tuned_gemm.csv, "
+    "libtype is opus, kernel name is opus_gemm\n"
+)
+
+
 class TestForgeGemmHelperCoverage:
     def test_resolve_backend_requires_exact_kernel_order_forge(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
@@ -96,8 +106,8 @@ class TestForgeGemmHelperCoverage:
         current = tmp_path / "current"
         baseline.mkdir()
         current.mkdir()
-        (baseline / "server.log").write_text("baseline", encoding="utf-8")
-        (current / "server.log").write_text("current", encoding="utf-8")
+        (baseline / "server.log").write_text("baseline\n" + _AITER_LINE, encoding="utf-8")
+        (current / "server.log").write_text("current\n" + _AITER_LINE, encoding="utf-8")
         state.last_baseline = {"workspace": str(baseline)}
         state.current_best = {"workspace": str(current)}
 
@@ -107,7 +117,7 @@ class TestForgeGemmHelperCoverage:
         state = SharedState()
         log = tmp_path / "runs" / "explore" / "abc" / "server.log"
         log.parent.mkdir(parents=True)
-        log.write_text("x", encoding="utf-8")
+        log.write_text(_AITER_LINE, encoding="utf-8")
 
         assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
 
@@ -271,7 +281,7 @@ class TestForgeGemmHelperCoverage:
         state = SharedState()
         baseline = tmp_path / "baseline"
         baseline.mkdir()
-        (baseline / "server.log").write_text("baseline", encoding="utf-8")
+        (baseline / "server.log").write_text("baseline\n" + _AITER_LINE, encoding="utf-8")
         state.last_baseline = {"workspace": str(baseline)}
 
         assert krh._resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")

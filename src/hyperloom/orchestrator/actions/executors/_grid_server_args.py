@@ -28,6 +28,9 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 log = logging.getLogger(__name__)
 
 _UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+#: What the 2nd..nth value of a not-yet-whitelisted multi-value flag may look
+#: like: a batch size, a length, a ratio. Deliberately not a general token.
+_NUMERIC_VALUE_RE = re.compile(r"^\d+(?:[.,]\d+)*$")
 
 
 def validate_server_args_shell_safe(server_args: str | None) -> str:
@@ -36,6 +39,29 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
     Magpie benchmark scripts expand ``EXTRA_*_ARGS`` through shell wrappers, so
     this is the final sink-side guard against LLM/payload content escaping from
     argv-like flags into shell control operators.
+
+    A flag may be followed by more than one value token (argparse ``nargs="+"``
+    semantics). ``--cuda-graph-bs 1 2 4 8`` is a real sglang invocation and is
+    already recognized as multi-valued by :data:`_MULTI_VALUE_FLAGS`; requiring
+    exactly one value here rejected it at the sink while the explore side let it
+    through.
+
+    The relaxation is scoped rather than blanket, because "any flag anywhere
+    earlier permits any bare token afterwards" stops rejecting anything at all:
+
+    * ``--flag=value`` already carries its value, so a bare token after it is
+      unambiguously positional.
+    * a flag in :data:`_MULTI_VALUE_FLAGS` takes an unlimited value list -- but
+      every entry in that whitelist is a list of batch sizes, so the list is
+      still digits-only. Letting the whitelist waive the token shape as well
+      would readmit ``--cuda-graph-bs 1 2 run.sh``.
+    * any other flag takes one arbitrary value; further tokens are accepted only
+      while they still look like list elements (digits), never as bare words.
+      That covers an ``nargs="+"`` flag not yet on the whitelist -- those carry
+      batch sizes or lengths -- without readmitting ``--foo bar some_script.sh``.
+
+    Shell control characters are blocked separately above, so this remains a
+    secondary "this looks like argv" guard.
     """
     args = str(server_args or "").strip()
     if not args:
@@ -46,13 +72,22 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
         tokens = shlex.split(args)
     except ValueError as exc:
         raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
-    expect_value = False
+    state = "positional"
     for token in tokens:
         if token.startswith("-"):
-            expect_value = "=" not in token
+            if "=" in token:
+                state = "positional"
+            elif token in _MULTI_VALUE_FLAGS:
+                state = "many"
+            else:
+                state = "any"
             continue
-        if expect_value:
-            expect_value = False
+        if state == "many" and _NUMERIC_VALUE_RE.match(token):
+            continue
+        if state == "any":
+            state = "numeric"
+            continue
+        if state == "numeric" and _NUMERIC_VALUE_RE.match(token):
             continue
         raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
     return args
