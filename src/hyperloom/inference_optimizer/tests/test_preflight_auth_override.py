@@ -2188,6 +2188,7 @@ def _fake_run_writes_marker(marker_path: Path, **marker_kwargs):
 def marker_path(tmp_path, monkeypatch) -> Path:
     user_data = tmp_path / "user_data"
     monkeypatch.setenv("USER_DATA_PATH", str(user_data))
+    monkeypatch.delenv("HYPERLOOM_PR_MONITOR_ENABLED", raising=False)
     return user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
 
 
@@ -2324,6 +2325,67 @@ def test_ir3_preflight_does_not_inject_recipe_kb_url(marker_path, monkeypatch):
     assert "RECIPE_KB_KB_URL" not in seen_env
     assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
+
+
+def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypatch):
+    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    args = _ns()
+    seen_env: dict = {}
+
+    def _runner(cmd, env=None, check=False, timeout=None):
+        seen_env.update(env or {})
+        _write_marker(
+            marker_path,
+            kb_reachable=False,
+            pr_reachable=False,
+            kb_skipped=True,
+            pr_failure_reason="timeout",
+        )
+        return subprocess.CompletedProcess(cmd, 1)
+
+    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
+        outcome = cli_preflight._run_ir3_preflight(args)
+
+    assert seen_env["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
+    assert args.recipe_kb_enabled is True
+    assert args.pr_monitor_enabled is False
+    assert args.pr_degraded_reason == "ir3_auto"
+    assert "HYPERLOOM_PR_MONITOR_ENABLED" not in os.environ
+    assert outcome["detail"]["pr_monitor"] == {
+        "enabled": False,
+        "reason": "ir3_unreachable",
+    }
+
+
+def test_ir3_real_shell_probes_local_default_url(marker_path, tmp_path, monkeypatch):
+    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    curl_log = tmp_path / "curl.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nprintf \'{"ok":true}\\n__HTTP_CODE__:200\\n\'\n',
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    monkeypatch.setenv("CURL_LOG", str(curl_log))
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    args = _ns()
+    outcome = cli_preflight._run_ir3_preflight(args)
+
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert f"{DEFAULT_KB_STORE_URL}/pr-monitor/v1/healthz" in curl_log.read_text(encoding="utf-8")
+    assert marker["pr_reachable"] is True
+    assert marker["pr_skipped"] is False
+    assert args.pr_monitor_enabled is True
+    assert outcome["status"] == "applied"
 
 
 def test_cli_parser_exposes_degraded_flags():

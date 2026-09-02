@@ -54,9 +54,9 @@ def test_pr_states_parsed_and_validated() -> None:
         _minimal_request(pr_states=["bogus"])
 
 
-def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
-    """pr_states=all -> primus search queried with state='all'."""
-    from hyperloom.agents.framework.models import PrimusCortexConfig
+def test_pr_monitor_search_state_broadens_with_pr_states(monkeypatch) -> None:
+    """pr_states=all -> pr_monitor search queried with state='all'."""
+    from hyperloom.agents.framework.models import PRMonitorConfig
 
     captured: dict[str, str] = {}
 
@@ -64,32 +64,32 @@ def test_primus_search_state_broadens_with_pr_states(monkeypatch) -> None:
         captured["state"] = state
         return [GitHubPr(number=7, title="perf fastpath", html_url="https://github.com/x/y/pull/7")]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", _fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", _fake_search)
     req = _minimal_request(
         gap_description="speed up decode",
         pr_states=["all"],
-        primus_cortex={"base_url": "http://primus.local"},
+        pr_monitor={"base_url": "http://pr_monitor.local"},
     )
-    assert isinstance(req.primus_cortex, PrimusCortexConfig)
-    out = src._run_primus_cortex(req)
+    assert isinstance(req.pr_monitor, PRMonitorConfig)
+    out = src._run_pr_monitor(req)
     assert captured["state"] == "all"
-    assert out and out[0].source == "primus_cortex"
+    assert out and out[0].source == "pr_monitor"
 
 
-def test_primus_search_state_open_only_default(monkeypatch) -> None:
+def test_pr_monitor_search_state_open_only_default(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
     def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         captured["state"] = state
         return []
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", _fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", _fake_search)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **k: [])
     req = _minimal_request(
         gap_description="speed up decode",
-        primus_cortex={"base_url": "http://primus.local"},
+        pr_monitor={"base_url": "http://pr_monitor.local"},
     )
-    src._run_primus_cortex(req)
+    src._run_pr_monitor(req)
     assert captured["state"] == "open"
 
 
@@ -108,53 +108,55 @@ def test_dispatch_explicit_refs_only_across_frameworks(framework: str) -> None:
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
-def test_dispatch_primus_search_per_framework(framework: str, monkeypatch) -> None:
+def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -> None:
     """PR-search backends are framework-agnostic; the framework only determines which repo gets queried."""
     req = _minimal_request(
         framework=framework,
         repo_url=_FRAMEWORK_TO_REPO_URL[framework],
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=2,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
     )
 
     seen_repo_urls: list[str] = []
 
-    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         seen_repo_urls.append(repo_url)
         return [
             GitHubPr(number=11, title=f"{framework}-pr-1", html_url="u1"),
         ]
 
-    monkeypatch.setattr(src, "list_perf_prs", fake_primus)
+    monkeypatch.setattr(src, "list_perf_prs", fake_pr_monitor)
 
     out = src.enumerate_candidates(req)
     assert seen_repo_urls == [_FRAMEWORK_TO_REPO_URL[framework]]
-    assert any(c.source == "primus_cortex" for c in out)
+    assert any(c.source == "pr_monitor" for c in out)
 
 
-def test_dispatch_primus_missing_config_raises() -> None:
-    """search_modes=['primus_cortex'] without config raises SourceConfigError."""
+def test_dispatch_pr_monitor_missing_remote_config_raises(monkeypatch) -> None:
+    """Remote Recipe mode does not synthesize a missing KB Service URL."""
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
     )
-    with pytest.raises(src.SourceConfigError, match="primus_cortex"):
+    with pytest.raises(src.SourceConfigError, match="pr_monitor"):
         src.enumerate_candidates(req)
 
 
-def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
+def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
     """Both backends contribute; duplicates de-duped by ref."""
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex", "github"],
+        search_modes=["pr_monitor", "github"],
         max_search_candidates=3,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         candidate_refs=["main"],
     )
 
-    def fake_primus(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
+    def fake_pr_monitor(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
@@ -166,19 +168,19 @@ def test_dispatch_unions_primus_and_github(monkeypatch) -> None:
             GitHubPr(number=3, title="c", html_url="u3"),
         ]
 
-    monkeypatch.setattr(src, "list_perf_prs", fake_primus)
+    monkeypatch.setattr(src, "list_perf_prs", fake_pr_monitor)
     monkeypatch.setattr(src.github_backend, "search_perf_prs", fake_github)
 
     out = src.enumerate_candidates(req)
     refs = [c.ref for c in out]
-    # explicit first, then primus, then github (dedup keeps first occurrence)
+    # explicit first, then pr_monitor, then github (dedup keeps first occurrence)
     assert refs == ["main", "PR:1", "PR:2", "PR:3"]
     by_ref = {c.ref: c.source for c in out}
-    assert by_ref["PR:2"] == "primus_cortex"
+    assert by_ref["PR:2"] == "pr_monitor"
     assert by_ref["PR:3"] == "github"
 
 
-def test_primus_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
+def test_pr_monitor_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
     """When gap_description yields keywords, dispatcher uses /v1/search/prs."""
     captured: dict[str, object] = {}
 
@@ -196,14 +198,14 @@ def test_primus_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
         captured["called"] = "list"
         return []
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=2,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve sglang fp8 MoE on MI300X",
     )
     out = src.enumerate_candidates(req)
@@ -217,7 +219,7 @@ def test_primus_uses_search_endpoint_when_gap_present(monkeypatch) -> None:
     assert len(refs) == 2
 
 
-def test_primus_falls_back_to_list_when_search_returns_empty(monkeypatch) -> None:
+def test_pr_monitor_falls_back_to_list_when_search_returns_empty(monkeypatch) -> None:
     """When /v1/search/prs returns 0 candidates, fall back to list_perf_prs + client-side rerank rather than failing the run."""
     calls: list[str] = []
 
@@ -232,14 +234,14 @@ def test_primus_falls_back_to_list_when_search_returns_empty(monkeypatch) -> Non
             GitHubPr(number=41, title="fp8 MoE quant", html_url="u41"),
         ]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=1,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve sglang fp8 MoE on MI300X throughput",
     )
     out = src.enumerate_candidates(req)
@@ -248,12 +250,12 @@ def test_primus_falls_back_to_list_when_search_returns_empty(monkeypatch) -> Non
     assert refs == ["PR:41"], "rerank picks the fp8/MoE PR over the NPU one"
 
 
-def test_primus_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
-    """If the search endpoint raises PrimusCortexError, fall back to list_perf_prs."""
+def test_pr_monitor_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
+    """If the search endpoint raises PRMonitorError, fall back to list_perf_prs."""
     captured: dict[str, object] = {}
 
     def fake_search(*_a, **_kw):
-        raise src.PrimusCortexError("404 Not Found at /v1/search/prs")
+        raise src.PRMonitorError("404 Not Found at /v1/search/prs")
 
     def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         captured["called"] = "list"
@@ -263,14 +265,14 @@ def test_primus_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
             GitHubPr(number=21, title="fp8 MoE quant", html_url="u21"),
         ]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=2,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve sglang fp8 MoE on MI300X",
     )
     out = src.enumerate_candidates(req)
@@ -281,7 +283,7 @@ def test_primus_falls_back_to_list_when_search_unavailable(monkeypatch) -> None:
     assert refs[0] == "PR:21"
 
 
-def test_primus_no_gap_uses_label_only_path(monkeypatch) -> None:
+def test_pr_monitor_no_gap_uses_label_only_path(monkeypatch) -> None:
     """When gap_description is empty, dispatcher uses the cheap label-only listing."""
     captured: dict[str, object] = {}
 
@@ -296,14 +298,14 @@ def test_primus_no_gap_uses_label_only_path(monkeypatch) -> None:
             GitHubPr(number=30, title="generic PR", html_url="u30"),
         ]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=1,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         # gap_description omitted (defaults to empty)
     )
     out = src.enumerate_candidates(req)
@@ -355,8 +357,8 @@ def test_resolve_keywords_lowercases_explicit() -> None:
     assert src._resolve_keywords(req) == ["mi300x", "fp8"]
 
 
-def test_primus_uses_explicit_keywords(monkeypatch) -> None:
-    """End-to-end: --framework-keywords sent as Primus query verbatim, bypassing the gap_description auto-extract."""
+def test_pr_monitor_uses_explicit_keywords(monkeypatch) -> None:
+    """End-to-end: --framework-keywords sent as PR Monitor query verbatim, bypassing the gap_description auto-extract."""
     captured: dict[str, object] = {}
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
@@ -367,14 +369,14 @@ def test_primus_uses_explicit_keywords(monkeypatch) -> None:
         captured["list_called"] = True
         return []
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=1,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve sglang fp8 MoE",  # auto would be 'fp8 moe sglang'
         keywords=["mi300x"],  # but explicit wins
     )
@@ -411,14 +413,14 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
             ),
         ]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=2,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve sglang bf16 dense throughput on mi300x",
     )
     out = src.enumerate_candidates(req)
@@ -430,8 +432,8 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
     assert "PR:25769" in refs
 
 
-def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
-    """The dispatcher transports the rerank score on every primus_cortex Candidate; order is score-descending, stable on ties."""
+def test_candidate_score_field_populated_for_pr_monitor_path(monkeypatch) -> None:
+    """The dispatcher transports the rerank score on every pr_monitor Candidate; order is score-descending, stable on ties."""
 
     def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):  # noqa: ARG001
         return [
@@ -440,14 +442,14 @@ def test_candidate_score_field_populated_for_primus_path(monkeypatch) -> None:
             GitHubPr(number=12, title="random doc edit", html_url="u12"),
         ]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=3,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve sglang bf16 dense throughput on mi300x",
     )
     out = src.enumerate_candidates(req)
@@ -470,14 +472,14 @@ def test_candidate_score_defaults_to_zero_for_label_only_path(monkeypatch) -> No
     def fake_list(repo_url, *, base_url, limit, label=None, timeout_sec, state=None):  # noqa: ARG001
         return [GitHubPr(number=30, title="generic PR", html_url="u30")]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", fake_list)
 
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=1,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         # gap_description omitted; keywords too
     )
     out = src.enumerate_candidates(req)
@@ -496,15 +498,15 @@ def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) 
             GitHubPr(number=12, title="random doc edit", html_url="u12"),
         ]
 
-    monkeypatch.setattr(src, "search_perf_prs_via_primus_search", fake_search)
+    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
     monkeypatch.setattr(src, "list_perf_prs", lambda *a, **kw: [])
 
     # Gap with NO anti-trigger; extract_keywords -> ['attention', 'fp8'].
     req = _minimal_request(
         search_perf_prs=True,
-        search_modes=["primus_cortex"],
+        search_modes=["pr_monitor"],
         max_search_candidates=3,
-        primus_cortex={"base_url": "http://x"},
+        pr_monitor={"base_url": "http://x"},
         gap_description="improve fp8 attention",
     )
     out = src.enumerate_candidates(req)

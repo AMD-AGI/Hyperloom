@@ -434,8 +434,9 @@ def _bootstrap_knowledge_plane(
     Fail-soft; --degraded-pr yields a disabled PRMonitorClient.
 
     Args:
-        args: Parsed CLI arguments (``pr_monitor_enabled``,
-            ``pr_monitor_mcp_url``, ``pr_degraded_reason``).
+        args: Parsed CLI arguments carrying ``pr_monitor_enabled`` and
+            ``pr_degraded_reason``. The endpoint is derived from
+            ``KB_STORE_URL``.
         recipe_kb_client: Optional recipe KB client; unused (KB reads go via RecipeKB).
         session_dir: Optional session directory; when set a status marker is
             written for breakdown warnings.
@@ -444,13 +445,11 @@ def _bootstrap_knowledge_plane(
         KnowledgePlane: The wired KnowledgePlane facade.
     """
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-    from hyperloom.orchestrator.knowledge.pr_monitor import (
-        DEFAULT_PR_MONITOR_MCP_URL,
-        PRMonitorClient,
-    )
+    from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
+    from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    pr_mcp_url = (getattr(args, "pr_monitor_mcp_url", None) or "").strip() or DEFAULT_PR_MONITOR_MCP_URL
+    pr_mcp_url = pr_monitor_mcp_url() if pr_enabled else ""
 
     pr_client = PRMonitorClient.from_args(enabled=pr_enabled)
     if not pr_enabled:

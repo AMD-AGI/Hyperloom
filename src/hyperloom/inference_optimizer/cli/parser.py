@@ -125,22 +125,6 @@ class RedactingArgumentParser(argparse.ArgumentParser):
         super().error(message)
 
 
-def _default_pr_monitor_mcp_url() -> str | None:
-    """Derive the PR Monitor MCP URL from ``$PRIMUS_CORTEX_PR_API``.
-
-    Appends ``/mcp/`` so the one env var that already defaults
-    ``--pr-monitor-url`` also configures the specialist PR-Monitor MCP server,
-    instead of silently leaving the MCP half disabled. The trailing
-    slash is kept because the bare ``/mcp`` form answers 307 and MCP clients do
-    not re-POST across the redirect.
-
-    Returns:
-        The derived URL, or ``None`` when the env var is unset.
-    """
-    base = (os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip().rstrip("/")
-    return f"{base}/mcp/" if base else None
-
-
 def _positive_int_arg(value: str) -> int:
     """argparse type for positive integer knobs."""
     try:
@@ -987,27 +971,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "``status=drift`` and continue with the regular optimisation "
         "flow without inheriting the warm config.",
     )
-    # PR Monitor REST + MCP.
-    opt.add_argument(
-        "--pr-monitor-url",
-        dest="pr_monitor_url",
-        type=str,
-        default=(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip() or None,
-        help="PR Monitor REST URL for this run (flag wins). Default: "
-        "$PRIMUS_CORTEX_PR_API, else unset. Set this flag or env var to a "
-        "reachable primus_cortex HTTPS endpoint. Pair with "
-        "--pr-monitor-mcp-url when exposing the corresponding MCP server.",
-    )
-    opt.add_argument(
-        "--pr-monitor-mcp-url",
-        dest="pr_monitor_mcp_url",
-        type=str,
-        default=_default_pr_monitor_mcp_url(),
-        help="PR Monitor MCP URL handed to specialist LLM backends (flag "
-        "wins). Default: $PRIMUS_CORTEX_PR_API + '/mcp/', else unset, which "
-        "disables PR Monitor MCP tools. The trailing slash is mandatory when "
-        "configured.",
-    )
+    # PR Monitor REST + MCP are co-hosted by KB Store and derived from
+    # $KB_STORE_URL. There are deliberately no independent endpoint flags.
     opt.add_argument(
         "--degraded-pr",
         dest="degraded_pr",

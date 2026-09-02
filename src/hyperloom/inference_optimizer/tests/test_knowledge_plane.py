@@ -21,6 +21,12 @@ def test_plane_disabled_pr_returns_empty_mcp_url():
     )
     assert plane.pr_monitor_enabled is False
     assert plane.specialist_mcp_url() == ""
+    assert plane.config is not None and plane.config.pr_monitor_enabled is False
+    child_env: dict[str, str] = {}
+    assert plane.kernel_experience is not None
+    plane.kernel_experience.configure_child_env(child_env)
+    assert child_env["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
+    assert "KB_STORE_URL" not in child_env
 
 
 def test_plane_enabled_pr_returns_mcp_url():
@@ -66,8 +72,6 @@ def _make_bare_shared_state():
 def _build_args(**overrides) -> argparse.Namespace:
     base = dict(
         pr_monitor_enabled=True,
-        pr_monitor_url=None,
-        pr_monitor_mcp_url=None,
         pr_degraded_reason=None,
         kb_degraded_reason=None,
     )
@@ -117,13 +121,11 @@ def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
     return parser.parse_args(["optimize", "--degraded-kb", *extra])
 
 
-def test_cli_pr_monitor_flags_have_expected_dest_and_defaults():
-    """PR-monitor flags land under the dest names the bootstrap reads."""
+def test_cli_pr_monitor_controls_have_expected_defaults():
     args = _parse_optimize_args([])
-    # dest is ``degraded_pr`` (store_true, default False).
     assert args.degraded_pr is False
-    assert args.pr_monitor_url is None
-    assert args.pr_monitor_mcp_url is None
+    assert not hasattr(args, "pr_monitor_url")
+    assert not hasattr(args, "pr_monitor_mcp_url")
     assert isinstance(args.pr_feed_window_days, int)
     assert args.pr_feed_window_days > 0
 
@@ -133,46 +135,10 @@ def test_cli_degraded_pr_sets_flag_true():
     assert args.degraded_pr is True
 
 
-def test_cli_pr_monitor_url_override_reaches_namespace():
-    args = _parse_optimize_args(
-        [
-            "--pr-monitor-url",
-            "https://localhost:8080/v1",
-        ]
-    )
-    assert args.pr_monitor_url == "https://localhost:8080/v1"
-
-
-def test_cli_pr_monitor_mcp_url_override_reaches_namespace():
-    args = _parse_optimize_args(
-        [
-            "--pr-monitor-mcp-url",
-            "https://localhost:8080/mcp/",
-        ]
-    )
-    assert args.pr_monitor_mcp_url == "https://localhost:8080/mcp/"
-
-
-def test_cli_pr_monitor_url_defaults_to_primus_cortex_pr_api_env(monkeypatch):
-    """--pr-monitor-url default resolves from the canonical $PRIMUS_CORTEX_PR_API env."""
-    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://global.example/pr-monitor")
-    monkeypatch.delenv("PR_MONITOR_URL", raising=False)
-    args = _parse_optimize_args([])
-    assert args.pr_monitor_url == "https://global.example/pr-monitor"
-
-
-def test_cli_pr_monitor_url_ignores_legacy_pr_monitor_url_env(monkeypatch):
-    """The removed legacy $PR_MONITOR_URL env no longer feeds --pr-monitor-url."""
-    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
-    monkeypatch.setenv("PR_MONITOR_URL", "https://legacy.example/pr-monitor/v1")
-    args = _parse_optimize_args([])
-    assert args.pr_monitor_url is None
-
-
-def test_cli_pr_monitor_url_flag_wins_over_primus_cortex_pr_api_env(monkeypatch):
-    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://env.example/pr-monitor")
-    args = _parse_optimize_args(["--pr-monitor-url", "https://flag.example/pr-monitor"])
-    assert args.pr_monitor_url == "https://flag.example/pr-monitor"
+@pytest.mark.parametrize("flag", ["--pr-monitor-url", "--pr-monitor-mcp-url"])
+def test_removed_independent_pr_endpoint_flags_are_rejected(flag: str):
+    with pytest.raises(SystemExit):
+        _parse_optimize_args([flag, "https://legacy.example/pr-monitor"])
 
 
 def test_cli_pr_feed_window_days_override_reaches_namespace():
@@ -206,22 +172,13 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
         "from_args",
         classmethod(lambda cls, **kw: _Stub(enabled=kw.get("enabled", True))),
     )
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
 
-    args = _parse_optimize_args(
-        [
-            "--pr-monitor-url",
-            "https://my-pr-monitor.example/v1",
-            "--pr-monitor-mcp-url",
-            "https://my-pr-monitor.example/mcp/",
-            "--pr-feed-window-days",
-            "14",
-        ]
-    )
+    args = _parse_optimize_args(["--pr-feed-window-days", "14"])
     plane = _bootstrap_knowledge_plane(
         args,
         recipe_kb_client=None,
         session_dir=tmp_path,
     )
     assert constructed_enabled[-1] is True
-    # The plane does not store pr_feed_window_days; only the MCP URL round-trips.
-    assert plane.pr_monitor_mcp_url == "https://my-pr-monitor.example/mcp/"
+    assert plane.pr_monitor_mcp_url == "https://kb.example/knowledge-base/pr-monitor/mcp/"

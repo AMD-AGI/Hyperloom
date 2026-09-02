@@ -37,7 +37,7 @@ from .logging_setup import get_logger, stage_log
 from .models import Candidate, CandidateResult, ExploreRequest, Finding, PrFilter
 from hyperloom.common.coerce import first_float as _first_float
 from .shell import render_template, run_command
-from .sources import primus_cortex
+from .sources import pr_monitor
 from .sources._shared import _repo_slug
 
 
@@ -63,7 +63,7 @@ def _coalesce_str(*values: Any) -> str:
 def _summary_of(detail: dict[str, Any]) -> dict[str, Any]:
     """Return the nested ``summary`` mapping from a PR detail payload.
 
-    primus_cortex wraps PR metadata under a ``summary`` key; this defaults
+    pr_monitor wraps PR metadata under a ``summary`` key; this defaults
     to ``{}`` when it is absent or not a dict.
 
     Args:
@@ -230,14 +230,14 @@ def _extract_changed_files(detail: dict[str, Any], files_payload: list[dict[str,
     return tuple(out)
 
 
-def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> Candidate:
-    """Enrich a PR-typed candidate with metadata from Primus Cortex.
+def _enrich_candidate_via_pr_monitor(req: ExploreRequest, candidate: Candidate) -> Candidate:
+    """Enrich a PR-typed candidate with metadata from PR Monitor.
 
     Fetches ``pr_get`` + ``pr_files`` for PR candidates; branch / tag /
     commit refs are returned unchanged.
 
     Args:
-        req: The explore request carrying the Primus Cortex config.
+        req: The explore request carrying the PR Monitor config.
         candidate: The candidate to enrich.
 
     Returns:
@@ -245,10 +245,10 @@ def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> C
         apply.
 
     Raises:
-        primus_cortex.PrimusCortexError: If the repo URL is malformed or a
-            required Primus call fails.
+        pr_monitor.PRMonitorError: If the repo URL is malformed or a
+            required PR Monitor call fails.
     """
-    if req.primus_cortex is None:
+    if req.pr_monitor is None:
         return candidate
     number = candidate.pr_number
     if number is None:
@@ -256,15 +256,13 @@ def _enrich_candidate_via_primus(req: ExploreRequest, candidate: Candidate) -> C
     try:
         repo_slug = _repo_slug(req.repo_url)
     except ValueError as exc:
-        raise primus_cortex.PrimusCortexError(
-            f"cannot enrich {candidate.ref}: bad repo_url={req.repo_url!r}: {exc}"
-        ) from exc
-    base_url = req.primus_cortex.base_url
-    timeout_sec = req.primus_cortex.timeout_sec
-    detail = primus_cortex.pr_get(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
+        raise pr_monitor.PRMonitorError(f"cannot enrich {candidate.ref}: bad repo_url={req.repo_url!r}: {exc}") from exc
+    base_url = req.pr_monitor.base_url
+    timeout_sec = req.pr_monitor.timeout_sec
+    detail = pr_monitor.pr_get(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     try:
-        files_payload = primus_cortex.pr_files(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
-    except primus_cortex.PrimusCortexError:
+        files_payload = pr_monitor.pr_files(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
+    except pr_monitor.PRMonitorError:
         files_payload = []
     return replace(
         candidate,
@@ -319,7 +317,7 @@ def _passes_filter(c: Candidate, f: PrFilter) -> tuple[bool, str]:
 
     if f.include_paths or f.exclude_paths or f.max_changed_files or f.min_changed_files:
         if not c.changed_files:
-            return False, "no changed_files metadata (primus enrichment likely skipped)"
+            return False, "no changed_files metadata (pr_monitor enrichment likely skipped)"
 
     if f.exclude_paths:
         for path in c.changed_files:
@@ -352,7 +350,7 @@ def _enumerate_with_skipped(
 ) -> tuple[list[Candidate], list[dict[str, str]]]:
     """Enumerate, enrich, and filter candidates.
 
-    Unions the configured sources, enriches PR candidates via Primus, then
+    Unions the configured sources, enriches PR candidates via PR Monitor, then
     applies ``req.pr_filter``. Explicit candidates bypass the filter
     (operator intent wins) but are still enriched.
 
@@ -369,7 +367,7 @@ def _enumerate_with_skipped(
     kept: list[Candidate] = []
     skipped: list[dict[str, str]] = []
     for cand in raw:
-        cand = _enrich_candidate_via_primus(req, cand)
+        cand = _enrich_candidate_via_pr_monitor(req, cand)
         if cand.source == "explicit":
             kept.append(cand)
             continue
@@ -472,23 +470,23 @@ def _prepare_candidate_workspace_with_artifacts(
 def _write_pr_artifacts(req: ExploreRequest, candidate: Candidate, candidate_dir: Path) -> dict[str, str]:
     """Write ``pr.patches`` + ``pr_files.json`` for a PR candidate.
 
-    No-op when Primus Cortex is unconfigured or the candidate is not a PR
+    No-op when PR Monitor is unconfigured or the candidate is not a PR
     ref; hard-fails on network errors (the CLI converts these to exit
     code 2).
 
     Args:
-        req: The explore request carrying the Primus config and repo URL.
+        req: The explore request carrying the PR Monitor config and repo URL.
         candidate: The candidate whose artifacts to write.
         candidate_dir: Directory to write the artifacts into.
 
     Returns:
         A mapping of artifact names to written file paths (empty when the
-        candidate is not a PR or Primus is unconfigured).
+        candidate is not a PR or PR Monitor is unconfigured).
 
     Raises:
-        primus_cortex.PrimusCortexError: If the repo URL is malformed.
+        pr_monitor.PRMonitorError: If the repo URL is malformed.
     """
-    if req.primus_cortex is None:
+    if req.pr_monitor is None:
         return {}
     number = candidate.pr_number
     if number is None:
@@ -496,17 +494,17 @@ def _write_pr_artifacts(req: ExploreRequest, candidate: Candidate, candidate_dir
     try:
         repo_slug = _repo_slug(req.repo_url)
     except ValueError as exc:
-        raise primus_cortex.PrimusCortexError(
+        raise pr_monitor.PRMonitorError(
             f"cannot drop PR artifacts for {candidate.ref}: bad repo_url={req.repo_url!r}: {exc}"
         ) from exc
-    base_url = req.primus_cortex.base_url
-    timeout_sec = req.primus_cortex.timeout_sec
+    base_url = req.pr_monitor.base_url
+    timeout_sec = req.pr_monitor.timeout_sec
 
-    patches_text = primus_cortex.pr_patches(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
+    patches_text = pr_monitor.pr_patches(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     patches_path = candidate_dir / "pr.patches"
     patches_path.write_text(patches_text, encoding="utf-8")
 
-    files_payload = primus_cortex.pr_files(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
+    files_payload = pr_monitor.pr_files(repo_slug, number, base_url=base_url, timeout_sec=timeout_sec)
     files_json_path = candidate_dir / "pr_files.json"
     files_json_path.write_text(
         json.dumps(

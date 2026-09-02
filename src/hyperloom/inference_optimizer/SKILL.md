@@ -336,6 +336,11 @@ Any failure → treat as fresh launch and re-run `install.sh`.
 
 ### IR-3 — PR Monitor reachability (in-loop, soft degrade)
 
+The PR Monitor endpoint is co-hosted by KB Store. Hyperloom derives
+`${KB_STORE_URL}/pr-monitor/v1/healthz` for this probe and
+`${KB_STORE_URL}/pr-monitor/mcp/` for specialist tools; there are no separate
+PR endpoint flags or Cortex endpoint variable.
+
 `_preflight()` invokes:
 
 ```

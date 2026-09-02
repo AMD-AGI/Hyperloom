@@ -35,6 +35,7 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
+from hyperloom.common.pr_monitor_urls import kb_store_url
 from hyperloom.common.provenance import (
     RESOLVED_FRAMEWORK_ENV,
     RESOLVED_FRAMEWORK_PYTHON_ENV,
@@ -3059,11 +3060,13 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     marker_path = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    env.pop("PR_MONITOR_URL", None)
-    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
-    if pr_url:
-        probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
-        env["PR_MONITOR_URL"] = probe_base
+    resolved_kb_store_url = kb_store_url(env=env)
+    if resolved_kb_store_url:
+        # Local mode may derive the default without exporting KB_STORE_URL.
+        # Pass the effective value to IR-3 so an unreachable default disables
+        # PR Monitor instead of being mistaken for an intentionally skipped
+        # probe.
+        env["KB_STORE_URL"] = resolved_kb_store_url
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 

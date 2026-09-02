@@ -86,6 +86,39 @@ def _stub_enumerate(monkeypatch, cands):
     monkeypatch.setattr(src, "enumerate_candidates", _fake_enum)
 
 
+@pytest.mark.parametrize(
+    ("enabled", "expected_modes"),
+    [
+        (True, ("pr_monitor", "github")),
+        (False, ("github",)),
+    ],
+)
+def test_enablement_discovery_honors_pr_monitor_gate(
+    monkeypatch,
+    enabled,
+    expected_modes,
+):
+    import hyperloom.agents.framework.sources as sources
+
+    seen = []
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
+    monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
+    fake = _fake_self()
+    fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
+    request = types.SimpleNamespace(
+        max_search_candidates=5,
+        framework="sglang",
+        work_dir="/tmp/enablement",
+    )
+    plan = types.SimpleNamespace(
+        repos=("https://github.com/sgl-project/sglang.git",),
+        keywords=("scheduler",),
+    )
+
+    assert Coordinator._discover_enablement_candidate_refs(fake, request, plan) == ()
+    assert seen[0].search_modes == expected_modes
+
+
 def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
