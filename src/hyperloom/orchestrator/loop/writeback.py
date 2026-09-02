@@ -46,6 +46,8 @@ from ..state.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
+from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -1176,6 +1178,28 @@ class WritebackCollaborator:
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
+            elif err_class == AGENTX_PREFLIGHT_ERROR_CLASS:
+                # AgentX declares aiperf for itself, this repository owns its
+                # install, and the runtime already tried it (agentx.repair) --
+                # so reaching here means the environment cannot supply a
+                # dependency no amount of authoring can invent. Stop on the
+                # FIRST occurrence and name the fix.
+                #
+                # Measured: routed as an ordinary launch failure, this opened an
+                # enablement round instead. The specialist could not tell a
+                # supply gap from a framework bug, re-derived the install from
+                # scratch, had its commands rejected by the setup allowlist, and
+                # the PolicyGate's enablement_round_in_flight rule then blocked
+                # the baseline for the rest of the run -- 24h of budget spent
+                # retrying a problem one operator action fixes.
+                log.error(
+                    "baseline %s failed the AgentX preflight and the automatic install did not "
+                    "resolve it; stopping the run. This is an environment gap, not something a "
+                    "framework patch can close: %s",
+                    task.task_id,
+                    result_payload.get("error") or err_class,
+                )
+                self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
@@ -1205,8 +1229,11 @@ class WritebackCollaborator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump (fast arg errors excluded).
-            if err_class != "fast_exit_arg_error":
+            # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
+            # fast arg errors, and an AgentX preflight abort -- the pump treats a
+            # non-blank log as "there is something here to author against", and
+            # for a missing pinned dependency there is not.
+            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS):
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
                     self.shared_state.enablement.launch_log = launch_log

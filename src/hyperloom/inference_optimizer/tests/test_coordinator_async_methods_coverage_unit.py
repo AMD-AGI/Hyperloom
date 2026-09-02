@@ -271,6 +271,50 @@ async def test_unpromotable_baseline_fast_arg_errors_stop_after_two(
 
 
 @pytest.mark.asyncio
+async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
+    coord: Coordinator,
+) -> None:
+    """A missing AgentX client is a supply gap, not a code gap.
+
+    AgentX declares aiperf for itself, this repository owns its install, and the
+    runtime already tried it. Reaching the writeback means the environment
+    cannot supply it -- nothing downstream can author its way out of that.
+
+    Measured: filed as an ordinary launch failure, this opened an enablement
+    round. The specialist could not tell a supply gap from a framework bug,
+    re-derived the install from scratch, had its commands rejected by the setup
+    allowlist, and PolicyGate's enablement_round_in_flight then blocked the
+    baseline for the rest of the run. Stop on the first occurrence instead.
+    """
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+    )
+    from hyperloom.orchestrator.phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
+
+    task = Task(
+        task_id="baseline-agentx-preflight",
+        kind="baseline",
+        state="running",
+        params={"config_path": "baseline.yaml"},
+        idempotency_key="baseline-agentx-preflight",
+    )
+    result = {
+        "status": "failed",
+        "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
+        "error": "AgentX preflight failed: HYPERLOOM_AGENTX is on but aiperf was not found.",
+    }
+
+    await coord._handle_unpromotable_result(task, result)
+
+    assert coord.shared_state.stop_reason == AGENTX_PREFLIGHT_STOP_REASON
+    # No launch log is stashed: the FRAMEWORK pump reads a non-blank log as
+    # "there is something here to author against", and there is not.
+    assert not (coord.shared_state.enablement.launch_log or "").strip()
+    # The slow-baseline retry budget is untouched -- retrying cannot help.
+    assert coord.shared_state.baseline_failure_streak == 0
+
+
+@pytest.mark.asyncio
 async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
     coord: Coordinator,
 ) -> None:

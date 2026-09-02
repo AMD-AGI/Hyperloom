@@ -32,6 +32,7 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
+from ...phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ...state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import db_path_for
 
@@ -426,6 +427,14 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
     "enablement_stalled": "The enablement loop made no forward progress for several consecutive rounds and stopped instead of re-deriving the same fix.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
+    AGENTX_PREFLIGHT_STOP_REASON: (
+        "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "
+        "AIPERF_REF build, and the automatic install did not resolve it. This is an environment gap, "
+        "not something a framework patch can close, so the run stopped on the first occurrence rather "
+        "than spending its budget in the enablement lane. Fix: run "
+        "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
+        "the real cause), or point AIPERF_BIN at an existing pinned build."
+    ),
 }
 
 

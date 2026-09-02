@@ -240,6 +240,13 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
 )
 
 
+#: Named rather than inlined below because the writeback gate that sets it lives
+#: in another module, and the vocabulary is closed -- PolicyGate rejects any
+#: stop_reason outside it, so a typo on either side would silently degrade into
+#: "the run did not stop" rather than into an error anyone sees.
+AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
+
+
 # stop_reason vocab
 STOP_REASON_VOCAB: frozenset[str] = frozenset(
     {
@@ -296,6 +303,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # run halts. Post-baseline accuracy failures REVERT the offending
         # change instead of stopping.
         "baseline_accuracy_failed",
+        # AgentX is on but its benchmark client (aiperf) is missing or is not
+        # the pinned build, and the runtime install could not supply it. An
+        # environment/supply gap, not a code gap: nothing downstream can author
+        # its way out of it, so the run halts on the FIRST occurrence instead of
+        # spending the budget in the enablement lane.
+        AGENTX_PREFLIGHT_STOP_REASON,
     }
 )
 
