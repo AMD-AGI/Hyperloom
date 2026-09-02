@@ -24,6 +24,7 @@ the ``return`` at the end of ``__call__`` for the authoritative field set.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import os
@@ -63,6 +64,7 @@ from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
+    _kill_stale_servers,
     _num_gpus_for_config,
     _resolve_session_dir,
     apply_aiter_moe_pin_filter,
@@ -674,9 +676,16 @@ class ExploreExecutor:
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task.
 
-        Resolves the benchmark config and output workspace, builds the
-        candidate grid (programmatic seed and/or LLM/specialist variants),
-        and benchmarks each variant with per-variant KEEP/REVERT gating.
+        Thin wrapper around :meth:`_run_explore` that guarantees a
+        post-round GPU sweep regardless of how the task ends (success,
+        failure, or an early ``return``): every variant this task started is
+        expected to be torn down by its own per-variant finally by the time
+        this returns, but a magpie_timeout that fires before a
+        server_lifecycle variant's pidfile is ever written leaves nothing
+        for that pidfile-based teardown to find, orphaning its server
+        (AMD-AGI/Hyperloom#1354). Skipped under pytest (unsafe there),
+        matching the guard on the per-launch preclean in ``_grid_runner.py``.
+        Best-effort; never raises.
 
         Args:
             ctx: The action runner context carrying the task and params.
@@ -686,6 +695,20 @@ class ExploreExecutor:
             accepted/rejected variants and ledger updates), or a failure
             dict on error.
         """
+        try:
+            return await self._run_explore(ctx)
+        finally:
+            if not os.environ.get("PYTEST_CURRENT_TEST"):
+                try:
+                    await asyncio.to_thread(_kill_stale_servers)
+                except Exception:  # noqa: BLE001 - best-effort safety net
+                    log.warning(
+                        "explore: post-run _kill_stale_servers failed",
+                        exc_info=True,
+                    )
+
+    async def _run_explore(self, ctx) -> dict[str, Any]:
+        """Run body for :meth:`__call__`; see its docstring for the wrapper."""
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())

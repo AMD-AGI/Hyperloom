@@ -405,7 +405,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `/proc` scan already used elsewhere: Hyperloom's own scheduling
   (`gpu_research_lane`, capacity 1) guarantees at most one server-holding
   task runs at a time, so nothing matching should be alive at this point
-  regardless of port health. (AMD-AGI/Hyperloom#1354)
+  regardless of port health. `conc_sweep` and `explore` -- the two actions
+  whose timed-out rounds most often leave one of these orphans -- now also
+  reap any lingering server once they themselves finish, shrinking the
+  window an orphan can sit on the GPU before the next baseline attempt.
+  (AMD-AGI/Hyperloom#1354)
 - **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
   derived its demand file only when the serving log carried dense tuned-config
   misses, so a MoE-only model -- or one whose dense tables all hit while
