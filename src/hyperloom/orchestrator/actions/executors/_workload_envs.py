@@ -30,6 +30,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import env_int
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -886,7 +887,9 @@ def materialize_config_with_envs(
     ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
     ``benchmark.inferencex_path`` for one task (falling back to
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
-    into the framework env; ``extra_envs`` overrides any of the above.
+    into the framework env; ``--extra-env`` is copied into ``benchmark.envs``
+    so Magpie forwards it to vLLM/sglang workers; ``extra_envs`` overrides any
+    of the above.
     The session's ``--reference-script`` recipe is read from SharedState here
     rather than passed in, so it seeds a lowest-priority base (below the YAML
     base and ``extra_server_args``) for every caller.
@@ -1208,12 +1211,19 @@ def materialize_config_with_envs(
         _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
         if _ovr.isdigit() and int(_ovr) > 0:
             max_iters = int(_ovr)
-            try:
-                delay_iters = int(os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "8") or "8")
-            except (TypeError, ValueError):
-                delay_iters = 8
-            if delay_iters < 0:
-                delay_iters = 0
+            # Raising the capture bound must not revive the delay the AgentX
+            # branch above zeroed; the two knobs are documented together.
+            if agentx_enabled():
+                _delay_ovr = os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "").strip()
+                if _delay_ovr:
+                    log.warning(
+                        "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
+                        "profiling window is wall-clock, so an iteration delay never elapses "
+                        "inside it and the trace comes back empty",
+                        _delay_ovr,
+                    )
+            else:
+                delay_iters = max(0, env_int("HYPERLOOM_PROFILE_DELAY_ITERS", 8))
             # The AgentX clamp above is a HOST RAM bound, and this override
             # silently undoes it. Neither check below stands in for saying so:
             # ``cap`` defaults to _DEFAULT_PROFILE_MAX_STEPS, so the obvious
@@ -1446,8 +1456,13 @@ def materialize_config_with_envs(
             envs[framework_env] = merge_server_args(existing, server_args)
         elif not replace_args:
             envs[framework_env] = server_args
+    # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
+    # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
+    combined_extra: dict[str, Any] = dict(_operator_extra_env())
+    if extra_envs:
+        combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
-        extra_envs,
+        combined_extra,
         allow_predicate=is_allowed_variant_env_key,
     )
     for _dk in dropped_extra_envs:

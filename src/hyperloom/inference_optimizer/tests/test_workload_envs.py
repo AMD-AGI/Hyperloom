@@ -414,6 +414,38 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
     assert "NUM_PROMPTS" in bench["envs"]
 
 
+def test_the_iters_override_keeps_the_delay_an_agentx_run_needs_at_zero(monkeypatch, tmp_path):
+    """Raising the capture bound must not reintroduce an iteration delay.
+
+    AgentX brackets a wall-clock profiling window, so a delay counted in decode
+    iterations is never reached inside it and the trace comes back empty. Both
+    knobs are documented together, so the override path is exactly where an
+    operator reintroduces the delay the AgentX branch just zeroed.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    args = str(bench["envs"]["EXTRA_VLLM_ARGS"])
+    assert "--profiler-config.delay_iterations 0" in args
+    assert "--profiler-config.max_iterations 128" in args
+
+
+def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    args = str(bench["envs"]["EXTRA_VLLM_ARGS"])
+    assert "--profiler-config.delay_iterations 64" in args
+
+
 def test_profile_atom_defers(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
