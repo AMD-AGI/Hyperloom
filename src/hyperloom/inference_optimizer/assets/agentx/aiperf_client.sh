@@ -42,6 +42,10 @@
 #     per-rank trace files to finish writing; default 1800. A 200 from
 #     /stop_profile only means the tracer was told to stop -- measured on
 #     GLM-5.3 TP=8, the 5.1 GB set was still being written 546s later),
+#   AGENTX_TRACE_FIRST_FILE_TIMEOUT_S (separate, shorter bound for the case
+#     where NO trace file appears at all -- a failed capture, not a slow one;
+#     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
+#     landed at t+350s on that same GLM-5.3 capture),
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WARMUP_S, AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
@@ -574,11 +578,27 @@ if [ "${PROFILE:-0}" = "1" ]; then
     printf '%s %s' "$_tc" "$_tb"
   }
   _wait_for_trace_flush() {
+    # Nothing was ever pointed at a directory, so there is nothing to flush.
+    # Without this the loop below can never reach its stable-sample condition
+    # (the count stays 0 forever) and burns the whole budget waiting for files
+    # that no profiler was configured to write.
+    if [ -z "$(_trace_dirs)" ]; then
+      log "no profiler output directory is configured; nothing to wait for"
+      return 0
+    fi
     _want="${TP:-0}"
     case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
     _budget="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
     case "$_budget" in "" | *[!0-9]*) _budget=1800 ;; esac
-    log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s)"
+    # A separate, much shorter bound for "no file has appeared at all". A
+    # capture that produced zero files is a failed capture (a rejected
+    # /start_profile, a profiler that never armed) -- waiting out the full
+    # flush budget for it buys nothing. The first rank file landed at t+350s on
+    # the GLM-5.3 8-rank measurement, so the default leaves real margin.
+    _first="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
+    case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
+    [ "$_first" -gt "$_budget" ] && _first="$_budget"
+    log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
     _t0=$(date +%s); _prev=""; _stable=0
     while :; do
       sleep 10
@@ -587,6 +607,10 @@ if [ "${PROFILE:-0}" = "1" ]; then
         _stable=$((_stable + 1))
       else
         _stable=0
+      fi
+      if [ "$_cnt" -eq 0 ] && [ "$_el" -ge "$_first" ]; then
+        log "WARN no trace file appeared within ${_first}s of stop_profile; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. Not treating this as a round failure -- the measurement itself is unaffected."
+        return 0
       fi
       # Three identical samples AND, when TP is known, one file per rank. The
       # count check matters: ranks appear one at a time, so a set that is merely

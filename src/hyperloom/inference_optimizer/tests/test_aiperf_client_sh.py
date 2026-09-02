@@ -1064,3 +1064,67 @@ def test_the_wait_is_skipped_when_not_profiling(tmp_path):
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "waiting for the profiler trace" not in (r.stdout + r.stderr)
+
+
+def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
+    """With no profiler output directory there is nothing that can ever settle.
+
+    The stability gate gates on a nonzero file count, so a run where neither
+    SGLANG_TORCH_PROFILER_DIR nor VLLM_TORCH_PROFILER_DIR is set and no
+    ``$RESULT_DIR/torch_trace`` exists can never satisfy it -- the loop would
+    spin out the entire flush budget waiting for files that no profiler was
+    configured to write. Return at once instead.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    assert not (res / "torch_trace").exists()
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="8")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "no profiler output directory is configured" in out, out[-1500:]
+    # Crucially, it must not have entered the polling loop at all: the default
+    # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
+    assert "waiting for the profiler trace" not in out
+
+
+def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):
+    """Zero files is a failed capture, not a slow one; bound it separately.
+
+    A rejected /start_profile or an unwritable output dir yields a directory
+    that stays empty forever. Waiting out the full flush budget (1800s by
+    default) buys nothing, and on a sweep it is paid once per profiled round.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    (res / "torch_trace").mkdir()  # exists, but nothing ever lands in it
+
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="8",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="600",
+        AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="15",
+    )
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "no trace file appeared within 15s" in out, out[-1500:]
+    # The shorter first-file bound must win over the flush budget, not the
+    # other way round.
+    assert "trace flush did not settle" not in out
+
+
+def test_the_first_file_bound_never_exceeds_the_flush_budget(tmp_path):
+    """An operator who lowers only the flush budget must still get that bound.
+
+    Otherwise the 900s first-file default would silently override a deliberately
+    short AGENTX_TRACE_FLUSH_TIMEOUT_S and the wait would outlast it.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    (res / "torch_trace").mkdir()
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="15")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "first-file bound 15s" in out, out[-1500:]
+    assert "no trace file appeared within 15s" in out
