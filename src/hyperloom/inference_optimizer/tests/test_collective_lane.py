@@ -363,11 +363,7 @@ def test_record_collective_integration_updates_last_collective_and_history(tmp_p
     assert state.last_collective["integration_decision"] == "KEEP"
     assert state.last_collective["integration_gain_pct"] == 12.5
 
-    history_entry = next(
-        item
-        for item in state.collective_attempts
-        if item["collective_attempt_id"] == "attempt-1"
-    )
+    history_entry = next(item for item in state.collective_attempts if item["collective_attempt_id"] == "attempt-1")
     assert history_entry["patch_cleanup_status"] == "complete"
     assert history_entry["integration_gain_pct"] == 12.5
 
@@ -480,8 +476,8 @@ def test_record_collective_integration_rejects_bad_attempt_history(tmp_path, mut
         )
 
 
-def test_record_collective_integration_rolls_back_when_save_fails(tmp_path, monkeypatch):
-    """A failed persist must restore in-memory collective state and leave state.json untouched."""
+def test_record_collective_integration_rolls_back_when_save_fails_with_legacy_field(tmp_path, monkeypatch):
+    """A failed persist using the legacy ``integration_status`` field must still restore state."""
     state = _seeded_collective_state(tmp_path)
     before_last = dict(state.last_collective)
     before_history = [dict(item) for item in state.collective_attempts]
