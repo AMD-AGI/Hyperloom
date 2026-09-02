@@ -581,7 +581,7 @@ def test_profile_enables_the_aiperf_progress_api(tmp_path):
     assert '"stop_reason":"wall_clock_limit"' in (r.stdout + r.stderr)
 
 
-def test_profile_phase_wait_covers_dataset_configuration_and_warmup(tmp_path):
+def test_profile_phase_wait_uses_outer_lifecycle_deadline(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     marker = tmp_path / "phase-gate-args.json"
     r = _run_profile(
@@ -595,7 +595,7 @@ def test_profile_phase_wait_covers_dataset_configuration_and_warmup(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     argv = json.loads(marker.read_text())
-    assert argv[argv.index("--timeout-seconds") + 1] == "3618"
+    assert argv[argv.index("--timeout-seconds") + 1] == "0"
 
 
 def test_legacy_profile_warmup_delay_is_ignored(tmp_path):

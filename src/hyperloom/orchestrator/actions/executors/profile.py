@@ -558,8 +558,10 @@ def _preferred_main_trace_path(
             return max(preferred, key=_trace_size_bytes)
 
         non_merged = [path for path in trace_files if not path.name.startswith("merged-")]
-        if tensor_parallel_size == 1 and len(non_merged) == 1:
+        if len(non_merged) == 1:
             return non_merged[0]
+        if tensor_parallel_size == 1 and non_merged:
+            return max(non_merged, key=_trace_size_bytes)
         if tensor_parallel_size == 1 and not non_merged:
             merged = [path for path in trace_files if path.name.startswith("merged-")]
             if len(merged) == 1:
@@ -1178,6 +1180,8 @@ class ProfileExecutor(BaselineExecutor):
                     int(task_started_unix),
                 )
         agentx_profile = agentx_profile or capture_status is not None
+        if agentx_profile:
+            result["measurement_status"] = str(result.get("status") or "")
         if agentx_profile and not round_trace_root and capture_status is None:
             capture_status = {
                 "status": "failed",
@@ -1186,10 +1190,20 @@ class ProfileExecutor(BaselineExecutor):
             result["trace_capture_status"] = "missing"
             result["trace_capture"] = capture_status
             log.error("profile_executor: AgentX profile produced no current-round agentx_profile_capture.json")
-        try:
-            tensor_parallel_size = int(os.environ.get("TP") or 0) or None
-        except (TypeError, ValueError):
-            tensor_parallel_size = None
+        tensor_parallel_size: int | None = None
+        for raw_tp in (
+            result.get("tp"),
+            params.get("tp"),
+            getattr(shared_state, "tp", None),
+            os.environ.get("TP"),
+        ):
+            try:
+                parsed_tp = int(raw_tp or 0)
+            except (TypeError, ValueError):
+                continue
+            if parsed_tp > 0:
+                tensor_parallel_size = parsed_tp
+                break
         if round_trace_root:
             # Multi-node: traces land at the shared wekafs base dir (not the
             # workspace-local ``_candidate_trace_dirs``). Mtime-gate to files
@@ -1227,8 +1241,11 @@ class ProfileExecutor(BaselineExecutor):
                         )
                         if main_trace is not None:
                             result["main_trace_path"] = str(main_trace)
-                            result["primary_rank"] = _trace_rank(main_trace)
-                            result["profile_trace_selection_reason"] = "primary_rank_trace"
+                            selected_rank = _trace_rank(main_trace)
+                            result["primary_rank"] = selected_rank
+                            result["profile_trace_selection_reason"] = (
+                                "primary_rank_trace" if selected_rank is not None else "single_trace_compatibility"
+                            )
                     else:
                         # The shared round dir can contain a small warmup
                         # capture beside the real GPU-rich trace.
@@ -1331,8 +1348,11 @@ class ProfileExecutor(BaselineExecutor):
                     )
                     if main_trace is not None:
                         if agentx_profile:
-                            result["primary_rank"] = _trace_rank(main_trace)
-                            result["profile_trace_selection_reason"] = "primary_rank_trace"
+                            selected_rank = _trace_rank(main_trace)
+                            result["primary_rank"] = selected_rank
+                            result["profile_trace_selection_reason"] = (
+                                "primary_rank_trace" if selected_rank is not None else "single_trace_compatibility"
+                            )
                         else:
                             result["profile_trace_selection_reason"] = (
                                 "merged_trace_preferred"

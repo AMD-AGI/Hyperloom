@@ -2105,6 +2105,7 @@ async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path):
 
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "profile_capture_failed"
+    assert res.result["measurement_status"] == "succeeded"
     assert res.result["trace_capture_status"] == "failed"
     assert res.result["trace_capture"]["reason"] == "trace_flush_failed"
     db.close()
@@ -2143,6 +2144,7 @@ async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path):
 
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "profile_capture_failed"
+    assert res.result["measurement_status"] == "succeeded"
     assert res.result["trace_capture_status"] == "missing"
     assert res.result["trace_capture"]["reason"] == "capture_status_missing"
     db.close()
@@ -5019,6 +5021,21 @@ def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
             tensor_parallel_size=8,
         )
         is None
+    )
+
+
+def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    trace = trace_dir / "worker.pt.trace.json.gz"
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [trace],
+            require_single_rank=True,
+            tensor_parallel_size=None,
+        )
+        == trace
     )
 
 

@@ -514,9 +514,10 @@ if [ "${PROFILE:-0}" = "1" ]; then
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
-  # Include the measured-phase duration as bounded scheduling margin around
-  # AIPerf's own dataset-configuration and warmup deadlines.
-  PHASE_WAIT_TIMEOUT=$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))
+  # AIPerf owns the AgentX warmup lifecycle, whose duration is not bounded by
+  # the flat drain grace on very large models. Process liveness and Magpie's
+  # outer profile deadline provide the hard bound.
+  PHASE_WAIT_TIMEOUT=0
   CAPTURE_STATUS_FILE="${RESULT_DIR}/agentx_profile_capture.json"
   rm -f "$CAPTURE_STATUS_FILE"
   AIPERF_API_PORT=""
