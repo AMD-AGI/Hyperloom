@@ -24,7 +24,6 @@ from ..bus.gpu_pool import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
-    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
     REQUEST_KIND_TO_OWNED_ACTION,
@@ -867,14 +866,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        # Kernel-owned actions are not directly delegatable; require a REQUEST to the Kernel-agent.
-        if action_name in KERNEL_AGENT_OWNED_ACTIONS:
-            raise PolicyDenied(
-                f"action={action_name!r} is owned by the Kernel-agent; "
-                f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
-                f"of delegate(action_name={action_name!r})",
-                rule="kernel_owned_by_kernel_agent",
-            )
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             self._validate_specialist_dispatch(role, payload)
@@ -948,15 +939,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        # Kernel-owned actions are REQUEST-only; mirror the delegate guard so a
-        # propose_action can't materialize a kernel task bypassing the REQUEST handler.
-        if action_name in KERNEL_AGENT_OWNED_ACTIONS:
-            raise PolicyDenied(
-                f"action={action_name!r} is owned by the Kernel-agent; "
-                f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
-                f"of propose_action(action_name={action_name!r})",
-                rule="kernel_owned_by_kernel_agent",
-            )
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -1071,23 +1053,7 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        # The wire kind and the action name are different vocabularies; resolve
-        # to the owned action so the phase-action gate sees a name it knows.
         owned_action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
-        if kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
-            raise PolicyDenied(
-                f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable ({role.name})",
-                rule="phase_incompatible",
-                hint=(
-                    "run_fusion / run_collective are dispatched by the "
-                    "Coordinator at KERNEL entry once their deterministic gate "
-                    "passes; their outcomes arrive as run_fusion_done / "
-                    "run_collective_done responses. Requesting one directly "
-                    "skips that gate, the lane's SharedState accounting, and "
-                    "its integrate step. Propose ``kernel_opt`` for a "
-                    "source-level kernel instead."
-                ),
-            )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(

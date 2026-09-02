@@ -74,7 +74,6 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 # they have no executor and no prompt entry.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
-        "run_fusion",
         "run_collective",
     }
 )
