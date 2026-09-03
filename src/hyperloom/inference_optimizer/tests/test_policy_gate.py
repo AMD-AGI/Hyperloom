@@ -209,101 +209,99 @@ def test_phase_semantics_prompt_names_every_internal_action() -> None:
 # -- Coordinator-owned surfaces stay closed to the LLM ---------------------
 
 
-def _orchestration_gate(**state_attrs):
-    class _S:
-        phase = "KERNEL_AGENT"
-        phase_history: list = []
+def _llm_gate(**state_overrides) -> PolicyGate:
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    state = _S()
-    for key, value in state_attrs.items():
-        setattr(state, key, value)
+    state = SharedState(session_id="t", phase="KERNEL_AGENT", **state_overrides)
     return PolicyGate(role_registry=default_role_registry(), shared_state=state)
 
 
-def _intent(kind, payload):
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+def _emit(gate: PolicyGate, intent_type, payload: dict) -> None:
+    from hyperloom.inference_optimizer.protocol.intent import Intent
 
-    return Intent(type=getattr(IntentType, kind), payload=payload)
+    gate.validate_intent("orchestration", Intent(type=intent_type, payload=payload))
+
+
+def _propose_channels():
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
+    return [IntentType.DELEGATE, IntentType.PROPOSE_ACTION]
 
 
 @pytest.mark.parametrize("kind", ["run_collective", "run_fusion", "no_such_kind"])
 def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
-    """A direct request would skip the lane's own entry gate and accounting."""
-    gate = _orchestration_gate()
+    """A direct request skips the lane's own entry gate and accounting."""
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
     with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", _intent("REQUEST", {"target_agent": "kernel_agent", "kind": kind}))
+        _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
     assert excinfo.value.rule == "request_kind"
 
 
 @pytest.mark.parametrize("kind", ["trace_analyze", "run_optimization", "integrate", "apply_patch"])
 def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
-    _orchestration_gate().validate_intent(
-        "orchestration",
-        _intent("REQUEST", {"target_agent": "kernel_agent", "kind": kind}),
-    )
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
+    _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
 
 
-@pytest.mark.parametrize("intent_kind", ["DELEGATE", "PROPOSE_ACTION"])
-def test_a_coordinator_managed_action_is_not_proposable(intent_kind: str) -> None:
+def test_a_coordinator_managed_action_is_not_proposable() -> None:
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         COORDINATOR_INTERNAL_ACTIONS,
     )
 
-    gate = _orchestration_gate()
-    for action_name in sorted(COORDINATOR_INTERNAL_ACTIONS):
-        with pytest.raises(PolicyDenied) as excinfo:
-            gate.validate_intent(
-                "orchestration",
-                _intent(intent_kind, {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}}),
-            )
-        assert excinfo.value.rule == "coordinator_managed_action", action_name
+    gate = _llm_gate()
+    for channel in _propose_channels():
+        for action_name in sorted(COORDINATOR_INTERNAL_ACTIONS):
+            with pytest.raises(PolicyDenied) as excinfo:
+                _emit(gate, channel, {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}})
+            assert excinfo.value.rule == "coordinator_managed_action", (channel, action_name)
 
 
 def test_the_coordinator_still_dispatches_its_own_internal_actions() -> None:
-    """The guard is on the agent channels only; dispatch replay must pass."""
+    """The guard sits on the agent channels; dispatch replay must pass."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         COORDINATOR_INTERNAL_ACTIONS,
     )
 
-    gate = _orchestration_gate()
+    gate = _llm_gate()
     for action_name in sorted(COORDINATOR_INTERNAL_ACTIONS):
         gate.validate_dispatched_task(action_name, {})
 
 
 def test_baseline_is_refused_while_an_enablement_round_is_in_flight() -> None:
-    """A specialist rewriting the stack underneath a baseline moves the anchor."""
-
-    class _Enablement:
-        inflight_task_id = "task-abc"
-
-    gate = _orchestration_gate(enablement=_Enablement())
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", _intent("DELEGATE", {"action_name": "baseline", "params": {}}))
-    assert excinfo.value.rule == "enablement_round_in_flight"
+    """A specialist rewriting the stack underneath the round moves the anchor."""
+    gate = _llm_gate()
+    gate.shared_state.enablement.inflight_task_id = "task-abc"
+    for channel in _propose_channels():
+        with pytest.raises(PolicyDenied) as excinfo:
+            _emit(gate, channel, {"action_name": "baseline", "params": {}})
+        assert excinfo.value.rule == "enablement_round_in_flight"
 
 
-def test_baseline_passes_once_no_authoring_round_is_live() -> None:
-    class _Enablement:
-        inflight_task_id = ""
-
-    gate = _orchestration_gate(enablement=_Enablement())
-    gate.validate_intent("orchestration", _intent("DELEGATE", {"action_name": "baseline", "params": {}}))
+def test_the_revalidation_dispatch_runs_during_an_authoring_round() -> None:
+    """The enablement lane re-measures through dispatch, which the guard skips."""
+    gate = _llm_gate()
+    gate.shared_state.enablement.inflight_task_id = "task-abc"
+    gate.validate_dispatched_task("baseline", {"source": "coordinator_internal"})
 
 
 def test_the_prompt_never_advertises_an_action_the_gate_denies() -> None:
-    """The rendered per-phase sets and the propose guard must agree."""
+    """Ties the rendered per-phase sets to what the propose channel accepts."""
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES, allowed_actions_for
 
-    gate = _orchestration_gate()
+    gate = _llm_gate()
+    denied: list[tuple[str, str, str]] = []
     for phase in PHASE_NAMES:
         for action_name in allowed_actions_for(phase):
             try:
-                gate.validate_intent(
-                    "orchestration",
-                    _intent("PROPOSE_ACTION", {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}}),
+                _emit(
+                    gate,
+                    IntentType.PROPOSE_ACTION,
+                    {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}},
                 )
-            except PolicyDenied as denied:
-                assert denied.rule not in {
-                    "coordinator_managed_action",
-                    "propose_action_source",
-                }, f"{phase}: prompt advertises {action_name!r} but the gate denies it ({denied.rule})"
+            except PolicyDenied as exc:
+                if exc.rule in {"coordinator_managed_action", "propose_action_source"}:
+                    denied.append((phase, action_name, exc.rule or ""))
+    assert not denied, f"prompt advertises actions the gate refuses: {denied}"

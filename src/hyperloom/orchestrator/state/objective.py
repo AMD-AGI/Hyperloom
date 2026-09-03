@@ -9,6 +9,7 @@ TimeOnly. `build_objective(env)` takes at most one TARGET_* var.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,9 @@ from .shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:  # pragma: no cover
     from .shared_state import SharedState
+
+
+log = logging.getLogger(__name__)
 
 
 class ObjectiveError(ValueError):
@@ -218,13 +222,11 @@ class TargetBaselineObjective(_RatioObjective):
     _ref_tput: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
-        """Load the reference throughput from the baseline directory.
+        """Load the reference throughput from the newest report in the baseline directory.
 
-        Recursively searches ``baseline_dir`` for ``benchmark_report.json``,
-        prefers the newest measured round, and extracts
-        ``throughput.output_throughput`` into ``_ref_tput``. A budget-dropped
-        measure round leaves the warmup as the only report, so the warmup is a
-        fallback rather than a discard.
+        Prefers a measured round. A budget-dropped measure round leaves the
+        warmup as the only report, which is a usable reference and is reported
+        as such rather than refused.
 
         Raises:
             ObjectiveError: If the directory is missing, no report is found, or the
@@ -235,6 +237,8 @@ class TargetBaselineObjective(_RatioObjective):
             raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
         reports = list(path.rglob("benchmark_report.json"))
         measured = [p for p in reports if "warmup_round" not in p.parts]
+        if reports and not measured:
+            log.warning("TargetBaselineObjective: reference throughput comes from a warmup round under %s", path)
         candidates = sorted(measured or reports, key=safe_mtime)
         if not candidates:
             raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")

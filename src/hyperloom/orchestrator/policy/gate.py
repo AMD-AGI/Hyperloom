@@ -24,7 +24,6 @@ from ..bus.gpu_pool import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
-    INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
     LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
@@ -739,9 +738,9 @@ class PolicyGate:
         """Re-validate a persisted queued task before executor dispatch.
 
         Defense-in-depth for forged ``coordinator.db`` rows: replays path
-        containment and structural delegate action gates. Source rules are
-        skipped because the task row does not persist the originating role;
-        they are enforced at intent ingress.
+        containment and structural delegate action gates. The agent-channel
+        guards are skipped because the task row does not persist the
+        originating role; they are enforced at intent ingress.
 
         Args:
             action_name: The task ``kind`` / delegate action name.
@@ -841,9 +840,9 @@ class PolicyGate:
             role: The resolved role of the emitting agent.
             payload: Delegate payload with ``action_name`` and optional
                 ``params``.
-            check_source: When True, enforce the role-scoped source rules.
-                Dispatch replay passes False because the task row does not
-                persist the originating role.
+            check_source: When True, enforce the guards that only apply to an
+                agent-emitted intent. Dispatch replay passes False because the
+                task row does not persist the originating role.
         """
         if not role.can_delegate_side_effects:
             raise PolicyDenied(
@@ -950,11 +949,10 @@ class PolicyGate:
         )
 
     def _validate_coordinator_managed_action(self, action_name: str, *, intent_kind: str) -> None:
-        """Deny an LLM proposal of an action the Coordinator dispatches for itself.
+        """Deny an agent-initiated copy of an action the Coordinator dispatches itself.
 
-        These actions carry their own entry conditions and SharedState
-        accounting, which an agent-initiated copy would skip. Phase-independent:
-        the action is never the LLM's to run, in any phase.
+        Phase-independent: these actions carry their own entry conditions and
+        SharedState accounting, which a second run would skip.
 
         Args:
             action_name: The proposed/delegated action name.
@@ -968,20 +966,15 @@ class PolicyGate:
         raise PolicyDenied(
             f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
             rule="coordinator_managed_action",
-            hint=(
-                "the Coordinator dispatches this on its own schedule and records "
-                "the outcome in SharedState; read the result there rather than "
-                "ordering a second run."
-            ),
+            hint="read the outcome in SharedState rather than ordering a second run.",
         )
 
     def _validate_baseline_not_mid_authoring(self, action_name: str) -> None:
         """Deny an LLM ``baseline`` while an enablement authoring round is in flight.
 
-        A specialist rewriting the framework underneath a baseline would leave
-        the round measuring a stack that changes as it runs, so the anchor it
-        writes describes neither the old stack nor the new one. The Coordinator's
-        own revalidation dispatch is trusted and does not reach this guard.
+        A specialist rewriting the framework underneath the round leaves the
+        anchor describing neither the old stack nor the new one. The
+        Coordinator's own revalidation dispatch does not reach this guard.
 
         Args:
             action_name: The proposed/delegated action name.
@@ -989,10 +982,9 @@ class PolicyGate:
         Raises:
             PolicyDenied: when a baseline is proposed mid-authoring-round.
         """
-        if action_name != "baseline":
+        if action_name != "baseline" or self.shared_state is None:
             return
-        enablement = getattr(getattr(self, "shared_state", None), "enablement", None)
-        inflight = str(getattr(enablement, "inflight_task_id", "") or "")
+        inflight = self.shared_state.enablement.inflight_task_id
         if not inflight:
             return
         raise PolicyDenied(
@@ -1100,12 +1092,9 @@ class PolicyGate:
                 f"(allowed: {sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS)!r})",
                 rule="request_kind",
                 hint=(
-                    "run_collective is a Coordinator-dispatched lane: it runs at "
-                    "KERNEL entry once its own comm-share gate passes, and its "
-                    "outcome arrives as a run_collective_done response. Requesting "
-                    "it directly skips that gate, the lane's SharedState accounting "
-                    "and its integrate step. Request run_optimization for a "
-                    "source-level kernel instead."
+                    "run_collective is dispatched at KERNEL entry once its own "
+                    "comm-share gate passes and reports as run_collective_done; "
+                    "request run_optimization for a source-level kernel instead."
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
@@ -2246,7 +2235,6 @@ __all__ = [
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
-    "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "PATH_LIKE_FIELDS",
     "PRUNE_BRANCH_ALLOWED_SCOPES",

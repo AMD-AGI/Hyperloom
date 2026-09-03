@@ -110,16 +110,15 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
 }
 
-# Not the LLM's to propose: the Coordinator dispatches its own, and Robustness
-# owns its ladder.
+# Dispatched by the Coordinator or owned by the Robustness ladder.
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic).
 
-    Both callers render this into the prompt, so naming an action the LLM cannot
-    propose would advertise a lever it does not have.
+    Both callers render this into the prompt, which must not advertise a lever
+    the gate refuses.
 
     Args:
         phase (str): Phase name; stripped and upper-cased before lookup.
