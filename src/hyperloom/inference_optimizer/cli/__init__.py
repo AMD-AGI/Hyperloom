@@ -2740,11 +2740,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
     # Production: enable strict PolicyGate path-containment (escaping intents land as policy_denied).
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    # PolicyGate R1 phase_incompatible enforcement for production runs (env affects cli boot path only).
-    if getattr(args, "strict_phase", True):
-        os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)

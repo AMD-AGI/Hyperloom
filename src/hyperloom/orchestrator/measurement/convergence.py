@@ -31,10 +31,7 @@ A and B legs, and it lives in its own module.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
-
-log = logging.getLogger(__name__)
 
 # Same order of magnitude as the KEEP threshold: a measurement that cannot
 # resolve the decision it feeds is not converged.
@@ -161,27 +158,3 @@ def assess_convergence(
         discarded,
         spread_pct=spread,
     )
-
-
-def converged_throughput(
-    rounds: list[float],
-    *,
-    tolerance_pct: float = DEFAULT_TOLERANCE_PCT,
-    warmup_rounds: int = DEFAULT_WARMUP_ROUNDS,
-) -> float | None:
-    """The steady-state throughput, or None when the series has not settled.
-
-    Callers must treat None as "cannot decide" and refuse the KEEP, rather than
-    falling back to the last round -- that fallback is what turned a warm-up
-    climb into a reported gain.
-    """
-    verdict = assess_convergence(rounds, tolerance_pct=tolerance_pct, warmup_rounds=warmup_rounds)
-    if not verdict.converged:
-        log.info(
-            "throughput not converged (%s): used=%s discarded=%s spread=%.1f%%",
-            verdict.reason,
-            verdict.used,
-            verdict.discarded,
-            verdict.spread_pct or 0.0,
-        )
-    return verdict.value

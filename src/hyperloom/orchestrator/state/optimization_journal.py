@@ -165,6 +165,7 @@ class JournalEntry:
             fingerprint=str(d.get("fingerprint", "")),
             metrics=dict(d.get("metrics") or {}),
             tick=_optional_int(d.get("tick")),
+            lever_kind=str(d.get("lever_kind", "")),
         )
 
     def dedupe_key(self) -> tuple[str, int, str, str, str, str, str]:

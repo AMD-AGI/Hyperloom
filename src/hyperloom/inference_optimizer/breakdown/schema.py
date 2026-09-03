@@ -15,15 +15,6 @@ from typing import Any, Literal, TypedDict
 
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
 
-#: Historical collector-only schema retained for archived-reader identification.
-SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
-
-#: breakdown schema version stamped when the file was assembled from the
-#: author-time recorder fragments. Same wire shape as v2 plus recorder-only
-#: sections; lets consumers tell a recorder-aggregated breakdown apart from a
-#: legacy collector fallback.
-SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
-
 #: Unified optimization schema. This is a breaking wire-shape cutover: adopted
 #: optimizations are emitted only through ``optimizations``, and that section
 #: is built exclusively from recorder fragments -- never reconstructed from
@@ -282,7 +273,9 @@ class Baseline(TypedDict, total=False):
     sub-metrics, attempt history, and the replayable launch invocation.
 
     Attributes:
-        throughput_tok_s_per_gpu (float): Baseline throughput (tok/s per GPU).
+        throughput_tok_s_per_gpu (float): Baseline throughput, whole-server
+            total in ``throughput_unit``. The key name is a misnomer kept for
+            wire compatibility; do not divide it by a GPU count.
         accuracy (float): Baseline accuracy score.
         ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
         e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
@@ -324,7 +317,9 @@ class Final(TypedDict, total=False):
     gain, the applied server-arg/env stack, and closing-phase bookkeeping.
 
     Attributes:
-        throughput_tok_s_per_gpu (float | None): Final throughput (tok/s/GPU), or None.
+        throughput_tok_s_per_gpu (float | None): Final throughput, whole-server
+            total in ``throughput_unit`` (same misnomer as
+            ``BaselineSummary``), or None.
         cumulative_gain_pct_validated (float): Validated cumulative gain percent.
         validated_at_stack_len (int): Stack depth at which validation occurred.
         validated_ts (str): ISO UTC timestamp of the validation.
@@ -335,7 +330,7 @@ class Final(TypedDict, total=False):
         ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
         e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
         ttft_e2el_source (str): Provenance of the latency metrics (``current_best`` /
-            ``validate_stack_disk`` / ``stack_top_disk`` / ``unavailable``).
+            ``current_best_disk`` / ``stack_top_disk`` / ``unavailable``).
         invocation (BenchmarkInvocation): Replayable launch record for the final state.
         closing_phase_entered (bool): Whether the closing phase was entered.
         closing_started_unix (float): Unix time the closing phase started.
@@ -353,7 +348,7 @@ class Final(TypedDict, total=False):
     action_path: list[str]  # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
-    ttft_e2el_source: str  # current_best / validate_stack_disk / stack_top_disk / unavailable
+    ttft_e2el_source: str  # current_best / current_best_disk / stack_top_disk / unavailable
     invocation: BenchmarkInvocation
     closing_phase_entered: bool
     closing_started_unix: float
@@ -4220,8 +4215,6 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V2",
-    "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V5",
     "SCHEMA_VERSION_V6",
     "Adoption",

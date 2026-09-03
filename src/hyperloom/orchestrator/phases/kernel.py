@@ -3888,8 +3888,6 @@ class KernelPhase(PhaseHandler):
                 budget_minutes=per_tuner_budget_minutes,
                 extra_server_args=("--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else ""),
             )
-            if paired is not None:
-                result["paired_confirmation"] = paired.to_dict()
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(
                     running_tput,
@@ -4861,8 +4859,6 @@ class KernelPhase(PhaseHandler):
         flags on the re-baseline server, and KEEPs only when measured e2e throughput
         clears the threshold. ``base_tput`` is filled from state by integrate_handler.
         """
-        import os
-
         from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
 
         patch = str(result.get("patch") or "").strip()
@@ -4907,7 +4903,7 @@ class KernelPhase(PhaseHandler):
                         "kernel_repo": kernel_repo,
                         "snapshot_dir": snapshot_dir,
                         "extra_envs": merged_envs,
-                        "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
+                        "keep_threshold_pct": 3.0,
                     },
                     session_dir=self.session_dir,
                 )
