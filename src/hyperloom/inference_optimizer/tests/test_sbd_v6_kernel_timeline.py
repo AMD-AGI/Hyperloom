@@ -499,6 +499,28 @@ def test_the_verdict_stays_unstamped_when_nothing_was_adopted(tmp_path):
     assert _kernel_events(tmp_path)[0]["ext"]["outcome"]["verdict"] is None
 
 
+def test_the_verdict_comes_from_the_rebench_and_not_from_the_caller(tmp_path):
+    """The phase seam names no verdict, so assembly must supply one.
+
+    The seam is the only production caller and it has nothing to judge with;
+    it used to default to "adopted", which stamped the word on any entry whose
+    rows happened to settle that way and on any that did not.
+    """
+    recorder = _forge_recorder()
+    _forge_rewrite_with_rebench(recorder, decision=REBENCH_VALIDATED, measured_tput=1100.0, status="settled")
+    recorder.finish(tput_after=1100.0)
+
+    assert _kernel_events(tmp_path)[0]["ext"]["outcome"]["verdict"] == "adopted"
+
+
+def test_an_unnamed_verdict_stays_unstamped_when_the_rebench_rejected(tmp_path):
+    recorder = _forge_recorder()
+    _forge_rewrite_with_rebench(recorder, decision=REBENCH_NO_PROMOTE, measured_tput=1000.0, status="settled")
+    recorder.finish(tput_after=1000.0)
+
+    assert _kernel_events(tmp_path)[0]["ext"]["outcome"]["verdict"] is None
+
+
 def _forge_rewrite_with_rebench(recorder, **rebench: Any) -> None:
     recorder.record_kernel_rewrite(
         run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", rebench_ref="rb-1"

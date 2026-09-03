@@ -1311,7 +1311,7 @@ class KernelEventRecorder:
     def finish(
         self,
         *,
-        verdict: str,
+        verdict: str = "",
         status: str = "",
         exit_reason: str = "",
         tput_after: Any = None,
@@ -1327,9 +1327,12 @@ class KernelEventRecorder:
         the same event this writes.
 
         Args:
-            verdict (str): The entry's conclusion. Dropped at assembly when
-                nothing was adopted, so an entry that adopted nothing cannot
-                read as having concluded something about a candidate.
+            verdict (str): The entry's conclusion, for a caller that knows one
+                assembly cannot derive -- the failure path, which closes before
+                any candidate settles. Leave it empty otherwise: assembly reads
+                the conclusion off the settled rows. Either way it is dropped
+                when nothing was adopted, so an entry that adopted nothing
+                cannot read as having concluded something about a candidate.
             status (str): The event status to close with. Derived from the
                 rebench evidence when empty, so the ladder cannot drift per call
                 site.
@@ -1705,9 +1708,15 @@ def assemble_kernel_ext(
     before = _float_or_none(outcome_block.get("tput_before"))
     after = _float_or_none(outcome_block.get("tput_after"))
     route = _text(header.get("route")) or _text(_as_dict(header.get("entry")).get("route"))
+    # Derived here rather than taken from the phase, which has no verdict of its
+    # own to give: an entry is adopted because a rebench validated something, and
+    # that join is what ``_settle`` above has just done. A caller's word is
+    # honoured only when it names something assembly cannot see for itself --
+    # the failure path's, which closes before any of this is settled.
+    stated = _text(outcome_block.get("verdict"))
     outcome = {
         "route": route or "",
-        "verdict": _text(outcome_block.get("verdict")) if adopted else None,
+        "verdict": (stated or OUTCOME_ADOPTED) if adopted else None,
         "exit_reason": _text(outcome_block.get("exit_reason")),
         "tput_before": before,
         "tput_after": after,

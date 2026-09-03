@@ -535,7 +535,10 @@ class KernelPhase(PhaseHandler):
         ``status="running"``, which is the honest reading of what happened.
 
         Args:
-            verdict: The entry's conclusion; derived from the stack when empty.
+            verdict: The entry's conclusion. Left empty by the phase seam, which
+                is the only production caller: the conclusion is the rebench
+                join's to make, and assembly derives it from the settled
+                candidate rows rather than from a word named here.
             exit_reason: The phase's own exit reason.
         """
         recorder = self._kernel_timeline()
@@ -546,7 +549,7 @@ class KernelPhase(PhaseHandler):
         current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
         try:
             recorder.finish(
-                verdict=verdict or "adopted",
+                verdict=verdict,
                 exit_reason=exit_reason,
                 tput_after=current_best.get("tput"),
                 cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
