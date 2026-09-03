@@ -186,11 +186,7 @@ from .v6 import (
     collect_v6_timeline as collect_v6_timeline,
 )
 from .v6_close import collect_v6_close as collect_v6_close
-from .v6_stages import (
-    project_baseline_event as project_baseline_event,
-    project_conc_sweep_event as project_conc_sweep_event,
-    project_kernel_events as project_kernel_events,
-)
+from .v6_stages import project_conc_sweep_event as project_conc_sweep_event
 
 __all__ = [
     "collect_attribution",
@@ -216,9 +212,7 @@ __all__ = [
     "collect_v6_metadata",
     "collect_v6_outcome",
     "collect_v6_timeline",
-    "project_baseline_event",
     "project_conc_sweep_event",
-    "project_kernel_events",
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",

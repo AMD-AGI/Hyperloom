@@ -256,6 +256,59 @@ def _open_trace_binary(path: Path):
     return open(path, "rb")
 
 
+class _ObjectBalance:
+    """Resumable brace balancer for a single ``traceEvents`` element.
+
+    Only the recovery path of :func:`stream_events` needs it, so it keeps its
+    scan position across refills instead of restarting over the grown buffer.
+    """
+
+    __slots__ = ("_depth", "_escaped", "_in_string", "_scan")
+
+    def __init__(self, start: int) -> None:
+        self._scan = start
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+
+    def advance(self, buf: str) -> int | None:
+        """Consume newly buffered characters.
+
+        Returns:
+            The index one past the element's closing brace once the object
+            balances, or ``None`` when the buffer ends mid-object.
+        """
+        scan = self._scan
+        depth = self._depth
+        in_string = self._in_string
+        escaped = self._escaped
+        end: int | None = None
+        while scan < len(buf):
+            char = buf[scan]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = scan + 1
+                    break
+            scan += 1
+        self._scan = scan
+        self._depth = depth
+        self._in_string = in_string
+        self._escaped = escaped
+        return end
+
+
 def stream_events(
     fileobj,
     bufsize: int = 8 * 1024 * 1024,
@@ -442,60 +495,47 @@ def stream_events(
             continue
 
         object_start = pos
-        scan = pos
-        depth = 0
-        in_string = False
-        escaped = False
-        object_end: int | None = None
-        while object_end is None:
-            while scan < len(buf):
-                char = buf[scan]
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif char == "\\":
-                        escaped = True
-                    elif char == '"':
-                        in_string = False
-                elif char == '"':
-                    in_string = True
-                elif char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                    if depth == 0:
-                        object_end = scan + 1
-                        break
-                scan += 1
-            if object_end is not None:
-                break
-            buffered = len(buf) - object_start
-            if buffered >= _MAX_EVENT_CHARS:
-                _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-                return
-            if eof:
-                _record(f"traceEvents object truncated after {emitted} event(s): unterminated object")
-                return
-            _refill(_MAX_EVENT_CHARS - buffered)
+        obj: dict[str, Any] | None = None
+        decoded_end = object_start
+        balance = _ObjectBalance(object_start)
+        while True:
+            try:
+                obj, decoded_end = _DECODER.raw_decode(buf, object_start)
+            except json.JSONDecodeError as exc:
+                # raw_decode cannot distinguish corrupt input from an object the
+                # buffer merely has not reached the end of yet, so balance braces
+                # to tell the two apart. Only this path pays for that scan, and
+                # it stops at the object's own end rather than the buffer's.
+                object_end = balance.advance(buf)
+                if object_end is not None:
+                    _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
+                    pos = object_end
+                    break
+                buffered = len(buf) - object_start
+                if buffered >= _MAX_EVENT_CHARS:
+                    _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
+                    return
+                if eof:
+                    _record(f"traceEvents object truncated after {emitted} event(s): unterminated object")
+                    return
+                _refill(_MAX_EVENT_CHARS - buffered)
+                continue
+            break
 
-        if object_end - object_start > _MAX_EVENT_CHARS:
-            _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-            return
-        try:
-            obj, decoded_end = _DECODER.raw_decode(buf, object_start)
-        except json.JSONDecodeError as exc:
-            _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
-            pos = object_end
+        if obj is None:
             _trim_consumed()
             continue
-        if decoded_end != object_end or not isinstance(obj, dict):
+        if decoded_end - object_start > _MAX_EVENT_CHARS:
+            _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
+            return
+        if not isinstance(obj, dict):
             _record(f"traceEvents object malformed after {emitted} event(s): invalid object boundary")
-            pos = object_end
+            pos = decoded_end
             _trim_consumed()
             continue
         yield obj
         emitted += 1
-        pos = object_end
+        pos = decoded_end
         _trim_consumed()
 
 

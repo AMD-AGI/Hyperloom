@@ -53,6 +53,7 @@ from hyperloom.agents.kernel.tools._trace_rank import (
 )
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
     ensure_benchmark_lib_patched,
@@ -76,6 +77,13 @@ _TRACE_CONFIRM_BYTES = 64_000_000
 # Min fraction of ``cpu_op`` events carrying ``Input Dims`` for a healthy
 # ``capture_traces/`` file (Deval ref 99.97%; gated low to avoid false-positives).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
+
+# Kineto puts the annotation category in ``cat`` and the label the framework
+# wrote in ``name``, so a marker keyed on ``"name": "user_annotation"`` looks for
+# a label no producer emits. Matching the quoted token on its own is independent
+# of both the field and the separator spacing: across the 62-capture reference
+# corpus its count equals the ``"cat": "user_annotation"`` count in every file.
+_USER_ANNOTATION_MARKER = '"user_annotation"'
 
 
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
@@ -169,6 +177,256 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
     return text.count(substring)
 
 
+# Structured verdict ids for the post-profile trace validation. Kept as one
+# vocabulary because the ids are the queryable surface: a consumer asking "was
+# the graph recording complete on the attempt we adopted" must be able to name
+# the check without matching prose.
+#
+# ``CHECK_GRAPH_LAUNCH_COVERAGE`` and ``CHECK_RANK_SHAPE`` come from the
+# capture-side probe, which reads the trace body and the directory inventory
+# rather than sampling a substring off the file prefix. A check that did not run
+# simply produces no row.
+CHECK_CAPTURE_TRACES_PRESENT = "capture_traces_present"
+CHECK_CAPTURE_INPUT_DIMS = "capture_input_dims"
+CHECK_STEP_ANNOTATIONS = "step_annotations"
+CHECK_SPLIT_CHUNK_ANNOTATIONS = "split_chunk_annotations"
+CHECK_SGLANG_SHAPE_PROFILER = "sglang_shape_profiler"
+CHECK_STEADY_STATE_SPLIT_NAMING = "steady_state_split_naming"
+CHECK_TRACE_HAS_OPS = "trace_has_ops"
+CHECK_GRAPH_LAUNCH_COVERAGE = "graph_launch_coverage"
+CHECK_RANK_SHAPE = "rank_shape"
+
+
+def _check_row(
+    check_id: str,
+    *,
+    status: str,
+    skip_reason: str | None = None,
+    **detail: Any,
+) -> dict[str, Any]:
+    """Build one structured check row.
+
+    Args:
+        check_id: One of the ``CHECK_*`` ids.
+        status: ``passed`` / ``failed`` / ``skipped``.
+        skip_reason: Why the check did not run, when skipped.
+        **detail: The values the row was reached on.
+
+    Returns:
+        The check row.
+    """
+    return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
+
+
+def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Express the probe's measurements in the shared check vocabulary.
+
+    Both ids answer questions the substring checks structurally cannot: launch
+    coverage needs the trace body, and rank shape needs the directory inventory.
+
+    Args:
+        certificate: The record ``certify_trace_dir`` returned.
+
+    Returns:
+        Check rows, one graph-coverage row per certified rank plus one rank-shape
+        row for the directory.
+    """
+    inventory = certificate.get("trace_dir_level") or {}
+    thresholds = (certificate.get("verdict") or {}).get("thresholds_effective") or {}
+    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
+    rows: list[dict[str, Any]] = []
+
+    for rank in ranks:
+        density = rank.get("density") or {}
+        measured = {
+            "rank": rank.get("rank"),
+            "graph_mode": density.get("graph_mode"),
+            "graph_launch_count": density.get("graph_launch_count"),
+            "graph_launches_with_kernels": density.get("graph_launches_with_kernels"),
+            "graph_launch_coverage": density.get("graph_launch_coverage"),
+            "coverage_max": thresholds.get("graph_launch_coverage_max"),
+        }
+        under_recorded = density.get("graph_under_recorded")
+        if under_recorded is None:
+            # Nothing was measured, which is not the same as measured and fine.
+            rows.append(
+                _check_row(
+                    CHECK_GRAPH_LAUNCH_COVERAGE,
+                    status="skipped",
+                    skip_reason="the probe reached no coverage measurement for this rank",
+                    **measured,
+                )
+            )
+        elif not density.get("graph_mode"):
+            # An eager capture has no graph launches, so the coverage denominator
+            # is zero. Grading that as a failure would report a healthy trace as
+            # under-recorded, which is the trap the reader's own preconditions
+            # exist to avoid.
+            rows.append(
+                _check_row(
+                    CHECK_GRAPH_LAUNCH_COVERAGE,
+                    status="skipped",
+                    skip_reason="capture recorded no CUDA graph launches",
+                    **measured,
+                )
+            )
+        else:
+            rows.append(
+                _check_row(
+                    CHECK_GRAPH_LAUNCH_COVERAGE,
+                    status="failed" if under_recorded else "passed",
+                    **measured,
+                )
+            )
+
+    rank_count = inventory.get("rank_count")
+    certified = [rank.get("rank") for rank in ranks]
+    shape = {
+        "rank_count": rank_count,
+        "certified_rank_count": len(ranks),
+        "certified_ranks": certified,
+    }
+    if isinstance(rank_count, int) and rank_count > len(ranks):
+        # The probe certifies the file the live resolver would open, so on a
+        # tensor-parallel capture the other ranks are unmeasured rather than
+        # measured and equal. Saying so keeps a single-rank verdict from reading
+        # as a claim about the whole capture.
+        rows.append(
+            _check_row(
+                CHECK_RANK_SHAPE,
+                status="skipped",
+                skip_reason="only the resolved rank was certified; the remaining ranks are unmeasured",
+                **shape,
+            )
+        )
+    else:
+        rows.append(_check_row(CHECK_RANK_SHAPE, status="passed", **shape))
+    return rows
+
+
+def _steady_state_forecast(certificate: dict[str, Any]) -> dict[str, Any]:
+    """Project the modes the splitter would survive, off the resolved rank.
+
+    This is the prediction half of the schema. It is computed from the source
+    trace's annotation tree, so it is available before any chunk exists, and the
+    analysis stage can later record what the split actually produced against it.
+
+    Args:
+        certificate: The record ``certify_trace_dir`` returned.
+
+    Returns:
+        The forecast summary, or an empty dict when no rank was certified.
+    """
+    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
+    if not ranks:
+        return {}
+    forecast = ranks[0].get("split_forecast") or {}
+    return {
+        "viable_modes": forecast.get("viable_modes"),
+        "viable_consumer_modes": forecast.get("viable_consumer_modes"),
+        "candidate_window_count": forecast.get("candidate_window_count"),
+        "candidate_windows_with_prefill": forecast.get("candidate_windows_with_prefill"),
+        "step_count": forecast.get("step_count"),
+        "prefill_step_count": forecast.get("prefill_step_count"),
+        "num_steps_effective": forecast.get("num_steps_effective"),
+    }
+
+
+def _build_trace_validate(
+    health: dict[str, Any],
+    *,
+    trace_dir: Path,
+    framework: str,
+    certificate: dict[str, Any] | None = None,
+    probe_error: str = "",
+) -> dict[str, Any]:
+    """Assemble the profile-stage trace validation block.
+
+    The verdict is two independent axes -- whether a consumer can route the
+    trace at all, and whether a decode conclusion drawn from it would be true --
+    and they are carried separately because a trace can analyse cleanly and
+    still be wrong. Collapsing them into one grade is what hides that case.
+
+    ``chunk_level`` stays empty here: chunks do not exist until the splitter
+    runs. What the profile stage can produce is the forecast the analysis stage
+    later measures against.
+
+    Args:
+        health: The ``trace_health`` dict the structure validator returned.
+        trace_dir: The trace directory the checks ran against.
+        framework: The framework the checks were gated on.
+        certificate: The ``certify_trace_dir`` record, when the probe ran.
+        probe_error: Why the probe produced no record, when it failed.
+
+    Returns:
+        A ``trace_validate`` block carrying the two-axis verdict, the probe's
+        directory and rank levels, and the per-check rows behind them.
+    """
+    checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
+    certificate = certificate or {}
+    if certificate:
+        checks = checks + _probe_check_rows(certificate)
+        probe_status = "ok"
+    else:
+        probe_status = "failed" if probe_error else "skipped"
+    return {
+        "schema_version": certificate.get("schema_version"),
+        "probe_version": certificate.get("probe_version"),
+        "probe_status": probe_status,
+        "probe_error": str(probe_error or ""),
+        "checked_at": now_iso(timespec="seconds"),
+        "trace_dir": str(trace_dir),
+        "framework": str(framework or ""),
+        "verdict": certificate.get("verdict") or {},
+        "steady_state_forecast": _steady_state_forecast(certificate),
+        "trace_dir_level": certificate.get("trace_dir_level") or {},
+        "rank_level": certificate.get("rank_level") or [],
+        "chunk_level": [],
+        "checks": checks,
+    }
+
+
+def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
+    """Run the capture-time self-certification probe over a profile trace.
+
+    Imported at call time: the probe pulls in the bypass trace reader, which a
+    profile run that never reaches a trace has no reason to load.
+
+    The kernel tools resolve their siblings by bare module name, so the tools
+    directory has to be importable before the probe's own imports run -- the
+    same path insertion the trace_analyze handler does for TraceLens.
+
+    Args:
+        trace_dir: The trace directory the profiler wrote.
+        framework: The framework the capture ran under.
+
+    Returns:
+        The ``certify_trace_dir`` record.
+    """
+    import sys
+
+    from hyperloom.agents.kernel.tools import _capture_shapes
+
+    tools_dir = str(Path(_capture_shapes.__file__).resolve().parent)
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+
+    from hyperloom.agents.kernel.tools import trace_selfcert
+
+    # The workload parameters shape the split forecast, and reading them from the
+    # benchmark config keeps the certificate independent of any analysis having
+    # run -- the point of certifying at capture time.
+    params = trace_selfcert.read_workload_params(trace_dir)
+    return trace_selfcert.certify_trace_dir(
+        trace_dir,
+        framework=framework or str(params.get("framework") or ""),
+        num_steps=params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS),
+        conc=params.get("conc"),
+        osl=params.get("osl"),
+        r=params.get("r", trace_selfcert.DEFAULT_R),
+    )
+
+
 def _validate_trace_structure(
     trace_dir: Path,
     framework: str,
@@ -205,13 +463,35 @@ def _validate_trace_structure(
         A ``trace_health`` dict with ``issues`` (logged warning strings),
         ``per_kernel_attribution_degraded`` (no ``execute_*``/
         ``user_annotation`` events -> per-kernel time folded, triggers an eager
-        re-profile), ``capture_traces_present``, and ``zero_ops``
-        (metadata-only trace, triggers a roofline re-profile).
+        re-profile), ``capture_traces_present``, ``zero_ops``
+        (metadata-only trace, triggers a roofline re-profile), and ``checks``
+        (one structured row per check, carrying the measured values the verdict
+        was reached on rather than only the operator prose).
     """
     issues: list[str] = []
     per_kernel_attribution_degraded = False
     capture_traces_present = False
     zero_ops = False
+    # Structured mirror of ``issues``: same findings, but with the measured
+    # values attached so a consumer can compare attempts instead of diffing prose.
+    checks: list[dict[str, Any]] = []
+
+    def _note_check(
+        check_id: str,
+        *,
+        status: str,
+        skip_reason: str | None = None,
+        **detail: Any,
+    ) -> None:
+        """Record one structured check verdict.
+
+        Args:
+            check_id: One of the ``CHECK_*`` ids.
+            status: ``passed`` / ``failed`` / ``skipped``.
+            skip_reason: Why the check did not run, when skipped.
+            **detail: The values the verdict was reached on.
+        """
+        checks.append(_check_row(check_id, status=status, skip_reason=skip_reason, **detail))
 
     # Scriptable image frameworks (xDiT diffusion) produce a plain torch-
     # profiler trace, so checks 1-6 (LLM/serving-specific) would emit spurious
@@ -227,13 +507,20 @@ def _validate_trace_structure(
     # --- Check 1: capture_traces/ presence (LLM/serving only) ---
     capture = trace_dir / "capture_traces"
     capture_files: list[Path] = []
-    if not scriptable:
+    if scriptable:
+        _note_check(
+            CHECK_CAPTURE_TRACES_PRESENT,
+            status="skipped",
+            skip_reason="scriptable framework writes a plain torch-profiler trace",
+        )
+    else:
         if not capture.is_dir():
             issues.append(
                 "[1] capture_traces/ subdirectory missing — graph capture "
                 "didn't fire. Verify EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS "
                 "include the TraceLens flag and the server-side patch landed."
             )
+            _note_check(CHECK_CAPTURE_TRACES_PRESENT, status="failed", capture_dir_present=False, file_count=0)
         else:
             capture_files = sorted(p for p in capture.iterdir() if p.is_file())
             capture_traces_present = bool(capture_files)
@@ -241,16 +528,62 @@ def _validate_trace_structure(
                 issues.append(
                     "[1] capture_traces/ exists but is empty — graph capture path fired but produced no files."
                 )
+            _note_check(
+                CHECK_CAPTURE_TRACES_PRESENT,
+                status="passed" if capture_files else "failed",
+                capture_dir_present=True,
+                file_count=len(capture_files),
+            )
 
     # --- Check 2 (Deval): capture file has cpu_op + Input Dims ---
     # Sample the heaviest capture file; gate cpu_op-with-Input-Dims fraction
     # at _INPUT_DIMS_FRACTION_FLOOR.
-    if capture_files:
+    if not capture_files:
+        _note_check(
+            CHECK_CAPTURE_INPUT_DIMS,
+            status="skipped",
+            skip_reason="no capture file to sample",
+        )
+    else:
         target = max(capture_files, key=lambda p: p.stat().st_size)
         text = _sample_trace_text(target)
-        if text is not None:
+        if text is None:
+            _note_check(
+                CHECK_CAPTURE_INPUT_DIMS,
+                status="skipped",
+                skip_reason="capture file could not be sampled",
+                sampled_file=target.name,
+            )
+        else:
             cpu_op_count = _count_substring_occurrences(text, '"name": "cpu_op"')
             input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
+            _input_dims_fraction = input_dims_count / cpu_op_count if cpu_op_count else None
+            if _input_dims_fraction is None:
+                # Zero cpu_op leaves no fraction to judge, and on ROCm/SGLang it
+                # is an event-naming difference rather than a capture failure --
+                # which is what the advisory below says. Calling it "failed" put
+                # the structured copy, the one consumers query by id, at odds
+                # with the prose sitting next to it.
+                _note_check(
+                    CHECK_CAPTURE_INPUT_DIMS,
+                    status="skipped",
+                    skip_reason="no literal cpu_op events to measure the Input Dims fraction against",
+                    sampled_file=target.name,
+                    cpu_op_count=cpu_op_count,
+                    input_dims_count=input_dims_count,
+                    input_dims_fraction=None,
+                    floor=_INPUT_DIMS_FRACTION_FLOOR,
+                )
+            else:
+                _note_check(
+                    CHECK_CAPTURE_INPUT_DIMS,
+                    status="passed" if _input_dims_fraction >= _INPUT_DIMS_FRACTION_FLOOR else "failed",
+                    sampled_file=target.name,
+                    cpu_op_count=cpu_op_count,
+                    input_dims_count=input_dims_count,
+                    input_dims_fraction=_input_dims_fraction,
+                    floor=_INPUT_DIMS_FRACTION_FLOOR,
+                )
             if cpu_op_count == 0:
                 # ROCm/SGLang often log graph-capture kernels under other names,
                 # so zero cpu_op isn't itself a capture failure (cross-check [5]).
@@ -285,10 +618,7 @@ def _validate_trace_structure(
     if main_traces:
         main_text = _sample_trace_text(main_traces[0])
         if main_text is not None:
-            user_ann_count = _count_substring_occurrences(
-                main_text,
-                '"name": "user_annotation"',
-            )
+            user_ann_count = _count_substring_occurrences(main_text, _USER_ANNOTATION_MARKER)
             execute_count = _count_substring_occurrences(main_text, '"execute_')
             # ``execute_*`` labels are the real health signal; ``user_annotation``
             # presence is profiler-version-dependent. Only warn when both are
@@ -300,8 +630,16 @@ def _validate_trace_structure(
                 and user_ann_count == 0
                 and not (
                     _trace_contains(main_traces[0], '"execute_')
-                    or _trace_contains(main_traces[0], '"name": "user_annotation"')
+                    or _trace_contains(main_traces[0], _USER_ANNOTATION_MARKER)
                 )
+            )
+            _note_check(
+                CHECK_STEP_ANNOTATIONS,
+                status="failed" if confirmed_absent else "passed",
+                sampled_file=main_traces[0].name,
+                execute_annotation_count=execute_count,
+                user_annotation_count=user_ann_count,
+                confirmed_absent=confirmed_absent,
             )
             if confirmed_absent:
                 per_kernel_attribution_degraded = True
@@ -312,6 +650,19 @@ def _validate_trace_structure(
                     "detailed_annotations reached the framework "
                     "(PROFILE_EXTRA_BODY consumed; see #210)."
                 )
+        else:
+            _note_check(
+                CHECK_STEP_ANNOTATIONS,
+                status="skipped",
+                skip_reason="main trace could not be sampled",
+                sampled_file=main_traces[0].name,
+            )
+    else:
+        _note_check(
+            CHECK_STEP_ANNOTATIONS,
+            status="skipped",
+            skip_reason="no *.trace.json.gz in the trace dir",
+        )
 
     # --- Check 4 (Deval): per-file execute_* in trace_split/ ---
     # An empty split means the splitter ran but got no usable events.
@@ -328,6 +679,13 @@ def _validate_trace_structure(
                 continue
             if _count_substring_occurrences(text, '"execute_') == 0:
                 empty_splits.append(sp.name)
+        _note_check(
+            CHECK_SPLIT_CHUNK_ANNOTATIONS,
+            status="failed" if (split_files and empty_splits) else "passed",
+            split_file_count=len(split_files),
+            empty_chunk_count=len(empty_splits),
+            empty_chunk_samples=empty_splits[:3],
+        )
         if split_files and empty_splits:
             issues.append(
                 f"[4] {len(empty_splits)} trace_split/ file(s) have NO "
@@ -338,6 +696,12 @@ def _validate_trace_structure(
                 "trace lacks the per-step annotations needed for splitting "
                 "(see check [3])."
             )
+    else:
+        _note_check(
+            CHECK_SPLIT_CHUNK_ANNOTATIONS,
+            status="skipped",
+            skip_reason=("scriptable framework has no per-step split" if scriptable else "no trace_split/ directory"),
+        )
 
     # --- Check 6 (Hyperloom): _extend_* / _decode_* without ---
     # _steady_state_* in trace_split/.
@@ -346,6 +710,13 @@ def _validate_trace_structure(
         has_extend = any("_extend_" in n or "extend_only_" in n for n in names)
         has_decode = any("_decode_" in n or "decode_only_" in n for n in names)
         has_steady_state = any("steady_state" in n for n in names)
+        _note_check(
+            CHECK_STEADY_STATE_SPLIT_NAMING,
+            status="failed" if ((has_extend or has_decode) and not has_steady_state) else "passed",
+            has_extend=has_extend,
+            has_decode=has_decode,
+            has_steady_state=has_steady_state,
+        )
         if (has_extend or has_decode) and not has_steady_state:
             issues.append(
                 "[6] trace_split/ has _extend_* / _decode_* files but NO "
@@ -355,6 +726,12 @@ def _validate_trace_structure(
                 "InferenceX (#210; check $MAGPIE_PATH/InferenceX/utils/"
                 "bench_serving/benchmark_serving.py)."
             )
+    else:
+        _note_check(
+            CHECK_STEADY_STATE_SPLIT_NAMING,
+            status="skipped",
+            skip_reason=("scriptable framework has no per-step split" if scriptable else "no trace_split/ directory"),
+        )
 
     # --- Check 7 (Hyperloom): torch-profiler captured zero ops ---
     # A metadata-only trace (no ``cpu_op`` / ``kernel`` events) means the
@@ -364,6 +741,12 @@ def _validate_trace_structure(
     if main_traces:
         has_ops = _trace_contains(main_traces[0], '"cat": "cpu_op"') or _trace_contains(
             main_traces[0], '"cat": "kernel"'
+        )
+        _note_check(
+            CHECK_TRACE_HAS_OPS,
+            status="passed" if has_ops else "failed",
+            sampled_file=main_traces[0].name,
+            has_ops=has_ops,
         )
         if not has_ops:
             zero_ops = True
@@ -375,9 +758,33 @@ def _validate_trace_structure(
                 "dropped when the schedule restarts after the last active "
                 "step). The trace is unusable for roofline; re-profile needed."
             )
+    else:
+        _note_check(
+            CHECK_TRACE_HAS_OPS,
+            status="skipped",
+            skip_reason="no *.trace.json.gz in the trace dir",
+        )
 
     # --- Check 5 (Deval): sglang kernel_shape_profiler presence ---
-    if framework.lower() == "sglang" and main_text is not None:
+    if framework.lower() != "sglang":
+        _note_check(
+            CHECK_SGLANG_SHAPE_PROFILER,
+            status="skipped",
+            skip_reason=f"framework is {framework or 'unset'}, not sglang",
+        )
+    elif main_text is None:
+        _note_check(
+            CHECK_SGLANG_SHAPE_PROFILER,
+            status="skipped",
+            skip_reason="main trace could not be sampled",
+        )
+    else:
+        _note_check(
+            CHECK_SGLANG_SHAPE_PROFILER,
+            status="passed" if "kernel_shape_profiler" in main_text else "failed",
+            sampled_file=main_traces[0].name,
+            sampled_bytes=_TRACE_INSPECT_BYTES,
+        )
         if "kernel_shape_profiler" not in main_text:
             issues.append(
                 f"[5] sglang main trace ({main_traces[0].name}, sampled "
@@ -402,6 +809,7 @@ def _validate_trace_structure(
         "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
         "capture_traces_present": capture_traces_present,
         "zero_ops": zero_ops,
+        "checks": checks,
     }
 
 
@@ -633,6 +1041,26 @@ class ProfileExecutor(BaselineExecutor):
         # probe dir alone cannot say whether the probe was never asked for or
         # could not be installed.
         self._host_probe_status: str = ""
+
+    def _resolve_sink(self, ctx) -> Any:
+        """Decline the baseline event a profile run must never open.
+
+        This class runs the base executor's body through ``super().__call__``,
+        and that body now opens a BASELINE event for whatever it measures. A
+        profile is not a baseline: the roofline recorder already stores each
+        profile attempt on its own action, so opening one here would invent a
+        BASELINE event for every roofline, and ``open_event`` is idempotent --
+        so in a phase and cycle that also ran a real measurement the profile
+        pass would be merged into that event's actions and read as one of its
+        measurements.
+
+        Args:
+            ctx: Action context, unused.
+
+        Returns:
+            Always ``None``.
+        """
+        return None
 
     def _resolve_default_config(self) -> Path:
         """Override BaselineExecutor's resolver to pick the profile yaml.
@@ -1386,6 +1814,31 @@ class ProfileExecutor(BaselineExecutor):
                     health = _validate_trace_structure(selected_trace_dir, framework)
                     if isinstance(health, dict):
                         result["trace_health"] = health
+                        # The probe reads the trace body, so it fails on its own
+                        # terms (an unreadable capture) without that meaning the
+                        # profile failed. Its absence is recorded rather than
+                        # silently producing a verdict with nothing behind it.
+                        certificate: dict[str, Any] = {}
+                        probe_error = ""
+                        try:
+                            certificate = _certify_trace_dir(selected_trace_dir, framework)
+                        except Exception as e:  # noqa: BLE001 - probe is best-effort
+                            probe_error = f"{type(e).__name__}: {e}"
+                            log.debug(
+                                "profile_executor: trace self-certification failed: %s",
+                                probe_error,
+                            )
+                        # Structured verdict for the caller's timeline event: the
+                        # roofline recorder stores it per profile attempt, so a
+                        # retried roofline keeps each attempt's verdict beside the
+                        # trace that attempt produced.
+                        result["trace_validate"] = _build_trace_validate(
+                            health,
+                            trace_dir=selected_trace_dir,
+                            framework=framework,
+                            certificate=certificate,
+                            probe_error=probe_error,
+                        )
                 except Exception as e:  # noqa: BLE001 - validator is best-effort
                     log.debug(
                         "profile_executor: trace structure validator failed: %s",

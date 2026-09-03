@@ -1539,6 +1539,61 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path, monkeypatch):
+    """An attempt that raises must still appear in the event's ``runs``.
+
+    The fail-soft handler wrapping this branch only narrates the outcome into a
+    reason string, so an unrowed attempt leaves ``attempt_count`` short of what
+    actually ran -- and the main retry loop does row its raising attempts.
+    """
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import PROFILE_ATTEMPT_COMPUTE_BOUND
+
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    host_bound = _ta_ok(report_md=md)
+    host_bound["trace_health_warnings"] = [{"code": "high_gpu_idle_pct", "severity": "warning"}]
+    profile_calls = {"n": 0}
+
+    async def fake_profile(ctx):
+        profile_calls["n"] += 1
+        if profile_calls["n"] == 1:
+            return _profile_ok()
+        raise RuntimeError("server boot failed on the compute-bound retry")
+
+    async def fake_ta(payload, *, session_dir):
+        return host_bound
+
+    monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: True)
+
+    executor = RooflineExecutor(shared_state=_state())
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
+    ):
+        result = await executor(_n26_ctx(tmp_path))
+
+    # Fail-soft is preserved: the host-bound analysis remains the outcome.
+    assert result["status"] == "succeeded"
+
+    event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
+    action = event["ext"]["actions"][0]
+    profile = action["profile"]
+    assert profile["attempt_count"] == 2
+    raised = profile["runs"][-1]
+    assert raised["attempt_reason"] == PROFILE_ATTEMPT_COMPUTE_BOUND
+    assert raised["status"] == "failed"
+    assert "server boot failed" in raised["failure"]["message"]
+    assert action["analysis"]["compute_bound_reprofile"]["adopted"] is False
+
+
+@pytest.mark.asyncio
 async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
     """Even if trace_health says degraded, a non-empty hot_kernels list
     proves attribution worked — do NOT append the warning."""

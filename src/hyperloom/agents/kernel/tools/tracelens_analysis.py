@@ -8223,6 +8223,47 @@ def main() -> int:
     orchestrator_error = ""
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
+    # What this run saw and decided, returned to the caller instead of only
+    # reaching the CLI log. The caller records it on the SBD V6 roofline event as
+    # the run happens, so "which file was analysed, how was the steady-state
+    # window picked, which gate refused" survives without re-reading the log.
+    run_meta: dict[str, Any] = {
+        "preflight": {},
+        "split": {},
+        "selection": {},
+        "steps": [],
+        "route_ext": {},
+    }
+
+    def _note_step(
+        step_id: str,
+        *,
+        category: str,
+        status: str,
+        skip_reason: str | None = None,
+        **detail: Any,
+    ) -> None:
+        """Append one step to the run's ladder.
+
+        Args:
+            step_id: Stable step name.
+            category: Ladder phase (``preflight`` / ``install`` / ``split`` /
+                ``select`` / ``analyze`` / ``emit``).
+            status: ``ok`` / ``failed`` / ``skipped``.
+            skip_reason: Why the step did not run, when skipped.
+            **detail: Measured values for the step.
+        """
+        run_meta["steps"].append(
+            {
+                "step_id": step_id,
+                "order": len(run_meta["steps"]) + 1,
+                "category": category,
+                "status": status,
+                "skip_reason": skip_reason,
+                "detail": detail,
+            }
+        )
+
     # Discovery is cached per run, so re-run it here: a process that outlives a
     # single run would otherwise keep the roots it saw when it first imported
     # this module, and miss a framework installed since.
@@ -8261,6 +8302,20 @@ def main() -> int:
         trace_input_type, trace_files = discover_trace_inputs(trace_input)
         append_log(log_path, f"trace_input_type={trace_input_type}")
         append_log(log_path, f"trace_files={len(trace_files)}")
+        run_meta["preflight"].update(
+            {
+                "trace_input": str(trace_input),
+                "trace_input_type": trace_input_type,
+                "trace_file_count": len(trace_files),
+            }
+        )
+        _note_step(
+            "discover_inputs",
+            category="preflight",
+            status="ok",
+            trace_input_type=trace_input_type,
+            trace_file_count=len(trace_files),
+        )
         # The file the analysis will actually read. Discovery order picks the
         # default; the preflight below promotes whichever candidate it proves
         # carries GPU kernels, because passing the check on one file and then
@@ -8345,6 +8400,23 @@ def main() -> int:
             append_log(
                 log_path,
                 f"trace_gpu_kernel_events={kernel_event_count} (probed={', '.join(probed)})",
+            )
+            run_meta["preflight"].update(
+                {
+                    "probe_gpu_kernel_events": kernel_event_count,
+                    "probed_files": list(probed),
+                    "probed_bytes": spent_bytes,
+                    "analysed_file": analysis_trace_path.name,
+                    "input_promoted": analysis_trace_path != trace_files[0],
+                }
+            )
+            _note_step(
+                "probe_gpu_kernels",
+                category="preflight",
+                status="ok" if kernel_event_count else "failed",
+                gpu_kernel_events=kernel_event_count,
+                probed_file_count=len(probed),
+                analysed_file=analysis_trace_path.name,
             )
             if analysis_trace_path != trace_files[0]:
                 promotion_warning: dict[str, Any] = {
@@ -8635,6 +8707,31 @@ def main() -> int:
                 mixed_chunks = _collect("mixed")
                 decode_chunks = _collect("decode_only")
                 prefill_chunks = _collect("prefilldecode")
+                run_meta["split"].update(
+                    {
+                        "split_input": str(split_input_path),
+                        "split_dir": str(split_dir),
+                        "num_steps": split_num_steps,
+                        "conc": str(conc or ""),
+                        "osl": str(osl or ""),
+                        "r": r_str,
+                        "returncode": split_rc,
+                        "chunks_by_mode": {
+                            "mixed": len(mixed_chunks),
+                            "decode_only": len(decode_chunks),
+                            "prefilldecode": len(prefill_chunks),
+                        },
+                        "chunks_extracted": len(mixed_chunks) + len(decode_chunks) + len(prefill_chunks),
+                    }
+                )
+                _note_step(
+                    "split_trace",
+                    category="split",
+                    status="ok" if split_rc == 0 and (mixed_chunks or decode_chunks or prefill_chunks) else "failed",
+                    returncode=split_rc,
+                    num_steps=split_num_steps,
+                    chunks_extracted=run_meta["split"]["chunks_extracted"],
+                )
                 # Splitter produced nothing -> trace_split_no_steady_state failure.
                 if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
                     warning = _build_trace_split_warning(
@@ -8703,6 +8800,18 @@ def main() -> int:
 
                 # Data-validity gate: the selected chunk must have observable GPU work.
                 cli_trace_path = selected_chunks[0]
+                run_meta["selection"].update(
+                    {
+                        "requested_mode": args.steady_state_mode,
+                        "chunk_label": chunk_label,
+                        "selected_chunk": str(cli_trace_path),
+                        "selected_chunk_count": len(selected_chunks),
+                        "available_modes": [mode for mode, (_, chunks) in _mode_to_chunks.items() if chunks],
+                        # TraceLens refuses the raw trace when no chunk qualifies,
+                        # so reaching here means the window is a real split chunk.
+                        "fell_back_to_full_trace": False,
+                    }
+                )
                 empty_chunk_warning = _check_selected_chunk_has_gpu_events(
                     split_dir=split_dir,
                     selected_chunk=cli_trace_path,
@@ -8738,6 +8847,16 @@ def main() -> int:
                     available_modes=_mode_to_chunks,
                 )
                 if low_quality_warning is not None:
+                    run_meta["selection"]["busy_ratio"] = low_quality_warning.get("busy_ratio")
+                    run_meta["selection"]["busy_ratio_threshold"] = low_quality_warning.get("threshold")
+                    _note_step(
+                        "select_chunk",
+                        category="select",
+                        status="failed",
+                        requested_mode=args.steady_state_mode,
+                        selected_chunk=cli_trace_path.name,
+                        busy_ratio=low_quality_warning.get("busy_ratio"),
+                    )
                     trace_health_warnings.append(low_quality_warning)
                     append_log(
                         log_path,
@@ -8764,6 +8883,14 @@ def main() -> int:
                         f"{low_quality_warning['non_empty_modes']}"
                     )
 
+                _note_step(
+                    "select_chunk",
+                    category="select",
+                    status="ok",
+                    requested_mode=args.steady_state_mode,
+                    selected_chunk=cli_trace_path.name,
+                    selected_chunk_count=len(selected_chunks),
+                )
                 artifacts["tracelens_trace_split_dir"] = str(split_dir)
                 artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
                 append_log(
@@ -8784,6 +8911,14 @@ def main() -> int:
                 # for capture_traces/ beside the file it is given, and after a
                 # cross-directory promotion those are different places.
                 else discover_capture_folder(trace_input_path, [analysis_trace_path])
+            )
+            _note_step(
+                "discover_capture_folder",
+                category="preflight",
+                status="ok" if capture_folder else "skipped",
+                skip_reason=None if capture_folder else "no capture_traces/ beside the analysed trace",
+                capture_folder=str(capture_folder or ""),
+                exists=bool(capture_folder and capture_folder.is_dir()),
             )
             if capture_folder:
                 append_log(
@@ -9255,7 +9390,16 @@ def main() -> int:
             "orchestrator_error": orchestrator_error,
             # Trace-quality findings surfaced to the Coordinator (empty = nothing wrong).
             "trace_health_warnings": trace_health_warnings,
+            # What this run saw and decided, for the caller's timeline event.
+            "run_meta": run_meta,
         }
+        _note_step(
+            "extract_hot_kernels",
+            category="emit",
+            status="ok",
+            hot_kernel_count=len(candidates) if isinstance(candidates, list) else 0,
+            orchestrator_mode=orchestrator_mode,
+        )
         atomic_write_json(
             run_dir / "session_state.json",
             {
@@ -9291,6 +9435,9 @@ def main() -> int:
             error=f"{type(exc).__name__}: {exc}",
         )
         # Include trace_health_warnings accumulated pre-exception for auto-recovery.
+        # ``run_meta`` goes out on this path too: the ladder up to the failure is
+        # what says which rung refused, so dropping it here would leave the
+        # failure cases -- the ones worth explaining -- as the only blind spot.
         print(
             json.dumps(
                 {
@@ -9302,6 +9449,7 @@ def main() -> int:
                     "cli_log_path": str(log_path),
                     "status_path": str(status_path),
                     "trace_health_warnings": trace_health_warnings,
+                    "run_meta": run_meta,
                 },
                 indent=2,
                 sort_keys=True,

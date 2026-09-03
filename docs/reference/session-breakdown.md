@@ -31,23 +31,29 @@ This page describes the contract from a consumer's perspective.
 ## Versioning
 
 The top-level `schema_version` field is a stable string. New exports use the
-unified optimization wire shape:
+recorded-timeline wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v5.0"
+"schema_version": "hyperloom.session_breakdown.v6.0"
 ```
 
-V5 is a breaking cutover for optimization results: consumers read only
+V6 is a breaking cutover for the timeline: each action records its own event
+while it runs, so an event's `start_time` is when the work began rather than
+when its artefacts were written, and the KERNEL and BASELINE projections are no
+longer emitted. Consumers that ordered events around the old collapsed windows
+see a different ordering.
+
+V5 was the preceding cutover, for optimization results: consumers read only
 `optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
 Forge invocation, and GEMM-tuning result projections are no longer emitted.
-Archived V2/V3/V4 documents require a downstream migration before V5 readers
+Archived V2/V3/V4/V5 documents require a downstream migration before V6 readers
 consume them.
 
 Compatibility rules:
 
 * **Parse the version, do not gate on string equality**. Read the
   `vN[.M]` prefix and compare the major component so a future minor
-  revision of V5 is still accepted.
+  revision of V6 is still accepted.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
@@ -71,7 +77,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v5.0",
+  "schema_version": "hyperloom.session_breakdown.v6.0",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -738,7 +744,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v5.0",
+  "schema_version": "hyperloom.session_breakdown.v6.0",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 

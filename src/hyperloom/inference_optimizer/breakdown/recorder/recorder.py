@@ -117,6 +117,38 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # one item per tool (idempotent by tool name); folded into the top-level
     # ``versions`` map at assembly.
     "versions": "item",
+    # SBD v6 KERNEL substreams. One ``kernel_event`` fragment per event holds
+    # its mapping-shaped blocks; every row-shaped fact owns a section of its
+    # own, one fragment per row keyed by its real id, because ``_merge_lists``
+    # only merges nested rows in place by ``_ENTITY_ID_FIELDS`` and appends
+    # anything else -- a partial update to a row nested in the event-level
+    # fragment would silently duplicate it. Assembled into one ``kernel``
+    # timeline event when the phase is left.
+    "kernel_event": "item",  # one per KERNEL phase entry, keyed by event id
+    "kernel_lane_run": "item",  # one per forge candidate, ``lane`` discriminates
+    "kernel_rebench_attempt": "item",  # one per re-measurement, forge and geak alike
+    "kernel_trace_analyze": "item",  # one per analysis the phase requested for itself
+    "kernel_geak_attempt": "item",  # one per kernel geak considered
+    "kernel_geak_discovery": "item",  # one per geak hot-kernel discovery run
+    "kernel_geak_acceptance": "item",  # one per kernel or env selection geak accepted
+    # SBD v6 roofline substreams. Written by the same executor whether it was
+    # dispatched on its own or called inline by a phase that owns an event, and
+    # the only difference between the two is the event id on the rows: the
+    # sections are the same either way, and which wire position they assemble
+    # into is the assembler's to decide.
+    "roofline_event": "item",  # one per roofline event, holding its timeline sequence
+    "roofline_action": "item",  # one per roofline action, keyed by its task id
+    "roofline_profile_run": "item",  # one per profile attempt within an action
+    "roofline_analysis_run": "item",  # one per trace-analysis attempt within an action
+    # SBD v6 baseline substreams. The executor retries at two levels -- a pass
+    # through its core, and a Magpie round within a pass -- so runs and rounds
+    # are separate sections rather than one flat list: a pass the budget
+    # refused before it booted anything has a run and no round, and a flat
+    # model would drop it.
+    "baseline_event": "item",  # one per baseline event, holding its timeline sequence
+    "baseline_action": "item",  # one per measurement dispatched, keyed by its task id
+    "baseline_run": "item",  # one per pass through the executor's core
+    "baseline_round": "item",  # one per Magpie round within a pass
 }
 
 # Sections computed at finalize from in-memory state, never written as
@@ -548,11 +580,37 @@ _RECORDERS: dict[tuple[str, str], Recorder] = {}
 _RECORDERS_LOCK = threading.Lock()
 
 
-def get_recorder(session_dir: Path | str, *, producer: str) -> Recorder:
-    """Return a process-cached :class:`Recorder` for ``(session_dir, producer)``.
+def get_recorder(*, producer: str) -> Recorder:
+    """Return the process-cached :class:`Recorder` for the bound session.
 
-    Lets deep call sites obtain the writer without threading it through every
-    function signature.
+    The entry point for recording: a call site needs to know what it is
+    recording and nothing else. Which session it lands in was decided once, at
+    startup, by :func:`~...session.session_binding.bind_session`.
+
+    Args:
+        producer: The producer name owning the written fragments.
+
+    Returns:
+        The process-cached :class:`Recorder` for the bound session and this
+        producer.
+
+    Raises:
+        SessionNotBoundError: If no session is bound -- either startup never
+            bound one, or this is running in a subprocess, where writing
+            fragments loses writes and is forbidden outright.
+    """
+    from ...session.session_binding import bound_session
+
+    return recorder_for(bound_session(), producer=producer)
+
+
+def recorder_for(session_dir: Path | str, *, producer: str) -> Recorder:
+    """Return a process-cached :class:`Recorder` for an explicit session.
+
+    Exists only for the v4 ``instrument`` helpers, whose whole API already
+    takes ``session_dir`` as its first parameter. It goes away with them: no
+    new caller should appear here, and every v6 entry point uses
+    :func:`get_recorder` instead so the session path stays in one place.
 
     Args:
         session_dir: The session directory whose breakdown parts dir backs the
@@ -581,5 +639,6 @@ __all__ = [
     "Recorder",
     "SectionShape",
     "get_recorder",
+    "recorder_for",
     "section_shape",
 ]

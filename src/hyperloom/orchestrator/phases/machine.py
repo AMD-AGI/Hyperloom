@@ -396,17 +396,19 @@ class MachinePhase(PhaseHandler):
             log.exception("Coordinator: phase_transition event bus write failed")
         # Phase-entry side effects are additive; hook failures are logged only.
         try:
-            await self._on_phase_entered(from_phase=prior or "", to_phase=target)
+            await self._on_phase_entered(from_phase=prior or "", to_phase=target, reason=reason or "")
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: _on_phase_entered hook failed")
 
-    async def _on_phase_entered(self, *, from_phase: str, to_phase: str) -> None:
+    async def _on_phase_entered(self, *, from_phase: str, to_phase: str, reason: str = "") -> None:
         """Fire per-phase entry side effects (pure dispatcher; hooks catch + log internally). CLOSE runs the 7-step sequencer (sets close_sequence_done).
 
         Args:
             from_phase: The phase being left.
             to_phase: The phase being entered; selects which per-phase entry
                 hook fires.
+            reason: The transition reason, recorded as the left phase's exit
+                reason when that phase owns a timeline event.
         """
         # Orchestration checkpoint at the phase seam.
         try:
@@ -422,6 +424,17 @@ class MachinePhase(PhaseHandler):
             self._reseed_orch_prompt_for_phase(to_phase)
         except Exception:  # noqa: BLE001 — prompt scoping is best-effort
             log.exception("Coordinator: phase-boundary prompt reseed failed")
+
+        # The machine has entry hooks only, so the phase being left closes its
+        # own timeline event here rather than in a hook of its own. A KERNEL
+        # event must span the whole visit -- the entry hook's deterministic
+        # lanes plus the LLM-driven kernel_opt loop that follows -- and the
+        # transition is the first point at which the visit is over.
+        if (from_phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT:
+            try:
+                self._close_kernel_timeline(exit_reason=str(reason or ""))
+            except Exception:  # noqa: BLE001 — observability cannot change the transition
+                log.debug("Coordinator: kernel timeline close failed", exc_info=True)
 
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:

@@ -56,6 +56,7 @@ from ..phases import machine_state as _phase_state
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
@@ -584,6 +585,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
+        # Bind the session for the SBD V6 recorders once, here, so no recorder
+        # entry point below has to be handed a path. It is bound on the
+        # Coordinator's own context, which is deliberately not inherited by the
+        # Ray actors the phases dispatch into: a subprocess that tried to write
+        # a fragment would find no session and decline, and two processes
+        # upserting one fragment lose a side of the merge.
+        bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
         # KnowledgePlane owns RecipeKB. Keep the explicit parameter as a
         # compatibility injection path for library callers during Phase 1.
@@ -973,6 +981,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_geak_enabled": "phase_kernel",
         "_collective_required_before_kernel_opt": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
+        "_open_kernel_timeline": "phase_kernel",
+        "_close_kernel_timeline": "phase_kernel",
+        "_kernel_timeline": "phase_kernel",
         "_run_bf16_dense_gemm_fallback": "phase_kernel",
         "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
         "_bf16_dense_gemm_fallback_pending": "phase_kernel",
