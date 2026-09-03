@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -5008,6 +5009,24 @@ class _NominationStagingError(RuntimeError):
     """The brief names no candidate that a workspace could be staged from."""
 
 
+@dataclass(frozen=True)
+class _StagedBrief:
+    """Where a nomination will run, and what has to be undone afterwards.
+
+    ``workspace`` equals ``live_repo`` in place, so the path rewriting and the
+    inverse mapping both collapse to identity and only the restore differs.
+    """
+
+    workspace: str
+    live_repo: str
+    staged_request: str
+    base_commit: str
+    offtree_rows: int
+    inplace: bool = False
+    restore_info: dict | None = None
+    nogit_scratch: bool = False
+
+
 def _nominatable_rows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """Rows the nominator could actually pick, hottest first.
 
@@ -5031,7 +5050,7 @@ def _stage_nomination_brief(
     nomination_input: str,
     output_dir: Path,
     branch: str,
-) -> tuple[str, str, str, str, int]:
+) -> _StagedBrief:
     """Stage a workspace the nominator can pick inside, and re-point the brief.
 
     forge resolves the nominated kernel against ``--workspace`` and refuses
@@ -5050,15 +5069,19 @@ def _stage_nomination_brief(
         output_dir: Per-attempt directory the worktree is created under.
         branch: Branch name for the staged worktree.
 
+    An editable install is the exception: its finder imports the live tree, so a
+    copy is invisible to the campaign's own measurement and the loop would no-op.
+    That tree is edited in place instead, under the same lock and restore contract
+    the named-kernel path uses, and the caller must replay the restore.
+
     Returns:
-        ``(workspace, live_repo, staged_request, base_commit, dropped_offtree_rows)``.
-        ``live_repo`` is the tree the workspace copies, which is the only tree the
-        re-baselined server imports, so patch targets must be mapped back onto it.
+        The staged brief, whose ``live_repo`` is the tree the re-baselined server
+        imports and the one patch targets must name.
 
     Raises:
         _NominationStagingError: When no eligible row resolves into a stageable
-            tree, so no workspace could make any nomination runnable, or when the
-            tree is an editable install no staged copy can stand in for.
+            tree, so no workspace could make any nomination runnable, or when an
+            editable tree could not be prepared in place.
     """
     request_path = Path(nomination_input).resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -5074,21 +5097,29 @@ def _stage_nomination_brief(
     repo = str(hottest.get("kernel_repo") or "").strip() or _git_toplevel(source_file)
     if not repo:
         raise _NominationStagingError(f"could not resolve a source tree to stage from {source_file}")
-    # An editable-finder install imports the live tree through a meta_path finder
-    # PYTHONPATH cannot override, so a staged copy is never what forge measures.
-    if _needs_inplace(repo):
-        raise _NominationStagingError(
-            f"{repo} is an editable install, whose finder imports the live tree: a staged copy "
-            "would never be the tree forge measures, so self-nomination cannot run here; use the "
-            "named-kernel path"
-        )
-
-    staged = _prepare_worktree(source_file, repo, output_dir, branch)
-    if staged is None:
-        staged = _prepare_worktree_nogit(source_file, repo, output_dir, branch)
-    if staged is None:
-        raise _NominationStagingError(f"{repo} is neither a usable git checkout nor a copyable source tree")
-    workspace, _staged_kernel, base_commit = staged
+    # An editable install imports the live tree, so a copy is invisible to the
+    # campaign's own measurement: edit in place and restore on the way out.
+    inplace = _needs_inplace(repo)
+    restore_info: dict | None = None
+    nogit_scratch = False
+    if inplace:
+        prepared = _prepare_inplace(source_file, repo, branch)
+        if prepared is None:
+            raise _NominationStagingError(
+                f"{repo} is an editable install that could not be prepared in place; another forge "
+                "run may hold it, or it is not a usable git checkout"
+            )
+        workspace, _staged_kernel, restore_info = prepared
+        # The dirty-baseline commit when there was one, else the original HEAD.
+        base_commit = str(restore_info.get("base_commit") or "")
+    else:
+        staged = _prepare_worktree(source_file, repo, output_dir, branch)
+        if staged is None:
+            staged = _prepare_worktree_nogit(source_file, repo, output_dir, branch)
+            nogit_scratch = staged is not None
+        if staged is None:
+            raise _NominationStagingError(f"{repo} is neither a usable git checkout nor a copyable source tree")
+        workspace, _staged_kernel, base_commit = staged
 
     repo_root = Path(repo).resolve()
     kept: list[dict[str, Any]] = []
@@ -5113,7 +5144,16 @@ def _stage_nomination_brief(
     staged_manifest.write_text(json.dumps({**manifest, "hot_kernels": kept}), encoding="utf-8")
     staged_request = output_dir / "forge_nomination_input.staged.json"
     staged_request.write_text(json.dumps({**request, "candidates_path": str(staged_manifest)}), encoding="utf-8")
-    return workspace, str(repo_root), str(staged_request), base_commit, dropped
+    return _StagedBrief(
+        workspace=workspace,
+        live_repo=str(repo_root),
+        staged_request=str(staged_request),
+        base_commit=base_commit,
+        offtree_rows=dropped,
+        inplace=inplace,
+        restore_info=restore_info,
+        nogit_scratch=nogit_scratch,
+    )
 
 
 def _reanchor_patch_targets(envelope: Any, *, workspace: str, live_repo: str) -> Any:
@@ -5235,7 +5275,7 @@ def submit_auto(
     try:
         # forge reports the commit each patch is diffed against on the envelope,
         # so the staged base is not needed again here.
-        workspace, live_repo, nomination_input, _base_commit, offtree = _stage_nomination_brief(
+        brief = _stage_nomination_brief(
             nomination_input=nomination_input,
             output_dir=output_dir,
             branch=branch,
@@ -5252,15 +5292,86 @@ def submit_auto(
             "patches": [],
             "error": f"forge --auto workspace staging failed: {exc}",
         }
-    if offtree:
+    workspace = brief.workspace
+    if brief.offtree_rows:
         log.warning(
             "forge --auto: %d candidate row(s) live outside the staged tree %s and were not offered",
-            offtree,
+            brief.offtree_rows,
             workspace,
         )
     # forge-loop requires --driver to exist before its task preparer authors the
     # real one; the placeholder fails loudly rather than passing for a driver.
     driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
+    try:
+        return _run_auto_campaign(
+            brief=brief,
+            driver=driver,
+            output_dir=output_dir,
+            experiments_dir=experiments_dir,
+            result_json=result_json,
+            forge_log=forge_log,
+            branch=branch,
+            deadline_unix=deadline_unix,
+            timeout_s=timeout_s,
+            resolved_target=resolved_target,
+            resolved_type=resolved_type,
+            kernel_backend=kernel_backend,
+        )
+    finally:
+        # In place this restores the live tree; a worktree is retained because
+        # the patches it produced still reference paths inside it.
+        try:
+            _finalize_forge_workspace(
+                inplace=brief.inplace,
+                restore_info=brief.restore_info,
+                driver=driver,
+                workspace=workspace,
+                output_dir=output_dir,
+                branch=branch,
+                nogit_scratch=brief.nogit_scratch,
+            )
+        except Exception:
+            log.exception("forge --auto workspace finalization failed")
+
+
+def _run_auto_campaign(
+    *,
+    brief: _StagedBrief,
+    driver: str,
+    output_dir: Path,
+    experiments_dir: Path,
+    result_json: Path,
+    forge_log: Path,
+    branch: str,
+    deadline_unix: float,
+    timeout_s: int,
+    resolved_target: str,
+    resolved_type: str,
+    kernel_backend: str,
+) -> dict:
+    """Launch ``forge-loop --auto`` in a staged workspace and read its envelope.
+
+    Split from :func:`submit_auto` so every exit runs the staging teardown: in
+    place the live tree stays edited until the restore replays.
+
+    Args:
+        brief: The staged workspace and the live tree it stands for.
+        driver: The placeholder driver already allocated inside the workspace.
+        output_dir: Per-attempt directory holding the campaign and its logs.
+        experiments_dir: Campaign directory handed to ``--experiments-dir``.
+        result_json: Sidecar the child writes its envelope to.
+        forge_log: Log file the child's output is appended to.
+        branch: Branch name the campaign commits on.
+        deadline_unix: Absolute instant the child is killed at.
+        timeout_s: Budget reported in the timeout error.
+        resolved_target: GPU target passed through to forge.
+        resolved_type: GPU model passed through to forge.
+        kernel_backend: Optional kernel-backend override.
+
+    Returns:
+        The envelope, with patch targets mapped onto the live tree.
+    """
+    workspace = brief.workspace
 
     env = dict(os.environ)
     env["GPU_TARGET"] = resolved_target
@@ -5278,7 +5389,7 @@ def submit_auto(
         "forge-loop",
         "--auto",
         "--nomination-input",
-        str(Path(nomination_input).resolve()),
+        str(Path(brief.staged_request).resolve()),
         "--workspace",
         workspace,
         "--driver",
@@ -5381,7 +5492,7 @@ def submit_auto(
     if isinstance(parsed, dict):
         # forge owns the envelope's shape; only the staged paths are rewritten,
         # since the tree it worked in is not the tree the server imports.
-        return _reanchor_patch_targets(parsed, workspace=workspace, live_repo=live_repo)
+        return _reanchor_patch_targets(parsed, workspace=workspace, live_repo=brief.live_repo)
     return {
         "status": "failed",
         "patches": [],

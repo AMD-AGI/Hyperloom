@@ -649,12 +649,12 @@ def test_a_brief_with_no_resolved_source_is_refused_before_launch(tmp_path, monk
     assert "no candidate with a resolved source file" in result["error"]
 
 
-def test_an_editable_install_is_refused_instead_of_staged_into_a_copy(tmp_path, monkeypatch):
-    """An editable tree cannot be staged, so the run must fail by name.
+def test_an_editable_install_is_edited_in_place_and_restored(tmp_path, monkeypatch):
+    """An editable finder imports the live tree, so the campaign must run there.
 
-    The editable finder imports the live path and PYTHONPATH cannot override it,
-    so forge would benchmark an unpatched server while writing patches into a copy
-    nothing imports -- "no gain" recorded for work that was never applied.
+    A staged copy is invisible to the campaign's own measurement, so the loop
+    would iterate against code it never changed. The live tree is edited under a
+    lock and put back on the way out.
     """
     _neutralize_env_probes(monkeypatch)
     repo, source = _kernel_repo(tmp_path, name="editable_framework")
@@ -672,13 +672,29 @@ def test_an_editable_install_is_refused_instead_of_staged_into_a_copy(tmp_path, 
     )
     _mark_editable_install(monkeypatch, tmp_path, repo)
     assert forge_submit._needs_inplace(str(repo)) is True
-    before = _branches(repo)
-    assert len(before) == 1
+    before_branches = _branches(repo)
+    before_bytes = source.read_bytes()
+    captured: dict = {}
 
-    def _boom(_command, **_kwargs):
-        raise AssertionError("forge must not launch against an editable install")
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        # A campaign edits the tree it was handed; the restore has to undo this.
+        source.write_text("def paged_attention_v1():\n    return 1\n", encoding="utf-8")
+        envelope = {
+            "status": "ok",
+            "patches": [
+                {
+                    "kernel_name": "paged_attention_v1",
+                    "patch_path": str(tmp_path / "attempt" / "forge_experiments" / "a.patch"),
+                    "target_file": str(source),
+                    "kernel_repo": str(repo),
+                    "micro_speedup": 1.4,
+                }
+            ],
+        }
+        return _FakeProcess(returncode=0, stdout="__FORGE_RESULT__" + json.dumps(envelope))
 
-    _patch_forge_launch(monkeypatch, _boom)
+    _patch_forge_launch(monkeypatch, fake_popen)
 
     output_dir = tmp_path / "attempt"
     result = forge_submit.submit_auto(
@@ -688,19 +704,15 @@ def test_an_editable_install_is_refused_instead_of_staged_into_a_copy(tmp_path, 
         gpu_type="mi355x",
     )
 
-    assert result == {
-        "status": "failed",
-        "patches": [],
-        "error": (
-            f"forge --auto workspace staging failed: {repo} is an editable install, whose "
-            "finder imports the live tree: a staged copy would never be the tree forge "
-            "measures, so self-nomination cannot run here; use the named-kernel path"
-        ),
-    }
-    # Nothing was staged for a run that could not have been correct: no forge
-    # branch in the live repo, and no workspace beside the campaign directory.
-    assert _branches(repo) == before
-    assert sorted(child.name for child in output_dir.iterdir()) == ["forge_experiments"]
+    command = captured["command"]
+    # The campaign ran in the live tree, not in a copy beside the attempt dir.
+    assert Path(command[command.index("--workspace") + 1]).resolve() == repo.resolve()
+    (patch,) = result["patches"]
+    assert patch["target_file"] == str(source)
+    # The tree is handed back exactly as it was found.
+    assert source.read_bytes() == before_bytes
+    assert _branches(repo) == before_branches
+    assert not list(repo.glob(".forge_driver_*"))
 
 
 def test_a_rejected_row_cannot_decide_the_staged_tree(tmp_path, monkeypatch):
