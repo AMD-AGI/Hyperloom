@@ -26,6 +26,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_TIMED_OUT,
     OpportunityAnalysisAgent,
     _StagingProtection,
+    _system_prompt,
     run_opportunity_analysis,
 )
 from kernelforge.knowledge.kernel_identity import (
@@ -192,6 +193,37 @@ def test_backend_model_probe_receives_an_existing_agent_directory(
     assert (layout.agent_root / "analysis-result.json").is_file()
 
 
+def test_agent_staging_always_gets_a_private_git_baseline(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+
+    def _assert_git_workspace(staging: Path) -> None:
+        assert _git(staging, "rev-parse", "--show-toplevel") == str(staging.resolve())
+
+    backend = _Backend(_assert_git_workspace)
+    backend.capabilities = AgentCapabilities(
+        writable=True,
+        stop_hooks=True,
+        workspace_guard=True,
+        requires_workspace_cwd=False,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+
+
+def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
+    prompt = _system_prompt()
+
+    assert '"identity": {' in prompt
+    assert '"producer": "forge-loop"' in prompt
+    assert '"evidence": [{' in prompt
+    assert "Do not place identity fields at the top level" in prompt
+    assert "case_ms: <case> <ms>" in prompt
+    assert "before investigating secondary candidates" in prompt
+
+
 def test_agent_failure_still_publishes_a_complete_task(tmp_path: Path) -> None:
     repo, _base_commit = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
@@ -270,3 +302,20 @@ def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> Non
 
     assert allowed == {}
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
+    protection = _StagingProtection(tmp_path / "staging")
+    matchers = {hook.matcher for hook in protection.hooks().pre_tool_use}
+
+    denied = asyncio.run(
+        protection._on_pre_disallowed_tool(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            "",
+            None,
+        )
+    )
+
+    assert "Bash|Shell|Task.*|Agent" in matchers
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "direct read, search" in denied["hookSpecificOutput"]["permissionDecisionReason"]

@@ -3,8 +3,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
+
+from kernelforge.kernel_rewrite_controller.handoff import read_handoff
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    _additional_directories,
+)
 
 from hyperloom.orchestrator.kernel.forge_handoff import write_forge_handoff
 
@@ -29,6 +35,7 @@ def _state(**overrides) -> _State:
         "max_model_len": 4096,
         "framework": "sglang",
         "framework_version": "0.5.0",
+        "framework_repo_path": "",
         "baseline_config_path": "",
         "current_best": {},
         "last_profile_trace": "",
@@ -123,3 +130,34 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
     assert f"`{missing_candidates.resolve()}` (missing)" in evidence
     assert "Profile raw trace:** not provided" in evidence
     assert "Kernel source resolution:" in evidence
+
+
+def test_handoff_exposes_configured_git_source_roots_without_trace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    framework_repo = tmp_path / "sglang"
+    framework_repo.mkdir()
+    (framework_repo / ".git").mkdir()
+    nested_source = framework_repo / "python" / "sglang"
+    nested_source.mkdir(parents=True)
+    aiter_repo = tmp_path / "aiter"
+    aiter_repo.mkdir()
+    (aiter_repo / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    non_git = tmp_path / "site-packages"
+    non_git.mkdir()
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
+        os.pathsep.join((str(nested_source), str(aiter_repo), str(non_git))),
+    )
+    state = _state(framework_repo_path=str(framework_repo))
+
+    handoff_dir = write_forge_handoff(tmp_path / "session", state)
+
+    serving = (handoff_dir / "serving-context.md").read_text(encoding="utf-8")
+    assert serving.count(str(framework_repo.resolve())) == 1
+    assert str(aiter_repo.resolve()) in serving
+    assert str(non_git.resolve()) not in serving
+    additional = _additional_directories(read_handoff(handoff_dir))
+    assert str(framework_repo.resolve()) in additional
+    assert str(aiter_repo.resolve()) in additional

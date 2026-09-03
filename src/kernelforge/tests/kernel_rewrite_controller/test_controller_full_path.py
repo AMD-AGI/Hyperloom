@@ -8,6 +8,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentRunResult,
@@ -53,11 +55,14 @@ def _source_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _handoff(tmp_path: Path) -> Path:
+def _handoff(tmp_path: Path, repo: Path) -> Path:
     root = tmp_path / "handoff"
     root.mkdir()
     (root / "workload.md").write_text("# Workload\n", encoding="utf-8")
-    (root / "serving-context.md").write_text("# Serving Context\n", encoding="utf-8")
+    (root / "serving-context.md").write_text(
+        f"# Serving Context\n\n## Source Repositories\n\n- `{repo.resolve()}`\n",
+        encoding="utf-8",
+    )
     (root / "trace-evidence.md").write_text("# Trace Evidence\n", encoding="utf-8")
     return root
 
@@ -73,6 +78,7 @@ class _TaskAgentBackend:
         self.malformed = malformed
 
     async def run(self, spec, usage=None):
+        assert str(self.repo.resolve()) in spec.additional_directories
         draft = Path(spec.cwd) / "draft"
         draft.mkdir()
         (draft / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
@@ -154,7 +160,7 @@ def test_controller_full_path_publishes_a_shared_base_patch(
     monkeypatch.setattr(dispatcher, "run_forge_loop", _successful_forge)
 
     state = controller.run_controller(
-        handoff_dir=_handoff(tmp_path),
+        handoff_dir=_handoff(tmp_path, repo),
         budget_minutes=120,
         output_dir=tmp_path / "output",
     )
@@ -182,7 +188,8 @@ def test_invalid_agent_task_becomes_no_result_without_starting_forge(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    _wire_fake_analysis(monkeypatch, _TaskAgentBackend(_source_repo(tmp_path), malformed=True))
+    repo = _source_repo(tmp_path)
+    _wire_fake_analysis(monkeypatch, _TaskAgentBackend(repo, malformed=True))
     monkeypatch.setattr(
         dispatcher,
         "run_forge_loop",
@@ -190,7 +197,7 @@ def test_invalid_agent_task_becomes_no_result_without_starting_forge(
     )
 
     state = controller.run_controller(
-        handoff_dir=_handoff(tmp_path),
+        handoff_dir=_handoff(tmp_path, repo),
         budget_minutes=120,
         output_dir=tmp_path / "output",
     )
@@ -213,7 +220,7 @@ def test_agent_failure_after_task_write_still_dispatches_and_returns_partial(
     monkeypatch.setattr(dispatcher, "run_forge_loop", _successful_forge)
 
     state = controller.run_controller(
-        handoff_dir=_handoff(tmp_path),
+        handoff_dir=_handoff(tmp_path, repo),
         budget_minutes=120,
         output_dir=tmp_path / "output",
     )
@@ -222,3 +229,27 @@ def test_agent_failure_after_task_write_still_dispatches_and_returns_partial(
     assert state.analysis_status == "failed"
     assert state.task_count == 1
     assert state.patch_count == 1
+
+
+def test_runtime_failure_is_not_mislabeled_as_handoff_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _source_repo(tmp_path)
+    output = tmp_path / "output"
+    monkeypatch.setattr(
+        controller,
+        "recover_all_task_results",
+        lambda _layout: (_ for _ in ()).throw(RuntimeError("recovery broke")),
+    )
+
+    with pytest.raises(controller.ControllerRunError, match="controller execution failed"):
+        controller.run_controller(
+            handoff_dir=_handoff(tmp_path, repo),
+            budget_minutes=120,
+            output_dir=output,
+        )
+
+    state = json.loads((output / "controller" / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["reason"] == "controller execution failed: recovery broke"

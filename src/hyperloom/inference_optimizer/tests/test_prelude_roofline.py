@@ -467,6 +467,47 @@ async def test_controller_result_integrates_published_patches_before_terminal_st
     }
 
 
+@pytest.mark.asyncio
+async def test_controller_without_patches_records_integration_not_run(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    from hyperloom.orchestrator.kernel import controller_submit
+
+    class _Bus:
+        async def append_and_seq(self, _message):
+            return 1
+
+    coord.bus = _Bus()
+    monkeypatch.setattr(
+        controller_submit,
+        "run_controller_subprocess",
+        lambda **_kwargs: {
+            "status": "failed",
+            "reason": "opportunity analysis failed",
+            "patch_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        coord.phase_kernel,
+        "_kernel_rewrite_controller_timeouts",
+        lambda: (60.0, 90.0),
+    )
+
+    await type(coord.phase_kernel)._run_kernel_rewrite_controller(
+        coord.phase_kernel,
+        coord.session_dir / "handoff",
+    )
+
+    assert coord.shared_state.kernel_rewrite_controller_result["integration"] == {
+        "status": "not_run",
+        "reason": "Controller published no patches",
+        "kept_count": 0,
+        "reverted_count": 0,
+        "skipped_count": 0,
+    }
+
+
 def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
     """The two writers of ``last_profile_workload`` disagree by construction.
 

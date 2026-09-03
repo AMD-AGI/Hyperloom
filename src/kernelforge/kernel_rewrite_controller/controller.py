@@ -120,6 +120,25 @@ def _initialize_layout(layout: ControllerLayout) -> None:
         path.mkdir(parents=True, exist_ok=False)
 
 
+def _raise_controller_failure(
+    layout: ControllerLayout,
+    running: ControllerRunState,
+    reason: str,
+    error: Exception,
+) -> None:
+    failed = ControllerRunState(
+        **{
+            **running.to_dict(),
+            "status": CONTROLLER_STATUS_FAILED,
+            "finished_at": _now_iso(),
+            "reason": reason,
+        }
+    )
+    _write_state(layout, failed)
+    _write_summary(layout, failed)
+    raise ControllerRunError(reason) from error
+
+
 def run_controller(
     *,
     handoff_dir: str | Path,
@@ -147,6 +166,15 @@ def run_controller(
 
     try:
         handoff = read_handoff(handoff_path)
+    except Exception as error:
+        _raise_controller_failure(
+            layout,
+            running,
+            f"handoff validation failed: {error}",
+            error,
+        )
+
+    try:
         recover_all_task_results(layout)
         analysis = run_opportunity_analysis(
             handoff=handoff,
@@ -160,17 +188,12 @@ def run_controller(
         recover_all_task_results(layout)
         patch_count = len(published_operator_dirs(layout))
     except Exception as error:
-        failed = ControllerRunState(
-            **{
-                **running.to_dict(),
-                "status": CONTROLLER_STATUS_FAILED,
-                "finished_at": _now_iso(),
-                "reason": f"handoff validation failed: {error}",
-            }
+        _raise_controller_failure(
+            layout,
+            running,
+            f"controller execution failed: {error}",
+            error,
         )
-        _write_state(layout, failed)
-        _write_summary(layout, failed)
-        raise ControllerRunError(failed.reason) from error
 
     if analysis.status != ANALYSIS_STATUS_COMPLETED and schedule.task_count == 0 and patch_count == 0:
         status = CONTROLLER_STATUS_FAILED

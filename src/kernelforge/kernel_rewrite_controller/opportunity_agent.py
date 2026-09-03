@@ -66,9 +66,24 @@ class _StagingProtection:
                 AgentHook(
                     matcher="Edit|Write|MultiEdit|NotebookEdit",
                     callback=self._on_pre_write,
-                )
+                ),
+                AgentHook(
+                    matcher="Bash|Shell|Task.*|Agent",
+                    callback=self._on_pre_disallowed_tool,
+                ),
             ]
         )
+
+    async def _on_pre_disallowed_tool(self, _input_data, _tool_use_id, _context) -> dict:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Opportunity analysis is limited to direct read, search, and staging write tools."
+                ),
+            }
+        }
 
     async def _on_pre_write(self, input_data, _tool_use_id, _context) -> dict:
         tool_input = input_data.get("tool_input") or {}
@@ -138,16 +153,44 @@ subdirectory containing exactly:
   - task.json
   - driver.py
 
-task.json must contain schema_version=1, the six identity fields (producer must
-be "forge-loop"), repo_root, kernel_path relative to that repo, operator_name,
-driver_path="driver.py", source_files, target_functions, shape_cases, priority,
-reason, and evidence. Set base_commit to an empty string; the host pins the
-current repo HEAD before publication.
+task.json must use this exact top-level structure:
+{
+  "schema_version": 1,
+  "identity": {
+    "producer": "forge-loop",
+    "kernel_name": "<normalized operator name>",
+    "framework": "<framework>",
+    "framework_version": "<version>",
+    "backend": "<backend>",
+    "gpu": "<gpu>"
+  },
+  "base_commit": "",
+  "repo_root": "<absolute Git top-level>",
+  "kernel_path": "<repo-relative source path>",
+  "operator_name": "<name that normalizes to identity.kernel_name>",
+  "driver_path": "driver.py",
+  "source_files": ["<repo-relative path>"],
+  "target_functions": ["<function>"],
+  "shape_cases": [{"name": "<case>"}],
+  "priority": 0,
+  "reason": "<why this measured workload may improve>",
+  "evidence": [{"kind": "<evidence kind>", "path": "<path or source reference>"}]
+}
+Do not place identity fields at the top level. evidence must be a JSON list,
+even when one detailed evidence object is sufficient. The host pins base_commit
+to the current repo HEAD before publication.
 
 driver.py must cover all known shapes for the six-tuple operator and implement
-the existing forge-loop correctness and benchmark output contract. Publish each
-complete task directory as soon as it is ready. Do not write state.json and do
-not modify source repositories or handoff files.
+the forge-loop contract: `python3 driver.py` prints a correctness line such as
+`SNR: <db> dB` or `allclose: True/False`; `python3 driver.py --warmup 3
+--iters 20 --bench-mode` prints `case_ms: <case> <ms>` for every case and one
+`mean_ms: <ms>`. Do not search other Hyperloom or KernelForge trees for task or
+driver examples; this prompt is the authoritative contract.
+
+Publish the strongest plausible task before investigating secondary candidates.
+The host and forge-loop own validation, so do not spend the analysis budget
+trying to prove an implementation. Do not write state.json and do not modify
+source repositories or handoff files.
 """
 
 
@@ -206,8 +249,7 @@ class OpportunityAnalysisAgent:
     ) -> OpportunityAnalysisResult:
         started = time.time()
         layout.agent_staging_root.mkdir(parents=True, exist_ok=True)
-        if self.backend.capabilities.requires_workspace_cwd:
-            _ensure_agent_workspace(layout.agent_staging_root)
+        _ensure_agent_workspace(layout.agent_staging_root)
         progress: list[str] = []
         spec = AgentRunSpec(
             system_prompt=_system_prompt(),

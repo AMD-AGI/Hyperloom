@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,30 @@ def _environment_overrides(
     return dict(sorted(merged.items()))
 
 
+def _source_repository_roots(state: Any) -> tuple[Path, ...]:
+    """Resolve configured source paths to distinct Git repository roots."""
+    raw_paths = [
+        getattr(state, "framework_repo_path", ""),
+        os.environ.get("FRAMEWORK_REPO_PATH", ""),
+    ]
+    raw_paths.extend(
+        value for value in os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep) if value
+    )
+    roots: set[Path] = set()
+    for raw in raw_paths:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser().resolve(strict=False)
+        if path.is_file():
+            path = path.parent
+        for candidate in (path, *path.parents):
+            if (candidate / ".git").exists():
+                roots.add(candidate)
+                break
+    return tuple(sorted(roots, key=str))
+
+
 def build_serving_context_md(state: Any, env_spec: Mapping[str, Any] | None = None) -> str:
     """Render the framework, serving arguments, and environment overrides."""
     context = _workload_context(state)
@@ -105,22 +130,34 @@ def build_serving_context_md(state: Any, env_spec: Mapping[str, Any] | None = No
         f"- **Launch recipe:** `{_display(_absolute_path(spec.get('launch_recipe') or getattr(state, 'baseline_config_path', '')))}`",
         f"- **Overlay Python path:** `{_display(_absolute_path(spec.get('overlay_pythonpath')))}`",
         "",
-        "## Resolved Server Arguments",
+        "## Source Repositories",
         "",
-        "```text",
-        redact_secret_values(resolved_args) if resolved_args else "not available",
-        "```",
-        "",
-        "## Additional Server Arguments",
-        "",
-        "```text",
-        redact_secret_values(extra_args) if extra_args else "not available",
-        "```",
-        "",
-        "## Environment Variable Overrides",
-        "",
-        "```text",
     ]
+    source_roots = _source_repository_roots(state)
+    if source_roots:
+        lines.extend(f"- `{root}`" for root in source_roots)
+    else:
+        lines.append("- not available")
+    lines.extend(
+        [
+            "",
+            "## Resolved Server Arguments",
+            "",
+            "```text",
+            redact_secret_values(resolved_args) if resolved_args else "not available",
+            "```",
+            "",
+            "## Additional Server Arguments",
+            "",
+            "```text",
+            redact_secret_values(extra_args) if extra_args else "not available",
+            "```",
+            "",
+            "## Environment Variable Overrides",
+            "",
+            "```text",
+        ]
+    )
     lines.extend(f"{key}={value}" for key, value in envs.items())
     if not envs:
         lines.append("not available")

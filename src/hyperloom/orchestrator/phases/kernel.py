@@ -4083,7 +4083,8 @@ class KernelPhase(PhaseHandler):
                 }
         else:
             result["integration"] = {
-                "status": "completed",
+                "status": "not_run",
+                "reason": "Controller published no patches",
                 "kept_count": 0,
                 "reverted_count": 0,
                 "skipped_count": 0,

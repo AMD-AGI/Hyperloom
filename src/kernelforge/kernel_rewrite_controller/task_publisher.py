@@ -56,7 +56,13 @@ def publish_staged_task(
     staged_dir: str | Path,
 ) -> TaskPublicationResult:
     """Validate one staged task, pin its repo HEAD, and publish it atomically."""
-    source = Path(staged_dir).expanduser().resolve()
+    unresolved_source = Path(staged_dir).expanduser()
+    if unresolved_source.is_symlink():
+        return TaskPublicationResult(
+            source_dir=unresolved_source.absolute(),
+            reason="staged task is not a safe directory",
+        )
+    source = unresolved_source.resolve()
     task_json = source / "task.json"
     driver = source / "driver.py"
     if not source.is_dir() or source.is_symlink():

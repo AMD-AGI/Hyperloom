@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -84,6 +85,44 @@ def test_run_controller_subprocess_normalizes_a_successful_exit(
     assert result["status"] == "no_opportunity"
     assert result["returncode"] == 0
     assert result["timed_out"] is False
+
+
+def test_controller_environment_prioritizes_this_checkout(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(("/other/src", "/another/src")))
+
+    env = controller_submit._controller_environment()
+
+    source_root = str(Path(controller_submit.__file__).resolve().parents[3])
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == source_root
+    assert env["PYTHONPATH"].split(os.pathsep).count(source_root) == 1
+
+
+def test_business_failure_is_preserved_even_with_zero_returncode(tmp_path: Path) -> None:
+    output = tmp_path / "cycle"
+    state = output / "controller" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "reason": "opportunity analysis failed",
+                "task_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = controller_submit.read_controller_result(
+        output_dir=output,
+        returncode=0,
+        timed_out=False,
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "opportunity analysis failed"
+    assert result["returncode"] == 0
 
 
 def test_run_controller_subprocess_recovers_after_hard_timeout(

@@ -266,3 +266,67 @@ async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path)
     assert summary.results[0].status == "skipped_baseline_mismatch"
     assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 1
+
+
+@pytest.mark.asyncio
+async def test_dirty_integration_worktree_is_skipped_without_cleanup(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="dirty",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    (repo / "second.py").write_text("USER_CHANGE = True\n", encoding="utf-8")
+
+    async def _must_not_validate(_publication):
+        raise AssertionError("dirty worktree must not reach E2E")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_must_not_validate,
+    )
+
+    assert summary.results[0].status == "skipped_dirty_worktree"
+    assert (repo / "second.py").read_text(encoding="utf-8") == "USER_CHANGE = True\n"
+
+
+@pytest.mark.asyncio
+async def test_publication_outside_configured_roots_is_rejected(tmp_path: Path) -> None:
+    allowed_root = tmp_path / "allowed"
+    publication_root = tmp_path / "publication"
+    allowed_root.mkdir()
+    publication_root.mkdir()
+    allowed_repo, _allowed_base = _repo(allowed_root)
+    publication_repo, publication_base = _repo(publication_root)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        publication_repo,
+        publication_base,
+        kernel_name="outside",
+        kernel_path="first.py",
+        patch=_patch(publication_repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _must_not_validate(_publication):
+        raise AssertionError("outside repo must not reach E2E")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, allowed_repo),
+        validator=_must_not_validate,
+    )
+
+    assert summary.results[0].status == "skipped_invalid"
+    assert "outside the configured patch target roots" in summary.results[0].reason
