@@ -15,6 +15,8 @@ from pathlib import Path
 from kernelforge.durable_io import atomic_write_text, fsync_directory
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
+from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kernel_identity import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.llm.git import GitError, git
 
 
@@ -26,6 +28,25 @@ class TaskPublicationResult:
     operator_id: str = ""
     published: bool = False
     reason: str = ""
+
+
+def _normalize_agent_task_payload(payload: dict) -> dict:
+    """Canonicalize harmless textual variations at the untrusted Agent boundary."""
+    normalized = dict(payload)
+    identity_raw = normalized.get("identity")
+    if isinstance(identity_raw, dict):
+        identity = dict(identity_raw)
+        for field in KERNEL_CANONICAL_DIMENSIONS:
+            value = identity.get(field)
+            if not isinstance(value, str):
+                continue
+            stripped = value.strip()
+            identity[field] = normalize_operator_name(stripped) if field == "kernel_name" else stripped.lower()
+        normalized["identity"] = identity
+    repo_root = normalized.get("repo_root")
+    if isinstance(repo_root, str):
+        normalized["repo_root"] = repo_root.strip()
+    return normalized
 
 
 def _repo_head(repo_root: Path) -> str:
@@ -76,6 +97,7 @@ def publish_staged_task(
         payload = json.loads(task_json.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("task.json must contain a JSON object")
+        payload = _normalize_agent_task_payload(payload)
         repo_root_raw = payload.get("repo_root")
         if not isinstance(repo_root_raw, str) or not Path(repo_root_raw).expanduser().is_absolute():
             raise ValueError("repo_root must be an absolute path")

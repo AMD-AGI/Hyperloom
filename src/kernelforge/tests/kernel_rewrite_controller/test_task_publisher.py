@@ -89,6 +89,38 @@ def test_publish_pins_live_head_and_moves_complete_task_atomically(tmp_path: Pat
     assert payload["driver_path"] == "driver.py"
 
 
+def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    task_json = staged / "task.json"
+    payload = json.loads(task_json.read_text(encoding="utf-8"))
+    payload["identity"].update(
+        {
+            "producer": " FORGE-LOOP ",
+            "kernel_name": " Kernel ",
+            "framework": " SGLang ",
+            "framework_version": " 0.5.17+ROCM ",
+            "backend": " TRITON ",
+            "gpu": " MI355X ",
+        }
+    )
+    task_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is True
+    published = json.loads((layout.task_dir(result.operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert published["identity"] == {
+        "producer": "forge-loop",
+        "kernel_name": "kernel",
+        "framework": "sglang",
+        "framework_version": "0.5.17+rocm",
+        "backend": "triton",
+        "gpu": "mi355x",
+    }
+
+
 def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
     repo, _head = _repo(tmp_path)
     nested = repo / "nested"
