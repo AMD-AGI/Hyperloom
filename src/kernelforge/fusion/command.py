@@ -1253,6 +1253,20 @@ def _run_multi_patch_nomination(
     """
     patches: list[dict[str, Any]] = []
 
+    # The ceiling covers BOTH pipelines, not each one separately: a claim and an
+    # authored recipe each cost a full validation, so capping only the autoloop
+    # let the claims push the round past the share that paid for it. Authored
+    # recipes are funded first, matching the order they run in.
+    authored_budget = _recipe_ceiling(len(authored), max_recipes)
+    claims_budget = len(claims) if max_recipes <= 0 else max(0, max_recipes - authored_budget)
+    if len(claims) > claims_budget:
+        log.info(
+            "multi-patch: lane ceiling of %d target(s) withholds %d compile-pass claim(s)",
+            max_recipes,
+            len(claims) - claims_budget,
+        )
+    claims = claims[:claims_budget]
+
     # Authored recipes first: the autoloop owns the shared git workspace, smokes
     # each keeper, and returns siblings strongest-first.
     loop_result: Optional[LoopResult] = None
@@ -1276,7 +1290,7 @@ def _run_multi_patch_nomination(
             ab_isl=ab_isl,
             ab_osl=ab_osl,
             max_turns=max_turns,
-            max_recipes=max_recipes,
+            max_recipes=authored_budget,
             agent_factory=agent_factory,
             pristine_dir=pristine_dir,
             tp=tp,
