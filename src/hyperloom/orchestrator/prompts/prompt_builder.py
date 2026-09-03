@@ -725,34 +725,28 @@ def _idea_generation_lines() -> list[str]:
 _KERNEL_OPT_PIPELINE_BODY: str = """\
 ## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
 
-The four kernel_agent-owned actions are picked per the DECISION FRAMEWORK
-(phase allowed-set + gaps + KB priors); there is no system-side
-priority ranking. Pick the next one by reading these facts in order:
-a `state.gaps[]` `layer='kernel_agent'` gap with attempts left →
-`last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
-skip ids in `rejected_kernel_ids` → recover from `last_action_failures`.
+The request kinds you may emit here are `trace_analyze`, `integrate`, and
+`integrate`'s `apply_patch` alias; they are picked per the DECISION FRAMEWORK
+(phase allowed-set + gaps + KB priors), with no system-side priority ranking.
+Read the optimization lane's outcome before you act: a `state.gaps[]`
+`layer='kernel_agent'` gap names the target, `last_kernel_opt` carries the
+verdict (KEEP→integrate next; PARTIAL→the lane retries at most
+`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` times then rejects; REVERT→rejected),
+`rejected_kernel_ids` lists the ids already written off, and
+`last_action_failures` explains a request of your own that failed.
 A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
 recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
 driven by the phase budget, an `escalate_strategy_change` hint, or a
 terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
 you want to wind down sooner.
 
-### `trace_analyze` — must precede every `run_optimization`
+### `trace_analyze` — read-only candidate analysis
 
   request{target_agent: 'kernel_agent', kind: 'trace_analyze',
           params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
 
   Skip if `last_trace_analyze.trace_input` already equals
   `last_profile_trace` (cached). Explore/sweep/report are NEVER gated on it.
-
-### `gemm_tuning` — `run_gemm_tuning`
-
-  request{target_agent: 'kernel_agent', kind: 'run_gemm_tuning', params={}}
-
-  Current GEAK owns the KERNEL phase by default and decides GEMM applicability
-  internally. Only use this legacy request in explicit per-kernel forge mode
-  (`KERNEL_OPT_BACKEND_ORDER=forge`).
 
 ### `kernel_opt` and `gemm_tuning` — not yours to propose
 

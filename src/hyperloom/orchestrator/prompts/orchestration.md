@@ -380,29 +380,30 @@ on the next tick.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
   and the CSV/JSON they resolve to, or online tuning during a benchmark
-  (`PYTORCH_TUNABLEOP_TUNING=1`). That is `run_gemm_tuning`'s job in
-  KERNEL_AGENT; boolean GEMM-backend switches are unaffected.
+  (`PYTORCH_TUNABLEOP_TUNING=1`). That is the job of the Coordinator-owned
+  `run_gemm_tuning` lane in KERNEL_AGENT; boolean GEMM-backend switches are
+  unaffected.
 
 <!-- phase: KERNEL_AGENT -->
 ### Kernel request kinds
 
-* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
-  `run_optimization` / `integrate` / `apply_patch` — the kinds you may
-  request. `kernel_opt` is NOT a recognised kind — never
-  use it as a request kind. Use `trace_analyze` for candidate analysis.
-  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
-  and it is valid only for FP8 SGLang workloads.
-* `run_fusion` and `run_collective` ALSO have programmatic handlers but are
-  NOT yours to request: they are Coordinator-owned deterministic lanes,
-  dispatched at KERNEL entry once their own gate passes. PolicyGate REJECTS
-  either kind from you (`phase_incompatible`) because a direct request
-  bypasses that gate, the lane's SharedState accounting and its integrate
-  step. You only OBSERVE them — outcomes land in your inbox as
-  `run_fusion_done` / `run_collective_done`, followed by
-  `fusion_integrate_done` / `collective_integrate_done` once a KEEP is
-  integrated, at which point `optimization_stack` carries a
+* `kind` MUST be EXACTLY one of `trace_analyze` / `integrate` /
+  `apply_patch` — the kinds you may request. `kernel_opt` and `gemm_tuning`
+  are action names, NOT recognised request kinds — never use either as a
+  request kind. Use `trace_analyze` for candidate analysis.
+* `run_optimization`, `run_gemm_tuning`, `run_fusion` and `run_collective`
+  ALSO have programmatic handlers but are NOT yours to request: they are
+  Coordinator-owned deterministic lanes, dispatched at KERNEL entry once
+  their own gate passes. PolicyGate REJECTS any of those kinds from you
+  (`phase_incompatible`) because a direct request bypasses that gate, the
+  lane's SharedState accounting and its integrate step. You only OBSERVE
+  them — outcomes land in your inbox as `run_optimization_done` /
+  `run_gemm_tuning_done` / `run_fusion_done` / `run_collective_done`,
+  followed by `fusion_integrate_done` / `collective_integrate_done` once a
+  KEEP is integrated, at which point `optimization_stack` carries a
   `fusion:forge_fusion` / `collective:forge_collective` entry. Read them as
-  progress; to act on a source-level kernel yourself, propose `kernel_opt`.
+  progress; to act on a source-level kernel yourself, `integrate` the KEEPs
+  the optimization lane queues in `pending_keep_kernels`.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 
@@ -425,14 +426,14 @@ repeat it, so work from the newest one already in this conversation (the
 Treat the newest snapshot as ground truth for bottleneck classification.
 Read it as a perf report: Executive
 Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`/`run_optimization`),
+`kernel_id` strings for `trace_analyze`),
 Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
 map to actions — **follow them**:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
-  → `kernel_opt` (KERNEL_AGENT phase, `🔴` before `🟡`; fusion rows want a
-  fused rewrite). On FP8 SGLang run `run_gemm_tuning` first when
-  `last_gemm_tuning` is empty.
+  → the Coordinator-owned `kernel_opt` lane in KERNEL_AGENT (`🔴` before
+  `🟡`; fusion rows want a fused rewrite). You do not dispatch it: read its
+  `run_optimization_done` events and `integrate` the KEEPs it queues.
 * **`## System-Level Optimizations`** → `explore` variants; the text
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.
