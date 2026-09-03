@@ -6267,7 +6267,7 @@ def _nomination_lane_budget(
 ):
     """Derive one lane's share of the phase's remaining time.
 
-    Wraps :func:`lane_budget.allocate`, which divides ``remaining_minutes`` between
+    Wraps :func:`lane_budget.allocate`, which divides the remaining time between
     the lanes and returns, per lane, both a second budget and how many targets that
     budget can fund. Every lane draws its share from this single probe of session
     state, so the shares stay parts of one whole.
@@ -6283,9 +6283,33 @@ def _nomination_lane_budget(
         and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
         reads as "no allocation to make".
     """
-    remaining_fn = getattr(state, "remaining_minutes", None)
-    remaining = remaining_fn() if callable(remaining_fn) else None
+    remaining = _nomination_remaining_minutes(state)
     return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+
+
+def _nomination_remaining_minutes(state: Any) -> float | None:
+    """Minutes a nomination may plan against: the tighter of session and phase.
+
+    The session clock alone overfunds a phase that has already spent most of its
+    own slice, and work planned past the phase exit is cut off partway through.
+
+    Args:
+        state: SharedState exposing ``remaining_minutes()`` and the phase clock.
+
+    Returns:
+        The binding remaining minutes, or ``None`` when the session is unbounded
+        and there is no finite budget to divide.
+    """
+    from ..phases.machine_state import phase_budget_remaining_seconds
+
+    remaining_fn = getattr(state, "remaining_minutes", None)
+    session = remaining_fn() if callable(remaining_fn) else None
+    if session is None:
+        return None
+    phase_sec = phase_budget_remaining_seconds(state)
+    if phase_sec is None:
+        return float(session)
+    return min(float(session), float(phase_sec) / 60.0)
 
 
 def _write_nomination_request(

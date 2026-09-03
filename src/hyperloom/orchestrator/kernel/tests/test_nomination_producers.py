@@ -116,6 +116,75 @@ def test_unbounded_session_is_not_fundable(tmp_path: Path) -> None:
     assert not allocation.is_fundable
 
 
+def _phased_state(tmp_path: Path, *, phase_burned_min: float) -> SharedState:
+    """A bounded session 60 min in, whose KERNEL entry has burned part of its slice."""
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from hyperloom.orchestrator.phases.machine_state import PHASE_CLOSE, PHASE_KERNEL_AGENT, PHASE_SWEEP
+
+    now = datetime.now(timezone.utc)
+    return _state(
+        tmp_path,
+        max_minutes=600.0,
+        start_ts=(now - timedelta(minutes=60)).isoformat(),
+        deadline_unix=(now + timedelta(minutes=540)).timestamp(),
+        phase=PHASE_KERNEL_AGENT,
+        phase_budget_pct={PHASE_KERNEL_AGENT: 0.5, PHASE_SWEEP: 0.3, PHASE_CLOSE: 0.2},
+        phase_started_unix=time.time() - phase_burned_min * 60,
+    )
+
+
+def test_the_rewrite_lane_never_outruns_the_phase_that_hosts_it(tmp_path: Path) -> None:
+    """The session clock alone funds a run the phase gets cut off partway through."""
+    from hyperloom.orchestrator.phases.machine_state import phase_budget_remaining_seconds
+
+    state = _phased_state(tmp_path, phase_burned_min=260.0)
+    phase_left = phase_budget_remaining_seconds(state)
+
+    allocation = krh._nomination_lane_budget(state)
+
+    assert state.remaining_minutes() == pytest.approx(540.0, abs=1.0)
+    assert phase_left / 60 == pytest.approx(140.0, abs=1.0)
+    assert allocation.budget_sec <= phase_left
+
+
+def test_burning_the_phase_slice_shrinks_the_lane(tmp_path: Path) -> None:
+    """A budget that ignores the phase clock reads the same however late it is."""
+    early = krh._nomination_lane_budget(_phased_state(tmp_path / "early", phase_burned_min=0.0))
+    late = krh._nomination_lane_budget(_phased_state(tmp_path / "late", phase_burned_min=260.0))
+
+    assert late.budget_sec < early.budget_sec
+
+
+def test_the_session_still_caps_an_oversized_phase_allotment(tmp_path: Path) -> None:
+    """Without a charge-back clock the phase allotment is flat, and can overshoot.
+
+    An oversized ``cycle_minutes`` allots the phase more time than the session
+    has left, so the session has to remain a ceiling too.
+    """
+    import time
+
+    from hyperloom.orchestrator.phases.machine_state import PHASE_CLOSE, PHASE_KERNEL_AGENT, PHASE_SWEEP
+    from hyperloom.orchestrator.phases.machine_state import phase_budget_remaining_seconds
+
+    state = _state(
+        tmp_path,
+        max_minutes=2880.0,
+        start_ts="not-a-timestamp",
+        deadline_unix=0.0,
+        cycle_minutes=100000,
+        phase=PHASE_KERNEL_AGENT,
+        phase_budget_pct={PHASE_KERNEL_AGENT: 0.5, PHASE_SWEEP: 0.3, PHASE_CLOSE: 0.2},
+        phase_started_unix=time.time(),
+    )
+    assert phase_budget_remaining_seconds(state) / 60 > state.remaining_minutes()
+
+    allocation = krh._nomination_lane_budget(state)
+
+    assert allocation.budget_sec <= 2880 * 60
+
+
 # --------------------------------------------------------------------------- #
 # the gemm and fusion lanes draw from the same split
 # --------------------------------------------------------------------------- #
