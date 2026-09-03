@@ -1281,6 +1281,34 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
     assert "ghp_notarealtoken" not in " ".join(written), "the artifact would carry the token"
 
 
+def test_round_artifact_on_disk_carries_no_credential(tmp_path):
+    """Assert on the file, not on the helper.
+
+    The test above checks ``_sanitize_setup_command`` in isolation, which stays
+    green if the call is dropped from the writer -- and the writer is the thing
+    that produces the durable artifact. ``round.json`` is copied into the
+    archive and read back by later sessions, so a token in it outlives the run.
+    """
+    import json
+
+    from hyperloom.orchestrator.phases import _enablement_artifacts as art
+
+    token = "ghp_notarealtoken"
+    art.snapshot_round(
+        tmp_path,
+        {
+            "status": "ok",
+            "specialist_task_id": "t1",
+            "setup_commands_applied": [f"pip install --index-url https://u:{token}@pkgs.internal/simple aiperf"],
+        },
+    )
+
+    written = (art.enablement_round_dir(tmp_path, "t1") / "round.json").read_text(encoding="utf-8")
+    assert token not in written, "the durable round artifact carried a credential"
+    # Still a usable record of what ran, not an empty field.
+    assert "pip install" in json.loads(written)["setup_commands_applied"][0]
+
+
 def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
     """The list itself must be safe, not just the sentence built from it.
 

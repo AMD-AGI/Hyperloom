@@ -14,7 +14,9 @@ re-derived by an LLM specialist.
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -355,3 +357,285 @@ def test_a_repaired_binary_is_memoized_like_any_other(tmp_path, monkeypatch):
     runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg)
     runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg)
     assert check.calls["n"] == 2  # the second round reuses the post-repair verdict
+
+
+# ── the installer gate, executed rather than read ────────────────────────────
+# The tests above assert on the TEXT of install.sh, which is what a packaging
+# drift check can do. Both defects this gate has had were behavioural and
+# invisible to a text match: a falsy INSTALL_AIPERF started installing once the
+# pre-warm became the default arm, and a bare $ONLY_AIPERF in a sibling function
+# broke every preflight test under `set -u`. So run the real block.
+
+
+def _bash(script: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run ``script`` by bare name from its own directory.
+
+    Absolute paths are the one thing bash flavours disagree about -- WSL wants
+    ``/mnt/c/...`` and Git Bash wants ``C:/...`` -- and a relative name works in
+    every one of them, including the Linux CI runner.
+    """
+    return subprocess.run(["bash", script.name], cwd=str(script.parent), capture_output=True, text=True, env=env)
+
+
+def _run_aiperf_gate(tmp_path: Path, *, env: dict[str, str], ships_client: bool = True) -> str:
+    """Execute install.sh's aiperf gate in isolation and return what it logged.
+
+    The block is sliced out of the packaged installer rather than restated, so a
+    change to the real gate that nobody mirrors here fails the assertions
+    instead of quietly passing against a stale copy.
+    """
+    text = repair.install_script_path().read_text(encoding="utf-8")
+    start = text.index('if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then')
+    end = text.index("\nensure_bench_serving_deps", start)
+
+    asset_dir = tmp_path / "agentx"
+    if ships_client:
+        asset_dir.mkdir()
+
+    runner = tmp_path / "gate.sh"
+    with runner.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    # `set -u` is what install.sh itself runs under, and is the
+                    # only reason the ONLY_AIPERF defect was a hard failure
+                    # rather than a silently-false branch.
+                    "set -uo pipefail",
+                    f'HYPERLOOM_BENCHMARK_BACKEND_LC="{env.get("BACKEND", "vllm")}"',
+                    f'INSTALL_AIPERF="{env.get("INSTALL_AIPERF", "")}"',
+                    f'HYPERLOOM_AGENTX="{env.get("HYPERLOOM_AGENTX", "")}"',
+                    f'AGENTX_ASSET_DIR="{asset_dir.name}"',
+                    "AIPERF_REQUIRED=0",
+                    'log() { echo "$*"; }',
+                    'ensure_aiperf() { echo "RAN ensure_aiperf required=${AIPERF_REQUIRED}"; }',
+                    text[start:end],
+                ]
+            )
+            + "\n"
+        )
+    proc = _bash(runner)
+    assert proc.returncode == 0, f"the gate itself failed: {proc.stderr}"
+    return proc.stdout
+
+
+@pytest.mark.parametrize(
+    ("flags", "expect_install"),
+    [
+        # Nobody set anything: the provisioning case the incident was measured
+        # in. This must install, and it is the whole point of the change.
+        ({}, True),
+        ({"INSTALL_AIPERF": "1"}, True),
+        ({"HYPERLOOM_AGENTX": "on"}, True),
+        ({"HYPERLOOM_AGENTX": " ON "}, True),
+        # Declining by name has to keep working. Before the falsy arm existed
+        # these fell through to the pre-warm and installed anyway.
+        ({"INSTALL_AIPERF": "0"}, False),
+        ({"INSTALL_AIPERF": "false"}, False),
+        ({"INSTALL_AIPERF": " OFF "}, False),
+        ({"HYPERLOOM_AGENTX": "no"}, False),
+        # An unparseable value is not a decline; it falls to the default arm,
+        # which is the safe direction -- a typo must not silently disarm AgentX.
+        ({"INSTALL_AIPERF": "bogus"}, True),
+    ],
+)
+def test_installer_aiperf_gate_truth_table(tmp_path, flags, expect_install):
+    out = _run_aiperf_gate(tmp_path, env=flags)
+    assert ("RAN ensure_aiperf" in out) is expect_install, out
+
+
+def test_installer_gate_makes_an_explicit_request_fatal(tmp_path):
+    """Asked for by name means AIPERF_REQUIRED=1, which is what makes
+    ``ensure_aiperf`` die instead of warn."""
+    out = _run_aiperf_gate(tmp_path, env={"INSTALL_AIPERF": "1"})
+    assert "RAN ensure_aiperf required=1" in out
+
+
+def test_installer_gate_prewarm_stays_non_fatal(tmp_path):
+    """The default arm must not raise the flag: an interpreter that cannot
+    supply aiperf must not block a provision that was never going to use it."""
+    out = _run_aiperf_gate(tmp_path, env={})
+    assert "RAN ensure_aiperf required=0" in out
+    assert "pre-warming" in out
+
+
+def test_installer_gate_skips_a_build_without_the_client(tmp_path):
+    """The pre-warm keys on the shipped client, so a build without it says so
+    rather than installing a dependency it has no use for."""
+    out = _run_aiperf_gate(tmp_path, env={}, ships_client=False)
+    assert "RAN ensure_aiperf" not in out
+    assert "ships no" in out
+
+
+def test_installer_gate_leaves_the_bypass_backend_alone(tmp_path):
+    """A bypass run starts no server and benchmarks nothing."""
+    out = _run_aiperf_gate(tmp_path, env={"BACKEND": "bypass", "INSTALL_AIPERF": "1"})
+    assert out.strip() == ""
+
+
+# ── the --only-aiperf preambles, also executed ───────────────────────────────
+def _run_sliced_function(
+    tmp_path: Path, opener: str, *, preamble: list[str], env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run one install.sh function standalone, the way test_setup_cli does.
+
+    That harness is the reason `${ONLY_AIPERF:-0}` has to be defaulted: it
+    declares a handful of variables and nothing else, under `set -u`.
+    """
+    text = repair.install_script_path().read_text(encoding="utf-8")
+    start = text.index(opener)
+    name = opener.split("(", 1)[0]
+    end = text.index(f"\n{name}", start) if f"\n{name}" in text[start:] else len(text)
+    body = text[start : text.index("\n}\n", start) + 3]
+
+    runner = tmp_path / f"{name}.sh"
+    with runner.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(["#!/usr/bin/env bash", "set -uo pipefail", *preamble, body, name]) + "\n")
+    return _bash(runner, env=env)
+
+
+@pytest.mark.parametrize(
+    "opener",
+    ["preflight_validate_credentials() {", "ensure_torch_compatible_with_gpu() {"],
+)
+def test_only_aiperf_guards_tolerate_an_undeclared_flag(tmp_path, opener):
+    """The ``--only-aiperf`` early returns must not require ONLY_AIPERF to exist.
+
+    ``ONLY_AIPERF`` is assigned at the top of install.sh, but these functions
+    are also run standalone: test_setup_cli.py slices
+    ``preflight_validate_credentials`` into a generated script whose preamble
+    declares a handful of variables and nothing else, under ``set -u``. A bare
+    ``$ONLY_AIPERF`` there is an unbound variable, which took out all eight CI
+    test shards -- five preflight tests died before reaching what they assert.
+
+    So the preamble here deliberately does NOT declare it.
+    """
+    proc = _run_sliced_function(
+        tmp_path,
+        opener,
+        preamble=[
+            "REPO_ROOT=.",
+            "CHECK_ONLY=0",
+            "DRY_RUN=0",
+            "PYTHON=python3",
+            "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test",
+            "log() { :; }",
+            'warn() { echo "$*" >&2; }',
+            'die() { echo "$*" >&2; exit 99; }',
+            "preflight_load_dotenv() { :; }",
+            "normalize_legacy_deepseek_env() { :; }",
+            "preflight_reject_cross_provider() { :; }",
+        ],
+        env={k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_", "DEEPSEEK_"))},
+    )
+    assert "unbound variable" not in proc.stderr, proc.stderr
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_repair_reports_an_unrunnable_installer(monkeypatch):
+    """A packaged install.sh that cannot be executed is a packaging fault.
+
+    Real shape: a wheel unpacked without the executable bit, or a $TMPDIR
+    mounted noexec. The OSError carries the only useful detail, and swallowing
+    it would leave "repair failed" with nothing to act on.
+    """
+
+    def _boom(cmd, **kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    err = repair.ensure_aiperf_installed(env={})
+    assert err is not None
+    assert "could not run" in err
+    assert "PermissionError" in err
+
+
+def test_repair_says_so_when_a_failed_installer_printed_nothing(monkeypatch):
+    """A silent non-zero exit must still name itself.
+
+    Without the fallback the message ends at "exited 2: " -- a colon and a
+    blank, which reads as a truncated log rather than as "the installer said
+    nothing", and sends the reader looking for output that does not exist.
+    """
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, "", "   \n\n"))
+    err = repair.ensure_aiperf_installed(env={})
+    assert err is not None
+    assert err.endswith("(no output)"), err
+
+
+def test_repair_keeps_stdout_and_stderr_on_separate_lines(monkeypatch):
+    """A stdout tail without a trailing newline must not fuse into stderr.
+
+    The first stderr line is usually the pip error this summary exists to
+    carry; concatenating the streams glued it onto the end of an unrelated
+    progress line, where a reader scanning for "ERROR:" at line start misses it.
+    """
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "Collecting aiperf", "ERROR: no matching distribution"),
+    )
+    err = repair.ensure_aiperf_installed(env={})
+    assert err is not None
+    assert "aiperfERROR" not in err, "the two streams were concatenated without a separator"
+
+
+def test_repair_replaces_an_empty_home_not_just_a_missing_one(monkeypatch):
+    """``HOME=""`` is not the same as unset, and setdefault treats it as set.
+
+    install.sh expands ``${HOME}/.hyperloom`` for its install stamp; an empty
+    HOME makes that ``/.hyperloom``, which is unwritable, so the stamp never
+    lands and every later provision redoes the install it was meant to record.
+    """
+    seen = {}
+
+    def _run(cmd, **kw):
+        seen["env"] = kw.get("env") or {}
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    repair.ensure_aiperf_installed(env={"HOME": ""})
+    assert seen["env"]["HOME"], "an empty HOME was passed through to the installer"
+
+
+def test_post_repair_failure_is_marked_unrepairable(tmp_path, monkeypatch):
+    """The installer reported success and the build is still unusable.
+
+    This is no longer a supply gap this process can close, and the distinction
+    is load-bearing: the repair result is memoized as a success, so a caller
+    that trusted ``repairable`` would re-enter the repair branch, get that
+    memoized success handed straight back, and arrive here again having done
+    nothing at all.
+    """
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/opt/venv/bin/aiperf")
+    monkeypatch.setattr(_INSTALL, lambda **kw: None)  # the install "succeeds"
+    monkeypatch.setattr(
+        _CHECK,
+        _raiser(
+            AgentXPreflightError("aiperf was not found", repairable=True),
+            AgentXPreflightError("aiperf is not AgentX-capable", repairable=True),
+        ),
+    )
+
+    with pytest.raises(AgentXPreflightError) as ei:
+        runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=_cfg(tmp_path))
+
+    assert ei.value.repairable is False, "a second repair would be attempted for nothing"
+    assert "installed during this run and the check still fails" in str(ei.value)
+
+
+def test_an_unreadable_config_is_left_to_magpie(tmp_path, monkeypatch):
+    """AgentX preparation must not be the thing that reports a broken config.
+
+    Magpie parses the same file moments later and says so with the context this
+    module does not have; failing here first would replace that diagnosis with
+    a traceback from the AgentX path, pointing at the wrong subsystem.
+    """
+    called = {"deploy": False}
+    monkeypatch.setattr(_DEPLOY, lambda d: called.__setitem__("deploy", True))
+    bad = tmp_path / "cfg.yaml"
+    bad.write_text("benchmark: [unclosed", encoding="utf-8")
+
+    assert runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=bad) is False
+    assert called["deploy"] is False
