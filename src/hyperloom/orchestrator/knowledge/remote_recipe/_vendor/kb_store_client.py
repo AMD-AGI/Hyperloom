@@ -30,7 +30,6 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable
@@ -47,30 +46,6 @@ FILES_MEMBER_ROOT = "files"
 
 class KBStoreError(RuntimeError):
     """Any failure talking to the KB store or the object store."""
-
-
-#: Must match ``knowledge_base.canonical.RECORD_NAMESPACE``.
-RECORD_NAMESPACE = uuid.UUID("0f4d5e6a-8b7c-4d1e-9f2a-3c5b7d9e1f00")
-
-
-def record_id(canonical_id: str, session_id: str) -> str:
-    """Compute a record's UUID locally, without calling the service.
-
-    The id is derived from the identity rather than allocated, so a
-    producer can record it (in a session breakdown, a DB row, a log line)
-    before the record exists and know the value will match.
-
-    The whole identity is hashed, scheme segment included, which is what
-    keeps an ``inference:`` id from colliding with a ``kernel:`` one.
-    """
-    cid = (canonical_id or "").strip()
-    scheme, _, dims = cid.partition(":")
-    if not scheme or not dims:
-        raise KBStoreError(f"canonical_id {canonical_id!r} is malformed")
-    sid = (session_id or "").strip()
-    if not sid:
-        raise KBStoreError(f"session_id {session_id!r} is malformed")
-    return str(uuid.uuid5(RECORD_NAMESPACE, f"{cid}|{sid}"))
 
 
 def sha256_of(path: str | Path) -> tuple[str, int]:
@@ -482,27 +457,6 @@ class KBStoreClient:
             return []
         with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
             return list(pool.map(fetch, files))
-
-    def download_archive(self, canonical_id: str, session_id: str, dest_file: str | Path) -> Path:
-        """Download the session directory as a single tar.gz."""
-        url = self._base + self._session_base(canonical_id, session_id) + "/archive"
-        headers = {}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        target = Path(dest_file)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp, open(target, "wb") as out:
-                while True:
-                    chunk = resp.read(_READ_CHUNK)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-        except Exception as exc:
-            raise KBStoreError(f"archive download failed: {exc!r}") from exc
-        return target
-
 
 #: Where a sectioned document keeps its per-section maps. The service treats
 #: ``knowledge`` as opaque, so this is a producer-side convention rather than

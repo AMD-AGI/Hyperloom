@@ -56,32 +56,6 @@ def _extract_fenced_json(markdown: str, marker: str) -> Any:
         return None
 
 
-def _parse_frontmatter(markdown: str) -> dict[str, Any]:
-    """Parse a minimal YAML frontmatter block (flat scalars + flow lists)."""
-    if not markdown.lstrip().startswith("---"):
-        return {}
-    body = markdown.lstrip()
-    end = body.find("\n---", 3)
-    if end == -1:
-        return {}
-    fm: dict[str, Any] = {}
-    for line in body[3:end].splitlines():
-        line = line.rstrip()
-        if not line or line.startswith("#") or ":" not in line or line.startswith("  "):
-            continue
-        key, _, raw = line.partition(":")
-        key = key.strip()
-        val = raw.strip()
-        if not key:
-            continue
-        if val.startswith("[") and val.endswith("]"):
-            inner = val[1:-1].strip()
-            fm[key] = [v.strip().strip('"') for v in inner.split(",") if v.strip()] if inner else []
-        else:
-            fm[key] = val.strip('"')
-    return fm
-
-
 def synthesize_unified_diff(patches: list[dict[str, Any]]) -> str:
     """Build a git-style unified diff from PR KB ``Patches JSON`` entries.
 
@@ -112,18 +86,6 @@ def synthesize_unified_diff(patches: list[dict[str, Any]]) -> str:
     return "\n".join(out).strip() + "\n" if out else ""
 
 
-def parse_files_page(page: dict[str, Any]) -> dict[str, Any]:
-    """Return ``{files_truncated, patch_omitted_any, patches}`` from a files page."""
-    md = _page_markdown(page)
-    fm = _parse_frontmatter(md)
-    patches = _extract_fenced_json(md, "## Patches JSON") or []
-    if not isinstance(patches, list):
-        patches = []
-    truncated = str(fm.get("files_truncated") or "").lower() == "true"
-    omitted_any = any(isinstance(p, dict) and p.get("patch_omitted") for p in patches)
-    return {"files_truncated": truncated, "patch_omitted_any": omitted_any, "patches": patches}
-
-
 def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the ``## PRs JSON`` list from an index page (empty on miss)."""
     data = _extract_fenced_json(_page_markdown(page), "## PRs JSON")
@@ -132,7 +94,6 @@ def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
 
 __all__ = [
     "synthesize_unified_diff",
-    "parse_files_page",
     "parse_index_prs",
     "index_slug",
 ]

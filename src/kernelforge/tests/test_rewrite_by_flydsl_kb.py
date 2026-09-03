@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
+from kernelforge.knowledge.remote_exp import kb_store_client
 from kernelforge.knowledge.experience_store import (
     REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
@@ -25,6 +26,15 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 VLLM_VERSION = framework_version("vllm")
 SOFTMAX_IDENTITY = f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:flydsl:mi355x"
+
+
+def test_remote_store_exposes_only_the_routes_used_by_rewrite_records() -> None:
+    client = kb_store_client.KBStoreClient
+    assert not hasattr(kb_store_client, "record_id")
+    assert not hasattr(client, "get_record")
+    assert not hasattr(client, "get_best_record")
+    assert not hasattr(client, "list_identity_files")
+    assert not hasattr(client, "download_archive")
 
 
 class InMemoryKBStore:

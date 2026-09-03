@@ -33,21 +33,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gzip
-import inspect
 import json
 import logging
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from kernelforge.llm import (
-    normalize_anthropic_base_url,
-    resolve_anthropic_gateway,
-    resolve_openai_gateway,
-)
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.resources import resource_path
 
@@ -58,7 +51,6 @@ from .llm_failure import (
     DEFAULT_BASE_DELAY_SEC,
     DEFAULT_DEADLINE_SEC,
     DEFAULT_MAX_DELAY_SEC,
-    NOT_CONFIGURED,
     RETRYABLE_KINDS,
     LlmUnavailableError,
     classify_llm_error,
@@ -98,15 +90,6 @@ _DEFAULT_MAX_FUSIONS = 4
 # budget -- a session that finishes in eight turns costs eight turns whatever the
 # ceiling is -- so it is set where exploring a large model tree fits under it.
 DEFAULT_DISCOVERY_TURNS = 60
-
-# A reasoning model spends this budget on thinking before it writes anything, so
-# a small cap does not truncate the answer -- it removes it. Measured against the
-# gateway with claude-opus-5 on a real discovery prompt: at 2400 every one of five
-# attempts came back with an empty completion; at 16000 the response was 5102
-# characters of closed JSON carrying four proposals. Override with
-# ``FORGE_FUSION_LLM_MAX_TOKENS``.
-DEFAULT_LLM_MAX_TOKENS = 16000
-
 
 def _resolve_max_fusions(value: Optional[int] = None) -> int:
     if value is not None:
@@ -1137,95 +1120,6 @@ def parse_discovered_recipes(
     return rank_recipes(out)
 
 
-def complete_with_retry(
-    client: Any,
-    prompt: str,
-    *,
-    model: str,
-    max_tokens: int,
-    attempts: int = DEFAULT_ATTEMPTS,
-    base_delay_sec: float = DEFAULT_BASE_DELAY_SEC,
-    max_delay_sec: float = DEFAULT_MAX_DELAY_SEC,
-    deadline_sec: float | None = None,
-    sleep: Callable[[float], Any] | None = None,
-    monotonic: Callable[[], float] | None = None,
-) -> str:
-    """Ask the gateway once, retrying only the failures a retry can fix.
-
-    Retryable means :data:`~kernelforge.fusion.llm_failure.RETRYABLE_KINDS`: a generic
-    API error or a timeout. A timeout says the request did not come back THIS
-    time, which is the transient degradation this chain exists for; credentials
-    and an over-long prompt fail the same way forever and stop on the first one.
-
-    ``max_tokens`` stays fixed across attempts. The previous hedge shrank it on
-    every retry, but the gateway's 400s carry no reason and recur at any cap
-    (measured success rates were indistinguishable from 512 to 16384 tokens), so
-    shrinking only truncated the answer we were trying to get; the one failure a
-    smaller request does fix — an over-long prompt — classifies as
-    ``context_length`` and is not retried at all.
-
-    ``deadline_sec`` bounds the wall clock, because the attempt count does not:
-    each attempt can sit on the client's read timeout, so a retried timeout is
-    the one kind that could otherwise hold discovery for over an hour.
-
-    An empty completion counts as a failure, not as an answer: discovery's
-    prompt requires a JSON array, so a model that genuinely found nothing
-    replies ``[]``. Treating "" as "no fusions" is the same conflation this
-    module exists to prevent.
-    """
-    import time as _time
-
-    pause = sleep or _time.sleep
-    clock = monotonic or _time.monotonic
-    budget = float(
-        deadline_sec
-        if deadline_sec is not None
-        else env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
-    )
-    started_at = clock()
-    last_error = ""
-    last_kind = API_ERROR
-    for attempt in range(1, attempts + 1):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                temperature=0,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.choices[0].message.content or ""
-            if text.strip():
-                return text
-            last_error = "gateway returned an empty completion"
-            last_kind = API_ERROR
-        except Exception as exc:  # noqa: BLE001 — classified immediately below
-            kind = classify_llm_error(exc)
-            last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
-            last_kind = kind
-            if kind not in RETRYABLE_KINDS:
-                raise LlmUnavailableError(
-                    f"discovery LLM call failed ({kind}): {last_error}",
-                    kind=kind,
-                    attempts=attempt,
-                ) from exc
-        log.warning("discovery llm_fn attempt %d/%d failed: %s", attempt, attempts, last_error)
-        if attempt >= attempts:
-            break
-        if budget > 0 and (clock() - started_at) >= budget:
-            raise LlmUnavailableError(
-                f"discovery LLM unreachable after {attempt} attempt(s) and "
-                f"{clock() - started_at:.0f}s (deadline {budget:.0f}s): {last_error}",
-                kind=last_kind,
-                attempts=attempt,
-            )
-        pause(retry_delay(attempt, base_sec=base_delay_sec, max_sec=max_delay_sec))
-    raise LlmUnavailableError(
-        f"discovery LLM unreachable after {attempts} attempts: {last_error}",
-        kind=last_kind,
-        attempts=attempts,
-    )
-
-
 class DiscoverySafetyError(RuntimeError):
     """Report any source mutation made by a discovery-only Agent session."""
 
@@ -1515,233 +1409,6 @@ def registered_agent_llm_fn(
     return _fn
 
 
-@dataclass(frozen=True)
-class _CompletionMessage:
-    """The one field :func:`complete_with_retry` reads off a completion."""
-
-    content: str
-
-
-@dataclass(frozen=True)
-class _CompletionChoice:
-    message: _CompletionMessage
-
-
-@dataclass(frozen=True)
-class _Completion:
-    """A reply in the chat-completions shape, whatever produced it."""
-
-    choices: list[_CompletionChoice]
-
-    @classmethod
-    def of(cls, text: str) -> _Completion:
-        """Wrap plain text so every provider path returns the same shape."""
-        return cls(choices=[_CompletionChoice(_CompletionMessage(text))])
-
-
-def _chat_shaped_client(completions: Any) -> Any:
-    """Wrap a ``.create()`` in the ``client.chat.completions`` attribute path.
-
-    :func:`complete_with_retry` navigates that path, so each provider adapter is
-    reached the same way rather than the retry chain learning about any of them.
-    """
-    chat = type("_Chat", (), {"completions": completions})()
-    return type("_Client", (), {"chat": chat})()
-
-
-def _anthropic_text(message: Any) -> str:
-    """Concatenate the text blocks of a Messages reply, ignoring the rest.
-
-    A thinking-enabled deployment puts a ``thinking`` block first, so reading
-    ``content[0]`` would drop the answer and look like an empty completion.
-    """
-    blocks = getattr(message, "content", None)
-    if not isinstance(blocks, list):
-        return ""
-    return "".join(str(getattr(b, "text", "") or "") for b in blocks if getattr(b, "type", "") == "text")
-
-
-class _AnthropicChatCompletions:
-    """The Messages API behind the chat-completions call shape.
-
-    Discovery's retry chain, failure classification and deadline all live in
-    :func:`complete_with_retry`, which speaks to a client. Adapting the protocol
-    here keeps both provider lines on that one chain instead of growing a
-    second, subtly different one.
-    """
-
-    def __init__(self, client: Any) -> None:
-        self._client = client
-
-    def create(self, *, model: str, temperature: float, max_tokens: int, messages: list[dict[str, str]]) -> Any:
-        # APIStatusError carries status_code, which classify_llm_error reads
-        # before it falls back to scanning the message, so a 401/403/413 stops
-        # on the first attempt instead of consuming the retry budget.
-        #
-        # ``temperature`` is still a Messages API field, but anthropic 1.x
-        # dropped it from create()'s typed signature, and that signature has no
-        # **kwargs -- passing it named is a TypeError. classify_llm_error reads
-        # that as a transient fault, so it burned the whole retry budget on a
-        # call that could never succeed. Send it in the body when the installed
-        # SDK will not name it.
-        payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
-        if _anthropic_create_names_temperature(self._client):
-            payload["temperature"] = temperature
-        else:
-            payload["extra_body"] = {"temperature": temperature}
-        reply = self._client.messages.create(**payload)
-        return _Completion.of(_anthropic_text(reply))
-
-
-def _anthropic_create_names_temperature(client: Any) -> bool:
-    """Whether this SDK's ``messages.create`` takes ``temperature`` by name.
-
-    Defaults to True for anything unintrospectable -- a stub or a ``**kwargs``
-    passthrough is happier with the named form, and the caller only needs the
-    negative answer to be right.
-    """
-    try:
-        params = inspect.signature(client.messages.create).parameters
-    except (AttributeError, TypeError, ValueError):  # pragma: no cover - exotic stubs
-        return True
-    return "temperature" in params or any(pm.kind is inspect.Parameter.VAR_KEYWORD for pm in params.values())
-
-
-def _anthropic_client(*, timeout_s: int, verify: bool) -> Any | None:
-    """A Messages-protocol client for the Anthropic line, or ``None`` if unset.
-
-    Requires both halves: unlike the Claude CLI, which can run on a Max login
-    with neither, this is a direct API call with nowhere to get a default
-    endpoint or credential from.
-
-    The credential travels in the header its own kind requires --
-    ``ANTHROPIC_API_KEY`` as ``x-api-key``, ``ANTHROPIC_AUTH_TOKEN`` as a bearer
-    token -- which the SDK derives from which argument it is passed as. A
-    gateway wanting something else again (APIM's subscription key) adds it
-    through ``ANTHROPIC_CUSTOM_HEADERS``.
-    """
-    gateway = resolve_anthropic_gateway()
-    key = os.environ.get(gateway.key_env, "").strip() if gateway.key_env else ""
-    if not gateway.has_endpoint or not key:
-        return None
-
-    # DefaultHttpxClient, not httpx.Client: the SDK validates http_client
-    # against the httpx flavour it was built on, and anthropic 1.x moved to
-    # httpx2. Handing it the wrong one is a TypeError at construction, which
-    # surfaces as "llm setup failed" on every discovery call.
-    from anthropic import Anthropic, DefaultHttpxClient
-
-    credential = {"auth_token": key} if gateway.key_env == "ANTHROPIC_AUTH_TOKEN" else {"api_key": key}
-    sdk = Anthropic(
-        base_url=normalize_anthropic_base_url(gateway.base_url),
-        default_headers=gateway.headers or None,
-        http_client=DefaultHttpxClient(verify=verify, timeout=timeout_s),
-        # Discovery owns the retry policy: complete_with_retry classifies each
-        # failure and enforces a wall-clock deadline, and a second silent layer
-        # underneath it would multiply the attempts and blow through that bound.
-        max_retries=0,
-        **credential,
-    )
-    return _chat_shaped_client(_AnthropicChatCompletions(sdk))
-
-
-def default_llm_fn(
-    *,
-    model: str = "claude-opus-4-7",
-    timeout_s: int = 900,
-    log_path: str = "",
-    max_tokens: Optional[int] = None,
-    gpu: str = "",  # gpu unused (text call); kept for call-site compat
-) -> LlmFn:
-    """Legacy bare-completion adapter retained for direct API compatibility.
-
-    The forge-fuse CLI does not use this path: it constructs one registered
-    Agent backend and injects :func:`registered_agent_llm_fn`. Existing callers
-    that import this helper continue to get the historical OpenAI-compatible
-    completion behavior.
-
-    Discovery only READS (the source and retrieved operator evidence are embedded
-    in the prompt) and RETURNS JSON, so a single chat completion suffices.
-    Endpoint, credential and headers come from the OpenAI line via
-    :func:`~kernelforge.llm.resolve_openai_gateway`, and ``ANTHROPIC_SKIP_TLS_VERIFY``
-    / ``NODE_TLS_REJECT_UNAUTHORIZED`` are honored for the gateway's
-    self-signed cert.
-
-    Raises :class:`~kernelforge.fusion.llm_failure.LlmUnavailableError` when the model
-    was never reached — an unconfigured gateway, an unusable client, or a
-    gateway that kept failing. It must never return ``""`` for those, because
-    the caller cannot tell that apart from the model proposing nothing, and the
-    run would publish ``no_opportunity`` for a model it never analyzed.
-
-    Retry budget is tunable without a redeploy via ``FORGE_FUSION_LLM_ATTEMPTS``,
-    ``FORGE_FUSION_LLM_RETRY_BASE_SEC`` and ``FORGE_FUSION_LLM_RETRY_MAX_SEC``.
-    """
-
-    resolved_max_tokens = (
-        int(max_tokens)
-        if max_tokens is not None
-        else int(env_setting("FORGE_FUSION_LLM_MAX_TOKENS", DEFAULT_LLM_MAX_TOKENS, cast=int))
-    )
-
-    def _fn(prompt: str) -> str:
-        skip_tls = (
-            os.environ.get("ANTHROPIC_SKIP_TLS_VERIFY", "").strip().lower() in ("1", "true", "yes")
-            or os.environ.get("NODE_TLS_REJECT_UNAUTHORIZED", "").strip() == "0"
-        )
-        gateway = resolve_openai_gateway()
-        key = os.environ.get(gateway.key_env, "").strip() if gateway.key_env else ""
-        try:
-            if gateway.is_complete() and key:
-                # APIM gateways (e.g. AMD) enforce an Ocp-Apim-Subscription-Key
-                # header the OpenAI SDK never sends from api_key; without
-                # default_headers the gateway 401s "missing subscription key".
-                # These come from the resolved provider, so the other side's
-                # headers can never leak onto this endpoint.
-                # DefaultHttpxClient for the same reason as the Anthropic leg
-                # above: the SDK type-checks http_client against its own httpx.
-                from openai import DefaultHttpxClient, OpenAI
-
-                client_kwargs: dict[str, Any] = {
-                    "base_url": gateway.base_url,
-                    "api_key": key,
-                    "http_client": DefaultHttpxClient(verify=not skip_tls, timeout=timeout_s),
-                }
-                if gateway.headers:
-                    client_kwargs["default_headers"] = gateway.headers
-                client: Any = OpenAI(**client_kwargs)
-            else:
-                client = _anthropic_client(timeout_s=timeout_s, verify=not skip_tls)
-        except Exception as exc:  # noqa: BLE001 — client construction failure.
-            raise LlmUnavailableError(
-                f"discovery llm_fn setup failed: {type(exc).__name__}: {str(exc)[:240]}",
-                kind=classify_llm_error(exc),
-            ) from exc
-        if client is None:
-            raise LlmUnavailableError(
-                "discovery llm_fn: no LLM gateway configured (needs either "
-                "OPENAI_BASE_URL + OPENAI_API_KEY for the OpenAI-compatible "
-                "protocol, or ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY for the "
-                "Anthropic Messages protocol)",
-                kind=NOT_CONFIGURED,
-            )
-
-        out = complete_with_retry(
-            client,
-            prompt,
-            model=model,
-            max_tokens=resolved_max_tokens,
-            attempts=int(env_setting("FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, cast=int)),
-            base_delay_sec=float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)),
-            max_delay_sec=float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)),
-        )
-        if log_path:
-            with contextlib.suppress(OSError):
-                Path(log_path).write_text(out, encoding="utf-8")
-        return out
-
-    return _fn
-
-
 def discover_recipes(
     diagnosis: Diagnosis,
     *,
@@ -1750,7 +1417,7 @@ def discover_recipes(
     source_file: str,
     shapes: dict[str, Any],
     trace_path: str,
-    llm_fn: Optional[LlmFn] = None,
+    llm_fn: LlmFn,
     max_fusions: Optional[int] = None,
     top_kernels: int = 15,
     knowledge_root: str | Path | None = None,
@@ -1760,9 +1427,8 @@ def discover_recipes(
     """LLM-autonomous discovery: propose fusible chains from the trace + source.
 
     Returns an empty list when the diagnosis is not a candidate, the source cannot
-    be read, or the LLM proposes nothing parseable. The CLI injects
-    :func:`registered_agent_llm_fn`; the legacy default remains only for direct
-    callers that omit ``llm_fn``.
+    be read, or the LLM proposes nothing parseable. Callers inject the selected
+    provider through :func:`registered_agent_llm_fn`.
 
     An empty list means discovery looked and found nothing. When it could not
     look at all, ``llm_fn`` raises
@@ -1800,8 +1466,7 @@ def discover_recipes(
         ordered_boundaries=ordered_boundaries,
         existing_operator_hints=existing_operator_hints,
     )
-    fn = llm_fn or default_llm_fn()
-    raw = fn(prompt)
+    raw = llm_fn(prompt)
     recipes = parse_discovered_recipes(
         raw,
         model_type=model_type,

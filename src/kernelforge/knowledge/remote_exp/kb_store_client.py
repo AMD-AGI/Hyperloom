@@ -50,30 +50,6 @@ class KBStoreError(RuntimeError):
     """Any failure talking to the KB store or the object store."""
 
 
-#: Must match ``knowledge_base.canonical.RECORD_NAMESPACE``.
-RECORD_NAMESPACE = uuid.UUID("0f4d5e6a-8b7c-4d1e-9f2a-3c5b7d9e1f00")
-
-
-def record_id(canonical_id: str, session_id: str) -> str:
-    """Compute a record's UUID locally, without calling the service.
-
-    The id is derived from the identity rather than allocated, so a
-    producer can record it (in a session breakdown, a DB row, a log line)
-    before the record exists and know the value will match.
-
-    The whole identity is hashed, scheme segment included, which is what
-    keeps an ``inference:`` id from colliding with a ``kernel:`` one.
-    """
-    cid = (canonical_id or "").strip()
-    scheme, _, dims = cid.partition(":")
-    if not scheme or not dims:
-        raise KBStoreError(f"canonical_id {canonical_id!r} is malformed")
-    sid = (session_id or "").strip()
-    if not sid:
-        raise KBStoreError(f"session_id {session_id!r} is malformed")
-    return str(uuid.uuid5(RECORD_NAMESPACE, f"{cid}|{sid}"))
-
-
 def sha256_of(path: str | Path) -> tuple[str, int]:
     """Return ``(hex_digest, size_bytes)`` for a local file."""
     digest = hashlib.sha256()
@@ -269,28 +245,6 @@ class KBStoreClient:
                 return None
             raise
 
-    def get_record(self, rid: str) -> dict[str, Any] | None:
-        """Fetch a record by UUID alone, or ``None`` when it does not exist."""
-        try:
-            return self._request("GET", f"/v1/records/{self._quote(rid)}")
-        except KBStoreError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
-
-    def get_best_record(self, canonical_id: str) -> dict[str, Any] | None:
-        """The record to act on for an identity, or ``None`` if there is none.
-
-        Answers from the v1 recipe page when an identity predates this store,
-        so a caller does not have to know which plane its data lives in.
-        """
-        try:
-            return self._request("GET", f"/v1/kb/{self._quote(canonical_id)}")
-        except KBStoreError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
-
     def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
         """Read the candidate index, or ``None`` when nothing is recorded."""
         try:
@@ -312,14 +266,6 @@ class KBStoreClient:
         query = urllib.parse.urlencode({"metric": metric, "limit": int(limit), "offset": int(offset)})
         path = f"/v1/kb/{self._quote(canonical_id)}/sessions/top?{query}"
         return self._request("GET", path) or {}
-
-    def list_identity_files(self, canonical_id: str, *, kind: str = "") -> list[dict[str, Any]]:
-        """Artifacts across all sessions of an identity, deduped by digest."""
-        path = f"/v1/kb/{self._quote(canonical_id)}/files"
-        if kind:
-            path += "?" + urllib.parse.urlencode({"kind": kind})
-        result = self._request("GET", path) or {}
-        return list(result.get("files") or [])
 
     def set_champion(
         self, canonical_id: str, session_id: str, *, metric: str = "throughput", value: float = 0.0
@@ -581,27 +527,6 @@ class KBStoreClient:
             return []
         with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
             return list(pool.map(fetch, entries))
-
-    def download_archive(self, canonical_id: str, session_id: str, dest_file: str | Path) -> Path:
-        """Download the session directory as a single tar.gz."""
-        url = self._base + self._session_base(canonical_id, session_id) + "/archive"
-        headers = {}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        target = Path(dest_file)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp, open(target, "wb") as out:
-                while True:
-                    chunk = resp.read(_READ_CHUNK)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-        except Exception as exc:
-            raise KBStoreError(f"archive download failed: {exc!r}") from exc
-        return target
-
 
 #: Where a sectioned document keeps its per-section maps. The service treats
 #: ``knowledge`` as opaque, so this is a producer-side convention rather than
