@@ -372,8 +372,14 @@ def _park(record_warning: Any, *, component: str, exc: BaseException) -> None:
 
     session = bound_session_or_none()
     if session is None:
+        log.warning("timeline: %s failed with no session bound, so it cannot be parked: %r", component, exc)
         return
     try:
         record_warning(session, component=component, exc=exc)
     except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
-        log.debug("timeline: write-warning sidecar failed", exc_info=True)
+        # The sidecar is what makes the parked failures above visible in the
+        # export, so losing it is the point at which the original failure would
+        # otherwise go unreported entirely.
+        log.warning(
+            "timeline: cannot park the %s failure %r; it will not reach the export", component, exc, exc_info=True
+        )

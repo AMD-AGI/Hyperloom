@@ -881,5 +881,8 @@ def make_roofline_recorder(
             owns_event=owns_event,
         )
     except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
-        log.debug("roofline timeline: recorder construction failed", exc_info=True)
+        log.warning(
+            "roofline timeline: recorder construction failed; this action's facts will be missing from the event",
+            exc_info=True,
+        )
         return None

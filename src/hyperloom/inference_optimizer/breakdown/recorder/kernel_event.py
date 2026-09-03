@@ -1799,7 +1799,11 @@ def make_kernel_recorder(
 
     try:
         if not session_is_bound():
-            log.debug("kernel timeline: no session bound; not recording")
+            log.warning(
+                "kernel timeline: no session bound; this phase entry's whole event will be "
+                "missing from the breakdown. The coordinator binds at startup, so this means "
+                "either that never happened or the entry ran outside the session's context"
+            )
             return None
         return KernelEventRecorder(
             macro_cycle=macro_cycle,
@@ -1809,5 +1813,9 @@ def make_kernel_recorder(
             code_revision=code_revision,
         )
     except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-        log.debug("kernel timeline: recorder construction failed; not recording", exc_info=True)
+        log.warning(
+            "kernel timeline: recorder construction failed; this phase entry's whole event "
+            "will be missing from the breakdown",
+            exc_info=True,
+        )
         return None

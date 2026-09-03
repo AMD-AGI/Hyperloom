@@ -345,7 +345,11 @@ class RooflineExecutor:
         params = ctx.task.params or {}
         try:
             if not session_is_bound():
-                log.debug("roofline timeline: no session bound; not recording")
+                log.warning(
+                    "roofline timeline: no session bound; this action's whole event will be "
+                    "missing from the breakdown. The coordinator binds at startup, so this "
+                    "means either that never happened or the context did not name a session"
+                )
                 return None
             inline = str(params.get(INLINE_EVENT_PARAM) or "")
             event = inline or roofline_event_id(
@@ -354,7 +358,11 @@ class RooflineExecutor:
             )
             return make_sink(event, producer=_RECORDER_PRODUCER)
         except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
-            log.debug("roofline timeline: could not resolve an event to record into", exc_info=True)
+            log.warning(
+                "roofline timeline: could not resolve an event to record into; this action's "
+                "whole event will be missing from the breakdown",
+                exc_info=True,
+            )
             return None
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:

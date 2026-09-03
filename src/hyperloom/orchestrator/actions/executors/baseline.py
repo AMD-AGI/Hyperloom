@@ -2511,7 +2511,11 @@ class BaselineExecutor:
             if is_truthy(params.get(SBD_INNER_STEP_PARAM)):
                 return None
             if not session_is_bound():
-                log.debug("baseline timeline: no session bound; not recording")
+                log.warning(
+                    "baseline timeline: no session bound; this measurement's whole event will "
+                    "be missing from the breakdown. The coordinator binds at startup, so this "
+                    "means either that never happened or the context did not name a session"
+                )
                 return None
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             event = baseline_event_id(
@@ -2520,7 +2524,11 @@ class BaselineExecutor:
             )
             return make_sink(event, producer=_RECORDER_PRODUCER)
         except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
-            log.debug("baseline timeline: could not resolve an event to record into", exc_info=True)
+            log.warning(
+                "baseline timeline: could not resolve an event to record into; this "
+                "measurement's whole event will be missing from the breakdown",
+                exc_info=True,
+            )
             return None
 
     def _resolve_framework(self, ctx: RunnerContext) -> str:

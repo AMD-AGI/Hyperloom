@@ -983,8 +983,15 @@ def build_verdict(
     # failure -- which would report a healthy trace as silently wrong. The
     # reader's own preconditions (graph_mode, launch_count >= 2, graph_kernels)
     # already draw that distinction, and deferring to them is also what keeps the
-    # certificate and the live gate from disagreeing. ``None`` means nothing was
-    # measured, which is not the same as measured-and-fine.
+    # certificate and the live gate from disagreeing.
+    #
+    # ``is False`` reads an unmeasured trace as invalid rather than unknown, and
+    # that is deliberate rather than a collapsed tri-state. The reader returns a
+    # bool on every path it reaches, so ``None`` means it produced no coverage
+    # block at all -- and that same absence leaves ``attribution`` empty, which
+    # blocks on zero kernels above and keeps ``tracelens`` out of ``usable``. So
+    # the case where an unknown could be mistaken for a proven-wrong answer
+    # cannot arise: ``silently_wrong`` requires a usable trace.
     valid = graph_under_recorded is False
     if tracelens_ok and graph_under_recorded:
         warnings.append(
