@@ -22,7 +22,6 @@ from ...session.paths import is_path_within
 
 
 _FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
-_KERNEL_PHASES = frozenset({"KERNEL_AGENT"})
 _AUTHORING_TASK_KINDS = frozenset(
     {
         "explore_apply_retry",

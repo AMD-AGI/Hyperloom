@@ -928,7 +928,6 @@ class SpecialistSubprocessDispatcher:
                 prompt_file.write_text(user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
                 cmd, launch_env_additions = self._build_codex_launch(
-                    prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     system_prompt=system_prompt,
@@ -942,7 +941,6 @@ class SpecialistSubprocessDispatcher:
                 cmd = self._build_claude_cmd(
                     system_prompt_file=prompt_file.parent / "system_prompt.md",
                     system_prompt=system_prompt,
-                    user_prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     disallowed_tools=frozenset(disallowed_tools),
@@ -1215,29 +1213,9 @@ class SpecialistSubprocessDispatcher:
                 dirs.append(root)
         return dirs
 
-    def _build_codex_cmd(
-        self,
-        *,
-        prompt_file: Path,
-        workspace: Path,
-        worktree: Path | None,
-        system_prompt: str = "",
-    ) -> list[str]:
-        """Assemble a test/introspection Codex argv without running the probe."""
-        cmd, _env_additions = self._build_codex_launch(
-            prompt_file=prompt_file,
-            workspace=workspace,
-            worktree=worktree,
-            system_prompt=system_prompt,
-            base_env=_build_specialist_env(),
-            probe_sandbox=False,
-        )
-        return cmd
-
     def _build_codex_launch(
         self,
         *,
-        prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         system_prompt: str,
@@ -1338,7 +1316,6 @@ class SpecialistSubprocessDispatcher:
         *,
         system_prompt_file: Path,
         system_prompt: str,
-        user_prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         disallowed_tools: frozenset[str] = frozenset(),
@@ -1352,7 +1329,6 @@ class SpecialistSubprocessDispatcher:
             system_prompt_file (Path): Destination for the written system prompt;
                 passed to ``--system-prompt-file``.
             system_prompt (str): The system prompt text to write.
-            user_prompt_file (Path): Pre-written user prompt file fed to stdin.
             workspace (Path): Task workspace surfaced as an ``--add-dir``.
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.

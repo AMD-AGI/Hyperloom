@@ -45,8 +45,6 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 _ENABLEMENT_MAX_STALL: int = 5
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
-# Floor on the per-repo framework-PR discover timeout.
-_FRAMEWORK_MIN_PER_REPO_TIMEOUT_SEC: float = 30.0
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
 _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction

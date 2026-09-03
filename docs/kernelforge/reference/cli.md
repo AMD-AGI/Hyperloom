@@ -250,7 +250,6 @@ when no fusion is found.
 | `--validate` / `--no-validate` | on | Run the A/B decode validation. Non-dry-run only. |
 | `--ab-isl <n>` | `512` | A/B input length. |
 | `--ab-osl <n>` | `128` | A/B output length. |
-| `--bench-extra <args>` | `''` | Extra `bench_one_batch` args, e.g. `--attention-backend triton`. |
 | `--server-extra <args>` | `''` | Extra serving args for the smoke launch, e.g. `--kv-cache-dtype fp8`. A model whose engine refuses to start without a flag can never reach the kernel the smoke exists to exercise. |
 | `--tp <n>` | `1` | Tensor-parallel size for the serving smoke; must match the session. |
 | `--block-size <n>` | `0` (omit) | vLLM KV `--block-size` for the serving smoke. Required for sparse-attention models that reject the default block size. |

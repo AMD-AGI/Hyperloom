@@ -219,7 +219,6 @@ class RemoteWarmRecipeAdapter:
         self._destination = Path(destination)
         self._scope = scope
         self._cache: dict[str, dict[str, Any] | None] = {}
-        self._materialized_identity = ""
         self._candidate_views: dict[str, dict[str, Any]] = {}
         self._candidate_rows: dict[str, dict[str, Any]] = {}
         self._scanned_candidate_ids: set[str] = set()
@@ -274,8 +273,6 @@ class RemoteWarmRecipeAdapter:
                     replay_material = False
                 row["replay_material_available"] = replay_material
                 self._cache[canonical_id] = row
-                if row["replay_material_available"]:
-                    self._materialized_identity = canonical_id
         return self._cache[canonical_id]
 
     def get_authoritative_recipe(
@@ -470,7 +467,6 @@ class RemoteWarmRecipeAdapter:
             }
         )
         self._cache[canonical_id] = selected
-        self._materialized_identity = canonical_id
         return True
 
     def close(self) -> None:

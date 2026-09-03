@@ -307,7 +307,6 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
             if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST
         }
         cmd, _ = dispatcher._build_codex_launch(
-            prompt_file=prompt_file,
             workspace=workspace,
             worktree=worktree,
             system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
@@ -318,7 +317,6 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
     return dispatcher._build_claude_cmd(
         system_prompt_file=workspace / "system_prompt.md",
         system_prompt="SYSTEM_INSTRUCTION_SENTINEL",
-        user_prompt_file=prompt_file,
         workspace=workspace,
         worktree=worktree,
         disallowed_tools=frozenset(),

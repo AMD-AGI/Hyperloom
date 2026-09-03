@@ -2134,7 +2134,6 @@ class IntegratePatchExecutor:
         ``None`` to continue.
         """
         ctx._ip_localization_patches = []  # type: ignore[attr-defined]
-        ctx._ip_localization_manifest = {}  # type: ignore[attr-defined]
         raw = params.get("localization_candidate")
         if not isinstance(raw, dict) or not raw:
             return None

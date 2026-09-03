@@ -144,7 +144,6 @@ class ManagedServerProcess:
         """
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
-        self._cmd = list(cmd)
         stdin: Any = subprocess.DEVNULL
         stdout: Any = subprocess.DEVNULL
         stdin_fh: Any = None
@@ -787,11 +786,8 @@ class GpuSpecialistLease:
         self._actor: Any = None
         self._pid: int | None = None
         # §3.3 non-blocking start: the pending ObjectRef for the actor's
-        # ``start`` remote call, and the monotonic clock at submit time so the
-        # caller can measure Ray *pending* time separately from the subprocess's
-        # *running* wall budget.
+        # ``start`` remote call.
         self._start_ref: Any = None
-        self._pending_started_monotonic: float | None = None
 
     def start_async(
         self,
@@ -831,7 +827,6 @@ class GpuSpecialistLease:
             env_mode=env_mode,
             stdin_path=stdin_path,
         )
-        self._pending_started_monotonic = time.monotonic()
 
     def poll_started(self) -> int | None:
         """Non-blocking poll for the launched pid.

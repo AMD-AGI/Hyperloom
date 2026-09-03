@@ -539,11 +539,6 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
 @click.option("--ab-isl", default=512, type=int, help="A/B input length.")
 @click.option("--ab-osl", default=128, type=int, help="A/B output length.")
 @click.option(
-    "--bench-extra",
-    default="",
-    help="Extra bench_one_batch args (e.g. '--attention-backend triton').",
-)
-@click.option(
     "--server-extra",
     default="",
     help=(
@@ -603,7 +598,6 @@ def run(
     max_turns: int,
     ab_isl: int,
     ab_osl: int,
-    bench_extra: str,
     server_extra: str,
     gpu_arch: str,
     tp: int,
