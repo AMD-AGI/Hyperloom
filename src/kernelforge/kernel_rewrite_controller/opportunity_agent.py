@@ -179,6 +179,11 @@ task.json must use this exact top-level structure:
 Do not place identity fields at the top level. evidence must be a JSON list,
 even when one detailed evidence object is sufficient. The host pins base_commit
 to the current repo HEAD before publication.
+All identity values must use normalized lowercase ASCII. For example, write
+`"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
+kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
+`triton`, `gluon`, `aiter`, `hip`, `hipblaslt`, or `fusion`. Do not publish an
+operator whose implementation language has no matching registered backend.
 
 driver.py must cover all known shapes for the six-tuple operator and implement
 the forge-loop contract: `python3 driver.py` prints a correctness line such as

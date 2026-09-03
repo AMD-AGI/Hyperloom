@@ -22,6 +22,7 @@ from kernelforge.kernel_rewrite_controller.paths import (
     TaskLayout,
     safe_relative_path,
 )
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.implementation_identity import normalize_operator_name
 from kernelforge.knowledge.kernel_identity import (
     KERNEL_CANONICAL_DIMENSIONS,
@@ -88,6 +89,10 @@ def _identity(payload: Any) -> tuple[KernelRecipeIdentity, str]:
         raise TaskContractError(str(error)) from error
     if identity.producer != LOOP_PRODUCER:
         raise TaskContractError(f"identity.producer must be {LOOP_PRODUCER!r}")
+    if identity.backend not in KERNEL_BACKENDS:
+        raise TaskContractError(
+            f"identity.backend must be one of the registered kernel backends: {', '.join(KERNEL_BACKENDS)}"
+        )
     return identity, operator_id
 
 

@@ -220,6 +220,8 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert '"producer": "forge-loop"' in prompt
     assert '"evidence": [{' in prompt
     assert "Do not place identity fields at the top level" in prompt
+    assert '"gpu": "mi355x"' in prompt
+    assert "registered backend" in prompt
     assert "case_ms: <case> <ms>" in prompt
     assert "before investigating secondary candidates" in prompt
 

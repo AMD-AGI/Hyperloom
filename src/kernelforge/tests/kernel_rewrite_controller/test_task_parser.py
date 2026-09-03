@@ -131,6 +131,13 @@ def test_operator_name_must_match_identity(task_dir: Path, task_payload: dict) -
         parse_task_payload(task_payload, task_dir=task_dir)
 
 
+def test_identity_backend_must_be_registered(task_dir: Path, task_payload: dict) -> None:
+    task_payload["identity"]["backend"] = "rocm"
+
+    with pytest.raises(ValueError, match="registered kernel backends"):
+        parse_task_payload(task_payload, task_dir=task_dir)
+
+
 def test_bool_priority_is_rejected(task_dir: Path, task_payload: dict) -> None:
     task_payload["priority"] = True
 
