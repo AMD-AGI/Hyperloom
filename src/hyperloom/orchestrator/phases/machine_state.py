@@ -1904,10 +1904,10 @@ def kernel_auto_pass_complete(state: Any) -> bool:
 
 
 def mark_kernel_auto_pass_complete(state: Any) -> None:
-    """Record that this cycle's nomination pass finished, whatever it selected.
+    """Record that this cycle's nomination pass reached a verdict.
 
-    Called for an empty selection too: "nobody wanted anything" is a completed
-    pass, and it is exactly the case the phase used to hang on.
+    Fired for an empty selection too, since "nothing was worth taking" is a
+    verdict; callers gate this on a readable result, never on a failure.
     """
     state.kernel_auto_pass_cycle = int(getattr(state, "macro_cycle", 0) or 0)
 

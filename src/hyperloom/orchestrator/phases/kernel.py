@@ -4604,10 +4604,17 @@ class KernelPhase(PhaseHandler):
         # kept nothing are the same ``queued`` figure and differ only in reasons.
         refused = _summarize_dropped_patches(outcome.dropped)
         if outcome.is_empty:
-            log.info(
-                "KERNEL entry: fusion KEPT but nominated no usable sibling; nothing to queue (refused=%s)",
-                refused or "none",
-            )
+            if outcome.schema_error:
+                log.warning(
+                    "KERNEL entry: fusion KEPT but its nomination envelope was unreadable (%s); refused=%s",
+                    outcome.schema_error,
+                    refused or "none",
+                )
+            else:
+                log.info(
+                    "KERNEL entry: fusion KEPT but nominated no usable sibling; nothing to queue (refused=%s)",
+                    refused or "none",
+                )
             return
         try:
             keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0"))

@@ -162,6 +162,60 @@ async def test_an_empty_nomination_queues_nothing_and_still_reports(phase, monke
     assert message.payload["result"]["status"] == "complete"
 
 
+def _latched_cycle(state: Any) -> Any:
+    """The latched cycle as stored, so an unset latch is not read as cycle 0."""
+    return getattr(state, "kernel_auto_pass_cycle", "absent")
+
+
+@pytest.mark.asyncio
+async def test_a_clean_empty_nomination_latches_the_pass(phase, monkeypatch):
+    """The latch exists for this case: nothing selected, and forge said so."""
+    phase.shared_state.macro_cycle = 3
+    _fake_forge(monkeypatch, _envelope([]))
+
+    await phase._run_kernel_opt_nomination()
+
+    assert _latched_cycle(phase.shared_state) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"nomination": {}},
+        {"patches": {}, "nomination": {}},
+        {"patches": "none"},
+        _envelope([{"micro_speedup": 1.4}]),
+        _envelope(["not-an-object"]),
+    ],
+    ids=["no-key", "object", "string", "no-identity", "not-an-object"],
+)
+async def test_an_unreadable_envelope_fails_and_leaves_the_latch_dormant(phase, monkeypatch, envelope):
+    """A schema skew must not read as a pass that decided against every kernel."""
+    phase.shared_state.macro_cycle = 3
+    _fake_forge(monkeypatch, envelope)
+
+    await phase._run_kernel_opt_nomination()
+
+    (message,) = phase.bus.sent
+    assert message.payload["result"]["status"] == "failed"
+    assert _queued_on_disk(phase.session_dir) == []
+    assert _latched_cycle(phase.shared_state) is None
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_envelope_still_names_what_it_refused(phase, monkeypatch):
+    """The operator needs the reason, or a schema skew looks like a dead lane."""
+    _fake_forge(monkeypatch, _envelope([{"micro_speedup": 1.4}]))
+
+    await phase._run_kernel_opt_nomination()
+
+    (message,) = phase.bus.sent
+    result = message.payload["result"]
+    assert "unreadable" in result["error"]
+    assert sum(result["dropped"].values()) == 1
+
+
 def _staged_workspaces(monkeypatch) -> list[str]:
     """Record the workspace each submit_auto call would stage into."""
     from hyperloom.agents.kernel.tools.backends import forge_submit

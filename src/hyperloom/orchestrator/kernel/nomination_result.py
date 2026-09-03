@@ -66,29 +66,47 @@ class NominationOutcome:
     candidates_seen: int = 0
     resolved: int = 0
     selected: int = 0
+    #: Why the envelope itself could not be trusted, empty when it could. An
+    #: envelope that is unreadable is not a nomination that selected nothing.
+    schema_error: str = ""
 
     @property
     def is_empty(self) -> bool:
         """No usable patch. A valid outcome, and not the same as a failure."""
         return not self.patches
 
+    @property
+    def is_clean_empty(self) -> bool:
+        """Selected nothing, and said so in a shape this build understands."""
+        return not self.patches and not self.schema_error
+
 
 def parse_outcome(payload: Any) -> NominationOutcome:
     """Read a forge result envelope into usable patches plus explained drops.
 
     Never raises on content: a malformed entry becomes a drop so the rest of
-    the batch survives. Only a non-mapping envelope yields an empty outcome.
+    the batch survives.
+
+    Only an explicit ``patches: []`` is a clean empty selection. An absent key,
+    a non-list, a non-mapping envelope, or a list whose every entry was refused
+    means the envelope could not be read -- reporting those as "selected
+    nothing" hides a schema skew and lets the phase latch on it.
 
     Args:
         payload: The parsed forge result envelope.
 
     Returns:
-        The outcome, with patches ordered strongest-first by micro speedup.
+        The outcome, with patches ordered strongest-first by micro speedup, and
+        ``schema_error`` set when the envelope itself was unreadable.
     """
     if not isinstance(payload, dict):
-        return NominationOutcome()
+        return NominationOutcome(schema_error=f"result envelope is {type(payload).__name__}, not an object")
     entries = payload.get("patches")
-    rows = entries if isinstance(entries, list) else []
+    if entries is None:
+        return NominationOutcome(schema_error="result envelope carries no patches array")
+    if not isinstance(entries, list):
+        return NominationOutcome(schema_error=f"patches is {type(entries).__name__}, not an array")
+    rows = entries
     kept: dict[str, NominatedPatch] = {}
     dropped: list[DroppedPatch] = []
     for row in rows:
@@ -121,12 +139,16 @@ def parse_outcome(payload: Any) -> NominationOutcome:
     summary = payload.get("nomination")
     summary = summary if isinstance(summary, dict) else {}
     ordered = sorted(kept.values(), key=lambda patch: patch.micro_speedup, reverse=True)
+    # Offered patches of which none survived: forge believed it nominated, so
+    # this is a contract disagreement rather than a round that selected nothing.
+    schema_error = f"every one of the {len(rows)} offered patch entries was refused" if rows and not ordered else ""
     return NominationOutcome(
         patches=tuple(ordered),
         dropped=tuple(dropped),
         candidates_seen=_int_or_zero(summary.get("candidates_seen")),
         resolved=_int_or_zero(summary.get("resolved")),
         selected=_int_or_zero(summary.get("selected")),
+        schema_error=schema_error,
     )
 
 

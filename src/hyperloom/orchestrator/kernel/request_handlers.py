@@ -6345,7 +6345,7 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
     return counts
 
 
-def _read_nomination_outcome(result: dict) -> tuple[list[Any], dict[str, int]]:
+def _read_nomination_outcome(result: dict) -> tuple[list[Any], dict[str, int], str]:
     """Read the forge ``--auto`` envelope into siblings the caller can queue.
 
     This deliberately does not touch SharedState. The phase that invoked the
@@ -6357,12 +6357,12 @@ def _read_nomination_outcome(result: dict) -> tuple[list[Any], dict[str, int]]:
         result: The raw forge ``--auto`` envelope (``patches[]`` + ``nomination``).
 
     Returns:
-        The usable sibling patches, and a count per named drop reason. Drops are
-        reported even when nothing survived: an envelope whose every entry was
-        malformed otherwise reads exactly like a clean empty nomination.
+        The usable sibling patches, a count per named drop reason, and why the
+        envelope was unreadable when it was. Only an explicit empty ``patches``
+        array reads as a nomination that cleanly selected nothing.
     """
     outcome = parse_outcome(result)
-    return list(outcome.patches), _summarize_dropped_patches(outcome.dropped)
+    return list(outcome.patches), _summarize_dropped_patches(outcome.dropped), outcome.schema_error
 
 
 def queue_nominated_siblings(state: Any, patches: Any) -> int:
@@ -6506,8 +6506,18 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
             "nominated_patches": [],
             "error": forge_error,
         }
-    patches, dropped = _read_nomination_outcome(result)
+    patches, dropped, schema_error = _read_nomination_outcome(result)
     nomination = result.get("nomination") if isinstance(result, dict) else None
+    if schema_error:
+        # An envelope this build cannot read is a failure, not an empty round:
+        # reporting it complete would latch the lane off on a schema skew.
+        return {
+            "status": "failed",
+            "auto": True,
+            "error": f"forge nomination result was unreadable: {schema_error}",
+            "dropped": dropped,
+            "nomination": nomination if isinstance(nomination, dict) else {},
+        }
     # Carries no single-kernel identity: every sibling lands as its own pending
     # record, so a kernel_id here would misattribute all of them to one phantom.
     return {

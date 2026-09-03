@@ -505,8 +505,8 @@ def test_auto_true_reports_named_refusals_alongside_the_queued_siblings(tmp_path
 def test_auto_true_an_all_malformed_envelope_is_not_a_clean_empty_nomination(tmp_path, monkeypatch):
     """Every entry refused looks identical to "nominated nothing" without this.
 
-    ``queued == 0`` is the same number either way, so the named reasons are the
-    only thing that tells an operator the envelope was broken.
+    Forge believed it nominated, so nothing usable arriving is a disagreement
+    about the contract: it fails, and names each refusal.
     """
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
@@ -521,8 +521,8 @@ def test_auto_true_an_all_malformed_envelope_is_not_a_clean_empty_nomination(tmp
 
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
-    assert result["status"] == "complete"
-    assert result["nominated_patches"] == []
+    assert result["status"] == "failed"
+    assert "nominated_patches" not in result
     assert result["dropped"] == {"missing_kernel_name": 1}
 
 
