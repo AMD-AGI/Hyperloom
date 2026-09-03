@@ -314,10 +314,22 @@ def prepare_agentx_runtime(
     inferencex_path: str | None = None,
     config_path: Path | str | None = None,
     output_dir: Path | str | None = None,
+    active: bool | None = None,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
     runtime_env = env or os.environ
-    if not agentx_enabled(runtime_env):
+    if active is None:
+        active = agentx_enabled(runtime_env)
+        if not active and config_path:
+            try:
+                materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+                benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
+                active = (
+                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
+                )
+            except (OSError, ValueError, TypeError):
+                active = False
+    if not active:
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None

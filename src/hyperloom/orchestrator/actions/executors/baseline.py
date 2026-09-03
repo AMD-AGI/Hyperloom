@@ -3369,6 +3369,7 @@ class BaselineExecutor:
             env=os.environ,
             inferencex_path=effective_inferencex_path,
             config_path=config_path,
+            active=agentx_active(live_shared_state),
         )
         if _agx_err:
             return {
