@@ -30,8 +30,10 @@ SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
 #: session business files.
 SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
 
-#: Current breakdown schema version.
-SCHEMA_VERSION = SCHEMA_VERSION_V5
+#: Current breakdown schema version. V6 stamps the document once the timeline
+#: is recorded by the actions themselves rather than projected out of their
+#: artefacts afterwards, which is what makes an event's start time its real one.
+SCHEMA_VERSION = SCHEMA_VERSION_V6
 
 
 # Session metadata

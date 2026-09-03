@@ -23,7 +23,7 @@ from hyperloom.common.jsonio import read_json
 
 from . import collectors
 from .recorder.event_finalize import finalize_events
-from .schema import SCHEMA_VERSION_V5
+from .schema import SCHEMA_VERSION_V6
 from ..session.session_paths import manifest_path, state_path
 
 log = logging.getLogger(__name__)
@@ -253,9 +253,9 @@ def build(
     # the source of truth for their section; when absent the collectors are used
     # as fallback.
     assembled = _load_assembled(sd, warnings)
-    # V5 is the hard-cutover wire shape regardless of whether recorder
+    # V6 is the hard-cutover wire shape regardless of whether recorder
     # fragments or collector fallbacks supplied the underlying evidence.
-    schema_version = SCHEMA_VERSION_V5
+    schema_version = SCHEMA_VERSION_V6
 
     def _pick(section: str, collector_value: Any) -> Any:
         """Fragment value if recorded and non-empty, else the collector value.

@@ -15,7 +15,6 @@ import pytest
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.critic_reviews import normalize_framework_reviews
-from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V5
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
     read_timeline_event,
@@ -70,14 +69,14 @@ def _write_model_config(model: Path, payload: dict) -> None:
 
 def _model_gate_from_breakdown(session_dir: Path) -> dict:
     breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
-    assert breakdown["schema_version"] == SCHEMA_VERSION_V5
+    assert breakdown["schema_version"] == SCHEMA_VERSION_V6
     assert breakdown["metadata"]["versions"]["schema_version"] == SCHEMA_VERSION_V6
     assert breakdown["outcome"]["status"] == "failed"
     assert breakdown["outcome"]["stage_reached"] == "model_gate"
     return next(event for event in breakdown["timeline"] if event["type"] == "model_gate")
 
 
-def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
+def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     state = {
         "session_id": "session-v6",
         "model_name": "Qwen-Test",
@@ -157,7 +156,7 @@ def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
 
     after = exporter.build(tmp_path)
 
-    assert after["schema_version"] == SCHEMA_VERSION_V5
+    assert after["schema_version"] == SCHEMA_VERSION_V6
     v6_keys = {"exported_at_utc", "metadata", "outcome", "timeline", "close"}
     assert {key: value for key, value in after.items() if key not in v6_keys} == {
         key: value for key, value in before.items() if key not in v6_keys
