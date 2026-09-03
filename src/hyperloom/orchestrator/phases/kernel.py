@@ -1644,7 +1644,9 @@ class KernelPhase(PhaseHandler):
         Alias twins -- one acceptance written under both the candidate tag and
         the kernel symbol -- are collapsed on ``(op_kind, e2e_delta_pct)`` so a
         single acceptance is not counted twice, and the surviving row is the one
-        named after the kernel.
+        named after the kernel. An acceptance carrying no usable delta is not a
+        twin candidate: it is kept as its own row, since there is nothing to
+        match it against.
 
         Args:
             result: The normalized GEAK ``result.json``.
@@ -1661,16 +1663,25 @@ class KernelPhase(PhaseHandler):
         for lane, raw in lanes:
             if not isinstance(raw, dict):
                 continue
+            stated = raw.get("e2e_delta_pct")
             try:
-                delta = float(raw.get("e2e_delta_pct") or 0.0)
+                delta = None if stated is None or stated == "" else float(stated)
             except (TypeError, ValueError):
-                continue
+                delta = None
             name = _geak_spec_name(raw)
             if not name:
                 continue
             row = {**raw, "lane": lane, "alias_collapsed": False}
             if geak_spec_is_env(raw):
                 row["kind"] = "env"
+            if delta is None:
+                # Collapsing is a claim that two rows measured the same thing,
+                # and an absent or unparseable delta is no evidence for it. Two
+                # env selections on one op_kind that merely both lack a delta
+                # are two acceptances, so they are kept apart -- and kept at
+                # all, rather than dropped for having nothing to compare.
+                out.append(row)
+                continue
             twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
             position = index.get(twin)
             if position is None:
