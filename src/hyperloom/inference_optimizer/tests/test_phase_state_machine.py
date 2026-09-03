@@ -55,16 +55,6 @@ def test_allowed_actions_disjoint_phases():
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
-def test_is_action_allowed_in_phase_handles_unknowns():
-    assert phase_state.is_action_allowed_in_phase("baseline", "PRELUDE")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "FRAMEWORK_AGENT")
-    # Unknown phase → deny by default.
-    assert not phase_state.is_action_allowed_in_phase("baseline", "UNKNOWN")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "")
-    # Empty action name → deny.
-    assert not phase_state.is_action_allowed_in_phase("", "PRELUDE")
-
-
 def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
     """The closed vocabulary must actually close over what the rules emit.
 

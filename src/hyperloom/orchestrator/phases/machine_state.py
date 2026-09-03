@@ -18,6 +18,10 @@ import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    COORDINATOR_INTERNAL_ACTIONS,
+    FULL_ENABLED_ACTIONS,
+)
 
 
 log = logging.getLogger(__name__)
@@ -106,31 +110,26 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
 }
 
-
-def _action_in_phase_map(action_name: str, phase: str, mapping: dict[str, frozenset[str]]) -> bool:
-    """Return True iff stripped ``action_name`` is a member of ``mapping[phase]`` (unknown phase → deny)."""
-    actions = mapping.get((phase or "").strip().upper())
-    if actions is None:
-        return False
-    return (action_name or "").strip() in actions
-
-
-def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
-    return _action_in_phase_map(action_name, phase, PHASE_ALLOWED_ACTIONS)
+# Internal in every run mode, so never LLM-proposable. Subtracting the enabled
+# set keeps the dual-dispatched ones (``roofline``).
+COORDINATOR_ONLY_ACTIONS: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS - frozenset(FULL_ENABLED_ACTIONS)
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple (deterministic).
+    """Return the phase's LLM-proposable actions as a sorted tuple (deterministic).
+
+    Both callers render this into the prompt, so a Coordinator-only action is
+    excluded: naming it advertises a lever the LLM does not have.
 
     Args:
         phase (str): Phase name; stripped and upper-cased before lookup.
 
     Returns:
-        tuple[str, ...]: The phase's allowed actions sorted ascending, or an
-        empty tuple for an unknown phase.
+        tuple[str, ...]: The phase's LLM-proposable actions sorted ascending, or
+        an empty tuple for an unknown phase.
     """
-    return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
+    actions = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())
+    return tuple(sorted(actions - COORDINATOR_ONLY_ACTIONS))
 
 
 def render_phase_action_bullets(
@@ -3327,6 +3326,7 @@ def record_lifecycle_event(
 
 
 __all__ = [
+    "COORDINATOR_ONLY_ACTIONS",
     "DEFAULT_PHASE_BUDGET_PCT",
     "OPTIMIZATION_RESERVE_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
@@ -3399,7 +3399,6 @@ __all__ = [
     "prelude_exit_viability",
     "session_usable_seconds",
     "render_phase_action_bullets",
-    "is_action_allowed_in_phase",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",

@@ -16,6 +16,7 @@ boundary rule: :func:`resolved_within` against a root from this module.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import re
 import site
@@ -23,6 +24,8 @@ import sys
 import sysconfig
 from collections.abc import Sequence
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 #: Framework-agnostic way to name the source tree a session may patch. Accepted in
 #: addition to ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``, which keep
@@ -472,9 +475,16 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         tuple[str, ...]: The merged, de-duplicated allowlist roots.
     """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
-    env_roots = (
-        tuple(_normalize_root(p) for p in env.split(":") if p.strip() and Path(p.strip()).is_absolute()) if env else ()
-    )
+    kept: list[str] = []
+    for raw in env.split(":") if env else ():
+        entry = raw.strip()
+        if not entry:
+            continue
+        if not Path(entry).is_absolute():
+            log.warning("ignoring non-absolute framework source root: %r", entry)
+            continue
+        kept.append(_normalize_root(entry))
+    env_roots = tuple(kept)
     return _merge_roots(
         _DEFAULT_SOURCE_ROOTS,
         _discover_installed_package_roots(),
