@@ -104,22 +104,30 @@ export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --launch-info-file "$LAUNCH_INFO_FILE" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-`setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
-written above is the **setsid wrapper** PID, which exits immediately — the
-robustness monitor reads `$PID_FILE` and would misfire a spurious resume if
-it kept the dead wrapper PID. After launch, reconcile `$PID_FILE` to the **real**
-optimizer PID, which the CLI records as `.pid` in the launch-info JSON.
+**Detach it the way the harness understands.** Under Claw (`$CLAW_SESSION_ID`
+set), hand that block to the bash tool with `run_in_background=true` — no
+`setsid nohup`, no trailing `&`. Everywhere else, prefix `setsid nohup`, append
+` &`, and `echo $! > "$PID_FILE"`; that form is required for runs longer than 5
+minutes under Cursor. See the **Launch** section of `SKILL.md` for why the
+distinction matters: a hand-detached run is invisible to Claw, and the sandbox
+is reclaimed about fifteen minutes after the agent turn ends, with the run still
+going.
+
+Either way, reconcile `$PID_FILE` to the **real** optimizer PID, which the CLI
+records as `.pid` in the launch-info JSON. Under `setsid` the `$!` written above
+is the wrapper, which exits immediately; under Claw the tool returns a
+`shell_id` and never a pid. The robustness monitor reads `$PID_FILE` and would
+misfire a spurious resume on a dead wrapper pid.
 
 Health-check after 30 seconds (the launch-info JSON carries the authoritative
 `.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
@@ -162,8 +170,9 @@ non-default session.
 
 ## Robustness Monitor
 
-For runs longer than 5 minutes, start the monitor in its own `setsid nohup`
-process. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
+For runs longer than 5 minutes, start the monitor in its own detached process,
+by the same rule as the optimizer above: `run_in_background=true` under Claw,
+`setsid nohup ... &` elsewhere. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
 else `.session_dir` from `$LAUNCH_INFO_FILE`. Its only allowed relaunch is the
 same session via `optimize --resume-from "$SESSION_DIR"` after the
 optimizer process disappears without a terminal marker; it must not start a
@@ -176,9 +185,9 @@ export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
-setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
+bash "$RUN_DIR/robustness_monitor.sh" \
   > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
-  2>&1 < /dev/null &
+  2>&1 < /dev/null
 ```
 
 ## Monitoring
