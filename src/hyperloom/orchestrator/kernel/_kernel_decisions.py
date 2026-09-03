@@ -91,6 +91,11 @@ def unattempted_skip_reason(reason: str) -> bool:
     return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
 
 
+#: A hot kernel whose source file trace analysis could not resolve. It retires
+#: like a rejection because nothing can dispatch it, but no backend judged it.
+UNRESOLVED_SOURCE_REASON = "unresolved_source"
+
+
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).
@@ -1307,8 +1312,12 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         if _impact_pct >= _min_gpu:
             infra_failure_cap = max(max_failures, _infra_max)
 
+    # Retires without a verdict: leaving it dispatchable would re-select it every
+    # cycle, since untried_hot_reusable_kernels does not require a resolved source.
+    unresolved_source = str(result.get("reason") or "") == UNRESOLVED_SOURCE_REASON
     should_reject = (
         decision == "REVERT"
+        or unresolved_source
         or int(entry.get("partial_count", 0)) >= max_partial
         or int(entry.get("failure_count", 0)) >= infra_failure_cap
     )
@@ -1325,6 +1334,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         entry["rejected_reason"] = (
             "revert_decision"
             if decision == "REVERT"
+            else UNRESOLVED_SOURCE_REASON
+            if unresolved_source
             else (
                 f"max_partial_attempts_{max_partial}_without_keep"
                 if int(entry.get("partial_count", 0)) >= max_partial

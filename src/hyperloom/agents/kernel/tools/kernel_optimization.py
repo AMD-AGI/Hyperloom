@@ -273,6 +273,24 @@ def has_benchmark(args: argparse.Namespace, candidate: dict[str, Any]) -> bool:
     )
 
 
+def non_routable_verdict(candidate: dict[str, Any]) -> tuple[str, str, str]:
+    """Classify a candidate no backend can take: reason, error class, decision.
+
+    An unresolved source carries no decision. Nothing ran, so calling it a
+    REVERT reports a lost optimization the session never attempted.
+
+    Args:
+        candidate: The TraceLens candidate row that failed the routing gate.
+
+    Returns:
+        The reason code, the error class, and the decision (empty when the
+        source could not be resolved).
+    """
+    if not candidate.get("source_file"):
+        return "unresolved_source", "missing_native_source", ""
+    return "non_routable_candidate", "non_reusable_kernel", "REVERT"
+
+
 def _resolve_source_file(
     llm_source: str,
     candidate: dict[str, Any],
@@ -3575,10 +3593,16 @@ def main() -> int:
             )
             return 0
         if candidate.get("reusable_native_kernel") is False or not candidate.get("source_file"):
+            reason_code, error_class, decision = non_routable_verdict(candidate)
+            unresolved_source = not decision
             reason = (
                 candidate.get("skip_reason")
                 or candidate.get("optimization_notes")
-                or "candidate is not a reusable native kernel"
+                or (
+                    "source file could not be resolved"
+                    if unresolved_source
+                    else "candidate is not a reusable native kernel"
+                )
             )
             msg = (
                 f"kernel_id {args.kernel_id!r} resolved to non-routable "
@@ -3606,20 +3630,18 @@ def main() -> int:
                         "resolved_kernel_id": candidate.get("kernel_id"),
                         "kernel_name": candidate.get("name"),
                         "status": "skipped",
-                        "decision": "REVERT",
-                        "error_class": (
-                            "missing_native_source" if not candidate.get("source_file") else "non_reusable_kernel"
-                        ),
-                        "reason": "non_routable_candidate",
+                        "error_class": error_class,
+                        "reason": reason_code,
                         "skip_reason": reason,
                         "verification": {
                             "micro_speedup": 0.0,
                             "best_artifact_path": "",
                         },
-                        "proposal": {
-                            "decision": "REVERT",
-                            "reasons": [reason],
-                        },
+                        **(
+                            {"decision": decision, "proposal": {"decision": decision, "reasons": [reason]}}
+                            if decision
+                            else {}
+                        ),
                         "cli_log_path": str(log_path),
                         "status_path": str(status_path),
                     },

@@ -63,6 +63,9 @@ KNOWN_REJECTION_REASONS = (
     "revert_decision",
     "max_partial_attempts_without_keep",
     "max_failures_without_keep",
+    # Retired without a backend ever running, so it must not inflate the
+    # reverted count that reads as "optimization was tried and lost".
+    "unresolved_source",
 )
 
 #: ``backend_ladder[].error_class`` vocabulary surfaced into
