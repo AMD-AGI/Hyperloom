@@ -124,11 +124,11 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
     assert request["lane"] == "rewrite"
     assert Path(request["candidates_path"]) == (tmp_path / "forge_candidate_manifest.json").resolve()
     assert request["lane_budget_sec"] > 0
-    # Concrete, not a restatement of the impl formula: a 600-min session leaves
-    # ~35 700 phase-sec, the rewrite lane takes 50% (~17 850 sec), and the 4500-sec
-    # admission floor funds floor(17850 / 4500) == 3 targets. Pinning the integer
-    # makes a change to the split or the floor break loudly.
-    assert request["max_kernels"] == 3
+    # A 600-min session leaves ~35 700 phase-sec, the rewrite lane takes 50%
+    # (~17 850 sec), and the 4500-sec admission floor funds 3 targets -- but
+    # forge executes one per call, so the request asks for one.
+    assert krh._nomination_lane_budget(SharedState.load_or_init(tmp_path)).max_targets == 3
+    assert request["max_kernels"] == 1
     assert request["protocol_version"] == 1
 
     # submit_auto was handed the request path, not a named kernel.

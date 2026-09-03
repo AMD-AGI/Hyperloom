@@ -252,8 +252,31 @@ def test_request_points_candidates_path_at_the_manifest(tmp_path: Path) -> None:
     assert Path(request.candidates_path) == manifest_path.resolve()
     assert Path(request.trace_path) == trace.resolve()
     assert request.lane_budget_sec == allocation.budget_sec
-    assert request.max_kernels == allocation.max_targets
+    assert request.max_kernels == 1
     assert request.protocol_version == 1
+
+
+def test_the_request_asks_for_only_what_forge_can_execute(tmp_path: Path) -> None:
+    """forge refuses more than one target per call, so a richer budget still asks for one.
+
+    The full budget still rides along in ``lane_budget_sec``: the ceiling caps how
+    many targets are picked, not how long the one picked target may run.
+    """
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    state = _state(tmp_path, max_minutes=600.0, last_profile_trace=str(trace))
+    manifest_path = krh._write_forge_candidate_manifest({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    allocation = krh._nomination_lane_budget(state)
+    assert allocation.max_targets > 1
+
+    request_path = krh._write_nomination_request(
+        {}, session_dir=tmp_path, manifest_path=manifest_path, allocation=allocation
+    )
+
+    request = nr.read_request(request_path)
+    assert request.max_kernels == 1
+    assert request.lane_budget_sec == allocation.budget_sec
 
 
 def test_request_rejects_a_missing_trace(tmp_path: Path) -> None:

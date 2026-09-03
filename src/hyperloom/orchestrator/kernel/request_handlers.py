@@ -6170,6 +6170,12 @@ def _validate_trace_analyze_inputs(
     return None
 
 
+#: Rewrite targets forge can actually execute in one ``--auto`` call. Running
+#: several needs a per-target base commit and scratch path, so its CLI refuses
+#: more than one; asking for what the budget funds would fail the whole lane.
+_REWRITE_EXECUTABLE_TARGETS = 1
+
+
 def _build_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> dict[str, Any] | None:
     """Build the manifest document forge reads under ``--auto``, without writing it.
 
@@ -6327,6 +6333,10 @@ def _write_nomination_request(
     requires both the trace and the manifest to already exist on disk, so the
     manifest must be written first.
 
+    ``max_kernels`` is the lane's target ceiling clamped by
+    :data:`_REWRITE_EXECUTABLE_TARGETS`, since a budget that funds several targets
+    still has to ask for a number forge can execute.
+
     Args:
         payload: The request payload; supplies an explicit ``trace_path`` when set.
         session_dir: Session directory the request is written into.
@@ -6340,12 +6350,19 @@ def _write_nomination_request(
 
     state = SharedState.load_or_init(session_dir)
     trace_path = _resolve_fusion_decode_trace(state, payload)
+    max_kernels = min(allocation.max_targets, _REWRITE_EXECUTABLE_TARGETS)
+    if allocation.max_targets > max_kernels:
+        log.info(
+            "nomination auto: budget funds %d rewrite target(s); asking for %d (multi-target execution pending)",
+            allocation.max_targets,
+            max_kernels,
+        )
     request = nomination_request.build_request(
         lane=LANE_REWRITE,
         trace_path=trace_path,
         candidates_path=str(manifest_path),
         lane_budget_sec=allocation.budget_sec,
-        max_kernels=allocation.max_targets,
+        max_kernels=max_kernels,
     )
     return nomination_request.write_request(Path(session_dir), request)
 
