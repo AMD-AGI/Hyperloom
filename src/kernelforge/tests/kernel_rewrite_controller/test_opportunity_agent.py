@@ -25,7 +25,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_FAILED,
     ANALYSIS_STATUS_TIMED_OUT,
     OpportunityAnalysisAgent,
-    _StagingProtection,
+    _AnalysisToolGuard,
     _system_prompt,
     run_opportunity_analysis,
 )
@@ -114,10 +114,18 @@ class _Backend:
     runtime = AgentRuntimeConfig(provider="fake", model="fake")
     capabilities = AgentCapabilities(writable=True, stop_hooks=True)
 
-    def __init__(self, callback, *, error: Exception | None = None, sleep: float = 0.0):
+    def __init__(
+        self,
+        callback,
+        *,
+        error: Exception | None = None,
+        sleep: float = 0.0,
+        result: AgentRunResult | None = None,
+    ):
         self.callback = callback
         self.error = error
         self.sleep = sleep
+        self.result = result
         self.spec = None
 
     async def run(self, spec, usage=None):
@@ -127,7 +135,107 @@ class _Backend:
             await asyncio.sleep(self.sleep)
         if self.error is not None:
             raise self.error
-        return AgentRunResult(text="done")
+        return self.result if self.result is not None else AgentRunResult(text="done")
+
+
+class _ResumableBackend(_Backend):
+    capabilities = AgentCapabilities(writable=True, stop_hooks=True, resumable=True)
+
+    def __init__(self, callback, *, first: AgentRunResult):
+        super().__init__(callback)
+        self.first = first
+        self.resumed: list[tuple[str, str]] = []
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        return self.first
+
+    async def resume(self, spec, session_id, feedback, usage=None):
+        self.resumed.append((session_id, feedback))
+        return AgentRunResult(text="continued", end_reason="agent_stopped")
+
+
+def test_a_provider_stream_failure_is_not_reported_as_an_answer(tmp_path: Path) -> None:
+    """``no_opportunity`` is a verdict, so a session that measured nothing fails."""
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda _staging: None,
+        result=AgentRunResult(
+            text="",
+            end_reason="sdk_error",
+            stderr_tail="JSON message exceeded maximum buffer size of 1048576 bytes",
+        ),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "maximum buffer size" in result.reason
+    assert result.published_task_count == 0
+
+
+def test_a_resumable_stream_failure_continues_the_same_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    backend = _ResumableBackend(
+        lambda staging: _write_staged_task(staging, repo),
+        first=AgentRunResult(text="", end_reason="sdk_error", session_id="session-1"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert [session for session, _prompt in backend.resumed] == ["session-1"]
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input", "expected"),
+    [
+        ("Grep", {"pattern": "moe"}, {"pattern": "moe", "head_limit": 200}),
+        ("Grep", {"pattern": "moe", "head_limit": 5000}, {"pattern": "moe", "head_limit": 200}),
+        ("Read", {"file_path": "/server.log"}, {"file_path": "/server.log", "limit": 2000}),
+    ],
+)
+def test_an_unbounded_investigation_read_is_capped(tool_name, tool_input, expected) -> None:
+    decision = asyncio.run(
+        opportunity_agent_module._cap_investigation_result(
+            {"tool_name": tool_name, "tool_input": tool_input},
+            "",
+            None,
+        )
+    )
+
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert decision["hookSpecificOutput"]["updatedInput"] == expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Grep", {"pattern": "moe", "head_limit": 20}),
+        ("Read", {"file_path": "/kernel.py", "limit": 40}),
+        ("Glob", {"glob_pattern": "**/*.py"}),
+    ],
+)
+def test_an_already_bounded_call_is_left_alone(tool_name, tool_input) -> None:
+    """An untouched call returns ``{}`` so the normal permission flow decides it."""
+    decision = asyncio.run(
+        opportunity_agent_module._cap_investigation_result(
+            {"tool_name": tool_name, "tool_input": tool_input},
+            "",
+            None,
+        )
+    )
+
+    assert decision == {}
 
 
 def test_agent_publishes_complete_tasks_and_pins_repo_head(tmp_path: Path) -> None:
@@ -300,7 +408,7 @@ def test_analysis_requires_a_hook_capable_provider() -> None:
 
 
 def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> None:
-    protection = _StagingProtection(tmp_path / "staging")
+    protection = _AnalysisToolGuard(tmp_path / "staging")
     allowed = asyncio.run(
         protection._on_pre_write(
             {"tool_input": {"file_path": "draft/task.json"}},
@@ -321,7 +429,7 @@ def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> Non
 
 
 def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
-    protection = _StagingProtection(tmp_path / "staging")
+    protection = _AnalysisToolGuard(tmp_path / "staging")
     matchers = {hook.matcher for hook in protection.hooks().pre_tool_use}
 
     denied = asyncio.run(

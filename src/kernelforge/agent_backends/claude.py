@@ -217,6 +217,14 @@ def _load_claude_sdk() -> tuple[Any, Any]:
 _PROGRESS_MAX_ENTRIES = 400
 _PROGRESS_TEXT_CHARS = 160
 
+# The SDK frames the CLI's NDJSON stream and kills the session when any single
+# message exceeds its 1 MiB default. A tool result carrying an excerpt of a
+# multi-megabyte server log clears that bound easily, and the session dies
+# holding every turn it had already spent, so raise the ceiling to a size a
+# real log or trace excerpt fits inside. This bounds one message, not the
+# transcript: the per-tool result caps are the callers' own business.
+_MAX_SDK_MESSAGE_BYTES = 10 * 1024 * 1024
+
 
 def _tool_argument_digest(payload: Any) -> str:
     """One short, human-scannable line for a tool call's arguments."""
@@ -408,6 +416,7 @@ class ClaudeBackend:
             "cwd": spec.cwd,
             "system_prompt": spec.system_prompt,
             "cli_path": resolve_claude_cli(self.runtime.executable),
+            "max_buffer_size": _MAX_SDK_MESSAGE_BYTES,
         }
         if spec.reasoning_effort:
             options["effort"] = spec.reasoning_effort

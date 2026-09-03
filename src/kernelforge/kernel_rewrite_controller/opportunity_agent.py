@@ -23,6 +23,10 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.session_resume import (
+    TERMINAL_END_REASONS,
+    run_session_with_api_resume,
+)
 from kernelforge.config import Config
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
@@ -41,6 +45,15 @@ ANALYSIS_STATUS_TIMED_OUT = "timed_out"
 _ABSOLUTE_PATH_RE = re.compile(r"`(/[^`\n]+)`")
 _PUBLISH_POLL_SEC = 0.5
 
+# Caps on what one investigation tool call may return. When TraceLens artifacts
+# are absent the Agent's only route is reading raw serving logs, and those run
+# to tens of megabytes: an unbounded grep over them returns far more text than
+# the analysis can use and can exceed what a single provider stream message may
+# carry. The bound is injected into the call rather than refused, so a capped
+# read costs the Agent no turn.
+_MAX_GREP_MATCHES = 200
+_MAX_READ_LINES = 2000
+
 
 @dataclass(frozen=True)
 class OpportunityAnalysisResult:
@@ -54,8 +67,38 @@ class OpportunityAnalysisResult:
     finished_at_unix: float = 0.0
 
 
-class _StagingProtection:
-    """Restrict Agent writes to the controller-owned staging directory."""
+def _bounded_result_cap(value: object, ceiling: int) -> int:
+    """Clamp a caller-supplied result cap into ``[1, ceiling]``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return ceiling
+    return min(value, ceiling)
+
+
+async def _cap_investigation_result(input_data, _tool_use_id, _context) -> dict:
+    """Bound one search or read so a huge artifact cannot end the session."""
+    tool_name = str(input_data.get("tool_name") or "")
+    field, ceiling = {
+        "Grep": ("head_limit", _MAX_GREP_MATCHES),
+        "Read": ("limit", _MAX_READ_LINES),
+    }.get(tool_name, ("", 0))
+    if not field:
+        return {}
+    tool_input = dict(input_data.get("tool_input") or {})
+    capped = _bounded_result_cap(tool_input.get(field), ceiling)
+    if capped == tool_input.get(field):
+        return {}
+    tool_input[field] = capped
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": tool_input,
+        }
+    }
+
+
+class _AnalysisToolGuard:
+    """Confine Agent writes to staging and bound what its reads may return."""
 
     def __init__(self, staging_root: Path) -> None:
         self.staging_root = staging_root.resolve()
@@ -70,6 +113,10 @@ class _StagingProtection:
                 AgentHook(
                     matcher="Bash|Shell|Task.*|Agent",
                     callback=self._on_pre_disallowed_tool,
+                ),
+                AgentHook(
+                    matcher="Read|Grep",
+                    callback=_cap_investigation_result,
                 ),
             ]
         )
@@ -335,11 +382,21 @@ class OpportunityAnalysisAgent:
                 permission_mode=os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits"),
                 bare=False,
             ),
-            hooks=_StagingProtection(layout.agent_staging_root).hooks(),
+            hooks=_AnalysisToolGuard(layout.agent_staging_root).hooks(),
             progress_log=progress,
         )
 
-        backend_task = asyncio.create_task(self.backend.run(spec))
+        # Resumed rather than run bare: a provider stream that drops mid-turn
+        # leaves a live session handle, and abandoning it throws away every turn
+        # already spent investigating. The chain is bounded by this analysis
+        # budget instead of its own default, which may outlive our window.
+        backend_task = asyncio.create_task(
+            run_session_with_api_resume(
+                self.backend,
+                spec,
+                deadline_sec=self.timeout_sec,
+            )
+        )
         publications: dict[str, TaskPublicationResult] = {}
         status = ANALYSIS_STATUS_COMPLETED
         reason = ""
@@ -358,9 +415,19 @@ class OpportunityAnalysisAgent:
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
-                    if agent_result.end_reason == "timeout":
+                    end_reason = str(agent_result.end_reason or "").strip()
+                    if end_reason == "timeout":
                         status = ANALYSIS_STATUS_TIMED_OUT
                         reason = agent_result.stderr_tail or "opportunity analysis timed out"
+                    elif end_reason not in TERMINAL_END_REASONS:
+                        # A provider failure measured nothing, so it must not
+                        # reach the controller as an answer: the controller
+                        # turns a completed analysis with no tasks into
+                        # `no_opportunity`, which is a verdict on the workload.
+                        status = ANALYSIS_STATUS_FAILED
+                        reason = (
+                            agent_result.stderr_tail or f"opportunity analysis ended with {end_reason or 'no reason'}"
+                        )
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
