@@ -1205,16 +1205,21 @@ class ProfileExecutor(BaselineExecutor):
                     }
                     result["trace_capture_status"] = "failed"
                     result["trace_capture"] = capture_status
+        measurement_status = str(result.get("status") or "")
         if agentx_profile:
-            result["measurement_status"] = str(result.get("status") or "")
+            result["measurement_status"] = measurement_status
         if agentx_profile and not round_trace_root and capture_status is None:
-            capture_status = {
-                "status": "failed",
-                "reason": "capture_status_missing",
-            }
-            result["trace_capture_status"] = "missing"
-            result["trace_capture"] = capture_status
-            log.error("profile_executor: AgentX profile produced no current-round capture-status.json")
+            if measurement_status == "succeeded":
+                capture_status = {
+                    "status": "failed",
+                    "reason": "capture_status_missing",
+                }
+                result["trace_capture_status"] = "missing"
+                result["trace_capture"] = capture_status
+                log.error("profile_executor: AgentX profile produced no current-round capture-status.json")
+            else:
+                result["trace_capture_status"] = "not_reached"
+                result["trace_input_ready"] = False
         tensor_parallel_size: int | None = None
         for raw_tp in (
             result.get("tp"),
@@ -1425,11 +1430,12 @@ class ProfileExecutor(BaselineExecutor):
             result["trace_input_ready"] = True
         if capture_status is not None and str(capture_status.get("status") or "") != "succeeded":
             result["trace_input_ready"] = False
-            result["status"] = "failed"
-            result["error_class"] = "profile_capture_failed"
-            result["error"] = (
-                f"AgentX trace capture failed: {capture_status.get('reason') or 'unknown capture failure'}"
-            )
+            if measurement_status == "succeeded":
+                result["status"] = "failed"
+                result["error_class"] = "profile_capture_failed"
+                result["error"] = (
+                    f"AgentX trace capture failed: {capture_status.get('reason') or 'unknown capture failure'}"
+                )
         elif (
             agentx_profile
             and result.get("trace_files")

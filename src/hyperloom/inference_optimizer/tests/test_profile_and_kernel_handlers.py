@@ -2171,6 +2171,42 @@ async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        return {
+            "status": "failed",
+            "error_class": "cuda_graph_capture_failed",
+            "error": "CUDA graph capture failed before AgentX capture started",
+            "workspace": str(output_dir / "benchmark_sglang_failed"),
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-before-capture-failed",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "cuda_graph_capture_failed"
+    assert res.result["measurement_status"] == "failed"
+    assert res.result["trace_capture_status"] == "not_reached"
+    assert res.result["trace_input_ready"] is False
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_profile_executor_patches_configured_inferencex_path(
     tmp_path,
     monkeypatch,
