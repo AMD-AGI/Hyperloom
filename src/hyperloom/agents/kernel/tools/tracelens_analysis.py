@@ -5664,8 +5664,7 @@ def run_command(
 # Defaults kept in sync with src/hyperloom/agents/kernel/scripts/install.sh (TRACELENS_REPO /
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-# Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "a59a9c165bb64c7c416fd7cf79149803d552e43c"
+_TRACELENS_REF_DEFAULT = "d1444f01fb582ab57cd5adec1908ef1282b3c4a7"
 
 
 def _default_tracelens_root() -> Path:
