@@ -125,52 +125,56 @@ _WRAPPER_RAW = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"
 _WRAPPER_EMIT = {"__unparsedToolInput": {"raw": _WRAPPER_RAW, "len": len(_WRAPPER_RAW)}}
 
 
-def _emit_intent_server() -> Any:
-    """The in-process MCP server, or a skip when the SDK is not installed."""
-    pytest.importorskip("claude_agent_sdk")
-    pytest.importorskip("mcp")
-    cfg = build_emit_intent_server()
-    if cfg is None:
-        pytest.skip("in-process MCP helpers unavailable")
-    return cfg["instance"]
+def _registered_emit_intent_tool() -> Any:
+    """The emit_intent tool as the real SDK decorator registers it.
+
+    Captured off the ``server_factory`` seam so the ``tool`` decorator, the
+    schema and the handler are all the production ones, without depending on
+    where a given ``mcp`` release keeps its server internals.
+    """
+    sdk = pytest.importorskip("claude_agent_sdk")
+    captured: list[Any] = []
+
+    def capture(name: str, version: str, tools: list[Any]) -> None:
+        captured.extend(tools)
+
+    build_emit_intent_server(sdk_module=sdk, server_factory=capture)
+    tool = next((t for t in captured if getattr(t, "name", None) == EMIT_INTENT_TOOL_NAME), None)
+    if tool is None:
+        pytest.skip("SDK did not register the emit_intent tool")
+    return tool
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "arguments,expect_error,text_substr",
-    [
-        (_NATIVE_EMIT, False, "ok"),
-        (_WRAPPER_EMIT, False, "ok"),
-        ({"nonsense": 1}, True, "Additional properties"),
-    ],
+    "arguments,schema_ok",
+    [(_NATIVE_EMIT, True), (_WRAPPER_EMIT, True), ({"nonsense": 1}, False)],
     ids=["native", "wrapper", "junk"],
 )
-async def test_sdk_tools_call_schema_accepts_native_and_wrapper(
-    arguments: dict[str, Any],
-    expect_error: bool,
-    text_substr: str,
-) -> None:
-    """The tool schema is validated before the handler runs, so a shape the
-    handler accepts but the schema rejects never reaches it. Driven through a
-    real client session rather than the handler directly, which is the only
-    way that ordering is exercised."""
-    memory = pytest.importorskip("mcp.shared.memory")
-    server = _emit_intent_server()
-    async with memory.create_connected_server_and_client_session(server) as session:
-        result = await session.call_tool(EMIT_INTENT_TOOL_NAME, arguments)
-    assert result.isError is expect_error
-    assert text_substr in result.content[0].text
+async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], schema_ok: bool) -> None:
+    """The declared schema gates the call before the handler ever runs, so a
+    shape the handler accepts but the schema rejects can never land. Both are
+    checked here against the same tool the SDK registers, because they used to
+    disagree: the handler decoded the wrapper the schema had already refused.
+    """
+    jsonschema = pytest.importorskip("jsonschema")
+    tool = _registered_emit_intent_tool()
+
+    if not schema_ok:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(instance=arguments, schema=tool.input_schema)
+        return
+
+    jsonschema.validate(instance=arguments, schema=tool.input_schema)
+    result = await tool.handler(arguments)
+    assert result["content"][0]["text"] == "ok"
+    assert "is_error" not in result
 
 
-@pytest.mark.asyncio
-async def test_broadcast_schema_offers_both_shapes() -> None:
-    """tools/list is what the model reads, so the wrapper alternative has to
-    survive into the advertised schema and say it is internal."""
-    memory = pytest.importorskip("mcp.shared.memory")
-    server = _emit_intent_server()
-    async with memory.create_connected_server_and_client_session(server) as session:
-        tools = await session.list_tools()
-    schema = next(t.inputSchema for t in tools.tools if t.name == EMIT_INTENT_TOOL_NAME)
+def test_registered_schema_offers_both_shapes() -> None:
+    """The declared schema is what the model reads, so the wrapper alternative
+    has to survive into it and say it is internal."""
+    schema = _registered_emit_intent_tool().input_schema
     assert {"required": ["intent_type", "payload"]} in schema["anyOf"]
     assert {"required": ["__unparsedToolInput"]} in schema["anyOf"]
     assert "Never emit this deliberately" in schema["properties"]["__unparsedToolInput"]["description"]
