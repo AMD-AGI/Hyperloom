@@ -90,6 +90,7 @@ def test_invocation_maps_task_to_named_kernel_forge_loop(tmp_path: Path) -> None
     assert command[command.index("--operator-name") + 1] == task.operator_name
     assert command[command.index("--framework") + 1] == task.identity.framework
     assert command[command.index("--gpu-type") + 1] == task.identity.gpu
+    assert command[command.index("--gpu-target") + 1] == "gfx950"
     assert command[command.index("--kernel-backend") + 1] == task.identity.backend
     assert "--auto" not in command
     assert "--nomination-input" not in command

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.fusion.gpu_arch import canon_arch
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
 
@@ -122,6 +123,9 @@ def build_forge_loop_invocation(
         "--result-json",
         str(result_json),
     ]
+    gpu_target = canon_arch(task.identity.gpu)
+    if gpu_target:
+        command.extend(["--gpu-target", gpu_target])
     if worktree.source_files:
         command.extend(["--source-files", ",".join(str(path) for path in worktree.source_files)])
     if task.target_functions:
