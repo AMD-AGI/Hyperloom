@@ -344,6 +344,141 @@ class TestGemmE2eCandidates:
         coord = _coord(tmp_path, baseline_tput=100.0)
         assert coord._gemm_e2e_candidates({}) == []
 
+    def test_a_forced_split_k_candidate_reaches_e2e(self, tmp_path):
+        """split-K benefit is e2e-only, so micro reports ``no_improvement``.
+
+        The producer promotes it on the forced ``candidate`` flag. Rebuilding
+        from the raw tuner rows gates on status first, so that flag can never
+        rescue the row and the only artifact worth an e2e run is discarded.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {
+                        "tuner": "sglang_dense_fp8_splitk",
+                        "env": {"SGLANG_SPLITK_CONFIG": "/tuned/splitk.csv"},
+                        "best_micro_speedup": 1.0,
+                        "requires_e2e_validation": True,
+                    }
+                ],
+                "tuners_run": [
+                    {
+                        "tuner": "sglang_dense_fp8_splitk",
+                        "status": "no_improvement",
+                        "candidate": True,
+                        "env_var": "SGLANG_SPLITK_CONFIG",
+                        "env_value": "/tuned/splitk.csv",
+                        "best_micro_speedup": 1.0,
+                    }
+                ],
+            }
+        )
+        assert cands == [
+            {
+                "tuner": "sglang_dense_fp8_splitk",
+                "env_var": "SGLANG_SPLITK_CONFIG",
+                "env_value": "/tuned/splitk.csv",
+                "envs": {"SGLANG_SPLITK_CONFIG": "/tuned/splitk.csv"},
+                "micro_speedup": 1.0,
+            }
+        ]
+
+    def test_moe_and_dense_stay_independent_candidates(self, tmp_path):
+        """One call tunes both, and each earns its own KEEP/REVERT."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": "/tuned/moe.csv"}, "best_micro_speedup": 1.4},
+                    {"tuner": "sglang_dense_fp8", "env": {"SGLANG_DENSE": "/tuned/d.csv"}, "best_micro_speedup": 1.2},
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["fmoe_ck", "sglang_dense_fp8"]
+        assert [c["micro_speedup"] for c in cands] == [1.4, 1.2]
+
+    def test_the_producer_verdict_is_not_re_derived_from_the_tuner_rows(self, tmp_path):
+        """The producer's list is authoritative once it names any candidate.
+
+        ``no_artifact`` below would sail through the rebuild's gate -- ``ok``
+        with improved shapes -- yet the producer excluded it, because a tuner
+        with nothing to apply is not landable. Re-deriving from the raw rows
+        would put it back and hand the integrate lane a patchless candidate.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "forced", "env": {"FORCED": "/tuned/f.csv"}, "best_micro_speedup": 1.0},
+                ],
+                "tuners_run": [
+                    {"tuner": "forced", "status": "no_improvement", "env_var": "FORCED", "env_value": "/tuned/f.csv"},
+                    {
+                        "tuner": "no_artifact",
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "env_var": "LOOKS_PROMOTABLE",
+                        "env_value": "/tuned/none.csv",
+                        "best_micro_speedup": 1.6,
+                    },
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["forced"]
+
+    def test_a_candidate_with_no_env_is_not_offered(self, tmp_path):
+        """Nothing to apply means nothing an e2e run could validate."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "empty", "env": {}, "best_micro_speedup": 1.5},
+                    {"tuner": "usable", "env": {"OK": "/tuned/ok.csv"}, "best_micro_speedup": 1.1},
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["usable"]
+
+    def test_an_envelope_without_candidates_still_reads_the_tuner_rows(self, tmp_path):
+        """The pre-candidates envelope and the GEAK backend keep working."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "tuners_run": [
+                    {
+                        "tuner": "fmoe_ck",
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "env_var": "AITER_CONFIG_FMOE",
+                        "env_value": "/tuned/moe.csv",
+                        "best_micro_speedup": 1.4,
+                    }
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
+
+    def test_a_multi_variable_candidate_leaves_the_singular_pair_empty(self, tmp_path):
+        """The singular pair is only unambiguous for a one-variable candidate."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        (cand,) = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "pair", "env": {"A": "1", "B": "2"}, "best_micro_speedup": 1.3},
+                ],
+            }
+        )
+        assert cand["envs"] == {"A": "1", "B": "2"}
+        assert cand["env_var"] == ""
+        assert cand["env_value"] == ""
+
     def test_forge_result_yields_one_candidate_per_improved_tuner(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
         cands = coord._gemm_e2e_candidates(

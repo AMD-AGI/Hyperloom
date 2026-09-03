@@ -112,22 +112,33 @@ def test_without_estimates_the_gemm_ceiling_divides_by_its_default_cost() -> Non
     assert 7140 // lane_budget.GEMM_DEFAULT_TARGET_SEC == 5
 
 
-def test_a_ceiling_of_one_pins_the_highest_priority_tuner() -> None:
-    assert krh._gemm_capped_tuner({}, max_targets=1, target_names=("fmoe_ck", "a8w8")) == "fmoe_ck"
+_GEMM_CMD_BASE = {
+    "model_path": "/m",
+    "framework": "sglang",
+    "precision": "fp8",
+    "output_dir": "/o",
+}
 
 
-def test_a_ceiling_that_fits_every_tuner_forces_none() -> None:
-    assert krh._gemm_capped_tuner({}, max_targets=1, target_names=("fmoe_ck",)) == ""
-    assert krh._gemm_capped_tuner({}, max_targets=5, target_names=("fmoe_ck", "a8w8")) == ""
+def test_the_gemm_ceiling_travels_as_a_tuner_count() -> None:
+    """The producer owns routing, so the lane supplies a count, not a name.
+
+    Naming one tuner was the only ceiling the wrapper could express before, so a
+    share paying for two of three routed tuners capped nothing at all and the
+    third ran anyway, bounded only by the wall clock.
+    """
+    from hyperloom.agents.kernel.tools import forge_gemm_tuning as fgt
+
+    cmd = fgt._build_cmd({**_GEMM_CMD_BASE, "max_tuners": 2})
+    assert cmd[cmd.index("--max-tuners") + 1] == "2"
 
 
-def test_no_allocation_leaves_the_routed_tuner_set_untouched() -> None:
+def test_no_gemm_ceiling_leaves_the_routed_tuner_set_untouched() -> None:
     """A zero ceiling means none could be derived, not "run nothing"."""
-    assert krh._gemm_capped_tuner({}, max_targets=0, target_names=("fmoe_ck", "a8w8")) == ""
+    from hyperloom.agents.kernel.tools import forge_gemm_tuning as fgt
 
-
-def test_an_explicit_tuner_outranks_the_lane_ceiling() -> None:
-    assert krh._gemm_capped_tuner({"tuner": "a8w8"}, max_targets=1, target_names=("fmoe_ck",)) == "a8w8"
+    cmd = fgt._build_cmd(dict(_GEMM_CMD_BASE))
+    assert "--max-tuners" not in cmd
 
 
 # -- _gemm_tuning_workspace -----------------------------------------------

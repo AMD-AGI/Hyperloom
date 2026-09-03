@@ -89,6 +89,14 @@ def _as_int(value: object) -> int:
         return 0
 
 
+def _as_float(value: object, default: float) -> float:
+    """Read a measurement that round-tripped through JSON, defaulting on junk."""
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 # Which table each aiter config env var is resolved under at serving time. Two
 # callers need it: the merge step, which has to find the runtime table to merge
 # our candidate into, and the apply check, which has to recognise our artifact
@@ -3035,6 +3043,54 @@ class KernelPhase(PhaseHandler):
         self.shared_state.last_gemm_tuning = entry
         self._writeback_gemm_result_json(entry)
 
+    @staticmethod
+    def _gemm_canonical_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Read the per-tuner candidates the producer already decided on.
+
+        The producer promotes a tuner on either a real micro improvement or an
+        explicitly forced ``candidate``; split-K earns the second rule, because
+        its benefit is e2e-only and it reports ``no_improvement`` at micro. The
+        rebuild from raw tuner rows gates on status first and so can never see
+        such a row, which is why its verdict is not derived a second time here.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            list[dict[str, Any]]: Candidates in the producer's priority order,
+                each with ``tuner`` / ``env_var`` / ``env_value`` / ``envs`` /
+                ``micro_speedup``. Empty when the envelope names none.
+        """
+        rows = result.get("candidates")
+        if not isinstance(rows, list):
+            return []
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_env = row.get("env")
+            envs = (
+                {str(key): str(value) for key, value in raw_env.items() if str(key).strip() and str(value).strip()}
+                if isinstance(raw_env, dict)
+                else {}
+            )
+            if not envs:
+                # Nothing to apply, so nothing an e2e run could validate.
+                continue
+            # The singular pair is what the CK-switch dedup and the promote path
+            # read; it is only unambiguous for a single-variable candidate.
+            env_var, env_value = next(iter(envs.items())) if len(envs) == 1 else ("", "")
+            candidates.append(
+                {
+                    "tuner": str(row.get("tuner") or "unknown"),
+                    "env_var": env_var,
+                    "env_value": env_value,
+                    "envs": envs,
+                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
+                }
+            )
+        return candidates
+
     def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Reduce a GEMM tuning result to the env sets worth E2E-validating.
 
@@ -3049,9 +3105,13 @@ class KernelPhase(PhaseHandler):
             list[dict[str, Any]]: Candidates with ``tuner`` / ``env_var`` /
                 ``env_value`` / ``envs`` / ``micro_speedup``.
         """
-        candidates: list[dict[str, Any]] = []
+        candidates = self._gemm_canonical_candidates(result)
+        # Only rebuild from the raw tuner rows when the producer named no
+        # candidates of its own, which is the pre-``candidates[]`` envelope and
+        # the GEAK backend. The rebuild's status gate cannot see a forced
+        # candidate, so it must not override a producer that already decided.
         # The list is already priority-sorted by forge CLI (fmoe_ck first).
-        for t in result.get("tuners_run") or []:
+        for t in [] if candidates else (result.get("tuners_run") or []):
             if not isinstance(t, dict):
                 continue
             # partial_output is a real artifact: the tuner wrote fewer rows than

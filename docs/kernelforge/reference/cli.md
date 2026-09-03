@@ -317,6 +317,7 @@ Search and execution:
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--tuner <name>` | routed | Force a specific tuner, skipping routing. |
+| `--max-tuners <n>` | `0` | Run at most this many of the routed tuners, in priority order. `0` means uncapped; Hyperloom passes the count its GEMM lane budget pays for. |
 | `--thorough` | off | Full search space: all libtypes, more shapes, no per-shape timeout. Slower, but finds the absolute best config. |
 | `--iters <n>` | `80` | Benchmark iterations per config. |
 | `--warmup <n>` | `20` | Warmup iterations. |

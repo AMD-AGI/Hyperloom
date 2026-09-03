@@ -56,6 +56,9 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "timeout", "--timeout")
     _add_opt(cmd, args, "global_timeout", "--global-timeout")
     _add_opt(cmd, args, "tuner", "--tuner")
+    # Omitted by the caller when no lane ceiling was derived; gemm-tune reads
+    # both an absent flag and an explicit 0 as "run every routed tuner".
+    _add_opt(cmd, args, "max_tuners", "--max-tuners")
     _add_opt(cmd, args, "untuned_csv", "--untuned-csv")
     _add_opt(cmd, args, "moe_untuned_csv", "--moe-untuned-csv")
     _add_opt(cmd, args, "shapes_json", "--shapes-json")

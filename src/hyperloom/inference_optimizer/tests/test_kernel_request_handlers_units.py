@@ -1446,6 +1446,85 @@ class TestForgeGemmHelperCoverage:
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 
+    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the gemm lane against a faked subprocess and return its input JSON."""
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path=str(model),
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            max_minutes=max_minutes,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_resolve_aiter_root_for_forge", lambda: "")
+        monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_k: (envs, ""))
+
+        async def _fake_subprocess(_cmd, *, timeout_sec):
+            body = json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+            return 0, f"FORGE_GEMM_TUNE_RESULT_BEGIN\n{body}\nFORGE_GEMM_TUNE_RESULT_END\n", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        request = {"task_id": "gemm_ceiling", **(payload or {})}
+        await krh._run_forge_gemm_tuning(request, session_dir=tmp_path)
+        workspace = krh._gemm_tuning_workspace(request, session_dir=tmp_path)
+        return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_gemm_tuner_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
+        """A bounded session funds the lane, so its target count is handed down."""
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=600)
+
+        assert payload["max_tuners"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_session_sends_no_gemm_tuner_ceiling(self, tmp_path, monkeypatch):
+        """No share can be derived, and a zero ceiling would silence the lane."""
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    async def test_a_named_gemm_tuner_needs_no_ceiling(self, tmp_path, monkeypatch):
+        """An explicit tuner has already narrowed the routed set to one."""
+        payload = await self._gemm_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=600,
+            payload={"tuner": "a8w8"},
+        )
+
+        assert payload["tuner"] == "a8w8"
+        assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_gemm_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
+        """An operator/test value stays an escape hatch over the derived share.
+
+        The lane's own figure is pinned to a different number, so the assertion
+        fails if the derived share is used instead of the explicit one.
+        """
+        monkeypatch.setattr(
+            krh,
+            "_nomination_lane_budget",
+            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(
+                lane=lane_budget.LANE_GEMM, budget_sec=7140, max_targets=4
+            ),
+        )
+        payload = await self._gemm_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=600,
+            payload={"max_tuners": 1},
+        )
+
+        assert payload["max_tuners"] == 1
+
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
         self,
@@ -6175,9 +6254,10 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
         return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
 
     @pytest.mark.asyncio
-    async def test_a_share_that_funds_one_tuner_pins_that_tuner(self, tmp_path, monkeypatch):
+    async def test_a_share_that_funds_one_tuner_caps_the_routed_set_at_one(self, tmp_path, monkeypatch):
         # 600 min - 5 min reserve = 35700s; gemm gets 20% = 7140s, which pays for
-        # the first 60-minute tuner and not the second.
+        # the first 60-minute tuner and not the second. The ceiling travels as a
+        # count, so the producer keeps deciding WHICH tuners those are.
         self._prepare(
             tmp_path,
             monkeypatch,
@@ -6185,12 +6265,13 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
             targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
         )
         written = await self._written(tmp_path, {"task_id": "cap-one"})
-        assert written["tuner"] == "fmoe_ck"
+        assert written["max_tuners"] == 1
+        assert written["tuner"] == ""
         assert written["global_timeout"] == 7140
         assert written["timeout"] == krh.gemm_per_tuner_timeout_sec(7140)
 
     @pytest.mark.asyncio
-    async def test_a_share_that_funds_every_tuner_pins_none(self, tmp_path, monkeypatch):
+    async def test_a_share_that_funds_every_tuner_caps_at_that_count(self, tmp_path, monkeypatch):
         self._prepare(
             tmp_path,
             monkeypatch,
@@ -6198,6 +6279,7 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
             targets=(("fmoe_ck", 600), ("a8w8", 600)),
         )
         written = await self._written(tmp_path, {"task_id": "cap-none"})
+        assert written["max_tuners"] == 2
         assert written["tuner"] == ""
         assert written["global_timeout"] == 7140
 

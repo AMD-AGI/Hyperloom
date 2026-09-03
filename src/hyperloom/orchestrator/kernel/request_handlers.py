@@ -1822,33 +1822,6 @@ def _gemm_router_targets(
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
 
 
-def _gemm_capped_tuner(payload: dict, *, max_targets: int, target_names: tuple[str, ...]) -> str:
-    """Resolve the ``tuner`` input-JSON value under the lane's target ceiling.
-
-    The gemm wrapper exposes no "run at most N tuners" input, only ``tuner``, which
-    names exactly one. A ceiling of one is therefore pinned to the router's
-    highest-priority tuner so the lane never starts a second one it cannot finish;
-    a wider ceiling is left to the session's ``global_timeout``, which the producer
-    already honours by skipping tuners once the deadline passes.
-
-    Args:
-        payload (dict): Request payload whose explicit ``tuner`` outranks the ceiling.
-        max_targets (int): The gemm lane's target ceiling. ``0`` means no allocation
-            could be derived and the routed tuner set is left untouched.
-        target_names (tuple[str, ...]): Runnable tuner names in the router's
-            priority order.
-
-    Returns:
-        str: The tuner name to force, or ``""`` to leave routing to the producer.
-    """
-    explicit = str(payload.get("tuner") or "").strip()
-    if explicit:
-        return explicit
-    if max_targets == 1 and len(target_names) > 1:
-        return target_names[0]
-    return ""
-
-
 def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds.
 
@@ -4361,6 +4334,16 @@ async def _run_forge_gemm_tuning(
         payload,
         lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
     )
+    try:
+        requested_tuners = int(payload.get("max_tuners") or 0)
+    except (TypeError, ValueError):
+        requested_tuners = 0
+    # An explicit payload value stays an operator/test escape hatch; a named
+    # ``tuner`` already narrows the set to one, so no ceiling is needed then.
+    if str(payload.get("tuner") or "").strip():
+        gemm_tuner_ceiling = 0
+    else:
+        gemm_tuner_ceiling = requested_tuners if requested_tuners > 0 else gemm_lane.max_targets
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
     if shapes_json:
@@ -4398,11 +4381,11 @@ async def _run_forge_gemm_tuning(
         "demand_json": demand_json,
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
-        "tuner": _gemm_capped_tuner(
-            payload,
-            max_targets=gemm_lane.max_targets,
-            target_names=tuple(name for name, _ in gemm_targets),
-        ),
+        "tuner": str(payload.get("tuner") or ""),
+        # How many routed tuners the lane's share pays for. Omitted when no
+        # ceiling could be derived, which leaves the producer's own routing
+        # intact rather than capping an unattended lane to zero.
+        **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }

@@ -308,6 +308,12 @@ def gemm_tune():
     help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.",
 )
 @click.option("--tuner", default="", help="Force a specific tuner (skip routing)")
+@click.option(
+    "--max-tuners",
+    default=0,
+    type=int,
+    help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
+)
 @click.option("--untuned-csv", default="", help="Input untuned CSV for dense aiter tuners")
 @click.option(
     "--moe-untuned-csv",
@@ -350,6 +356,7 @@ def run(
     global_timeout: int,
     thorough: bool,
     tuner: str,
+    max_tuners: int,
     untuned_csv: str,
     moe_untuned_csv: str,
     shapes_json: str,
@@ -541,6 +548,18 @@ def run(
             (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
             emit_result_json(report_dict)
             raise SystemExit(2)
+
+    # The caller's share of the phase pays for a bounded number of tuners. Cut
+    # the routed set to that many, keeping the router's priority order so the
+    # ones dropped are the ones it ranked last. An explicit --tuner has already
+    # narrowed the set to one, and 0 means no ceiling was supplied.
+    if max_tuners > 0 and len(tuner_specs) > max_tuners:
+        log.info(
+            "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
+            max_tuners,
+            ", ".join(spec.name for spec in tuner_specs[max_tuners:]),
+        )
+        tuner_specs = tuner_specs[:max_tuners]
 
     # Write plan
     plan = {
