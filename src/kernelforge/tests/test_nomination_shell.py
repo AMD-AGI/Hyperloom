@@ -133,7 +133,7 @@ def test_read_candidates_keeps_unresolved_rows(tmp_path: Path) -> None:
         _candidates_payload(
             [
                 _row("hot", gpu_pct=15.0),
-                _row("blind", source_file="", reason_class="graph_replay_no_args"),
+                _row("blind", source_file="", reason_class="source_not_resolved"),
             ]
         ),
     )
@@ -141,12 +141,39 @@ def test_read_candidates_keeps_unresolved_rows(tmp_path: Path) -> None:
     assert [candidate.kernel_name for candidate in candidates] == ["hot", "blind"]
     assert candidates[0].is_resolved is True
     assert candidates[1].is_resolved is False
-    assert candidates[1].reason_class == "graph_replay_no_args"
+    assert candidates[1].reason_class == "source_not_resolved"
 
 
-def test_read_candidates_accepts_legacy_name_key(tmp_path: Path) -> None:
+def test_read_candidates_refuses_a_row_missing_required_fields(tmp_path: Path) -> None:
+    """A row the producer did not fill in is a skew, not something to guess at.
+
+    The legacy singular ``name`` key is one such gap: ``kernel_name`` is the
+    accounting identity, so a row carrying only the old spelling is refused
+    rather than silently read under a different key.
+    """
     path = _write(tmp_path / "cand.json", _candidates_payload([{"name": "legacy", "source_file": "/repo/a.py"}]))
-    assert nom.read_candidates(path)[0].kernel_name == "legacy"
+    with pytest.raises(nom.NominationError, match="missing required field"):
+        nom.read_candidates(path)
+
+
+def test_read_candidates_refuses_an_unknown_reason_class(tmp_path: Path) -> None:
+    """An unknown class means the producer classifies on rules this build lacks."""
+    path = _write(tmp_path / "cand.json", _candidates_payload([_row("hot", reason_class="invented_class")]))
+    with pytest.raises(nom.NominationError, match="unknown reason_class"):
+        nom.read_candidates(path)
+
+
+def test_every_class_the_producer_can_emit_is_accepted(tmp_path: Path) -> None:
+    """The two sets are a literal on each side, so only a test ties them.
+
+    Driving the consumer's own set would pass however far it drifted; the
+    classes come from the producing contract instead.
+    """
+    from hyperloom.common.kernel_source_contract import KNOWN_REASON_CLASSES as produced
+
+    rows = [_row(f"k{index}", reason_class=name) for index, name in enumerate(sorted(produced))]
+    path = _write(tmp_path / "cand.json", _candidates_payload(rows))
+    assert len(nom.read_candidates(path)) == len(produced)
 
 
 def test_read_candidates_refuses_a_non_dict_row(tmp_path: Path) -> None:
@@ -159,7 +186,7 @@ def test_read_candidates_refuses_a_non_dict_row(tmp_path: Path) -> None:
 def test_read_candidates_refuses_a_nameless_row(tmp_path: Path) -> None:
     """The name is what a patch is reported back against; a row without one
     would vanish with no error and no counter."""
-    path = _write(tmp_path / "cand.json", _candidates_payload([_row("keep"), {"source_file": "/x.py"}]))
+    path = _write(tmp_path / "cand.json", _candidates_payload([_row("keep"), _row("", source_file="/x.py")]))
     with pytest.raises(nom.NominationError, match="candidate row 1 has no kernel name"):
         nom.read_candidates(path)
 
@@ -211,7 +238,7 @@ def test_a_non_object_candidate_list_is_refused(tmp_path: Path) -> None:
 def test_non_finite_gpu_pct_ranks_as_zero(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "cand.json",
-        _candidates_payload([{"kernel_name": "nan", "source_file": "/a.py", "gpu_pct": None}]),
+        _candidates_payload([_row("nan", gpu_pct=None)]),
     )
     assert nom.read_candidates(path)[0].gpu_pct == 0.0
 

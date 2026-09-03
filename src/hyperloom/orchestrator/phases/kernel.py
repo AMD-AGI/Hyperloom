@@ -3106,10 +3106,8 @@ class KernelPhase(PhaseHandler):
                 ``env_value`` / ``envs`` / ``micro_speedup``.
         """
         candidates = self._gemm_canonical_candidates(result)
-        # Only rebuild from the raw tuner rows when the producer named no
-        # candidates of its own, which is the pre-``candidates[]`` envelope and
-        # the GEAK backend. The rebuild's status gate cannot see a forced
-        # candidate, so it must not override a producer that already decided.
+        # The rebuild's status gate cannot see a forced candidate, so it runs only
+        # when the producer named none: the pre-``candidates[]`` envelope and GEAK.
         # The list is already priority-sorted by forge CLI (fmoe_ck first).
         for t in [] if candidates else (result.get("tuners_run") or []):
             if not isinstance(t, dict):
@@ -3818,14 +3816,8 @@ class KernelPhase(PhaseHandler):
                 "error_class": exc.__class__.__name__,
                 "error": repr(exc),
             }
-        # Only a completed auto nomination pass answers for the kernels it looked
-        # at and passed over: those leave no ledger row and would otherwise stay
-        # untried forever, so the phase-exit predicate never goes quiet without
-        # it. An empty nomination still counts -- that is the case the phase used
-        # to hang on. A failure, a timeout and a skip answer for nothing, and the
-        # legacy selector path is not a nomination at all; latching on any of
-        # those declares the cycle done while retryable kernels remain, and a
-        # failure without a kernel_id writes no attempt ledger to contradict it.
+        # Only a completed auto pass answers for the kernels it declined, empty
+        # selection included. A failure, a skip or the legacy path answers for none.
         if isinstance(result, dict) and result.get("auto") is True and result.get("status") == "complete":
             from .machine_state import mark_kernel_auto_pass_complete
 
@@ -4599,8 +4591,8 @@ class KernelPhase(PhaseHandler):
         from ..kernel.request_handlers import _summarize_dropped_patches
 
         outcome = parse_outcome(result)
-        # Reported before the empty check: an envelope whose every entry was
-        # refused otherwise reads exactly like a run that kept nothing.
+        # Counted before the empty check: an all-refused envelope and a run that
+        # kept nothing are the same ``queued`` figure and differ only in reasons.
         refused = _summarize_dropped_patches(outcome.dropped)
         if outcome.is_empty:
             log.info(

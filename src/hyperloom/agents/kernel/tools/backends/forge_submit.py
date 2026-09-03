@@ -5301,13 +5301,8 @@ def submit_auto(
         except Exception:
             parsed = None
     if loop_exc is not None:
-        # The process outcome outranks whatever the sidecar says. A
-        # task-preparation failure writes a JSON carrying neither ``status`` nor
-        # ``patches`` and then exits nonzero; returned verbatim that reads as a
-        # clean empty nomination, and the phase latches as if a pass had run.
-        # Only an exit code of 0 makes an empty ``patches`` a valid answer, so a
-        # failed run reports no patches at all rather than offering some from a
-        # run whose own tooling broke. The sidecar may only enrich the error.
+        # Only exit code 0 makes an empty ``patches`` a valid answer, so the
+        # process outcome decides and the sidecar may only enrich the error.
         envelope: dict[str, Any] = {
             "status": "timeout" if timed_out else "failed",
             "patches": [],

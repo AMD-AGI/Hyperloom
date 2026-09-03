@@ -549,10 +549,8 @@ def run(
             emit_result_json(report_dict)
             raise SystemExit(2)
 
-    # The caller's share of the phase pays for a bounded number of tuners. Cut
-    # the routed set to that many, keeping the router's priority order so the
-    # ones dropped are the ones it ranked last. An explicit --tuner has already
-    # narrowed the set to one, and 0 means no ceiling was supplied.
+    # Cut the routed set to what the caller's share pays for, in priority order
+    # so the dropped ones rank last. 0 means no ceiling was supplied.
     if max_tuners > 0 and len(tuner_specs) > max_tuners:
         log.info(
             "gemm-tune: lane ceiling of %d tuner(s); dropping %s",

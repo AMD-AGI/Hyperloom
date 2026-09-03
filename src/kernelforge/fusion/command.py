@@ -1253,10 +1253,8 @@ def _run_multi_patch_nomination(
     """
     patches: list[dict[str, Any]] = []
 
-    # The ceiling covers BOTH pipelines, not each one separately: a claim and an
-    # authored recipe each cost a full validation, so capping only the autoloop
-    # let the claims push the round past the share that paid for it. Authored
-    # recipes are funded first, matching the order they run in.
+    # One ceiling across both pipelines: a claim and an authored recipe each cost
+    # a full validation. Authored recipes are funded first, as they run first.
     authored_budget = _recipe_ceiling(len(authored), max_recipes)
     claims_budget = len(claims) if max_recipes <= 0 else max(0, max_recipes - authored_budget)
     if len(claims) > claims_budget:

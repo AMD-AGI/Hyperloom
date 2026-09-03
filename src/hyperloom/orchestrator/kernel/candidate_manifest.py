@@ -30,9 +30,9 @@ from typing import Any
 
 from hyperloom.common.kernel_source_contract import classify_skip_reason
 
-#: Bump when a field is removed or changes meaning. The consumer half lives in
-#: ``kernelforge.nomination`` and refuses a version it does not know.
-MANIFEST_VERSION = 1
+#: Bump on any field removal or meaning change. ``kernelforge.nomination``
+#: refuses a version it does not know, so both halves move together.
+MANIFEST_VERSION = 2
 
 MANIFEST_FILENAME = "forge_candidate_manifest.json"
 
@@ -142,8 +142,7 @@ def _project_row(
         return None
     kernel_name = name or kernel_id
     return {
-        # Provenance only: the ordinal is reassigned by reranking, so two
-        # kernels can claim it across cycles.
+        # Provenance only: reranking reassigns the ordinal between operators.
         "kernel_id": kernel_id,
         # The accounting identity on this lane, and what the consumer keys on.
         "kernel_name": kernel_name,
@@ -164,9 +163,8 @@ def _project_row(
         "shapes": row.get("shapes") if isinstance(row.get("shapes"), list) else [],
         "trace_report_path": str(row.get("trace_report_path") or "").strip(),
         # Orchestrator-only knowledge: forge cannot derive either of these.
-        # Read under the kernel name first, because that is what this lane writes
-        # its ledger and its rejections under; the ordinal is the fallback that
-        # keeps history recorded by the legacy selector from being lost.
+        # Keyed on the name this lane records under; the ordinal is the fallback
+        # that keeps the legacy selector's history readable.
         "attempts": _non_negative_int(_attempts_for(attempts, kernel_name, kernel_id)),
         "rejected": bool((kernel_name and kernel_name in rejected) or (kernel_id and kernel_id in rejected)),
     }

@@ -4382,9 +4382,8 @@ async def _run_forge_gemm_tuning(
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
-        # How many routed tuners the lane's share pays for. Omitted when no
-        # ceiling could be derived, which leaves the producer's own routing
-        # intact rather than capping an unattended lane to zero.
+        # How many routed tuners the lane's share pays for. Omitted when none
+        # could be derived, which leaves the producer's own routing intact.
         **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
@@ -5118,9 +5117,8 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         # Multi-patch (one independent sibling per recipe) is the default; the
         # combine escape hatch (a single merged patch) must be requested explicitly.
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
-        # How many recipes the lane's share pays for. Omitted when no ceiling
-        # could be derived, which leaves forge-fuse on every discovered recipe
-        # rather than capping an unattended lane to zero.
+        # How many recipes the lane's share pays for. Omitted when none could be
+        # derived, which leaves forge-fuse on every discovered recipe.
         **({"max_recipes": fusion_recipe_ceiling} if fusion_recipe_ceiling > 0 else {}),
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
@@ -6489,9 +6487,8 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         gpu_type=target_platform,
     )
 
-    # Decided BEFORE anything is queued: a crashed or timed-out run must not land
-    # a patch, and reporting "complete, queued=0" would be indistinguishable from
-    # forge having cleanly nominated nothing.
+    # Decided before anything is queued: a crashed run must land no patch, and
+    # "complete, queued=0" would not distinguish it from a clean empty pass.
     forge_status = str(result.get("status") or "") if isinstance(result, dict) else ""
     if forge_status in {"timeout", "failed"}:
         forge_error = str(result.get("error") or "") if isinstance(result, dict) else ""

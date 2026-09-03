@@ -25,7 +25,27 @@ PROTOCOL_VERSION = 1
 
 #: Must equal the producer's ``candidate_manifest.MANIFEST_VERSION``. The
 #: producer always writes it, so an absent version is a skew too and is refused.
-MANIFEST_VERSION = 1
+#: There is no compatibility path: both halves move together.
+MANIFEST_VERSION = 2
+
+#: Every field a candidate row must carry. A row missing one comes from a
+#: producer this build does not understand, so the gap is refused, not guessed.
+_REQUIRED_CANDIDATE_FIELDS = ("kernel_name", "gpu_pct", "source_file", "reason_class", "attempts", "rejected")
+
+#: Mirrors ``kernel_source_contract.KNOWN_REASON_CLASSES`` as a literal so forge
+#: stays independently importable; ``MANIFEST_VERSION`` keeps the two in step.
+KNOWN_REASON_CLASSES = frozenset(
+    {
+        "resolved",
+        "launch_api_only",
+        "vendor_binary",
+        "dispatch_shim",
+        "non_patchable_name",
+        "not_rewritable_verdict",
+        "source_not_resolved",
+        "unknown",
+    }
+)
 
 LANE_REWRITE = "rewrite"
 LANE_FUSION = "fusion"
@@ -161,9 +181,10 @@ def read_candidates(path: str | Path) -> list[Candidate]:
 
     Raises:
         NominationError: On unreadable JSON, a manifest version this build does
-            not know, a missing ``hot_kernels`` array, or a row that is not an
-            object or carries no kernel name. A dropped row would hide the same
-            producer/consumer skew an unknown request field does.
+            not know, a missing ``hot_kernels`` array, a row that is not an
+            object, a row missing a required field, or a ``reason_class`` outside
+            the known set. A dropped row would hide the same producer/consumer
+            skew an unknown request field does.
     """
     payload = _load_json(path, what="candidate list")
     if not isinstance(payload, dict):
@@ -178,7 +199,16 @@ def read_candidates(path: str | Path) -> list[Candidate]:
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise NominationError(f"candidate row {index} is not a JSON object: {path}")
-        name = str(row.get("kernel_name") or row.get("name") or "").strip()
+        missing = [field_name for field_name in _REQUIRED_CANDIDATE_FIELDS if field_name not in row]
+        if missing:
+            raise NominationError(f"candidate row {index} is missing required field(s) {missing}: {path}")
+        reason_class = str(row.get("reason_class") or "").strip()
+        if reason_class not in KNOWN_REASON_CLASSES:
+            raise NominationError(
+                f"candidate row {index} has unknown reason_class {reason_class!r}; "
+                f"this build knows {sorted(KNOWN_REASON_CLASSES)}: {path}"
+            )
+        name = str(row.get("kernel_name") or "").strip()
         if not name:
             raise NominationError(f"candidate row {index} has no kernel name: {path}")
         candidates.append(
@@ -186,7 +216,7 @@ def read_candidates(path: str | Path) -> list[Candidate]:
                 kernel_name=name,
                 source_file=str(row.get("source_file") or "").strip(),
                 gpu_pct=_finite_float(row.get("gpu_pct")),
-                reason_class=str(row.get("reason_class") or "").strip(),
+                reason_class=reason_class,
                 attempts=max(0, _int_or_zero(row.get("attempts"))),
                 rejected=bool(row.get("rejected")),
                 raw=row,

@@ -21,13 +21,27 @@ def _write(path: Path, payload: object) -> Path:
     return path
 
 
+def _row(name: str, **overrides: object) -> dict[str, object]:
+    """A candidate row carrying every field the contract requires."""
+    row: dict[str, object] = {
+        "kernel_name": name,
+        "source_file": f"/repo/{name}.py",
+        "gpu_pct": 1.0,
+        "reason_class": "resolved",
+        "attempts": 0,
+        "rejected": False,
+    }
+    row.update(overrides)
+    return row
+
+
 def _request_file(tmp_path: Path, *, max_kernels: int = 1, rows: list[dict[str, Any]] | None = None) -> Path:
     trace = _write(tmp_path / "decode.trace.json", {})
     candidates = _write(
         tmp_path / "kernel_candidates.json",
         {
             "manifest_version": nom.MANIFEST_VERSION,
-            "hot_kernels": rows if rows is not None else [{"kernel_name": "hot", "source_file": "/repo/hot.py"}],
+            "hot_kernels": rows if rows is not None else [_row("hot")],
         },
     )
     return _write(
@@ -86,8 +100,8 @@ def test_multi_target_nomination_is_refused_loudly(tmp_path: Path) -> None:
         tmp_path,
         max_kernels=2,
         rows=[
-            {"kernel_name": "a", "source_file": "/repo/a.py", "gpu_pct": 9.0},
-            {"kernel_name": "b", "source_file": "/repo/b.py", "gpu_pct": 8.0},
+            _row("a", gpu_pct=9.0),
+            _row("b", gpu_pct=8.0),
         ],
     )
     with pytest.raises(click.ClickException, match="multi-target execution is not implemented"):
@@ -103,7 +117,7 @@ def test_malformed_request_becomes_a_cli_error(tmp_path: Path) -> None:
 
 def test_empty_nomination_emits_a_clean_success(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Nothing eligible is an answer; the phase latch needs a clean exit."""
-    path = _request_file(tmp_path, rows=[{"kernel_name": "blind", "source_file": ""}])
+    path = _request_file(tmp_path, rows=[_row("blind", source_file="", reason_class="source_not_resolved")])
     resolution = cli._resolve_nomination(auto=True, nomination_input=str(path), kernel=None, resume=False)
     assert resolution is not None and not resolution.targets
     cli._emit_empty_nomination(resolution)
