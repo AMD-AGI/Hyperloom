@@ -31,6 +31,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _has_optimization,
     _order_concs_desc,
     _point_from_variant,
+    graded_metric_key,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
@@ -1293,6 +1294,44 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
     rows = list(csv.DictReader(csv_path.open()))
     assert len(rows) == 1
     assert rows[0]["arm"] == "baseline"
+
+
+class TestTheSummaryIsTakenOnTheChartsAxis:
+    """The headline speedup and the curve beside it have to be one quantity.
+
+    On the agentic corpus output throughput is about 1% of the token budget, so
+    a summary left on that axis reports a number the chart contradicts.
+    """
+
+    def _pts(self, arm: str, out: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {"arm": arm, "conc": 8, "status": "succeeded", "output_throughput": out, "total_token_throughput": total}
+        ]
+
+    def test_agentx_grades_on_total_token_throughput(self):
+        comparison, summary = _build_comparison(
+            self._pts("baseline", 183.0, 20000.0),
+            self._pts("optimized", 183.0, 26000.0),
+            metric_key=graded_metric_key("agentx"),
+        )
+        assert summary["metric"] == "total_token_throughput"
+        assert summary["best_speedup"] == pytest.approx(26000.0 / 20000.0)
+        assert comparison[0]["baseline_tput"] == pytest.approx(20000.0)
+
+    def test_synthetic_stays_on_output_throughput(self):
+        _comparison, summary = _build_comparison(
+            self._pts("baseline", 100.0, 20000.0),
+            self._pts("optimized", 130.0, 26000.0),
+            metric_key=graded_metric_key(""),
+        )
+        assert summary["metric"] == "output_throughput"
+        assert summary["best_speedup"] == pytest.approx(1.3)
+
+    def test_the_key_follows_the_mode(self):
+        assert graded_metric_key("agentx") == "total_token_throughput"
+        assert graded_metric_key("AgentX") == "total_token_throughput"
+        assert graded_metric_key("synthetic") == "output_throughput"
+        assert graded_metric_key("") == "output_throughput"
 
 
 # --- the chart's data contract ---

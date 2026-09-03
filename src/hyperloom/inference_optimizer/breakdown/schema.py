@@ -2073,7 +2073,10 @@ class ConcSweepSummary(TypedDict, total=False):
     baseline: dict[str, Any]
     optimized: dict[str, Any]
     comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
-    summary: dict[str, Any]  # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
+    # {metric, successful_pairs, failed_pairs, best_conc, best_speedup,
+    # median_speedup, mean_speedup}. ``metric`` names the axis the speedups
+    # were taken on, which is the one that mode's chart is drawn on.
+    summary: dict[str, Any]
     workspace: str
     elapsed_sec: float
     total_budget_sec: int  # None when budget gate disabled

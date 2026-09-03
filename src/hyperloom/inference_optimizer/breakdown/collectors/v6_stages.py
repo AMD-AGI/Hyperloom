@@ -526,8 +526,8 @@ def project_conc_sweep_event(
     comparison = [
         {
             "conc": _to_int(row.get("conc")),
-            "baseline_output_throughput": _to_float(row.get("baseline_tput")),
-            "optimized_output_throughput": _to_float(row.get("optimized_tput")),
+            "baseline_throughput": _to_float(row.get("baseline_tput")),
+            "optimized_throughput": _to_float(row.get("optimized_tput")),
             "speedup": _to_float(row.get("speedup")),
             "error": _conc_pair_error(row, points_by_arm),
         }
@@ -577,6 +577,8 @@ def project_conc_sweep_event(
             "comparison": comparison,
             "result": {
                 "status": result_status,
+                # The axis the speedups were taken on; it differs by workload.
+                "metric": _text(result_summary.get("metric")) or "output_throughput",
                 "best_conc": _to_int(result_summary.get("best_conc")),
                 "best_speedup": _to_float(result_summary.get("best_speedup")),
                 "skip_reason": _text(_first(summary.get("skip_reason"), last.get("skip_reason"))),

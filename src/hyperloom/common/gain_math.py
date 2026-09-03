@@ -35,6 +35,8 @@ def incremental_gain_pct(new: float, ref: float) -> float | None:
 def conc_pair_comparison(
     baseline_points: list[dict[str, Any]],
     optimized_points: list[dict[str, Any]],
+    *,
+    metric_key: str = "output_throughput",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Pair curve points by CONC (outer join), compute per-conc speedup, and aggregate.
 
@@ -45,9 +47,13 @@ def conc_pair_comparison(
     Args:
         baseline_points: Curve rows for the baseline arm.
         optimized_points: Curve rows for the optimized arm.
+        metric_key: The point field the speedup is measured on. It has to be
+            the axis the session is ranked by, or the summary reports a
+            different quantity from the curve drawn beside it.
 
     Returns:
-        A tuple of ``(per_conc_rows, summary_dict)``.
+        A tuple of ``(per_conc_rows, summary_dict)``; the summary names the
+        metric it used.
     """
 
     def _norm_conc(p: dict[str, Any]) -> int | float | str:
@@ -67,8 +73,8 @@ def conc_pair_comparison(
     ):
         b = by_conc_b.get(c) or {}
         o = by_conc_o.get(c) or {}
-        bt = to_float(b.get("output_throughput"))
-        ot = to_float(o.get("output_throughput"))
+        bt = to_float(b.get(metric_key))
+        ot = to_float(o.get(metric_key))
         speedup: float | None = None
         delta_pct: float | None = None
         if bt is not None and bt > 0 and ot is not None and ot > 0:
@@ -90,6 +96,7 @@ def conc_pair_comparison(
             }
         )
     summary: dict[str, Any] = {
+        "metric": metric_key,
         "successful_pairs": successful_pairs,
         "failed_pairs": failed_pairs,
         "best_conc": None,
