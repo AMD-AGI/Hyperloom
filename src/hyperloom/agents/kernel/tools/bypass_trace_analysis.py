@@ -492,6 +492,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--framework", default="")
     p.add_argument("--target-platform", default="")
     p.add_argument("--analysis-mode", default="")
+    p.add_argument("--require-single-rank", action="store_true")
     p.add_argument("--split-conc", default="")
     p.add_argument("--split-osl", default="")
     p.add_argument("--split-r", default="")
@@ -639,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
                 steady_state=enable_steady,
                 framework=args.framework,
                 emit_launches=True,
+                require_single_rank=args.require_single_rank,
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}

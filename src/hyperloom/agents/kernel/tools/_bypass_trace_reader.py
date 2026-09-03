@@ -63,7 +63,10 @@ _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
 
 # Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
-_RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
+_RANK_RES = (
+    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[-_.])tp[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
+)
 
 
 def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
@@ -122,8 +125,14 @@ def _file_size(fp: Path) -> int:
 
 def _rank_of(path: str | Path) -> int | None:
     """Parse the rank index from a trace filename (``None`` if not rank-tagged)."""
-    m = _RANK_RE.search(Path(path).name)
-    return int(m.group(1)) if m else None
+    trace_path = Path(path)
+    for pattern in _RANK_RES:
+        if match := pattern.search(trace_path.name):
+            return int(match.group(1))
+    for pattern in _RANK_RES:
+        if match := pattern.fullmatch(trace_path.parent.name):
+            return int(match.group(1))
+    return None
 
 
 def _trace_candidates(root: Path) -> list[Path]:
@@ -158,7 +167,13 @@ def _main_trace_candidates(candidates: list[Path], root: str | Path | None = Non
     return main or candidates
 
 
-def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -> Path:
+def _select_trace_file(
+    candidates: list[Path],
+    root: str | Path | None = None,
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+) -> Path | None:
     """Deterministically pick one trace file from candidates.
 
     Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
@@ -168,6 +183,16 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     largest file. Ties always break by name so selection is reproducible.
     """
     candidates = _main_trace_candidates(candidates, root)
+    if require_single_rank:
+        preferred = [candidate for candidate in candidates if _rank_of(candidate) == preferred_rank]
+        if preferred:
+            return max(preferred, key=lambda candidate: (_file_size(candidate), candidate.name))
+        unranked = [
+            candidate
+            for candidate in candidates
+            if _rank_of(candidate) is None and not candidate.name.startswith("merged-")
+        ]
+        return unranked[0] if len(unranked) == 1 else None
     merged = [c for c in candidates if c.name.startswith("merged-")]
     if merged:
         return max(merged, key=lambda c: (_file_size(c), c.name))
@@ -177,7 +202,12 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     return max(candidates, key=lambda c: (_file_size(c), c.name))
 
 
-def resolve_trace_file(trace_input: str | Path) -> Path | None:
+def resolve_trace_file(
+    trace_input: str | Path,
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+) -> Path | None:
     """Resolve a trace input (file or directory) to a single trace file.
 
     For a directory (e.g. a ``torch_trace/`` capture dir), selection is
@@ -199,7 +229,12 @@ def resolve_trace_file(trace_input: str | Path) -> Path | None:
     candidates = _trace_candidates(p)
     if not candidates:
         return None
-    return _select_trace_file(candidates, p)
+    return _select_trace_file(
+        candidates,
+        p,
+        require_single_rank=require_single_rank,
+        preferred_rank=preferred_rank,
+    )
 
 
 def _trace_rank_count(trace_input: str | Path) -> int:
@@ -955,6 +990,7 @@ def analyze_trace(
     steady_state: bool = False,
     framework: str = "",
     emit_launches: bool = False,
+    require_single_rank: bool = False,
 ) -> dict[str, Any]:
     """Stream a Kineto trace and return timeline + op/kernel aggregates.
 
@@ -984,7 +1020,7 @@ def analyze_trace(
           ``event_total`` (events scanned).
         On resolution failure, ``status='failed'`` with an ``error`` string.
     """
-    tf = resolve_trace_file(trace_input)
+    tf = resolve_trace_file(trace_input, require_single_rank=require_single_rank)
     if tf is None:
         return {
             "status": "failed",

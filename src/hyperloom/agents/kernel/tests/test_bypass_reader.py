@@ -233,6 +233,20 @@ def test_resolve_trace_file_prefers_merged(tmp_path):
     assert resolved is not None and resolved.name == "merged-all.trace.json.gz"
 
 
+def test_agentx_directory_prefers_rank0_over_merged(tmp_path):
+    d = tmp_path / "torch_trace"
+    rank0 = _write_trace(d / "900-TP-0-DECODE.trace.json.gz")
+    _write_trace(d / "900-TP-1-DECODE.trace.json.gz")
+    _write_trace(d / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(d, require_single_rank=True) == rank0
+
+
+def test_agentx_directory_refuses_merged_only_input(tmp_path):
+    d = tmp_path / "torch_trace"
+    _write_trace(d / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(d, require_single_rank=True) is None
+
+
 def test_analyze_reports_rank_provenance(tmp_path):
     d = tmp_path / "torch_trace"
     _write_ranked(d, 0)

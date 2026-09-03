@@ -223,6 +223,34 @@ def test_wait_for_phase_retries_transient_http_protocol_errors(monkeypatch):
     )
 
 
+def test_capture_stop_records_transient_api_errors(monkeypatch):
+    responses = iter(
+        [
+            phase_gate.http.client.IncompleteRead(b"partial"),
+            {"requests_end_ns": 123},
+        ]
+    )
+
+    def _phase_stats(*_args, **_kwargs):
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(phase_gate, "phase_stats", _phase_stats)
+    monkeypatch.setattr(phase_gate, "process_alive", lambda _pid: True)
+    result = phase_gate.wait_for_capture_stop(
+        api_url="http://127.0.0.1:1",
+        phase="profiling",
+        pid=42,
+        max_window_seconds=1,
+        poll_interval_seconds=0.01,
+    )
+    assert result["stop_reason"] == "phase_complete"
+    assert result["api_error_count"] == 1
+    assert "IncompleteRead" in result["last_api_error"]
+
+
 def test_write_capture_status_is_structured_and_atomic(tmp_path):
     output = tmp_path / "agentx_profile_capture.json"
     phase_gate.write_capture_status(

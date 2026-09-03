@@ -39,7 +39,12 @@ from ._multi_node_env import is_multi_node
 log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
-_NON_RETRYABLE_PROFILE_ERRORS = frozenset({"primary_rank_trace_missing"})
+_NON_RETRYABLE_PROFILE_ERRORS = frozenset(
+    {
+        "agentx_multi_node_profile_unsupported",
+        "primary_rank_trace_missing",
+    }
+)
 _NON_RETRYABLE_CAPTURE_REASONS = frozenset(
     {
         "api_port_allocation_failed",

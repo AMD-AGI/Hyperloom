@@ -115,8 +115,14 @@ if sys.argv[1] == "write-capture-status":
     with open(value("--output"), "w", encoding="utf-8") as handle:
         json.dump(
             {
+                "schema_version": 1,
                 "status": value("--status"),
                 "reason": value("--reason"),
+                "phase": "profiling",
+                "phase_start_ns": int(value("--phase-start-ns")),
+                "requested_window_seconds": float(value("--requested-window-seconds")),
+                "decision": json.loads(value("--decision-json") or "{}"),
+                "recorded_at_ns": 1,
             },
             handle,
         )
@@ -620,7 +626,8 @@ def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
     assert not marker.exists()
     assert "without trace capture" in (r.stdout + r.stderr)
     capture = json.loads((res / "agentx_profile_capture.json").read_text())
-    assert capture == {"status": "failed", "reason": "profiling_phase_unavailable"}
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "profiling_phase_unavailable"
 
 
 def test_capture_gate_failure_still_stops_profiler(tmp_path):
@@ -639,14 +646,13 @@ def test_capture_gate_failure_still_stops_profiler(tmp_path):
     assert "stopping the profiler immediately" in (r.stdout + r.stderr)
 
 
-def test_missing_phase_gate_still_writes_capture_status(tmp_path):
+def test_missing_phase_gate_leaves_status_for_executor_to_mark_missing(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     (bench / "aiperf_phase_gate.py").unlink()
     r = _run_profile(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
-    capture = json.loads((res / "agentx_profile_capture.json").read_text())
-    assert capture["status"] == "failed"
-    assert capture["reason"] == "phase_gate_missing"
+    assert not (res / "agentx_profile_capture.json").exists()
+    assert "cannot write trace-capture status" in (r.stdout + r.stderr)
 
 
 def test_agentx_server_script_override_without_framework(tmp_path):

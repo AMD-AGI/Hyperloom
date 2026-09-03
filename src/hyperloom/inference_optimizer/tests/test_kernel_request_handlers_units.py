@@ -5959,6 +5959,27 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[-1] == "--dry-run"
         assert steady == "auto"
 
+    def test_agentx_bypass_requires_single_rank(self, monkeypatch, tmp_path):
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        state.benchmark_mode = "agentx"
+        cmd, _steady = krh._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace-dir"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace-dir",
+            tracelens_root=None,
+            is_bypass=True,
+            scriptable=False,
+            workload={},
+            model_name="",
+            framework="sglang",
+            target_platform="",
+            analysis_mode="inference",
+            analysis_route="bypass",
+        )
+        assert "--require-single-rank" in cmd
+
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")

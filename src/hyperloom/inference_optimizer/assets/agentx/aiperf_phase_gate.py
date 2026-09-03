@@ -110,36 +110,40 @@ def wait_for_capture_stop(
 ) -> dict[str, Any]:
     """Wait until the phase ends or the wall-clock safety bound is reached."""
     started = time.monotonic()
+    api_error_count = 0
+    last_api_error = ""
+
+    def result(stop_reason: str, elapsed: float) -> dict[str, Any]:
+        output: dict[str, Any] = {
+            "stop_reason": stop_reason,
+            "elapsed_seconds": round(elapsed, 3),
+        }
+        if api_error_count:
+            output["api_error_count"] = api_error_count
+            output["last_api_error"] = last_api_error
+        return output
 
     while True:
         elapsed = time.monotonic() - started
         if elapsed >= max_window_seconds:
-            return {
-                "stop_reason": "wall_clock_limit",
-                "elapsed_seconds": round(elapsed, 3),
-            }
+            return result("wall_clock_limit", elapsed)
         if not process_alive(pid):
-            return {
-                "stop_reason": "aiperf_exited",
-                "elapsed_seconds": round(elapsed, 3),
-            }
+            return result("aiperf_exited", elapsed)
 
         try:
             stats = phase_stats(api_url, phase, timeout_seconds=max(1.0, poll_interval_seconds))
             if stats is not None:
                 if stats.get("requests_end_ns") is not None:
-                    return {
-                        "stop_reason": "phase_complete",
-                        "elapsed_seconds": round(elapsed, 3),
-                    }
+                    return result("phase_complete", elapsed)
         except (
             http.client.HTTPException,
             OSError,
             TimeoutError,
             ValueError,
             urllib.error.URLError,
-        ):
-            pass
+        ) as exc:
+            api_error_count += 1
+            last_api_error = f"{type(exc).__name__}: {exc}"
 
         time.sleep(min(poll_interval_seconds, max(0.0, max_window_seconds - elapsed)))
 

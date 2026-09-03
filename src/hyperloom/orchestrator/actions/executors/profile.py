@@ -19,6 +19,7 @@ Result schema (delivered on the bus as ``delegated_result``)::
     main_trace_path: absolute path of the chosen main trace
     primary_rank / rank_trace_paths / merged_trace_paths: trace topology
     trace_health:  structure-check dict (see _validate_trace_structure)
+    measurement_status: benchmark leg status before capture validation
     trace_capture_status: AgentX capture lifecycle status, when available
     trace_capture: full AgentX capture status sidecar payload
     profile_trace_selection_reason: why that main trace was picked
@@ -999,6 +1000,12 @@ class ProfileExecutor(BaselineExecutor):
         if str(params.get("base_args_mode") or "").strip().lower() == "replace":
             params.setdefault("args_mode", "replace")
         extra = getattr(ctx, "extra", None) or {}
+        shared_state = (extra.get("shared_state") if isinstance(extra, dict) else None) or getattr(
+            self, "shared_state", None
+        )
+        from ._workload_envs import agentx_active
+
+        agentx_session = agentx_active(shared_state)
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -1028,6 +1035,15 @@ class ProfileExecutor(BaselineExecutor):
         # dir, marking ``ctx.extra['mn_round_restarted']`` so BaselineExecutor
         # skips a second restart. No-op in single-node.
         round_trace_root = self._resolve_mn_round_trace_root(ctx)
+        if round_trace_root and agentx_session:
+            return {
+                "status": "failed",
+                "error_class": "agentx_multi_node_profile_unsupported",
+                "error": (
+                    "AgentX multi-node profiling is not phase-gated; refusing the legacy fixed wall-clock capture path"
+                ),
+                "trace_dir": round_trace_root,
+            }
         if round_trace_root:
             from ._multi_node_server_lifecycle import (
                 ServerRestartFailed,
@@ -1151,9 +1167,6 @@ class ProfileExecutor(BaselineExecutor):
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with. Single-node uses workspace/torch_trace.
         workspace_str = result.get("workspace")
-        shared_state = (extra.get("shared_state") if isinstance(extra, dict) else None) or getattr(
-            self, "shared_state", None
-        )
         agentx_profile = (
             "submission_valid" in result or str(getattr(shared_state, "benchmark_mode", "") or "").lower() == "agentx"
         )

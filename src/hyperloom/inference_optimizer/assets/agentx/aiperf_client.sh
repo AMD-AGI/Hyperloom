@@ -527,33 +527,18 @@ if [ "${PROFILE:-0}" = "1" ]; then
     _reason="$2"
     _phase_start_ns="${3:-0}"
     _decision="${4:-}"
-    _written=0
-    if [ -f "$PHASE_GATE" ]; then
-      if python3 "$PHASE_GATE" write-capture-status \
-        --output "$CAPTURE_STATUS_FILE" \
-        --status "$_status" \
-        --reason "$_reason" \
-        --phase-start-ns "$_phase_start_ns" \
-        --requested-window-seconds "$PWIN" \
-        --decision-json "$_decision"; then
-        _written=1
-      fi
+    if [ ! -f "$PHASE_GATE" ]; then
+      log "ERROR missing phase gate ${PHASE_GATE}; cannot write trace-capture status"
+      return 0
     fi
-    if [ "$_written" -ne 1 ]; then
-      _status_tmp="${CAPTURE_STATUS_FILE}.tmp.$$"
-      _decision_json="$_decision"
-      [ -n "$_decision_json" ] || _decision_json='{}'
-      _recorded_at_ns="$(date +%s%N)"
-      if printf '{"schema_version":1,"status":"%s","reason":"%s","phase":"profiling","phase_start_ns":%s,"requested_window_seconds":%s,"decision":%s,"recorded_at_ns":%s}\n' \
-        "$_status" "$_reason" "$_phase_start_ns" "$PWIN" "$_decision_json" "$_recorded_at_ns" > "$_status_tmp"; then
-        if ! mv -f "$_status_tmp" "$CAPTURE_STATUS_FILE"; then
-          rm -f "$_status_tmp"
-          log "WARN failed to publish trace-capture status"
-        fi
-      else
-        rm -f "$_status_tmp"
-        log "WARN failed to write trace-capture status"
-      fi
+    if ! python3 "$PHASE_GATE" write-capture-status \
+      --output "$CAPTURE_STATUS_FILE" \
+      --status "$_status" \
+      --reason "$_reason" \
+      --phase-start-ns "$_phase_start_ns" \
+      --requested-window-seconds "$PWIN" \
+      --decision-json "$_decision"; then
+      log "ERROR failed to write trace-capture status via ${PHASE_GATE}"
     fi
   }
   if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then

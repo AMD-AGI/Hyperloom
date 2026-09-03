@@ -15,7 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **AgentX profiling now follows AIPerf's measured phase.** Trace capture opens
   from the pinned client's progress API instead of a fixed warmup delay, records
   an independent capture status, and keeps single-rank TraceLens analysis off
-  merged multi-rank traces.
+  merged multi-rank traces. `AGENTX_PROFILE_WARMUP_S` is now ignored;
+  `AGENTX_PROFILE_WINDOW_S` remains the capture bound. Each run writes
+  `agentx_profile_capture.json`, and a capture failure fails the profile action
+  while preserving its benchmark measurement status. Multi-node AgentX
+  profiling now fails explicitly until it can use the same phase-gated lifecycle.
 
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP

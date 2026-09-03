@@ -908,6 +908,14 @@ degrade is never silent and never one-sided.
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
 
+AgentX profiling starts when AIPerf reports its measured phase. The legacy
+`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
+the capture window and defaults to 20 seconds. Capture lifecycle status is
+written to `agentx_profile_capture.json`; benchmark measurement success and
+trace-capture success are reported independently. AgentX multi-node profiling
+is currently rejected because its legacy fixed-delay capture is not aligned
+with the AIPerf phase signal.
+
 ---
 
 ## Phase tuning
