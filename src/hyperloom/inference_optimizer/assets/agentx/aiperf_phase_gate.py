@@ -151,6 +151,7 @@ def wait_for_capture_stop(
 def write_capture_status(
     *,
     output: str,
+    capture_id: str,
     status: str,
     reason: str,
     phase_start_ns: int | None,
@@ -166,6 +167,7 @@ def write_capture_status(
         decision = parsed
     payload = {
         "schema_version": 1,
+        "capture_id": capture_id,
         "status": status,
         "reason": reason,
         "phase": "profiling",
@@ -217,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="write the AgentX trace-capture result",
     )
     status_parser.add_argument("--output", required=True)
+    status_parser.add_argument("--capture-id", required=True)
     status_parser.add_argument("--status", required=True, choices=("succeeded", "failed"))
     status_parser.add_argument("--reason", required=True)
     status_parser.add_argument("--phase-start-ns", type=int)
@@ -248,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             write_capture_status(
                 output=args.output,
+                capture_id=args.capture_id,
                 status=args.status,
                 reason=args.reason,
                 phase_start_ns=args.phase_start_ns,

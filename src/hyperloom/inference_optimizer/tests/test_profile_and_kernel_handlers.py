@@ -2036,9 +2036,15 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
         rank_zero.write_bytes(b"rank-zero")
         rank_one.write_bytes(b"rank-one")
         merged.write_bytes(b"merged")
-        capture_status = workspace / "agentx_profile_capture.json"
+        capture_status = Path(_ctx.task.params["extra_envs"]["AGENTX_CAPTURE_STATUS_PATH"])
         capture_status.write_text(
-            json.dumps({"status": "succeeded", "reason": "capture_complete"}),
+            json.dumps(
+                {
+                    "capture_id": _ctx.task.params["extra_envs"]["AGENTX_CAPTURE_ID"],
+                    "status": "succeeded",
+                    "reason": "capture_complete",
+                }
+            ),
             encoding="utf-8",
         )
         return {
@@ -2066,11 +2072,17 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
     assert res.result["merged_trace_paths"] == [str(trace_dir / "merged-177.trace.json.gz")]
     assert sorted(res.result["rank_trace_paths"]) == ["0", "1"]
     assert res.result["trace_capture_status"] == "succeeded"
+    capture_status_path = Path(res.result["trace_capture_status_path"])
+    assert capture_status_path.parent.parent == output_dir / "agentx-profile"
+    manifest = json.loads(Path(res.result["trace_manifest_path"]).read_text())
+    assert manifest["capture_id"] == capture_status_path.parent.name
+    assert manifest["primary_trace_path"] == res.result["main_trace_path"]
     db.close()
 
 
 @pytest.mark.asyncio
-async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path):
+async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2083,8 +2095,15 @@ async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path):
         trace_dir = workspace / "torch_trace"
         trace_dir.mkdir(parents=True)
         (trace_dir / "rank-0.trace.json.gz").write_bytes(b"partial")
-        (workspace / "agentx_profile_capture.json").write_text(
-            json.dumps({"status": "failed", "reason": "trace_flush_failed"}),
+        capture_status = Path(_ctx.task.params["extra_envs"]["AGENTX_CAPTURE_STATUS_PATH"])
+        capture_status.write_text(
+            json.dumps(
+                {
+                    "capture_id": _ctx.task.params["extra_envs"]["AGENTX_CAPTURE_ID"],
+                    "status": "failed",
+                    "reason": "trace_flush_failed",
+                }
+            ),
             encoding="utf-8",
         )
         return {
@@ -2112,7 +2131,8 @@ async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path):
+async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)

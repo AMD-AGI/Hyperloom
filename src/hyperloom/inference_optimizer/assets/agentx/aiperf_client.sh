@@ -17,7 +17,8 @@
 # after AIPerf reports the measured phase through its progress API.
 #
 # Inputs (from Magpie env): MODEL, TP, PORT, MAX_MODEL_LEN, CONC, RESULT_DIR,
-#   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE.
+#   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE,
+#   AGENTX_CAPTURE_ID, AGENTX_CAPTURE_STATUS_PATH.
 # AgentX knobs (AGENTX_ prefix; NOT AIPERF_, which aiperf's own settings read):
 #   AGENTX_DATASET / WEKA_LOADER_OVERRIDE (pin the corpus loader),
 #   AGENTX_NUM_ENTRIES (corpus cap; default 393 = all),
@@ -513,12 +514,14 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
+  : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
+  : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
   PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
   # AIPerf owns the AgentX warmup lifecycle, whose duration is not bounded by
   # the flat drain grace on very large models. Process liveness and Magpie's
   # outer profile deadline provide the hard bound.
   PHASE_WAIT_TIMEOUT=0
-  CAPTURE_STATUS_FILE="${RESULT_DIR}/agentx_profile_capture.json"
+  CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
   rm -f "$CAPTURE_STATUS_FILE"
   AIPERF_PROGRESS_PORT=""
   PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
@@ -533,6 +536,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     fi
     if ! python3 "$PHASE_GATE" write-capture-status \
       --output "$CAPTURE_STATUS_FILE" \
+      --capture-id "$AGENTX_CAPTURE_ID" \
       --status "$_status" \
       --reason "$_reason" \
       --phase-start-ns "$_phase_start_ns" \

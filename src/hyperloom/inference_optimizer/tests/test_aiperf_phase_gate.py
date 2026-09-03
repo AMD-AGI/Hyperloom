@@ -255,6 +255,7 @@ def test_write_capture_status_is_structured_and_atomic(tmp_path):
     output = tmp_path / "agentx_profile_capture.json"
     phase_gate.write_capture_status(
         output=str(output),
+        capture_id="capture-1",
         status="succeeded",
         reason="capture_complete",
         phase_start_ns=123,
@@ -262,6 +263,7 @@ def test_write_capture_status_is_structured_and_atomic(tmp_path):
         decision_json='{"stop_reason":"wall_clock_limit"}',
     )
     payload = json.loads(output.read_text())
+    assert payload["capture_id"] == "capture-1"
     assert payload["status"] == "succeeded"
     assert payload["phase_start_ns"] == 123
     assert payload["decision"]["stop_reason"] == "wall_clock_limit"

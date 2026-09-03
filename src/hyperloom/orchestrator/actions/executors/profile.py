@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,7 @@ import yaml
 from hyperloom.agents.kernel.tools._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
-from hyperloom.common.io import safe_mtime
+from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
@@ -1016,6 +1017,21 @@ class ProfileExecutor(BaselineExecutor):
             else:
                 extra["workspace"] = str(output_dir)
 
+        capture_id = ""
+        capture_status_path: Path | None = None
+        trace_manifest_path: Path | None = None
+        if agentx_session:
+            profile_output_dir = self._resolve_workspace(ctx, "profile")
+            capture_id = uuid.uuid4().hex
+            capture_dir = profile_output_dir / "agentx-profile" / capture_id
+            capture_dir.mkdir(parents=True, exist_ok=True)
+            capture_status_path = capture_dir / "capture-status.json"
+            trace_manifest_path = capture_dir / "trace-manifest.json"
+            capture_envs = dict(params.get("extra_envs") or {})
+            capture_envs["AGENTX_CAPTURE_ID"] = capture_id
+            capture_envs["AGENTX_CAPTURE_STATUS_PATH"] = str(capture_status_path)
+            params["extra_envs"] = capture_envs
+
         # Mtime gate for the multi-node shared-trace-dir layout: captured before
         # super().__call__ so this round's traces are newer than the watermark.
         import time as _time
@@ -1167,20 +1183,20 @@ class ProfileExecutor(BaselineExecutor):
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with. Single-node uses workspace/torch_trace.
         workspace_str = result.get("workspace")
-        agentx_profile = (
-            "submission_valid" in result or str(getattr(shared_state, "benchmark_mode", "") or "").lower() == "agentx"
-        )
+        agentx_profile = agentx_session or "submission_valid" in result
         capture_status: dict[str, Any] | None = None
-        if workspace_str:
-            capture_status_path = Path(workspace_str) / "agentx_profile_capture.json"
-            if capture_status_path.is_file() and safe_mtime(capture_status_path) >= int(task_started_unix):
+        if agentx_profile and capture_status_path is not None:
+            if capture_status_path.is_file():
                 try:
                     parsed_capture_status = json.loads(capture_status_path.read_text(encoding="utf-8"))
-                    if isinstance(parsed_capture_status, dict):
-                        capture_status = parsed_capture_status
-                        result["trace_capture_status"] = str(parsed_capture_status.get("status") or "")
-                        result["trace_capture"] = parsed_capture_status
-                        result["trace_capture_status_path"] = str(capture_status_path)
+                    if not isinstance(parsed_capture_status, dict):
+                        raise ValueError("capture status must be a JSON object")
+                    if str(parsed_capture_status.get("capture_id") or "") != capture_id:
+                        raise ValueError("capture status id does not match this profile invocation")
+                    capture_status = parsed_capture_status
+                    result["trace_capture_status"] = str(parsed_capture_status.get("status") or "")
+                    result["trace_capture"] = parsed_capture_status
+                    result["trace_capture_status_path"] = str(capture_status_path)
                 except (OSError, ValueError, TypeError) as exc:
                     capture_status = {
                         "status": "failed",
@@ -1189,14 +1205,6 @@ class ProfileExecutor(BaselineExecutor):
                     }
                     result["trace_capture_status"] = "failed"
                     result["trace_capture"] = capture_status
-            elif capture_status_path.is_file():
-                log.warning(
-                    "profile_executor: ignoring stale AgentX capture status %s (mtime %.0f < round start second %d)",
-                    capture_status_path,
-                    safe_mtime(capture_status_path),
-                    int(task_started_unix),
-                )
-        agentx_profile = agentx_profile or capture_status is not None
         if agentx_profile:
             result["measurement_status"] = str(result.get("status") or "")
         if agentx_profile and not round_trace_root and capture_status is None:
@@ -1206,7 +1214,7 @@ class ProfileExecutor(BaselineExecutor):
             }
             result["trace_capture_status"] = "missing"
             result["trace_capture"] = capture_status
-            log.error("profile_executor: AgentX profile produced no current-round agentx_profile_capture.json")
+            log.error("profile_executor: AgentX profile produced no current-round capture-status.json")
         tensor_parallel_size: int | None = None
         for raw_tp in (
             result.get("tp"),
@@ -1435,6 +1443,30 @@ class ProfileExecutor(BaselineExecutor):
                 "AgentX profiling produced trace files but no rank-0 raw trace "
                 "could be identified; refusing a merged multi-rank fallback"
             )
+        if agentx_profile and trace_manifest_path is not None:
+            manifest = {
+                "schema_version": 1,
+                "capture_id": capture_id,
+                "measurement_status": result.get("measurement_status"),
+                "trace_capture_status": result.get("trace_capture_status"),
+                "trace_input_ready": bool(result.get("trace_input_ready")),
+                "primary_rank": result.get("primary_rank"),
+                "primary_trace_path": result.get("main_trace_path"),
+                "rank_trace_paths": result.get("rank_trace_paths") or {},
+                "merged_trace_paths": result.get("merged_trace_paths") or [],
+                "capture_status_path": str(capture_status_path) if capture_status_path else None,
+            }
+            try:
+                atomic_write_json(
+                    trace_manifest_path,
+                    manifest,
+                    trailing_newline=True,
+                    fsync=True,
+                    fsync_dir=True,
+                )
+                result["trace_manifest_path"] = str(trace_manifest_path)
+            except OSError as exc:
+                log.warning("profile_executor: failed to write AgentX trace manifest: %s", exc)
         return result
 
 

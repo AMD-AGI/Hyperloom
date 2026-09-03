@@ -116,6 +116,7 @@ if sys.argv[1] == "write-capture-status":
         json.dump(
             {
                 "schema_version": 1,
+                "capture_id": value("--capture-id"),
                 "status": value("--status"),
                 "reason": value("--reason"),
                 "phase": "profiling",
@@ -534,6 +535,8 @@ def test_realtime_metrics_survive_the_scrub(tmp_path):
 
 def _run_profile(bench, bind, res, tmp_path, **extra_env):
     """PROFILE=1 with the window collapsed, so the branch runs in seconds."""
+    capture_dir = res / "agentx-profile" / "test-capture"
+    capture_dir.mkdir(parents=True, exist_ok=True)
     return _run(
         bench,
         bind,
@@ -541,10 +544,16 @@ def _run_profile(bench, bind, res, tmp_path, **extra_env):
         tmp_path,
         PROFILE="1",
         AGENTX_PROFILE_WINDOW_S="0",
+        AGENTX_CAPTURE_ID="test-capture",
+        AGENTX_CAPTURE_STATUS_PATH=str(capture_dir / "capture-status.json"),
         FAKE_AIPERF_SLEEP="6",
         AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
         **extra_env,
     )
+
+
+def _capture_status_path(res: Path) -> Path:
+    return res / "agentx-profile" / "test-capture" / "capture-status.json"
 
 
 def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
@@ -625,7 +634,7 @@ def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
     assert (res / "inferencex_result.json").exists()
     assert not marker.exists()
     assert "without trace capture" in (r.stdout + r.stderr)
-    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    capture = json.loads(_capture_status_path(res).read_text())
     assert capture["status"] == "failed"
     assert capture["reason"] == "profiling_phase_unavailable"
 
@@ -651,7 +660,7 @@ def test_missing_phase_gate_leaves_status_for_executor_to_mark_missing(tmp_path)
     (bench / "aiperf_phase_gate.py").unlink()
     r = _run_profile(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
-    assert not (res / "agentx_profile_capture.json").exists()
+    assert not _capture_status_path(res).exists()
     assert "cannot write trace-capture status" in (r.stdout + r.stderr)
 
 
@@ -1116,7 +1125,7 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     assert "trace flush did not settle" in out, out[-1500:]
     assert "TRUNCATED" in out
     assert "AGENTX_TRACE_FLUSH_TIMEOUT_S" in out
-    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    capture = json.loads(_capture_status_path(res).read_text())
     assert capture["reason"] == "trace_flush_timeout"
 
 
@@ -1165,7 +1174,7 @@ def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
     # Crucially, it must not have entered the polling loop at all: the default
     # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
     assert "waiting for the profiler trace" not in out
-    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    capture = json.loads(_capture_status_path(res).read_text())
     assert capture["reason"] == "profiler_output_unconfigured"
 
 
@@ -1186,7 +1195,7 @@ def test_configured_trace_dir_is_waited_on_before_it_exists(tmp_path):
     assert "waiting for the profiler trace" in out
     assert "no trace file appeared" in out
     assert "no profiler output directory is configured" not in out
-    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    capture = json.loads(_capture_status_path(res).read_text())
     assert capture["reason"] == "trace_files_missing"
 
 
