@@ -191,9 +191,12 @@ in evidence instead of source_files; one task cannot modify multiple repos.
 driver.py must cover all known shapes for the six-tuple operator and implement
 the forge-loop contract: `python3 driver.py` prints a correctness line such as
 `SNR: <db> dB` or `allclose: True/False`; `python3 driver.py --warmup 3
---iters 20 --bench-mode` prints `case_ms: <case> <ms>` for every case and one
-`mean_ms: <ms>`. Do not search other Hyperloom or KernelForge trees for task or
-driver examples; this prompt is the authoritative contract.
+--iters 20 --bench-mode` measures CUDA/HIP graph replays and prints
+`case_ms: <case> <ms>` for every case plus one `mean_ms: <ms>`;
+`python3 driver.py --profile-run` selects one representative case, runs only
+the target kernel for 1-3 synchronized iterations without reference work or
+timing output, and exits zero. Do not search other Hyperloom or KernelForge
+trees for task or driver examples; this prompt is the authoritative contract.
 
 Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget
