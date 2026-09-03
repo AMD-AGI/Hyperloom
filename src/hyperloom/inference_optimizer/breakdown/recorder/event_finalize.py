@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import baseline_event, kernel_event, roofline_event
-from .assembler import BASELINE_EVENT_SECTIONS, KERNEL_EVENT_SECTIONS, ROOFLINE_EVENT_SECTIONS, event_parts
+from .assembler import BASELINE_EVENT_SECTIONS, EVENT_SECTIONS, ROOFLINE_EVENT_SECTIONS, event_parts
 from .event_timeline import EVENT_STATUS_INTERRUPTED, finish_event, residual_events
 
 __all__ = ["finalize_events"]
@@ -59,7 +59,12 @@ _EVENT_TYPES: tuple[_EventType, ...] = (
         event_type=kernel_event.EVENT_TYPE,
         kind=kernel_event.EVENT_KIND,
         event_section=kernel_event.SECTION_EVENT,
-        sections=KERNEL_EVENT_SECTIONS,
+        # Both families, matching what the phase's own close reads: a roofline
+        # dispatched inline records into the kernel event, and the re-profile
+        # block is assembled from those rows. Reading only the ``kernel_*``
+        # sections here recovered the event with an empty ``forge.reprofile``,
+        # which is the case recovery exists for.
+        sections=EVENT_SECTIONS,
         assemble=kernel_event.assemble_kernel_ext,
     ),
     _EventType(

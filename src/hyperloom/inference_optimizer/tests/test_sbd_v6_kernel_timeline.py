@@ -626,3 +626,55 @@ def test_lane_rows_are_ordered_by_when_they_started(tmp_path):
     lanes = _kernel_events(tmp_path)[0]["ext"]["forge"]["lanes"]["fusion_runs"]
     assert [row["run_id"] for row in lanes] == ["early", "late"]
     assert lanes[0]["applied"] is True
+
+
+def _record_inline_reprofile(recorder, *, task_id: str = "rp-1") -> None:
+    """Dispatch a re-profile inline, the way the entry hook does."""
+    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import make_roofline_recorder
+
+    recorder.record_reprofile(ran=True, task_kind="roofline", trigger="gain", task_id=task_id)
+    inline = make_roofline_recorder(
+        make_sink(recorder.event_id, producer="orchestrator"),
+        task_id=task_id,
+        task_kind="roofline",
+        reason="kernel_entry_reprofile",
+        owns_event=False,
+    )
+    assert inline is not None
+    return inline
+
+
+def test_an_inline_reprofile_survives_the_active_close(tmp_path):
+    """The baseline for the recovery test below: closing normally keeps the run."""
+    recorder = _forge_recorder()
+    _record_inline_reprofile(recorder)
+    recorder.finish(verdict="adopted", tput_after=1050.0)
+
+    reprofile = _kernel_events(tmp_path)[0]["ext"]["forge"]["reprofile"]
+    assert reprofile["ran"] is True
+    assert reprofile["run"]["task_id"] == "rp-1"
+
+
+def test_a_recovered_kernel_event_keeps_its_inline_reprofile(tmp_path):
+    """Recovery must read the roofline sections the active close reads.
+
+    An inline re-profile records into the kernel event, so its rows live in the
+    ``roofline_*`` sections under this event's id. Recovering from only the
+    ``kernel_*`` sections gave the assembler nothing to fold into
+    ``forge.reprofile.run`` -- an interrupted entry is exactly the case that
+    cannot be reconstructed any other way.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
+
+    recorder = _forge_recorder()
+    _record_inline_reprofile(recorder)
+    # No finish(): the session was killed after the re-profile was dispatched.
+
+    assert finalize_events(tmp_path) == [recorder.event_id]
+
+    event = _kernel_events(tmp_path)[0]
+    assert event["status"] == "interrupted"
+    reprofile = event["ext"]["forge"]["reprofile"]
+    assert reprofile["ran"] is True
+    assert reprofile["run"]["task_id"] == "rp-1"
