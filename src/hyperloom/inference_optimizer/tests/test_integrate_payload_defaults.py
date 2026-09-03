@@ -249,6 +249,123 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 800.0
 
 
+class TestBareKernelIdMustNotGuessBetweenSiblings:
+    """One ``kernel_id`` can name several pending siblings.
+
+    ``kernel_id`` comes from the patch's ``kernel_name``, so a nomination round
+    that authored two patches against different files queues two pending records
+    under one ``kernel_id``. Resolving a bare ``{kernel_id}`` payload to whichever
+    sibling sorts first would stamp the KEEP/REVERT verdict onto a record the
+    caller never named, and ``record_kernel_integrate_result`` cannot catch it
+    because this filler hands it a fully-populated ``integration_id``.
+    """
+
+    @staticmethod
+    def _enqueue(state, *, kernel_name: str, target_file: str, micro_speedup: float) -> dict:
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
+
+        record = enqueue_nominated_patch(
+            state,
+            patch=NominatedPatch(
+                kernel_name=kernel_name,
+                patch_path=f"/out/{Path(target_file).stem}.patch",
+                target_file=target_file,
+                micro_speedup=micro_speedup,
+            ),
+            keep_threshold_pct=3.0,
+        )
+        assert record is not None
+        return record
+
+    def _seed_two_siblings(self, session_dir: Path) -> list[str]:
+        state = _seed_state(session_dir, baseline_tput=800.0)
+        first = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/a.py", micro_speedup=1.9)
+        second = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/b.py", micro_speedup=1.2)
+        state.save(session_dir)
+
+        pending = SharedState.load_or_init(session_dir).pending_kernel_integration_records()
+        assert [str(record.get("kernel_id")) for record in pending] == ["fuse_a", "fuse_a"]
+        return [str(first["integration_id"]), str(second["integration_id"])]
+
+    def test_ambiguous_bare_kernel_id_is_refused_by_name(self, session_dir):
+        ids = self._seed_two_siblings(session_dir)
+
+        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+            krh._fill_integrate_defaults_from_state(
+                {"kernel_id": "fuse_a"},
+                session_dir=session_dir,
+            )
+
+        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert str(excinfo.value) == (
+            "integrate refused: kernel_id='fuse_a' matches 2 pending integration "
+            "records; an explicit integration_id is required to bind the "
+            f"KEEP/REVERT verdict. candidates={sorted(ids)!r}"
+        )
+
+    def test_an_unresolvable_integration_id_does_not_reopen_the_guess(self, session_dir):
+        """A named id that matches nothing is not a licence to fall back."""
+        ids = self._seed_two_siblings(session_dir)
+
+        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+            krh._fill_integrate_defaults_from_state(
+                {"kernel_id": "fuse_a", "integration_id": "kernel-integration:gone"},
+                session_dir=session_dir,
+            )
+
+        assert f"candidates={sorted(ids)!r}" in str(excinfo.value)
+
+    def test_an_explicit_integration_id_still_binds_its_own_sibling(self, session_dir):
+        ids = self._seed_two_siblings(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "fuse_a", "integration_id": ids[1]},
+            session_dir=session_dir,
+        )
+
+        assert out["integration_id"] == ids[1]
+        assert out["kernel_id"] == "fuse_a"
+
+    def test_a_single_pending_sibling_still_resolves_from_a_bare_kernel_id(self, session_dir):
+        state = _seed_state(session_dir, baseline_tput=800.0)
+        only = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/a.py", micro_speedup=1.9)
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "fuse_a"},
+            session_dir=session_dir,
+        )
+
+        assert out["integration_id"] == only["integration_id"]
+        assert out["kernel_id"] == "fuse_a"
+        assert out["base_tput"] == 800.0
+
+    def test_a_kernel_id_with_no_pending_record_is_unaffected(self, session_dir):
+        self._seed_two_siblings(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "gemm_tune_fmoe_ck"},
+            session_dir=session_dir,
+        )
+
+        assert out["kernel_id"] == "gemm_tune_fmoe_ck"
+        assert "integration_id" not in out
+
+    @pytest.mark.asyncio
+    async def test_integrate_handler_refuses_before_applying_anything(self, session_dir):
+        self._seed_two_siblings(session_dir)
+
+        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+            await krh.integrate_handler(
+                {"kernel_id": "fuse_a"},
+                session_dir=session_dir,
+            )
+
+        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert "an explicit integration_id is required" in str(excinfo.value)
+
+
 class TestVendorPlaybookDeployBlocked:
     """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach
     apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle

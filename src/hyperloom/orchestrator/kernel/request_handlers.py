@@ -1292,6 +1292,14 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     return ""
 
 
+class AmbiguousIntegrationTarget(Exception):
+    """A bare ``kernel_id`` named several pending integration records.
+
+    ``kernel_id`` is not unique across a nomination round, so it cannot select
+    the record a KEEP/REVERT verdict is bound to.
+    """
+
+
 def _fill_integrate_defaults_from_state(
     payload: dict,
     *,
@@ -1309,6 +1317,11 @@ def _fill_integrate_defaults_from_state(
 
     Returns:
         A shallow copy of ``payload`` with defaults filled from state.
+
+    Raises:
+        AmbiguousIntegrationTarget: The payload carries no ``integration_id``
+            that resolves and its ``kernel_id`` matches more than one pending
+            record.
     """
     from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 
@@ -1324,15 +1337,22 @@ def _fill_integrate_defaults_from_state(
     if pending_record is None and resolved.get("kernel_id"):
         requested_kernel_id = str(resolved.get("kernel_id") or "")
         requested_task_key = str(resolved.get("task_group_key") or "")
-        pending_record = next(
-            (
-                record
-                for record in pending_records
-                if str(record.get("kernel_id") or "") == requested_kernel_id
-                and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
-            ),
-            None,
-        )
+        candidates = [
+            record
+            for record in pending_records
+            if str(record.get("kernel_id") or "") == requested_kernel_id
+            and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
+        ]
+        if len(candidates) > 1:
+            # Siblings of one nomination round share a kernel_id, so picking any
+            # of them would bind the verdict to a record nobody named.
+            raise AmbiguousIntegrationTarget(
+                f"integrate refused: kernel_id={requested_kernel_id!r} matches "
+                f"{len(candidates)} pending integration records; an explicit "
+                "integration_id is required to bind the KEEP/REVERT verdict. "
+                f"candidates={sorted(str(record.get('integration_id') or '') for record in candidates)!r}"
+            )
+        pending_record = candidates[0] if candidates else None
     if pending_record is not None:
         resolved.setdefault(
             "integration_id",
