@@ -543,3 +543,28 @@ def test_auto_true_a_clean_empty_nomination_reports_no_refusals(tmp_path, monkey
     assert result["status"] == "complete"
     assert result["nominated_patches"] == []
     assert result["dropped"] == {}
+
+
+def test_auto_true_says_the_nominator_is_still_a_placeholder(tmp_path, monkeypatch, caplog):
+    """An operator flipping the env has to learn the trace is not read yet.
+
+    Without this the path looks like forge-driven kernel selection, when the
+    shipped nominator only reranks candidates Hyperloom already resolved.
+    """
+    import logging
+
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
+
+    with caplog.at_level(logging.WARNING, logger=krh.log.name):
+        asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("placeholder" in message and "does not read the trace" in message for message in warnings)

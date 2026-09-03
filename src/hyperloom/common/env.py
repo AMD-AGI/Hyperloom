@@ -148,6 +148,12 @@ def nomination_auto_enabled() -> bool:
     as it did before the nomination contract landed. Set to route ``auto=true``
     through forge's own kernel selection instead of the Hyperloom selector.
 
+    This enables the contract, not the capability the contract exists for. The
+    shipped nominator is a placeholder ranking already-resolved candidates by
+    ``gpu_pct``; trace-driven source resolution, per-target base commits and
+    multi-target execution are forge-side work that has not landed, so one target
+    runs per call. Treat it as a plumbing preview rather than a feature.
+
     Returns:
         True for any truthy ``HYPERLOOM_FORGE_NOMINATION_AUTO``.
     """

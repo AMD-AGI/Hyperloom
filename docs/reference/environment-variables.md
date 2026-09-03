@@ -220,6 +220,24 @@ fusion that already succeeded this session.
 
 ---
 
+## Rewrite nomination lane
+
+> **Not a complete feature yet.** The switch below enables the nomination
+> *contract* — Hyperloom projects its hot-kernel list into a manifest, forge picks
+> from it and hands back patches — but not the capability the contract exists for.
+> The shipped nominator is a placeholder that ranks already-resolved candidates by
+> `gpu_pct` and does not read the trace, so it adds no selection beyond the
+> standard selector. Trace-driven source resolution, per-target base commits and
+> multi-target execution are forge-side work; until they land, one target runs per
+> call regardless of what the lane budget funds. Enable it to exercise the
+> plumbing, not to gain kernel coverage.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, letting forge choose the kernels instead of the Hyperloom selector. Unset leaves the KERNEL phase byte-for-byte as it was before the nomination contract landed. Read independently of `KERNEL_OPT_BACKEND_ORDER`, so it also takes effect on the default `geak` backend; an explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
+
+---
+
 ## Collective optimization lane
 
 The collective lane is Coordinator-owned: it is dispatched directly at KERNEL

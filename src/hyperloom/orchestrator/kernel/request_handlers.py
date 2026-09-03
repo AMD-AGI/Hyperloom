@@ -6463,6 +6463,12 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
     from ...agents.kernel.tools.backends import forge_submit
     from hyperloom.inference_optimizer.session.session_paths import kernel_agent_runs_dir
 
+    log.warning(
+        "nomination auto: the shipped nominator is a placeholder that ranks already-resolved "
+        "candidates by gpu_pct; it does not read the trace, so this path adds no selection "
+        "beyond the standard selector and executes one target per call"
+    )
+
     # Check the budget FIRST: an unbounded/exhausted session funds nothing, and we
     # must not leave a stale forge_candidate_manifest.json behind on that skip.
     state = SharedState.load_or_init(session_dir)
