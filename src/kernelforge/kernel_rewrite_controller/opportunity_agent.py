@@ -184,6 +184,9 @@ All identity values must use normalized lowercase ASCII. For example, write
 kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
 `triton`, `gluon`, `aiter`, `hip`, `hipblaslt`, or `fusion`. Do not publish an
 operator whose implementation language has no matching registered backend.
+kernel_path and every source_files entry must be tracked, repo-relative files in
+the single repo_root at its current HEAD. Put cross-repository source references
+in evidence instead of source_files; one task cannot modify multiple repos.
 
 driver.py must cover all known shapes for the six-tuple operator and implement
 the forge-loop contract: `python3 driver.py` prints a correctness line such as

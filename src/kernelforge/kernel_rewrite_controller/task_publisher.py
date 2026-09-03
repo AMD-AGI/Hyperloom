@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
 from kernelforge.knowledge.implementation_identity import normalize_operator_name
@@ -58,6 +59,19 @@ def _repo_head(repo_root: Path) -> str:
     if top != repo_root.resolve():
         raise ValueError(f"repo_root must be the Git top-level directory: {repo_root}")
     return head
+
+
+def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
+    for relative in dict.fromkeys((task.kernel_path, *task.source_files)):
+        try:
+            git(
+                "cat-file",
+                "-e",
+                f"{task.base_commit}:{relative}",
+                cwd=task.repo_root,
+            )
+        except GitError as error:
+            raise ValueError(f"source path is not tracked in repo_root at base_commit: {relative}") from error
 
 
 def _fsync_tree(root: Path) -> None:
@@ -108,6 +122,7 @@ def publish_staged_task(
             task_dir=source,
             enforce_directory_identity=False,
         )
+        _validate_task_sources_at_base(task)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         return TaskPublicationResult(source_dir=source, reason=f"invalid staged task: {error}")
 

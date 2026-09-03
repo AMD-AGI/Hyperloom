@@ -135,6 +135,24 @@ def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
     assert staged.is_dir()
 
 
+def test_publish_rejects_source_files_outside_the_pinned_repo(
+    tmp_path: Path,
+) -> None:
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    task_json = staged / "task.json"
+    payload = json.loads(task_json.read_text(encoding="utf-8"))
+    payload["source_files"].append("python/other_repo/source.py")
+    task_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is False
+    assert "source path is not tracked" in result.reason
+    assert "python/other_repo/source.py" in result.reason
+
+
 def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path: Path) -> None:
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")
