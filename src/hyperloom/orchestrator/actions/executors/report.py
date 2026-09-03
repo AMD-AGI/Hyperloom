@@ -1213,9 +1213,8 @@ def _render_conc_sweep_curve_for_report(
         Path to the written PNG, or ``None`` when the chart cannot be
         produced (missing data, missing matplotlib, IO error).
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve, resolve_axes
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     if not json_path.exists():
@@ -1226,20 +1225,22 @@ def _render_conc_sweep_curve_for_report(
         log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
         return None
 
-    # The axis the chart is drawn on differs by mode, so probe the one this
-    # payload will actually use.
-    axis_key = "total_token_throughput" if is_agentx_mode(payload.get("benchmark_mode")) else "output_throughput"
+    png_path = output_dir / "conc_sweep_curve.png"
+    tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
+
+    # Ask the renderer's own axis pair whether a point is plottable, rather than
+    # probing one field: the two disagree on a point that carries throughput but
+    # no interactivity, and on a measured zero.
+    axes = resolve_axes(payload.get("benchmark_mode"), float(max(tp, 1)))
 
     def _has_data(arm_key: str) -> bool:
         pts = (payload.get(arm_key) or {}).get("points") or []
-        return any(p.get(axis_key) is not None for p in pts)
+        return any(axes.point_xy(p, float(max(tp, 1))) is not None for p in pts)
 
     if not _has_data("baseline") and not _has_data("optimized"):
-        log.debug("report_executor: conc_sweep_summary has no %s data — skipping plot", axis_key)
+        log.debug("report_executor: conc_sweep_summary has no plottable points — skipping plot")
         return None
 
-    png_path = output_dir / "conc_sweep_curve.png"
-    tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
     model_label = str(getattr(state, "model_name", "") or "")
     gpu_label = str(getattr(state, "gpu_type", "") or "").upper()
     isl = int(payload.get("isl") or 0)

@@ -73,7 +73,7 @@ class _Axes:
     agentic: bool
 
 
-def _resolve_axes(benchmark_mode: Any, tp_eff: float) -> _Axes:
+def resolve_axes(benchmark_mode: Any, tp_eff: float) -> _Axes:
     """Pick the axis pair the payload's mode is ranked on."""
     if is_agentx_mode(benchmark_mode):
         return _Axes(
@@ -227,7 +227,7 @@ def _render(
 
     data = _load_payload(payload)
     tp_eff = float(max(tp, 1))
-    axes = _resolve_axes(data.get("benchmark_mode"), tp_eff)
+    axes = resolve_axes(data.get("benchmark_mode"), tp_eff)
 
     baseline_pts = (data.get("baseline") or {}).get("points") or []
     optimized_pts = (data.get("optimized") or {}).get("points") or []
@@ -321,4 +321,4 @@ def _render(
     return out_path
 
 
-__all__ = ["render_conc_sweep_curve"]
+__all__ = ["render_conc_sweep_curve", "resolve_axes"]

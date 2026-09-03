@@ -135,6 +135,40 @@ def test_load_external_baseline_corrupt(tmp_path):
 
 
 # ---- _read_conc_sweep_pointer ----
+def test_the_chart_precheck_agrees_with_the_renderer(tmp_path, monkeypatch):
+    """A point the renderer would drop must not let the pre-check admit the chart.
+
+    The guard used to probe one field, so an agentic rung carrying throughput
+    but no interactivity passed it and then produced nothing to plot.
+    """
+    from hyperloom.inference_optimizer.session.session_paths import reports_dir
+
+    rdir = reports_dir(tmp_path)
+    rdir.mkdir(parents=True, exist_ok=True)
+    (rdir / "conc_sweep_summary.json").write_text(
+        json.dumps(
+            {
+                "benchmark_mode": "agentx",
+                "tp": 8,
+                "baseline": {"points": [{"conc": 8, "total_token_throughput": 25984.8}]},
+                "optimized": {"points": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[object] = []
+    monkeypatch.setattr(rp, "render_conc_sweep_curve", lambda *a, **kw: calls.append(a), raising=False)
+
+    class _S:
+        tp = 8
+        model_name = "m"
+        gpu_type = "mi300x"
+
+    assert rp._render_conc_sweep_curve_for_report(tmp_path, tmp_path, _S()) is None
+    assert calls == []
+
+
 def test_read_conc_sweep_pointer_missing(tmp_path):
     assert rp._read_conc_sweep_pointer(tmp_path) is None
 
