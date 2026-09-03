@@ -518,7 +518,10 @@ preflight_validate_credentials() {
   # scrub_benchmark_process_env. Gating the aiperf install on credentials that
   # were deliberately removed would fail the repair on every deployment that
   # supplies them by env var rather than $REPO_ROOT/.env.
-  if [ "$ONLY_AIPERF" -eq 1 ]; then
+  # Defaulted, not bare: test_setup_cli.py runs these preflights by slicing the
+  # function out of this file into a standalone script under `set -u`, where a
+  # variable assigned at the top of install.sh does not exist.
+  if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
     return 0
   fi
   preflight_load_dotenv
@@ -657,7 +660,8 @@ ensure_torch_compatible_with_gpu() {
   # Same reasoning as the credential preflight: aiperf is a benchmark client
   # that imports no torch, so a targeted install must not die on a $PYTHON whose
   # torch is missing or CUDA-built. A full install still gates on it.
-  if [ "$ONLY_AIPERF" -eq 1 ]; then
+  # Defaulted for the same reason as there.
+  if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
     return 0
   fi
   if ! command -v rocm-smi >/dev/null 2>&1; then
