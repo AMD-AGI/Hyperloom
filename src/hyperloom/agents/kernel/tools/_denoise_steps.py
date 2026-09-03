@@ -58,9 +58,10 @@ def count_profiler_steps(trace_path: str) -> int:
     A lightweight, JSON-parse-free scan (regex over the decompressed bytes) so it
     stays cheap on large traces. Streams in bounded chunks (with a small overlap
     so a marker split across a chunk boundary still matches) rather than reading
-    the whole decompressed trace into memory. Used as the per-step divisor source
-    for the TraceLens deterministic route, which (unlike bypass) does not run its
-    own steady-window step detection. Accepts a file or a directory (first trace).
+    the whole decompressed trace into memory. Both trace routes use it as the
+    inferred per-step divisor for the scriptable (diffusion) workload roofline,
+    where an operator-declared step count wins when there is one. Accepts a file
+    or a directory (first trace).
 
     Args:
         trace_path: Path to a ``.json`` / ``.json.gz`` trace file or a directory.

@@ -1,9 +1,9 @@
 """Canonical kernel-category display vocabulary shared across trace routes.
 
-The two trace-analysis backends (bypass and TraceLens deterministic) carry
-route-native category taxonomies that overlap on common kernels but diverge at
-the margins and in casing. This module maps BOTH vocabularies onto ONE canonical
-display label so ``analysis.md`` shows a consistent category regardless of route.
+The two trace-analysis backends (bypass and TraceLens) carry route-native
+category taxonomies that overlap on common kernels but diverge at the margins
+and in casing. This module maps BOTH vocabularies onto ONE canonical display
+label so ``analysis.md`` shows a consistent category regardless of route.
 
 Display-only: this does NOT rewrite the ``kernel_category`` /
 ``tracelens_category`` fields in ``kernel_candidates.json`` / ``kernel_roofline.json``,

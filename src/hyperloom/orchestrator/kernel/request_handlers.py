@@ -91,7 +91,14 @@ from ..state.kernel_decision_settings import (
 log = logging.getLogger(__name__)
 
 # Recognized trace-analysis routes; an unknown value falls back to ``agent``.
-_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
+_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "agent"})
+#: Routes that were removed. Named so the fallback warning can point the caller
+#: at the surviving route with the same intent, rather than reading as a typo.
+_RETIRED_ANALYSIS_ROUTES = {
+    "deterministic": (
+        "the 'deterministic' route was removed; use 'bypass' for a TraceLens-free analysis that makes no LLM calls"
+    ),
+}
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 # A patch whose correctness was only established against a reference kernel;
@@ -5556,7 +5563,6 @@ def _build_trace_analyze_cmd(
     framework: str,
     target_platform: str,
     analysis_mode: str,
-    analysis_route: str,
 ) -> "tuple[list[str], str]":
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
@@ -5638,9 +5644,6 @@ def _build_trace_analyze_cmd(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route (bypass takes no such flag).
-    if analysis_route in ("deterministic", "agent"):
-        cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
     # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
@@ -5723,27 +5726,35 @@ async def trace_analyze_handler(
         analysis_mode = "inference"
 
     # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # and ``deterministic`` (no-LLM TraceLens) are explicit routes via payload
-    # ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
+    # is the explicit route via payload ``analysis_route`` /
+    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
     explicit_route = (
         str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
     )
     # Reject an unknown route: warn and fall back to the default ``agent`` route.
+    # A retired route carries its own migration hint, because falling back to
+    # ``agent`` spends an LLM session -- the opposite of what the caller asked
+    # for when they named a no-LLM route.
     route_health_warnings: list[dict[str, Any]] = []
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
+        detail = _RETIRED_ANALYSIS_ROUTES.get(explicit_route, "")
         log.warning(
-            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route",
+            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route%s",
             explicit_route,
             sorted(_VALID_ANALYSIS_ROUTES),
+            f" -- {detail}" if detail else "",
         )
+        message = (
+            f"unknown analysis_route {explicit_route!r} (expected one of "
+            f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
+        )
+        if detail:
+            message += f" Note: {detail}."
         route_health_warnings.append(
             {
                 "code": "invalid_analysis_route",
                 "severity": "warning",
-                "message": (
-                    f"unknown analysis_route {explicit_route!r} (expected one of "
-                    f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
-                ),
+                "message": message,
                 "requested_route": explicit_route,
             }
         )
@@ -5788,7 +5799,6 @@ async def trace_analyze_handler(
         framework=framework,
         target_platform=target_platform,
         analysis_mode=analysis_mode,
-        analysis_route=analysis_route,
     )
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
@@ -5863,17 +5873,13 @@ async def trace_analyze_handler(
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
-            # Discovery source = the route that ran; deterministic maps to
-            # ``bypass``, the TraceLens LLM route to ``tracelens``.
+            # Discovery source = the route that ran: the TraceLens-free bypass
+            # backend, or the TraceLens LLM route.
             _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
-            _independent_bypass = _orch_mode == "bypass" or is_bypass
-            _is_bypass = _independent_bypass or _orch_mode == "deterministic" or analysis_route == "deterministic"
-            _disc_source = "bypass" if _is_bypass else "tracelens"
-            _disc_tool = "bypass" if _independent_bypass else "tracelens"
+            _disc_source = "bypass" if (_orch_mode == "bypass" or is_bypass) else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
                 source=_disc_source,
-                tool=_disc_tool,
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={

@@ -254,9 +254,9 @@ consumers and triage read a contract rather than candidate internals.
 
 ### Candidate review
 
-One agent session may audit the finished candidate table when
-`--analysis-route agent` is used. The `deterministic` route never runs it, and
-keeps its no-model guarantee by not reaching the stage at all.
+One agent session may audit the finished candidate table on the `agent`
+analysis route. The `bypass` route never runs it, and keeps its no-model
+guarantee by not reaching the stage at all.
 
 The stage is tool-enabled rather than a completion call because the deterministic
 tiers' real failure mode is not coming up empty but coming up confidently wrong,

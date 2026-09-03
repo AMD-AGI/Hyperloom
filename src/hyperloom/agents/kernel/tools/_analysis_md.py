@@ -1,12 +1,12 @@
-"""Canonical ``analysis.md`` renderer shared by the bypass and TraceLens
-deterministic trace-analysis routes.
+"""Canonical ``analysis.md`` renderer for the trace-analysis routes that build
+the report themselves rather than having a model write it (today: bypass).
 
-Both routes emit a human/downstream-readable ``analysis.md`` (NEITHER is the
-LLM-agent parser contract). This module is the single source of truth for the
-report's section structure and table schemas. Each route normalizes its own data
-into the inputs below and fills unmodeled cells with an em dash. Route-specific
-detail is appended verbatim via ``extra_sections`` after the shared sections,
-under a divider.
+The report is human/downstream-readable and is NOT the LLM-agent parser
+contract. This module is the single source of truth for its section structure
+and table schemas: a route normalizes its own data into the inputs below and
+unmodeled cells render as an em dash rather than a fabricated value.
+Route-specific detail is appended verbatim via ``extra_sections`` after the
+shared sections, under a divider.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from _kernel_category import canonical_category
 #: Placeholder for a cell a route does not model (keeps every table shape aligned).
 DASH = "\u2014"
 
-#: Canonical section headings, in order (shared by both routes).
+#: Canonical section headings, in order.
 EXEC_SUMMARY_HEADING = "## Executive Summary"
 SYSTEM_SIGNALS_HEADING = "## System-Level Signals"
 TOP_HOT_KERNELS_HEADING = "## Top Hot Kernels"
@@ -78,10 +78,10 @@ def render_report(
     p_items: list[dict[str, Any]],
     extra_sections: str = "",
 ) -> str:
-    """Render the canonical ``analysis.md`` body shared by both routes.
+    """Render the canonical ``analysis.md`` body.
 
     Args:
-        route: Route id for the provenance line (``bypass`` / ``deterministic``).
+        route: Route id for the provenance line (e.g. ``bypass``).
         model_name: Model identifier for the title (blank -> ``Workload``).
         provenance_detail: Route-specific trailing sentence for the provenance line.
         exec_summary: ``{total_gpu_time_ms, gpu_busy_pct, gpu_idle_pct,

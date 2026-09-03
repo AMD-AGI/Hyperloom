@@ -5,8 +5,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tests for the shared canonical analysis.md renderer (_analysis_md) and the
-cross-route consistency it guarantees (bypass vs TraceLens deterministic).
+"""Tests for the canonical analysis.md renderer (_analysis_md) and the report
+structure it guarantees for the bypass route that consumes it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import _analysis_md as am  # noqa: E402
 import _bypass_report as br  # noqa: E402
-import tracelens_analysis as tl  # noqa: E402
 from test_bypass_report import _KERNELS, _analyze  # noqa: E402
 
 
@@ -91,7 +90,6 @@ def test_render_report_canonical_sections():
 def test_render_report_missing_values_render_dash():
     kw = _sample_kwargs()
     kw.update(
-        route="deterministic",
         model_name="",
         provenance_detail="",
         exec_summary={k: None for k in kw["exec_summary"]},
@@ -118,10 +116,9 @@ def test_extra_sections_appended_under_divider():
     assert md.index("## Top Hot Kernels") < md.index("## Route Extra")
 
 
-# cross-route consistency: identical canonical spine
-
-# Section headings + table-header rows both routes must emit identically.
-_SHARED_SPINE = (
+# The canonical spine: section headings + table-header rows every report
+# rendered through _analysis_md must carry.
+_CANONICAL_SPINE = (
     "# Performance Analysis Report",
     "> Generated via ",
     "HYPERLOOM_TRACE_ANALYSIS_ROUTE=",
@@ -140,49 +137,19 @@ def _bypass_md():
     return br.render_analysis_md(cands, analyze, model_name="M", framework="vllm", target_platform="MI300X")
 
 
-def _deterministic_md(tmp_path):
-    cands = [
-        {
-            "name": "gemm_kernel",
-            "duration_us": 500.0,
-            "gpu_pct": 60.0,
-            "efficiency_percent": 45.0,
-            "tracelens_category": "GEMM",
-            "bound_type": "compute_bound",
-            "source_file": "f.py",
-            "tracelens_pitem_rank": 0,
-            "impact_score": 1.2,
-            "call_count": 3,
-            "shapes": ["(4,4)"],
-            "kernel_path": "launch.py",
-        }
-    ]
-    path = tl.generate_minimal_analysis_md(tmp_path, cands, idle_pct=20.0, model_name="M")
-    return path.read_text(encoding="utf-8")
-
-
-def test_both_routes_share_canonical_spine(tmp_path):
+def test_bypass_report_carries_the_canonical_spine():
     bypass_md = _bypass_md()
-    det_md = _deterministic_md(tmp_path)
-    for marker in _SHARED_SPINE:
+    for marker in _CANONICAL_SPINE:
         assert marker in bypass_md, f"bypass missing: {marker}"
-        assert marker in det_md, f"deterministic missing: {marker}"
-    # route ids differ in the provenance line, titles match format
     assert "route=bypass" in bypass_md.replace("HYPERLOOM_TRACE_ANALYSIS_ROUTE=", "route=")
-    assert "route=deterministic" in det_md.replace("HYPERLOOM_TRACE_ANALYSIS_ROUTE=", "route=")
-    # bypass carries extras under the divider; deterministic does not
+    # Route-specific detail lands under the divider, after the shared sections.
     assert "Additional route-specific detail below" in bypass_md
-    assert "Additional route-specific detail below" not in det_md
 
 
-def test_category_vocabulary_canonical_and_consistent(tmp_path):
-    # Category display uses one canonical vocabulary on both routes.
-    det_md = _deterministic_md(tmp_path)
-    # deterministic tracelens_category renders through canonical_category
-    assert "| GEMM |" in det_md
-    assert "| gemm |" not in det_md
-    assert "### P0: GEMM kernels" in det_md
-    # bypass Top Hot Kernels categories are canonical TitleCase too.
+def test_category_vocabulary_is_canonical():
+    # Category display uses one canonical vocabulary; the raw upstream spelling
+    # (lowercase ``gemm``, ``Others``) must not reach the report.
     bypass_spine = _bypass_md().split("Additional route-specific detail below")[0]
     assert "| Others |" not in bypass_spine
+    assert "| gemm |" not in bypass_spine
     assert "| GEMM |" in bypass_spine and "| SDPA |" in bypass_spine

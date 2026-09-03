@@ -606,9 +606,9 @@ def test_wiring_without_trace_files_falls_back_quietly(tmp_path):
 def test_finalization_never_calls_a_model(monkeypatch, tmp_path):
     """Source resolution is wholly deterministic; review is a later stage.
 
-    Nothing under ``_finalize_candidates`` may reach a provider, so the
-    deterministic route gets its no-LLM guarantee from the code rather than
-    from a flag it has to remember to pass.
+    Nothing under ``_finalize_candidates`` may reach a provider, so the no-LLM
+    guarantee comes from the code rather than from a flag a caller has to
+    remember to pass.
     """
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
     artifact = tmp_path / "kernel_source_resolution.json"

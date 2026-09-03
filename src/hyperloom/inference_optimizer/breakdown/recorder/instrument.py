@@ -2806,8 +2806,9 @@ def record_kernel_discovery(
 
     ``source`` is the discovery *route* label the dashboard groups by. ``tool``
     is the underlying tool whose authoritative version lands in the top-level
-    ``versions`` map; it defaults to ``source`` but is decoupled because routes
-    can share one toolchain (e.g. ``bypass`` reuses the TraceLens toolchain).
+    ``versions`` map; it defaults to ``source`` but is decoupled because a route
+    can run on a different toolchain (e.g. the GEAK backend reports
+    ``source="bypass"`` with ``tool="geak"``).
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
