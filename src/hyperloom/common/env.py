@@ -143,10 +143,12 @@ def nomination_auto_enabled() -> bool:
     """Whether forge self-nomination (``--auto``) drives the KERNEL rewrite lane.
 
     A single opt-in env, off by default, mirroring
-    :func:`forge_explicitly_enabled`: it reads one variable, touches no
-    SharedState schema, and when unset the KERNEL phase serializes byte-for-byte
-    as it did before the nomination contract landed. Set to route ``auto=true``
-    through forge's own kernel selection instead of the Hyperloom selector.
+    :func:`forge_explicitly_enabled`: it reads one variable and touches no
+    SharedState schema. Unset leaves the rewrite lane's kernel selection on the
+    Hyperloom selector path and dispatches no self-nomination; it does not leave
+    the KERNEL phase as a whole unchanged, since the fusion, gemm and rewrite
+    lane changes shipped alongside this contract are not gated on it. Set it to
+    route ``auto=true`` through forge's own nominator instead.
 
     This enables the contract, not the capability the contract exists for. The
     shipped nominator is a placeholder ranking already-resolved candidates by

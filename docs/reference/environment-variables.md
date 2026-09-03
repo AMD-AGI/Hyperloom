@@ -234,7 +234,49 @@ fusion that already succeeded this session.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, letting forge choose the kernels instead of the Hyperloom selector. Unset leaves the KERNEL phase byte-for-byte as it was before the nomination contract landed. Takes effect on the `forge` backend only: with `KERNEL_OPT_BACKEND_ORDER` unset, GEAK owns the whole KERNEL phase and hands straight to SWEEP without reaching nomination. An explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
+| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, so forge reranks and picks among the candidate rows Hyperloom already resolved instead of the Hyperloom selector picking from them. Unset leaves that selection on the selector path and dispatches no self-nomination; it does *not* leave the KERNEL phase as a whole unchanged — see the list below. Takes effect on the `forge` backend only: with `KERNEL_OPT_BACKEND_ORDER` unset, GEAK owns the whole KERNEL phase and hands straight to SWEEP without reaching nomination. An explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
+
+### Changes that land regardless of this variable
+
+The switch above gates kernel *selection* on the rewrite lane and nothing else.
+These behaviours change with it unset, and are not controlled by any other
+variable either.
+
+Globally, on every backend including the default `geak`:
+
+- **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
+  can neither propose either action nor request `run_optimization` /
+  `run_gemm_tuning` of the kernel agent; both are refused as
+  `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
+  entry from a lane budget, the way the fusion and collective lanes already
+  worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  model's job.
+
+On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
+`geak` backend hands to SWEEP before reaching any of these):
+
+- **Fusion authors one independent sibling patch per confirmed recipe** rather
+  than a single combined patch. `fuse_all_confirmed` is now the explicit opt-in
+  for the combined shape instead of the default.
+- **The fusion lane caps its recipe count** at 3 (`--max-recipes`), funded from
+  its share of the phase. A session with no finite remaining time derives no
+  share and stays uncapped.
+- **GEMM reports carry a per-tuner `candidates[]` list**, so one tuner's table
+  can be kept while another is reverted, instead of `recommended_env` landing
+  all-or-nothing.
+- **The fp8 → bf16 dense GEMM retry runs inside the same gemm call.** The
+  follow-up subprocess Hyperloom used to launch is gone; the bf16 dense pass is
+  selected up front as a fallback tuner and executes only when no earlier tuner
+  produced a candidate, so a winning fp8 run pays nothing for it.
+- **The gemm lane caps how many routed tuners run** (`--max-tuners`), priced on
+  the router's own per-tuner estimates.
+- **The KERNEL-entry `run_optimization` call re-stamps a progress marker while
+  it waits**, so the idle guard can tell a working phase from a stuck one across
+  a subprocess that may run for an hour.
+- **A `status: partial` invocation spec is declined on the rewrite route**
+  rather than admitted because the file exists. A partial spec leaves the
+  producer on its placeholder driver, which burns the whole budget and then
+  exits non-zero.
 
 ---
 
