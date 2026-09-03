@@ -88,7 +88,13 @@ class TuneResult:
             d["avg_micro_speedup"] = round(self.avg_micro_speedup, 4)
         if self.expected_shapes:
             d["expected_shapes"] = self.expected_shapes
-            d["missing_shapes"] = max(self.expected_shapes - self.total_shapes, 0)
+            # A row the accuracy check removed was tuned; it is missing from the
+            # artifact but it was not missed by the run. Counting it as
+            # "missing" made a completed batch read as a truncated one, which is
+            # the same conflation the partial_output gate used to make.
+            if self.dropped_inaccurate:
+                d["filtered_shapes"] = len(self.dropped_inaccurate)
+            d["missing_shapes"] = max(self.expected_shapes - self.total_shapes - len(self.dropped_inaccurate), 0)
         if self.unverified_shapes:
             d["unverified_shapes"] = self.unverified_shapes
         if self.shape_results:

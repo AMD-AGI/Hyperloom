@@ -205,7 +205,6 @@ def test_payload_contracts_are_scoped_to_the_proposable_set(registry):
         # Descriptions survive so a skip_to_* decision can still compare phases.
         assert "- **explore** —" in text
         assert "- **specialist** —" in text
-        assert "- **sweep** —" in text
 
 
 @pytest.mark.parametrize("phase", _ps.PHASE_NAMES)

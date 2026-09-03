@@ -41,130 +41,6 @@ def _events(timeline: list[dict], event_type: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# sweep
-# ---------------------------------------------------------------------------
-def _sweep_section() -> dict:
-    return {
-        "all_variants": [
-            {
-                "variant_name": "variant_c64_i1024_o1024",
-                "conc": 64,
-                "isl": 1024,
-                "osl": 1024,
-                "status": "ok",
-                "output_throughput_tok_s": 130.0,
-                "benchmark_report_path": "runs/sweep/v1/benchmark_report.json",
-            },
-            {
-                "variant_name": "variant_c128_i1024_o512",
-                "conc": 128,
-                "isl": 1024,
-                "osl": 512,
-                "status": "failed",
-                "output_throughput_tok_s": None,
-                "error": "server crashed",
-            },
-        ],
-        "best_overall": {"variant_name": "variant_c64_i1024_o1024"},
-    }
-
-
-def test_sweep_reads_the_grid_back_off_the_points_it_measured(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={
-            "last_sweep": {"workspace": "runs/sweep"},
-            "sweep_attempts": [{"ts": "2026-08-27T02:30:00+00:00", "status": "ok", "task_id": "t-sweep"}],
-        },
-        sweep=_sweep_section(),
-        phase_timeline=[{"action": "sweep", "ts": "2026-08-27T02:00:00+00:00", "task_id": "t-sweep"}],
-    )
-
-    event = _event(timeline, "sweep")
-    # One point measured, one lost: the grid ran but did not run whole.
-    assert event["status"] == "degraded"
-    assert event["ext"]["plan"]["conc_grid"] == [64, 128]
-    assert event["ext"]["plan"]["isl_grid"] == [1024]
-    assert event["ext"]["plan"]["osl_grid"] == [512, 1024]
-    # No producer records where the grid came from.
-    assert event["ext"]["plan"]["grid_source"] is None
-    assert event["ext"]["artifacts"]["sweep_dir"] == "runs/sweep"
-    assert event["ext"]["artifacts"]["sweep_report_paths"] == ["runs/sweep/v1/benchmark_report.json"]
-    assert [variant["variant_id"] for variant in event["ext"]["sweep"]["all_variants"]] == [
-        "variant_c64_i1024_o1024",
-        "variant_c128_i1024_o512",
-    ]
-
-
-def test_sweep_input_anchor_does_not_borrow_the_end_of_session_throughput(tmp_path):
-    """``current_best.tput`` is the final figure, not the sweep's entry point."""
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={"last_sweep": {"workspace": "runs/sweep"}, "current_best": {"tput": 175.0}},
-        sweep=_sweep_section(),
-        baseline={"attempts_history": [{"task_id": "t-base", "status": "ok"}]},
-    )
-
-    anchor = _event(timeline, "sweep")["ext"]["input_anchor"]
-    assert anchor["baseline_task_id"] == "t-base"
-    assert anchor["input_throughput_tok_s_per_gpu"] is None
-    assert anchor["current_best_task_id"] is None
-
-
-def test_sweep_without_any_evidence_produces_no_event(tmp_path):
-    timeline = collect_v6_timeline(tmp_path, [], state={}, sweep={"all_variants": []})
-
-    assert _event(timeline, "sweep") is None
-
-
-def test_sweep_that_died_before_its_first_grid_point_is_failed_not_skipped(tmp_path):
-    """A sweep can fail with an empty point list, and did not 'not happen'.
-
-    Deriving status from ``all_variants`` alone reported ``skipped`` on the
-    same event that carried ``stop_reason: sweep_failed``.
-    """
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={
-            "stop_reason": "sweep_failed",
-            "sweep_attempts": [
-                {
-                    "task_id": "t-sweep",
-                    "status": "failed",
-                    "error": "server never became ready",
-                    "ts": "2026-08-27T03:00:00+00:00",
-                }
-            ],
-        },
-        sweep={"all_variants": []},
-    )
-
-    event = _event(timeline, "sweep")
-    assert event["status"] == "failed"
-    assert event["ext"]["failure"]["stop_reason"] == "sweep_failed"
-    assert event["ext"]["failure"]["failed_task_id"] == "t-sweep"
-    assert event["ext"]["failure"]["message"] == "server never became ready"
-    assert event["ext"]["sweep"]["all_variants"] == []
-
-
-def test_sweep_with_measured_points_and_a_failed_attempt_is_degraded(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={
-            "stop_reason": "sweep_failed",
-            "sweep_attempts": [{"task_id": "t-sweep-2", "status": "failed", "ts": "2026-08-27T03:10:00+00:00"}],
-        },
-        sweep={"all_variants": [{"variant_name": "c8", "conc": 8, "status": "ok", "output_throughput": 90.0}]},
-    )
-
-    assert _event(timeline, "sweep")["status"] == "degraded"
-
-
-# ---------------------------------------------------------------------------
 # conc_sweep
 # ---------------------------------------------------------------------------
 def _conc_sweep_section() -> dict:
@@ -229,8 +105,8 @@ def test_conc_sweep_renames_the_comparison_columns_and_keeps_the_arms(tmp_path):
     assert event["end_time"] == "2026-08-27T04:00:00+00:00"
     assert event["ext"]["comparison"][0] == {
         "conc": 8,
-        "baseline_output_throughput": 90.0,
-        "optimized_output_throughput": 99.0,
+        "baseline_throughput": 90.0,
+        "optimized_throughput": 99.0,
         "speedup": 1.1,
         "error": None,
     }
@@ -243,6 +119,8 @@ def test_conc_sweep_renames_the_comparison_columns_and_keeps_the_arms(tmp_path):
     assert event["ext"]["arms"]["baseline"]["extra_server_args"] == ""
     assert event["ext"]["arms"]["optimized"]["extra_server_args"] == "--enable-torch-compile"
     assert event["ext"]["result"]["best_conc"] == 8
+    # The axis the speedups were taken on, defaulted when the summary omits it.
+    assert event["ext"]["result"]["metric"] == "output_throughput"
     assert event["ext"]["runtime"]["elapsed_sec"] == 300.0
 
 
@@ -750,21 +628,17 @@ def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
         tmp_path,
         [],
         state={"phase": "CLOSE"},
-        sweep=_sweep_section(),
-        baseline={"throughput_tok_s_per_gpu": 100.0},
-        phase_timeline=[{"action": "sweep", "ts": "2026-08-27T00:30:00+00:00"}],
+        phase_timeline=[{"action": "conc_sweep", "ts": "2026-08-27T00:30:00+00:00"}],
         conc_sweep_summary=_conc_sweep_section(),
     )
 
-    # The conc sweep has no recorded time at all, so it sorts last rather than
-    # to the epoch.
-    assert [event["type"] for event in timeline] == ["sweep", "install", "conc_sweep"]
+    # The durable event is read first and the stage is projected after it, so
+    # ordering by the projection order rather than by the recorded time would
+    # put ``install`` in front.
+    assert [event["type"] for event in timeline] == ["conc_sweep", "install"]
 
 
-@pytest.mark.parametrize(
-    "projector",
-    ["project_sweep_event", "project_conc_sweep_event"],
-)
+@pytest.mark.parametrize("projector", ["project_conc_sweep_event"])
 def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatch, projector):
     """One stage blowing up must not take the durable events or its peers down.
 
@@ -783,10 +657,7 @@ def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatc
         {"type": "install", "kind": "install", "status": "succeeded", "start_time": "", "end_time": ""},
     )
     before = exporter.build(tmp_path)
-    stage = {
-        "project_sweep_event": "sweep",
-        "project_conc_sweep_event": "conc_sweep",
-    }[projector]
+    stage = {"project_conc_sweep_event": "conc_sweep"}[projector]
     assert "install" in {event["type"] for event in before["timeline"]}
 
     def _boom(*args, **kwargs):
@@ -830,20 +701,6 @@ def test_a_raising_close_collector_cannot_disturb_the_v5_payload(tmp_path, monke
 # ---------------------------------------------------------------------------
 def _events(timeline: list[dict], event_type: str) -> list[dict]:
     return [event for event in timeline if event["type"] == event_type]
-
-
-def test_a_sweep_point_status_is_normalized_onto_the_sweep_enum(tmp_path):
-    """The sweep lane counts usable points by the literal word ``ok``."""
-    warnings: list[str] = []
-    timeline = collect_v6_timeline(
-        tmp_path,
-        warnings,
-        sweep={"all_variants": [{"variant_name": "v1", "status": "succeeded", "output_throughput_tok_s": 120.0}]},
-    )
-
-    event = _events(timeline, "sweep")[0]
-    assert event["ext"]["sweep"]["all_variants"][0]["status"] == "ok"
-    assert event["status"] == "succeeded"
 
 
 def test_a_malformed_conc_grid_does_not_raise_out_of_the_projector(tmp_path):

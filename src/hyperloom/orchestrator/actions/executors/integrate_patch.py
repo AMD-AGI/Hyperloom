@@ -36,7 +36,11 @@ from ...specialists.patch_safety import (
     patch_targets_missing,
     resolve_patch_apply_root,
 )
-from ...state.shared_state import inject_stack_base_params, resolve_anchor_with_drift
+from ...state.shared_state import (
+    inject_stack_base_params,
+    resolve_anchor_with_drift,
+    resolve_graded_comparison,
+)
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
@@ -1709,7 +1713,7 @@ class IntegratePatchExecutor:
                     "specialist integrate_patch is not supported in "
                     "multi-node mode (no git-diff pod fan-out); skipped "
                     "without applying any patch. Other actions "
-                    "(baseline/profile/explore/sweep/roofline) continue "
+                    "(baseline/profile/explore/conc_sweep/roofline) continue "
                     "normally. Use the kernel-agent integrate path (which "
                     "fans out via `multi_node apply-patch`) or run single-node."
                 ),
@@ -3194,8 +3198,21 @@ class IntegratePatchExecutor:
                 },
             )
 
+        # ``new_tput`` is reported as ``output_throughput``; the KEEP gate is
+        # graded on whichever axis this session uses, both sides from one
+        # resolver. On the output axis the drift-resolved ``base_tput`` is the
+        # reference, which is what resolve_anchor_with_drift exists for.
         new_tput = bench_result.get("output_throughput")
-        delta_pct = gain_pct(new_tput, base_tput)
+        graded = resolve_graded_comparison(shared_state, bench_result)
+        if graded.degrade_reason:
+            log.info("integrate_patch: grading on output throughput (%s)", graded.degrade_reason)
+        if not graded.graded_on_total:
+            delta_pct = gain_pct(new_tput, base_tput)
+        elif graded.vetoed:
+            log.info("integrate_patch: candidate failed the interactivity constraint")
+            delta_pct = None
+        else:
+            delta_pct = gain_pct(graded.candidate, graded.reference)
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
@@ -4460,6 +4477,12 @@ class IntegratePatchExecutor:
                 "error": getattr(r, "error", "") or "",
                 "error_class": getattr(r, "error_class", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
+                # Launch evidence is the immutable proof of the server that
+                # produced this measurement. It must survive the patch result
+                # and current-best promotion so GEAK can verify the handoff.
+                "launch_evidence": dict(getattr(r, "launch_evidence", {}) or {}),
+                "launch_evidence_path": str(getattr(r, "launch_evidence_path", "") or ""),
+                "server_log_path": str(getattr(r, "server_log_path", "") or ""),
                 # Materialized config used for this bench; needed by revalidation.
                 "materialized_config": str(config_path),
                 # Read off the variant so a replay cannot drift from the graded run.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -2275,3 +2276,71 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert fp_failed in tested
     # The latest result for fp_failed overwrites the FAILED entry.
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
+    """A ctx that makes __call__ take its earliest ``return`` (missing_config),
+    exercising the wrapper without needing to drive a full benchmark round."""
+    return SimpleNamespace(
+        task=SimpleNamespace(
+            task_id="t-explore-reap",
+            params={"config_path": str(tmp_path / "does_not_exist.yaml")},
+        ),
+        extra={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, monkeypatch):
+    """__call__ must reap any lingering server after _run_explore returns,
+    even on its earliest failure path (missing_config) -- not just after a
+    full benchmark round. A magpie_timeout that fires before a
+    server_lifecycle variant's pidfile is ever written leaves nothing for
+    that pidfile-based teardown to find, orphaning its server
+    (AMD-AGI/Hyperloom#1354)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    executor = ExploreExecutor(session_dir=tmp_path)
+    ctx = _missing_config_ctx(tmp_path)
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.explore._kill_stale_servers",
+        side_effect=fake_kill,
+    ):
+        result = await executor(ctx)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "missing_config"
+    assert kill_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_call_skips_reap_under_pytest(tmp_path):
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
+    set (pytest always sets it for a running test), mirroring the guard on
+    the per-launch preclean in ``_grid_runner.py``."""
+    executor = ExploreExecutor(session_dir=tmp_path)
+    ctx = _missing_config_ctx(tmp_path)
+
+    kill_calls = {"n": 0}
+
+    def fake_kill():
+        kill_calls["n"] += 1
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.explore._kill_stale_servers",
+        side_effect=fake_kill,
+    ):
+        result = await executor(ctx)
+
+    assert result["status"] == "failed"
+    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"

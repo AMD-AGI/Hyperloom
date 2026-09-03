@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from hyperloom.common.io import atomic_write_json
+from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
@@ -75,6 +77,17 @@ _GEAK_RESIDUAL_MIN_RATIO = 1.001
 # a transient cause plus the original attempt.
 MAX_FUSION_INFRA_RETRIES = 2
 
+# Why KERNEL entry dispatched no kernel_opt at all, recorded on
+# ``last_kernel_opt_dispatch_skip`` and surfaced by the summary as
+# ``dispatch_skip_reason``. A wholesale skip is invisible in the summary's
+# unattempted buckets, which only ever count kernels the candidate table
+# listed: an absent table leaves every bucket at zero, which reads as "this
+# workload had nothing worth optimising" rather than "nothing was ever asked".
+KERNEL_OPT_SKIP_DISABLED = "auto_kernel_opt_disabled"
+KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE = "no_candidate_table"
+KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS = "no_untried_hot_kernels"
+KERNEL_OPT_SKIP_NO_CANDIDATES_PATH = "no_candidates_path"
+
 
 def _as_int(value: object) -> int:
     """Read a counter that round-tripped through JSON, defaulting to 0."""
@@ -110,18 +123,17 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
-def _safe_mtime(path: Path) -> float:
-    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+def _integrate_server_logs(session_dir: Path, tuner_name: str) -> list[Path]:
+    """Server logs for a tuner's integrate run, retries included, oldest first.
 
-    Sorting server logs by mtime races the round that is still writing them, and
-    an ``exists()`` guard does not close the window. Ordering is a heuristic for
-    picking the newest log, so a vanished file is worth sorting last rather than
-    aborting the check that owns it.
+    Thin naming shim over
+    :func:`..kernel.gemm_shape_coverage.integrate_server_logs`, which owns the
+    retry-sibling and mtime-ordering rules; this side only knows that a dense
+    tuner's run directory is ``integrate-gemm_tune_<tuner>``.
     """
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+    from ..kernel.gemm_shape_coverage import integrate_server_logs
+
+    return integrate_server_logs(session_dir, f"integrate-gemm_tune_{tuner_name}")
 
 
 def _candidate_tuned_file(env: Any, env_var: str) -> str:
@@ -905,9 +917,63 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001
             log.debug("geak v4 start recording failed", exc_info=True)
         cb = state.current_best or {}
-        accepted_flags = str(cb.get("extra_server_args") or "")
-        extra_envs = cb.get("extra_envs") or {}
+        try:
+            env_spec = self.build_env_spec()
+        except Exception:  # noqa: BLE001 — a legacy handoff remains runnable
+            log.exception("geak: build_env_spec failed; handoff is unverified")
+            env_spec = {}
+        spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        accepted_flags = str(spec_config.get("extra_server_args") or cb.get("extra_server_args") or "")
+        extra_envs = spec_config.get("extra_envs") or cb.get("extra_envs") or {}
         accepted_env = " ".join(f"{k}={v}" for k, v in dict(extra_envs).items())
+        state_measurement = getattr(state, "current_best_measurement", None)
+        measurement = (
+            state_measurement
+            if isinstance(state_measurement, Mapping) and state_measurement
+            else (
+                cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
+            )
+        )
+        expected_identity = str(env_spec.get("launch_identity") or "")
+        measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        identity_matches = bool(expected_identity and expected_identity == measured_identity)
+        launch_evidence = measurement.get("launch_evidence")
+        launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
+        observed_flags = str(
+            measurement.get("resolved_server_launch_flags") or launch_evidence.get("observed_server_launch_flags") or ""
+        ).strip()
+        observed_server_identity = measurement.get("observed_server_identity") or launch_evidence.get(
+            "observed_server_identity"
+        )
+        observed_server_identity = (
+            {str(key): value for key, value in sorted(observed_server_identity.items())}
+            if isinstance(observed_server_identity, Mapping)
+            else {}
+        )
+        if identity_matches and (observed_flags or observed_server_identity):
+            reference_verification_status = "verified_observed"
+        elif identity_matches and (
+            str(launch_evidence.get("requested_server_args") or "").strip()
+            or bool(launch_evidence.get("requested_server_env"))
+            or str(launch_evidence.get("recipe_digest") or "").strip()
+        ):
+            reference_verification_status = "verified_declared_only"
+        else:
+            reference_verification_status = "unverified"
+        reference_verified = reference_verification_status == "verified_observed"
+        observed_identity = str(measurement.get("observed_launch_identity") or "")
+        if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
+            observed_payload = json.dumps(
+                {
+                    "declared_launch_identity": measured_identity,
+                    "observed_server_launch_flags": observed_flags,
+                    "observed_server_identity": observed_server_identity,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
+        same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
             "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
@@ -927,8 +993,9 @@ class KernelPhase(PhaseHandler):
             _baseline_srv_args = read_baseline_server_args(state) or ""
         except Exception:  # noqa: BLE001 — accessor is best-effort
             _baseline_srv_args = ""
+        _current_best_server_args = str(spec_config.get("server_launch_flags") or _baseline_srv_args)
         _serving_fidelity = _resolve_serving_fidelity(
-            baseline_server_args=_baseline_srv_args,
+            baseline_server_args=_current_best_server_args,
             state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
         )
 
@@ -948,9 +1015,22 @@ class KernelPhase(PhaseHandler):
             # Orchestrator throughput of the SAME config GEAK seeds its baseline
             # with, so run_e2e can compute a pure measurement divergence. 0.0 =>
             # no accepted config yet (falls back to raw baseline downstream).
-            "orchestrator_best_tput_same_config": float((state.current_best or {}).get("tput") or 0.0)
-            if isinstance(getattr(state, "current_best", None), dict)
-            else 0.0,
+            "orchestrator_best_tput_same_config": same_config_tput,
+            "same_config_reference_status": "verified" if reference_verified else "unverified",
+            "same_config_reference_identity": measured_identity,
+            "same_config_expected_identity": expected_identity,
+            "same_config_reference_workspace": str(measurement.get("benchmark_workspace") or ""),
+            # Additive identity semantics. Keep the legacy status above for
+            # existing GEAK consumers that only understand verified/unverified.
+            "same_config_reference_verification_status": reference_verification_status,
+            "same_config_reference_declared_identity": measured_identity,
+            "same_config_reference_observed_identity": observed_identity,
+            # GEAK compares this map with its parsed ServerArgs. Keep the
+            # hash alias above for consumers that only understand strings.
+            "same_config_observed_identity": observed_server_identity,
+            "observed_server_identity": observed_server_identity,
+            "measurement_evidence": launch_evidence,
+            "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             # Serving-launch fidelity (both optional; unset => GEAK adapter default).
             "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
             "mem_fraction": float(
@@ -976,12 +1056,9 @@ class KernelPhase(PhaseHandler):
             handoff["bench_protocol"] = bench_protocol
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.
         handoff.update(_serving_fidelity)
-        # Full layered environment of current_best so GEAK's baseline ref ==
-        # orchestrator best (config + source-patch snapshots + overlay).
-        try:
-            handoff["baseline_env_spec"] = self.build_env_spec()
-        except Exception:  # noqa: BLE001 — env_spec is additive; never block handoff
-            log.exception("geak: build_env_spec failed; handoff stays v1-compatible")
+        # Full layered environment and its matching measurement identity.
+        if env_spec:
+            handoff["baseline_env_spec"] = env_spec
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1735,6 +1812,7 @@ class KernelPhase(PhaseHandler):
         measured_tput: float,
         provenance: str = "geak_e2e_promote",
         overlay_loaded: bool | None = None,
+        measurement_provenance: Mapping[str, Any] | None = None,
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
@@ -1818,20 +1896,33 @@ class KernelPhase(PhaseHandler):
         entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
         kernel_proven = bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads"))
 
+        promotion_measurement = {
+            "name": "geak_e2e",
+            "candidate_extra_server_args": accepted_flags,
+            "extra_envs": dict(parsed_envs),
+            "final_overlay": result.get("final_overlay") or "",
+            "source_phase": "KERNEL_AGENT",
+            "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
+            "ttft_mean_ms": result.get("ttft_ms"),
+            "tpot_mean_ms": result.get("tpot_ms"),
+            **graded_axes_of(result),
+            "workspace": result.get("eval_dir"),
+        }
+        if isinstance(measurement_provenance, Mapping):
+            for key in (
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+                "workspace",
+                "single_workspace",
+            ):
+                value = measurement_provenance.get(key)
+                if value not in (None, "", {}):
+                    promotion_measurement[key] = value
         self._lift_to_current_best(
             "geak_e2e",
             measured,
-            {
-                "name": "geak_e2e",
-                "candidate_extra_server_args": accepted_flags,
-                "extra_envs": dict(parsed_envs),
-                "final_overlay": result.get("final_overlay") or "",
-                "source_phase": "KERNEL_AGENT",
-                "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
-                "ttft_mean_ms": result.get("ttft_ms"),
-                "tpot_mean_ms": result.get("tpot_ms"),
-                "workspace": result.get("eval_dir"),
-            },
+            promotion_measurement,
             entry_extra=entry_extra,
         )
 
@@ -1863,6 +1954,7 @@ class KernelPhase(PhaseHandler):
         if base > 0:
             self._update_cumulative_gain_validated(
                 measured,
+                result,
                 source="geak_e2e_promote",
             )
         self.shared_state.resume_pending_revalidation = False
@@ -2376,6 +2468,7 @@ class KernelPhase(PhaseHandler):
         from ..kernel.gemm_shape_coverage import (
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
+            parse_aiter_shape_lookups_for_tables,
             tuned_config_coverage,
             tuned_csv_shapes,
         )
@@ -2383,8 +2476,7 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             return None
         try:
@@ -2408,24 +2500,32 @@ class KernelPhase(PhaseHandler):
                 csv_paths,
             )
 
-        missed, hit = parse_aiter_shape_lookups(log_text)
-        requested = missed | hit
-        if not requested:
+        all_missed, all_hit = parse_aiter_shape_lookups(log_text)
+        all_requested = all_missed | all_hit
+        if not all_requested:
             return None
+        wanted = {Path(path).name for path in csv_paths}
+        missed, hit = parse_aiter_shape_lookups_for_tables(log_text, wanted)
+        requested = missed | hit
+        scoped_to_candidate = bool(requested)
+        if not scoped_to_candidate:
+            # Preserve the existing artifact-not-consulted diagnostic when the
+            # server performed lookups, but none against this candidate's table.
+            missed, hit = all_missed, set()
+            requested = all_requested
         tuned: set[tuple[int, int, int]] = set()
         for path in csv_paths:
             tuned |= tuned_csv_shapes(path)
         if not tuned:
             _unreadable("dense")
             return None
-        report = tuned_config_coverage(tuned, requested)
+        report = tuned_config_coverage(tuned, requested, known_covered=hit)
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
         report["artifact_applied"] = bool(report.get("covered"))
         consulted = parse_aiter_consulted_tables(log_text)
         report["consulted_tables"] = sorted(consulted)[:8]
-        wanted = {Path(path).name for path in csv_paths}
         if consulted and not (wanted & {Path(name).name for name in consulted}):
             # The runtime resolved a different quantisation variant's table, so
             # the tuner targeted a kernel this server never dispatches to.
@@ -2613,14 +2713,13 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             # Say so. This whole change exists to stop checks from failing
             # quietly, and a missing log is the one way this one can.
             log.warning(
-                "forge gemm E2E: no server.log under %s; apply verification cannot run for %s",
-                run_dir,
+                "forge gemm E2E: no server.log under %s (retries included); apply verification cannot run for %s",
+                self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}",
                 tuner_name,
             )
             return None
@@ -3177,6 +3276,13 @@ class KernelPhase(PhaseHandler):
             for stale in ("recommended_env", "extra_envs"):
                 if result.get(stale):
                     result[stale] = {}
+            # ``record_gemm_tuning`` above stored a SHALLOW COPY, so the scalar
+            # rewrites just made (decision/micro_decision/...) do not reach the
+            # recorded entry on their own -- only the normal exit re-syncs it.
+            # Without this the state kept the bridge's KEEP for an arm that was
+            # never measured, and the on-disk result.json kept the pre-E2E
+            # snapshot too.
+            self._replace_latest_gemm_tuning_attempt(result)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -3246,8 +3352,43 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — journaling is best-effort
             log.exception("gemm_tuning journal append failed")
 
+    def _writeback_gemm_result_json(self, entry: dict[str, Any]) -> None:
+        """Overwrite ``<workspace>/result.json`` with the E2E-adjudicated envelope.
+
+        forge's CLI writes ``result.json`` the moment micro tuning ends, so on
+        disk it stays a pre-E2E snapshot (``status=ok`` /
+        ``requires_e2e_validation=true``) even after this phase has recorded a
+        REVERT. Anything that reads the file rather than ``state.json`` -- the
+        fusion/collective lanes treat ``result.json`` as the final verdict --
+        then sees a candidate that was already rejected. Writing the merged
+        envelope back keeps both ledgers on the same value.
+
+        Best-effort: the workspace lives on shared storage that can be read-only
+        or already reaped, and a failed writeback must not turn a recorded
+        verdict into a phase crash.
+        """
+        workspace = str(entry.get("workspace") or "").strip()
+        if not workspace:
+            return
+        path = Path(workspace) / "result.json"
+        try:
+            if not path.parent.is_dir():
+                return
+            atomic_write_json(path, entry, make_parents=False)
+        except (OSError, TypeError, ValueError):
+            log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
+
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
-        """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
+        """Sync the latest GEMM history row, and publish the verdict to disk.
+
+        Not a pure in-memory update: every call also overwrites
+        ``<workspace>/result.json`` via ``_writeback_gemm_result_json``. The two
+        are deliberately coupled because they are the two books that must agree
+        -- ``record_gemm_tuning`` stores a shallow copy, so a caller that
+        rewrote scalars on ``result`` has changed neither the history row nor
+        the on-disk snapshot until this runs. All three call sites are terminal
+        verdict points, which is the only place either write is correct.
+        """
         if not isinstance(result, dict):
             return
         entry = dict(result)
@@ -3260,6 +3401,7 @@ class KernelPhase(PhaseHandler):
             attempts.append(entry)
         self.shared_state.gemm_tuning_attempts = attempts
         self.shared_state.last_gemm_tuning = entry
+        self._writeback_gemm_result_json(entry)
 
     def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Reduce a GEMM tuning result to the env sets worth E2E-validating.
@@ -3370,6 +3512,27 @@ class KernelPhase(PhaseHandler):
         candidates = self._gemm_e2e_candidates(result)
         if not candidates:
             log.info("gemm tuning: no candidates to E2E validate")
+            # Close the books here too. Returning early left the recorded
+            # attempt and the on-disk result.json claiming
+            # ``requires_e2e_validation=true`` with ``micro_decision=candidate``
+            # forever -- the same two-books-disagree state the exception arm was
+            # fixed for, and at least as common: any run whose tuners produced
+            # no usable env lands here.
+            result["decision"] = "REVERT"
+            result["requires_e2e_validation"] = False
+            result["e2e_validated"] = False
+            # Only when the tuners left no verdict of their own. An existing
+            # ``micro_decision`` is load-bearing downstream --
+            # ``_should_run_bf16_dense_gemm_fallback`` keys the sglang bf16
+            # retry on ``no_improvement`` -- so overwriting it here cancels the
+            # fallback for exactly the runs that need it. Same trap as adding a
+            # new ``status``: the value is a routing key, not a label.
+            if not str(result.get("micro_decision") or "").strip():
+                result["micro_decision"] = "no_e2e_candidates"
+            # ``recommended_env``/``extra_envs`` stay as the tuners left them:
+            # they are the raw record of what was produced, and the eligibility
+            # checks downstream already read them as "must be empty".
+            self._replace_latest_gemm_tuning_attempt(result)
             return
 
         baseline_tput = float(self.shared_state.baseline_tput or 0.0)
@@ -3399,8 +3562,14 @@ class KernelPhase(PhaseHandler):
             model_supports_aiter_ck_fused_moe,
         )
 
-        triton_moe_inert = (
-            any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and self._runtime_uses_aiter_fused_moe()
+        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now
+        # byte-scans the whole runs/ tree for aiter evidence -- and then reads it
+        # whole, ~17MB on the fleet. This function is a coroutine on the
+        # orchestrator's only event loop, so doing that inline stalls every other
+        # coroutine, heartbeats included, for the duration. The short-circuit is
+        # kept: no Triton candidate means no reason to look at all.
+        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
+            self._runtime_uses_aiter_fused_moe
         )
 
         for cand in candidates:
@@ -3601,7 +3770,10 @@ class KernelPhase(PhaseHandler):
             # not run.
             apply_blockers: list[str] = []
 
-            coverage = self._gemm_tuned_config_coverage(tuner_name, env)
+            # Off the event loop for the same reason: this reads the integrate
+            # run's server.log in full and parses every tuned CSV named in the
+            # candidate env.
+            coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
             if coverage is not None:
                 cand = {**cand, "tuned_config_coverage": coverage}
                 if not coverage.get("artifact_applied") and coverage.get("conclusive", True):
@@ -3676,6 +3848,7 @@ class KernelPhase(PhaseHandler):
                         "candidate_extra_server_args": extra_server_args,
                         "extra_envs": dict(env),
                         "source_phase": "KERNEL_AGENT",
+                        **graded_axes_of(result),
                         "workspace": result.get("workspace"),
                     },
                     entry_extra={
@@ -3720,6 +3893,7 @@ class KernelPhase(PhaseHandler):
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(
                     running_tput,
+                    result,
                     source="forge_gemm_tuning_e2e",
                     measurement_basis=_paired_measurement_basis(paired),
                 )
@@ -3802,6 +3976,83 @@ class KernelPhase(PhaseHandler):
         await self._maybe_run_collective_before_kernel_opt()
         if self._kernel_opt_work_remains():
             await self._run_kernel_opt_entry_batch()
+        else:
+            self._record_kernel_opt_dispatch_skip(self._kernel_opt_dispatch_skip_reason())
+
+    def _kernel_opt_dispatch_skip_reason(self) -> str:
+        """Name why the phase is declining to dispatch kernel_opt itself.
+
+        Separates the three states :meth:`_kernel_opt_work_remains` collapses
+        into one ``False``: the feature is off, no candidate table was ever
+        produced, or the table's hot kernels have all been tried.
+
+        Reads the same field the gate reads. ``last_trace_analyze`` being a
+        non-empty dict does not mean it carries a table -- a trace_analyze that
+        ran and failed leaves ``{"status": "failed", ...}`` behind -- and
+        calling that "the kernels were all tried" states the very conclusion
+        this breadcrumb exists to prevent.
+
+        Returns:
+            str: One of ``auto_kernel_opt_disabled`` /
+                ``no_candidate_table`` / ``no_untried_hot_kernels``.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "auto_kernel_opt_enabled", True)):
+            return KERNEL_OPT_SKIP_DISABLED
+        cached = getattr(state, "last_trace_analyze", None)
+        cached = cached if isinstance(cached, dict) else {}
+        hot = cached.get("hot_kernels_top15") or cached.get("hot_kernels") or []
+        if not isinstance(hot, list) or not hot:
+            return KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE
+        return KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS
+
+    def _record_kernel_opt_dispatch_skip(self, reason: str) -> None:
+        """Record why KERNEL entry skipped the whole kernel_opt batch.
+
+        The summary's unattempted buckets each mean "the candidate table listed
+        this kernel and nobody tried it", so a run whose table never
+        materialised counts zero in every bucket and reads as "nothing here was
+        worth optimising". Both skip paths return before ``run_optimization``
+        is called, so ``record_kernel_opt`` -- this field's other writer --
+        never runs to say otherwise.
+
+        The evidence fields carry the state the decision was made on, so the
+        report answers "why was the table empty" without a state.json dig.
+
+        Args:
+            reason: One of the ``KERNEL_OPT_SKIP_*`` reason codes.
+        """
+        state = self.shared_state
+        cached = getattr(state, "last_trace_analyze", None)
+        cached = cached if isinstance(cached, dict) else {}
+        try:
+            streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
+        except (TypeError, ValueError):
+            streak = 0
+        state.last_kernel_opt_dispatch_skip = {
+            "reason": reason,
+            "candidates_path": str(cached.get("candidates_path") or ""),
+            "trace_analyze_empty": not cached,
+            "profile_trace": str(getattr(state, "last_profile_trace", "") or ""),
+            "profile_status": str(getattr(state, "last_profile_status", "") or ""),
+            "roofline_failure_streak": streak,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        log.info(
+            "KERNEL entry: no kernel_opt dispatch (reason=%s, trace_analyze_empty=%s, roofline_failure_streak=%d)",
+            reason,
+            not cached,
+            streak,
+        )
+        # Persisted here rather than left to whichever later turn happens to
+        # save: the run this breadcrumb is for is the one that spends hours in
+        # the phase and is then killed or wedged, which is exactly when an
+        # unsaved breadcrumb is lost and the report falls back to reading as
+        # "nothing worth optimising".
+        try:
+            state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — a breadcrumb must never fail the phase
+            log.debug("KERNEL entry: saving the dispatch-skip breadcrumb failed", exc_info=True)
 
     def _kernel_opt_work_remains(self) -> bool:
         """Whether KERNEL entry should dispatch source-level kernel_opt itself.
@@ -3830,10 +4081,17 @@ class KernelPhase(PhaseHandler):
         candidates_path = str(cached.get("candidates_path") or "")
         if not candidates_path:
             log.info("KERNEL entry: skip kernel_opt; no candidates_path")
+            self._record_kernel_opt_dispatch_skip(KERNEL_OPT_SKIP_NO_CANDIDATES_PATH)
             return
         log.info(
             "KERNEL entry: dispatching the source-level kernel_opt batch",
         )
+        # A dispatch retires any earlier skip breadcrumb. ``record_kernel_opt``
+        # clears it too, but only for a result naming a ``kernel_id``, and this
+        # batch names none by design -- so an earlier "never dispatched" would
+        # outlive the dispatch and the report would assert it as fact for a
+        # round whose candidates were merely filtered by the handler's floor.
+        self.shared_state.last_kernel_opt_dispatch_skip = {}
         try:
             from ..kernel.request_handlers import run_optimization_handler
 
@@ -4455,6 +4713,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": envs,
                 "source_phase": "KERNEL_AGENT",
                 "provenance": "forge_collective",
+                **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
                 "workspace": integrate_result.get("workspace"),
             },
             entry_extra={
@@ -4478,6 +4737,7 @@ class KernelPhase(PhaseHandler):
         ts = datetime.now(timezone.utc).isoformat()
         self._update_cumulative_gain_validated(
             new_tput,
+            integrate_result,
             source="collective_promote",
             ts=ts,
         )
@@ -4728,6 +4988,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": envs,
                 "source_phase": "KERNEL_AGENT",
                 "provenance": "forge_fusion",
+                **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
                 "workspace": integrate_result.get("workspace"),
             },
             entry_extra={
@@ -4743,6 +5004,7 @@ class KernelPhase(PhaseHandler):
         if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:
             self._update_cumulative_gain_validated(
                 new_tput,
+                integrate_result,
                 source="fusion_promote",
             )
 

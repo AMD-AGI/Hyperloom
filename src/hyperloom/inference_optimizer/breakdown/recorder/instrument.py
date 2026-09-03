@@ -3545,6 +3545,17 @@ def record_kernel_e2e(
             "patch_path": patch_path,
             "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
+            # The deploy/apply root the integrated kernel landed in, the kernel
+            # analogue of the framework column's apply root. Absolute; empty when
+            # the integrate named no repo (e.g. an env-only adoption). Read off
+            # the integrate result, falling back to the deploy-root ledger keys.
+            "kernel_repo": str(
+                evidence.get("kernel_repo")
+                or evidence.get("deploy_repo_root")
+                or evidence.get("last_deploy_repo_root")
+                or ""
+            )
+            or None,
             "ts": _now_iso_safe(),
             # Carried on the record so the replay paths that re-record this
             # outcome from state pass the same value back instead of counting
@@ -4188,7 +4199,7 @@ def record_singleton_section(
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
-        if section.startswith("kb_") or section in {"warm_replay", "kb_provenance"}:
+        if section.startswith("kb_") or section in {"warm_replay"}:
             operation_id = _stable_id(
                 "op",
                 section,

@@ -90,7 +90,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "geak":               { /* GEAK route diagnostics; {} when GEAK never ran */ },
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
-  "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
@@ -108,7 +107,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "phase_segments":              [ /* per-phase segment records */ ],
   "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
-  "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],
   "kernel_roofline":             { /* kernel roofline snapshot */ },
   "kernel_optimization_summary": { /* kernel-opt rollup */ },
@@ -338,23 +336,28 @@ than disappeared and are reachable through `adopted_attempt_id`:
 `summary_by_agent`; the gain belonging to no adopted step is
 `validation.unattributed_gain_pct` rather than a bucket inside a breakdown.
 
-When Warm Replay uses a donor recipe, `kb_provenance.warm_replay` also
-preserves the available `donor_canonical_id`, `donor_model`,
-`donor_session_id`, `donor_family_tags`, `donor_gain_pct`, and
-`donor_breakdown_link`. Fields absent from the source recipe remain absent
-rather than being inferred.
+The Recipe KB touchpoints are recorded as ordered `timeline` events rather
+than a standalone `kb_provenance` section (removed in the V5→V6 migration):
+`warm_start` (which identity was requested and what the KB returned),
+`warm_replay` (whether replaying a prior recipe reproduced its gain), and
+`kb_write_back` (whether this session's own recipe reached the KB Store).
 
-`kb_provenance.warm_replay` additionally records what the replay was judged
-on, whether it passed or failed. A replayed recipe is evidence from another
-session on another machine, so reproducing its throughput says nothing about
-whether it still computes correctly here.
+When Warm Replay uses a donor recipe, `timeline[type=warm_replay].ext.donor`
+preserves the available `canonical_id`, `model`, `session_id`, `gain_pct`, and
+`breakdown_link`. Fields absent from the source recipe remain absent rather
+than being inferred.
+
+`timeline[type=warm_replay].ext.accuracy` records what the replay was judged
+on, and whether it passed. A replayed recipe is evidence from another session
+on another machine, so reproducing its throughput says nothing about whether it
+still computes correctly here.
 
 | Field | Type | Description |
 |---|---|---|
-| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay_accuracy` `0.0`) from a replay nothing checked (`eval_ran` false, `replay_accuracy` `null`). |
-| `replay_accuracy` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
-| `baseline_accuracy` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
-| `eval_error` | string \| null | Why no score could be read. Distinguishes a contract with the eval switched off, an eval that produced an unreadable file, and a results file carrying no metric this parser knows. |
+| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay` `0.0`) from a replay nothing checked (`eval_ran` false, `replay` `null`). |
+| `replay` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
+| `baseline` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
+| `passed` | bool \| null | Whether the replay cleared the accuracy gate. `null` when no verdict could be reached (no eval ran). |
 
 A replay whose accuracy could not be measured is still promoted — a failed
 measurement is not evidence the config broke the model — so `eval_ran` is what
@@ -462,7 +465,7 @@ T+90 min" charts.
 
 ## `capability_summary` — `CapabilitySummary`
 
-One card per live capability (`geak`, `forge`, `explore`, `sweep`,
+One card per live capability (`geak`, `forge`, `explore`,
 `specialist`) with: `status`, `attempts`, `keeps`, `micro_only_keeps`,
 `pending_integrate`, `reverts`, `e2e_gain_pct`, `tested`, `best_gain_pct`,
 `reason`. Legacy `backends`, `params`, and `validate_stack` rows can appear
@@ -543,24 +546,6 @@ The canonical field is `explore_search` (the native merged ledger), with
 `params` and `backends` are older compatibility aliases emitted for archived
 sessions and old readers. The section also includes
 `synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
-
----
-
-## `sweep`
-
-Final concurrency / input sequence length (ISL) / output sequence length (OSL) sweep. Always includes `all_variants`
-(a `SweepPoint[]`) and `best_overall`. `best_for_each_conc` and
-`pareto_front` are populated when the sweep grid is large enough.
-
-Each `all_variants` row carries `status`:
-
-* `ok` — a readable JSON object was loaded from `benchmark_report.json` and its `success` field was not `false`. Metrics may still be `null` (for example an empty object, or `success: true` with throughput 0); `ok` means the measurement landed, not that it is selectable.
-* `failed` — the report recorded a failure, the file existed but could not be read as a JSON object (truncated, empty, or a non-object top-level value), or no report was found but `abort_reason.json` is present (the grid runner's tested-but-failed marker).
-* `skipped` — neither `benchmark_report.json` nor `abort_reason.json` was found for that variant.
-
-`error` is present on every row and is always a non-empty string when `status` is `failed` (singular `error`, Magpie-compatible `errors` list, abort marker, or a fixed fallback). It is `null` on `ok` / `skipped` rows. Downstream consumers can rely on a stable key set across `ok` / `failed` / `skipped` rows.
-
-This `status` tightening does not bump `schema_version`. No field is renamed or removed; `error` is additive; the value set remains `ok` / `failed` / `skipped`. The change restores the stability guarantee that missing measurements are not fabricated as success.
 
 ---
 
@@ -858,7 +843,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "state": "state.json",
     "baseline_report": "runs/baseline/report.json",
     "profile_reports": ["runs/profile/report.json"],
-    "sweep_reports": ["runs/sweep/grid.json"],
     "kernel_attempts": ["kernel-agent/runs/sess-20260517-1130/optimization_attempts.jsonl"],
     "critic_workdir": "critic-workdir",
     "robustness_workdir": "agents/robustness"

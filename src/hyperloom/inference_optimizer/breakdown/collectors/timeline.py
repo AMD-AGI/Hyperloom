@@ -28,7 +28,6 @@ from ._common import (
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
-    _to_int,
 )
 
 
@@ -40,7 +39,6 @@ _AUDIT_ACTIONS = (
     "backends",
     "params",
     "validate_stack",
-    "sweep",
     "roofline",
 )
 
@@ -570,16 +568,6 @@ def collect_capability_summary(
     validate = _capability_for_action(state, "validate_stack")
     validate["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
 
-    sweep_cap = _capability_for_action(state, "sweep")
-    last_sweep = state.get("last_sweep") or {}
-    if isinstance(last_sweep, dict):
-        sweep_cap["grid_size"] = _to_int(last_sweep.get("grid_size"))
-        bo = last_sweep.get("best_overall")
-        if isinstance(bo, dict):
-            sweep_cap["best_throughput"] = _to_float(bo.get("output_throughput") or bo.get("tput"))
-        if sweep_cap.get("attempts", 0) > 0:
-            sweep_cap["status"] = "completed"
-
     # Merged explore row carrying the unified explore_search ledger activity.
     explore = _capability_for_action(state, "explore")
     explore["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
@@ -613,7 +601,6 @@ def collect_capability_summary(
         "explore": explore,
         "backends": backends,
         "params": params,
-        "sweep": sweep_cap,
         "validate_stack": validate,
         "specialist": specialist_row,
     }

@@ -93,24 +93,24 @@ def test_pr_server_is_skipped_on_a_backend_without_mcp(build_agent_fn):
 
 def test_the_service_endpoint_reaches_the_position_c_child(monkeypatch, build_agent_fn):
     """Forward PR settings to the MCP child."""
-    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://internal.example.com/pr")
+    monkeypatch.setenv("KB_STORE_URL", "https://internal.example.com/knowledge-base")
     monkeypatch.setenv("PR_KB_TOP_K", "3")
 
     entry = build_agent_fn(pr_kb_repo="ROCm/FlyDSL")["pr_mcp_servers"]["pr_monitor"]
 
-    assert entry.env["PRIMUS_CORTEX_PR_API"] == "https://internal.example.com/pr"
+    assert entry.env["KB_STORE_URL"] == "https://internal.example.com/knowledge-base"
     assert entry.env["PR_KB_TOP_K"] == "3"
     assert entry.env["PR_KB_REPO"] == "ROCm/FlyDSL"
 
 
 def test_unset_settings_are_not_forwarded_as_empty(monkeypatch, build_agent_fn):
     """Do not replace child defaults with empty values."""
-    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.setenv("PR_KB_BUDGET_SEC", "   ")
 
     entry = build_agent_fn(pr_kb_repo="ROCm/FlyDSL")["pr_mcp_servers"]["pr_monitor"]
 
-    assert "PRIMUS_CORTEX_PR_API" not in entry.env
+    assert "KB_STORE_URL" not in entry.env
     assert "PR_KB_BUDGET_SEC" not in entry.env
 
 

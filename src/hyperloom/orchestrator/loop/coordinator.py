@@ -98,19 +98,6 @@ from .coordinator_helpers import (
 log = logging.getLogger(__name__)
 
 
-# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS).
-_AUDIT_ACTIONS: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "profile",
-        "sweep",
-        "explore",
-        # Composite roofline runs profile + trace_analyze atomically.
-        "roofline",
-    }
-)
-
-
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
     """Extract launch/traceback text from a failed baseline result payload.
 
@@ -955,8 +942,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_enqueue_internal_analysis_task": "phase_prelude",
         "_on_enter_sweep": "phase_sweep",
         "_enqueue_internal_conc_sweep_task": "phase_sweep",
-        "_enqueue_internal_sweep_task": "phase_sweep",
-        "_build_sweep_params_from_recipe": "phase_sweep",
         "_record_session_budget_conc_sweep_skip": "phase_sweep",
         "_record_terminal_conc_sweep_skip": "phase_sweep",
         "_derive_close_stop_reason": "phase_close",
@@ -1574,7 +1559,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure
-    # param-search (explore/sweep) is excluded.
+    # param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:

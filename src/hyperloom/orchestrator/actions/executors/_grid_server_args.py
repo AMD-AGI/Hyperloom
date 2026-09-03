@@ -22,11 +22,15 @@ import shlex
 from typing import Any
 
 from hyperloom.common.coerce import optional_positive_int, to_str_list
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
 log = logging.getLogger(__name__)
 
 _UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
+#: What the 2nd..nth value of a not-yet-whitelisted multi-value flag may look
+#: like: a batch size, a length, a ratio. Deliberately not a general token.
+_NUMERIC_VALUE_RE = re.compile(r"^\d+(?:[.,]\d+)*$")
 
 
 def validate_server_args_shell_safe(server_args: str | None) -> str:
@@ -35,6 +39,29 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
     Magpie benchmark scripts expand ``EXTRA_*_ARGS`` through shell wrappers, so
     this is the final sink-side guard against LLM/payload content escaping from
     argv-like flags into shell control operators.
+
+    A flag may be followed by more than one value token (argparse ``nargs="+"``
+    semantics). ``--cuda-graph-bs 1 2 4 8`` is a real sglang invocation and is
+    already recognized as multi-valued by :data:`_MULTI_VALUE_FLAGS`; requiring
+    exactly one value here rejected it at the sink while the explore side let it
+    through.
+
+    The relaxation is scoped rather than blanket, because "any flag anywhere
+    earlier permits any bare token afterwards" stops rejecting anything at all:
+
+    * ``--flag=value`` already carries its value, so a bare token after it is
+      unambiguously positional.
+    * a flag in :data:`_MULTI_VALUE_FLAGS` takes an unlimited value list -- but
+      every entry in that whitelist is a list of batch sizes, so the list is
+      still digits-only. Letting the whitelist waive the token shape as well
+      would readmit ``--cuda-graph-bs 1 2 run.sh``.
+    * any other flag takes one arbitrary value; further tokens are accepted only
+      while they still look like list elements (digits), never as bare words.
+      That covers an ``nargs="+"`` flag not yet on the whitelist -- those carry
+      batch sizes or lengths -- without readmitting ``--foo bar some_script.sh``.
+
+    Shell control characters are blocked separately above, so this remains a
+    secondary "this looks like argv" guard.
     """
     args = str(server_args or "").strip()
     if not args:
@@ -45,42 +72,25 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
         tokens = shlex.split(args)
     except ValueError as exc:
         raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
-    expect_value = False
+    state = "positional"
     for token in tokens:
         if token.startswith("-"):
-            expect_value = "=" not in token
+            if "=" in token:
+                state = "positional"
+            elif token in _MULTI_VALUE_FLAGS:
+                state = "many"
+            else:
+                state = "any"
             continue
-        if expect_value:
-            expect_value = False
+        if state == "many" and _NUMERIC_VALUE_RE.match(token):
+            continue
+        if state == "any":
+            state = "numeric"
+            continue
+        if state == "numeric" and _NUMERIC_VALUE_RE.match(token):
             continue
         raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
     return args
-
-
-def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args.
-
-    Resolution is exact (registry-keyed) with a substring fallback so a
-    framework string carrying a version suffix (e.g. ``"vllm@0.21"``) still
-    maps correctly. Unknown names fall back to the default framework's env.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str: The ``EXTRA_*_ARGS`` env name for the framework (e.g.
-        ``"EXTRA_XDIT_ARGS"`` for xDiT, ``"EXTRA_SGLANG_ARGS"`` default).
-    """
-    from hyperloom.inference_optimizer import framework_registry
-
-    name = str(framework or "").strip().lower()
-    if framework_registry.is_supported(name):
-        return framework_registry.extra_args_env(name)
-    # Substring fallback for version-suffixed names.
-    for fw in framework_registry.names():
-        if fw in name:
-            return framework_registry.extra_args_env(fw)
-    return framework_registry.extra_args_env(framework_registry.DEFAULT_FRAMEWORK)
 
 
 def merge_server_args(*parts: str | None) -> str:
@@ -100,15 +110,68 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _unquote_token(token: str) -> str:
-    """Drop one layer of matching shell quotes from a non-POSIX-split token.
+def _unwrap_one_pair(s: str) -> str:
+    """Strip one balanced pair of outer shell quotes from *s* when safe to do so.
 
-    The removal specs are still POSIX-split, so they arrive unquoted; this puts
-    both sides of a pair comparison in the same shape.
+    JSON blobs (inner content starts with ``{`` or ``[``) are never touched
+    because they contain double quotes that must survive into the downstream arg.
     """
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
-        return token[1:-1]
-    return token
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        inner = s[1:-1]
+        if inner and not inner.startswith(("{", "[")) and s[0] not in inner and not any(ch.isspace() for ch in inner):
+            return inner
+    return s
+
+
+def _unwrap_shell_quotes(token: str) -> str:
+    """Drop one balanced pair of shell quotes from a token produced by shlex.
+
+    ``shlex.split(..., posix=False)`` keeps quote bytes in the token it returns,
+    which is exactly what protects a JSON value's inner double quotes. But a
+    plain operand written as ``--tool-call-parser 'kimi'`` or
+    ``--tool-call-parser='kimi'`` must not keep its wrappers, because Magpie
+    expands ``EXTRA_*_ARGS`` unquoted and the wrappers would reach argv
+    literally.
+
+    For a leading-dash token the unwrap is applied to the right-hand side of
+    the first ``=`` only, so token boundaries never shift and the flag name is
+    never altered. A JSON value (starting with ``{`` or ``[``) is left verbatim
+    in both positions.
+    """
+    if token.startswith("-") and "=" in token:
+        flag, _, value = token.partition("=")
+        unwrapped = _unwrap_one_pair(value)
+        return f"{flag}={unwrapped}" if unwrapped != value else token
+    return _unwrap_one_pair(token)
+
+
+def _split_args_preserving_json(text: str) -> list[str] | None:
+    """Tokenize a server-arg string WITHOUT stripping JSON's inner double quotes.
+
+    ``shlex.split(text)`` defaults to ``posix=True``, which consumes every quote
+    byte. Splitting a JSON-valued flag that way and space-joining the result
+    turns a stored-valid ``--compilation-config {"mode":3}`` into
+    ``{mode:3}``, and vLLM then aborts at argv parse with
+    ``Invalid JSON: key must be a string``. Valid blobs are compacted first (so
+    a blob is a single whitespace-free word) and then split in non-POSIX mode,
+    which preserves the quote bytes verbatim — a lossless round trip.
+
+    Returns ``None`` when the string is not tokenizable at all, so callers can
+    leave the input untouched rather than guess.
+
+    Deliberately not :func:`tokenize_server_args_preserving_json`, which shares
+    the same tokenizing core but a different contract: it returns the tokens
+    raw for a caller that inspects them, and fails closed when a blob was split
+    by embedded whitespace. Rewriting a string means the wrappers must come off
+    (see :func:`_unwrap_shell_quotes`), and a removal must degrade to "leave it
+    alone" rather than reject the whole string — ``strip_benchmark_harness_flags``
+    routes every composed variant through here.
+    """
+    try:
+        tokens = shlex.split(_reserialize_json_blobs(text), posix=False)
+    except ValueError:
+        return None
+    return [_unwrap_shell_quotes(tok) for tok in tokens]
 
 
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
@@ -118,30 +181,39 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     its following value when one is present; ``"--foo=bar"`` removes that exact
     token shape; ``"--foo bar"`` removes the exact flag/value pair. Unknown /
     unparseable inputs are left untouched rather than guessed.
+
+    Tokenization is quote-preserving (:func:`_split_args_preserving_json`), so
+    every flag this function does NOT remove survives byte-for-byte, JSON values
+    included. This matters far beyond explicit removals:
+    :func:`strip_benchmark_harness_flags` routes EVERY composed variant through
+    here with a non-empty denylist, so a lossy round trip would corrupt a
+    sibling ``--compilation-config`` even for a variant that removes nothing.
     """
-    # Compact the JSON values first, then split without POSIX quote processing.
-    # Compacting leaves every JSON value as one whitespace-free word, so the
-    # non-POSIX split keeps it whole AND keeps its inner double quotes, which
-    # the POSIX split eats (``{"a":"b"}`` -> ``{a:b}``, rejected by vLLM's
-    # ``json.loads`` at boot). Re-quoting afterwards cannot recover every value:
-    # _repair_unquoted_json has to guess where the quotes went, and atom's
-    # ``--online_quant_config`` wildcards (``*.mlp.gate``) fall outside that
-    # guess, so they reached the server unparseable.
+    # Normalized up front as well as inside the tokenizer, so the
+    # nothing-to-remove early return below hands back the same shape a caller
+    # with a non-empty denylist would get. Invalid substrings are preserved
+    # byte-for-byte, and the pass is idempotent, so the second application
+    # inside :func:`_split_args_preserving_json` is a no-op.
     args = _reserialize_json_blobs(str(server_args or "").strip())
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
-    try:
-        tokens = shlex.split(args, posix=False)
-    except ValueError:
+    # Non-POSIX split plus the wrapper strip: a plain operand written as
+    # ``--tool-call-parser 'kimi_k3'`` -- or ``--tool-call-parser='kimi_k3'`` --
+    # must not keep its quotes, because Magpie expands EXTRA_*_ARGS unquoted and
+    # they would reach argv literally. _unwrap_shell_quotes only touches
+    # whitespace-free content, and on a leading-dash token only the value side of
+    # the first ``=``, so a JSON blob (starts with ``{``/``[``) is never affected
+    # and token boundaries cannot shift.
+    tokens = _split_args_preserving_json(args)
+    if tokens is None:
         return args
 
     remove_flags: set[str] = set()
     remove_pairs: set[tuple[str, str | None]] = set()
     for spec in removes:
-        try:
-            spec_tokens = shlex.split(spec)
-        except ValueError:
+        spec_tokens = _split_args_preserving_json(spec)
+        if spec_tokens is None:
             spec_tokens = spec.split()
         i = 0
         while i < len(spec_tokens):
@@ -167,12 +239,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
         if flag and "=" in tok:
             _flag, _, value = tok.partition("=")
-            if _flag in remove_flags or (_flag, _unquote_token(value)) in remove_pairs:
+            if _flag in remove_flags or (_flag, value) in remove_pairs:
                 i += 1
                 continue
         if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
             value = tokens[i + 1]
-            if flag in remove_flags or (flag, _unquote_token(value)) in remove_pairs:
+            if flag in remove_flags or (flag, value) in remove_pairs:
                 i += 2
                 continue
         if flag and flag in remove_flags:
@@ -180,8 +252,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             continue
         out.append(tok)
         i += 1
-    # No re-serialisation on the way out: the non-POSIX split kept every token
-    # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
+    # No re-serialisation on the way out: the tokens are already JSON-compacted
+    # and the non-POSIX split kept each one byte-for-byte, so re-joining the
+    # survivors cannot corrupt a sibling flag. After-the-fact re-quoting was
+    # never a workable alternative -- _repair_unquoted_json has to guess where
+    # the quotes went, and a value like ``["+fused_rms_norm_gated"]`` (whose
+    # ``+`` the heuristic cannot reconstruct) is unrecoverable once damaged.
     return " ".join(out)
 
 
@@ -209,21 +285,90 @@ def compose_server_args(
     """
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
+        raw = merge_server_args(base_extra_args, variant_extra_args)
         pruned_base = remove_server_args(base_extra_args, remove_args)
         pruned_variant = remove_server_args(variant_extra_args, remove_args)
         composed = merge_server_args(pruned_base, pruned_variant)
     else:
         combined_base = merge_server_args(inherited_args, base_extra_args)
+        raw = merge_server_args(combined_base, variant_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
-    return strip_benchmark_harness_flags(composed)
+    result = strip_benchmark_harness_flags(composed)
+    # Compare against the RAW inputs, not against ``composed``. The tripwire
+    # exists to catch a lossy round trip inside ``remove_server_args`` -- and
+    # ``composed`` is already that function's output, so damage done there makes
+    # the "before" side unparseable too, ``healthy_before`` False, and the
+    # tripwire silent on exactly the failure it was written for. The one or two
+    # earlier removal calls are inside the window now. Flags the removal specs
+    # deliberately dropped are not reported: the loop walks what survived.
+    _warn_on_damaged_json_values(raw, result)
+    return result
+
+
+def _json_flag_values(args: str) -> dict[str, list[str]]:
+    """Map each :data:`SPACE_VALUE_FLAGS` occurrence to its raw value token."""
+    found: dict[str, list[str]] = {}
+    for flag in SPACE_VALUE_FLAGS:
+        start = 0
+        while True:
+            i = args.find(flag + " ", start)
+            if i < 0:
+                break
+            value = args[i + len(flag) :].strip().split(" ", 1)[0]
+            if value[:1] in ("{", "["):
+                found.setdefault(flag, []).append(value)
+            start = i + len(flag)
+    return found
+
+
+def _warn_on_damaged_json_values(before: str, after: str) -> None:
+    """Log loudly when composition turned a parseable JSON flag value unparseable.
+
+    This is a regression tripwire, not a repair. The composer damaged
+    ``--compilation-config`` for an entire optimization session by shlex
+    round-tripping it lossily: the value stayed a single shell word, so nothing
+    downstream looked wrong, and the only symptom was every variant server dying
+    at argv parse ~18s in while the baseline (which never routes through
+    :func:`compose_server_args`) ran clean for 4206s. The damage was silent
+    because ``_repair_unquoted_json`` "succeeded" on the sibling
+    ``--speculative-config`` and merely returned ``None`` for the one blob it
+    could not reconstruct. Emitting a loud, greppable line here converts that
+    class of failure from a multi-round mystery into one log grep.
+    """
+    try:
+        was = _json_flag_values(before)
+        now = _json_flag_values(after)
+    except Exception:  # never let a diagnostic break composition
+        return
+    for flag, values in now.items():
+        healthy_before = any(_parses_as_json(v) for v in was.get(flag, []))
+        if healthy_before and not any(_parses_as_json(v) for v in values):
+            log.error(
+                "server-arg composition CORRUPTED %s: its value parsed as JSON "
+                "before composition and does not after. The launched server will "
+                "abort at argv parse. Damaged value: %s",
+                flag,
+                values[0][:200] if values else "<missing>",
+            )
+
+
+def _parses_as_json(value: str) -> bool:
+    try:
+        json.loads(value)
+    except Exception:
+        return False
+    return True
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted
 # JSON key or string value should be (letters/digits/underscore plus the ``.``,
-# ``/``, ``-`` common in model ids and paths). Numbers, ``true``/``false``/
-# ``null`` are handled separately so they stay unquoted.
-_JSON_BAREWORD = r"[A-Za-z_][A-Za-z0-9_./-]*"
+# ``/``, ``-`` common in model ids and paths). An optional leading ``+``/``-``
+# sign covers vLLM's custom-op toggles (``custom_ops:["+fused_rms_norm_gated"]``)
+# — without it the repair silently failed on exactly those values. A sign is
+# only accepted when a letter/underscore follows, so numbers (``-1``) and
+# ``true``/``false``/``null`` are still handled separately and stay unquoted.
+_JSON_BAREWORD = r"[+-]?[A-Za-z_][A-Za-z0-9_./-]*"
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
 _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 
@@ -240,6 +385,14 @@ def _repair_unquoted_json(blob: str) -> str | None:
 
     This is a narrowly scoped recovery heuristic for known JSON-valued server
     flags after shlex damage, not a general parser for JSON-like syntax.
+
+    It is NOT the fix for the composer: :func:`remove_server_args` no longer
+    damages JSON in the first place (it tokenizes quote-preservingly). This
+    remains only as a recovery layer for strings that were already persisted in
+    damaged form by the earlier lossy round trip, or that arrive damaged from
+    another producer. Never rely on it for newly composed args — a blob is only
+    repairable when every stripped-quote value happens to be re-quotable, which
+    is not decidable in general.
     """
 
     def _quote_value(m: "re.Match[str]") -> str:
@@ -1106,6 +1259,8 @@ def apply_runtime_benchmark_overrides(
     model_path: str | None = None,
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
+    conc: Any = None,
+    agentx_mode: bool | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
 
@@ -1121,10 +1276,15 @@ def apply_runtime_benchmark_overrides(
             ``{framework}_{gpu_type}.sh`` script.
         benchmark_script (str | None): Pre-sanitized script name that
             force-selects a Magpie script (applied last).
+        agentx_mode (bool | None): Explicit AgentX decision; when omitted, an
+            already-materialized AgentX script or the ambient env decides.
 
     Returns:
         dict[str, Any]: The mutated ``benchmark["envs"]`` mapping.
     """
+    if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
+        agentx_mode = True
+
     if model_path:
         bench["model"] = str(model_path)
 
@@ -1153,7 +1313,7 @@ def apply_runtime_benchmark_overrides(
     # module-load cycle with _workload_envs.
     from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
 
-    apply_agentx_switch(bench, model_path)
+    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
 
     envs = bench.setdefault("envs", {})
     # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare

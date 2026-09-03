@@ -336,6 +336,22 @@ async def test_promote_profile_failed_clears_trace(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
+async def test_promote_profile_does_not_reuse_unready_merged_trace(coord: Coordinator) -> None:
+    coord.shared_state.last_profile_trace = "/tmp/old.trace.json"
+    await coord._promote_to_shared_state(
+        "profile",
+        {
+            "status": "failed",
+            "error_class": "primary_rank_trace_missing",
+            "trace_input_ready": False,
+            "trace_files": ["/tmp/merged.trace.json.gz"],
+        },
+    )
+    assert coord.shared_state.last_profile_status == "failed"
+    assert coord.shared_state.last_profile_trace == ""
+
+
+@pytest.mark.asyncio
 async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     await coord._promote_to_shared_state("roofline", {"status": "succeeded"})

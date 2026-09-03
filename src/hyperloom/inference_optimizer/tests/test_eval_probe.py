@@ -429,6 +429,16 @@ def test_read_eval_probe_tolerates_corrupt_json(tmp_path):
     assert read_eval_probe(tmp_path) is None
 
 
+def test_read_eval_probe_tolerates_an_unscannable_tree(tmp_path, monkeypatch):
+    """Parallel xdist workers can delete sibling dirs while rglob is walking."""
+
+    def _rglob_raises(self, pattern):
+        raise FileNotFoundError(self)
+
+    monkeypatch.setattr(Path, "rglob", _rglob_raises)
+    assert read_eval_probe(tmp_path) is None
+
+
 def test_eval_probe_summary_is_empty_without_a_probe():
     assert eval_probe_summary(None) == ""
 

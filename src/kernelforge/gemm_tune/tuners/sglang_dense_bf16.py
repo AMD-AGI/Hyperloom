@@ -723,25 +723,49 @@ class SglangDenseBf16Tuner(BaseTuner):
 
         dropped = list(getattr(self, "_dropped_inaccurate", []) or [])
 
+        # A row the accuracy check removed was tuned and then thrown away; the
+        # tuner did reach that shape. Comparing the surviving row count against
+        # n_expected therefore reports an accuracy problem as a budget problem,
+        # and sends the reader to raise --timeout when the timeout was fine.
+        produced = total + len(dropped)
+
         if forced_status:
             status = forced_status
-        elif total < n_expected:
+        elif produced < n_expected:
             log.warning(
-                "Dense BF16: tuned %d of %d shapes (rc=%d, not_finished=%s, "
-                "%d dropped as inaccurate); the grouped batch budget of %ds was "
-                "likely exhausted",
-                total,
+                "Dense BF16: reached %d of %d shapes (rc=%d, not_finished=%s); "
+                "the grouped batch budget of %ds was likely exhausted"
+                "%s",
+                produced,
                 n_expected,
                 rc,
                 not_finished,
-                len(dropped),
                 batch_timeout,
+                (
+                    f". Separately, {len(dropped)} of those rows were dropped as "
+                    f"inaccurate, leaving {total} in the artifact"
+                    if dropped
+                    else ""
+                ),
             )
             status = "partial_output"
-        elif improved or unverified:
-            status = "ok"
         else:
-            status = "no_improvement"
+            if dropped:
+                # Every expected shape was tuned. The artifact is short purely
+                # because the accuracy filter removed rows, which is a backend
+                # correctness signal, not a truncated run. Say so, but do not
+                # branch the status on it: the surviving rows are still worth
+                # validating, and a status of its own would be a new routing key
+                # that the E2E gate does not admit.
+                log.warning(
+                    "Dense BF16: all %d shapes tuned, but %d row(s) failed aiter's own "
+                    "accuracy check and were removed; %d remain in the artifact. This is "
+                    "accuracy filtering, not budget exhaustion",
+                    n_expected,
+                    len(dropped),
+                    total,
+                )
+            status = "ok" if (improved or unverified) else "no_improvement"
 
         return TuneResult(
             tuner_name=self.name,

@@ -11,6 +11,7 @@ LLM-proposable.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import logging
@@ -22,12 +23,16 @@ from typing import Any, Mapping
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    _kill_stale_servers,
+    agentx_variant_timeout_sec,
     run_grid,
+    variant_conc,
 )
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
@@ -48,18 +53,85 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
 
-# Default ladder (override via ``--conc-sweep-concs``).
+# Default ladders, one per workload (override via ``--conc-sweep-concs``).
+# The synthetic ladder halves from a concurrency the 1024/1024 shape saturates;
+# an agentic request carries a measured ISL p50 near 108k tokens, so the same
+# card runs out of KV cache two orders of magnitude lower and its rungs are
+# spaced across the interactivity range the chart is drawn over.
 DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
+AGENTX_DEFAULT_CONCS: list[int] = [1, 4, 8, 10, 14, 20, 28]
+
+
+def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
+    """The ladder a mode sweeps when the operator names none.
+
+    Args:
+        benchmark_mode: ``SharedState.benchmark_mode``; anything that is not
+            ``agentx`` reads as the synthetic workload.
+
+    Returns:
+        A copy of the ladder, safe for the caller to mutate.
+    """
+    return list(AGENTX_DEFAULT_CONCS if is_agentx_mode(benchmark_mode) else DEFAULT_CONCS)
+
 
 # Multiplier applied to each CONC for NUM_PROMPTS.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 # Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
+# Synthetic-sized, like every other variant-timeout default here; under AgentX
+# ``agentx_variant_timeout_sec`` raises it at the point of use, so this number
+# is a floor for the synthetic sweep rather than a bound on an agentic round.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
 # ``None`` disables the gate; ``<=0`` means no time is left to spend.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
+
+# How many rungs the AgentX floor below buys when the default budget cannot fund
+# even one. Two, not the full ladder: the point is to make the sweep produce a
+# comparison instead of nothing, not to silently authorize twelve hours of GPU.
+# A caller who wants the whole ladder passes --conc-sweep-total-budget-sec.
+_AGENTX_MIN_FUNDED_RUNGS = 2
+
+
+def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: int | None = None) -> float:
+    """What a variant will actually be granted, for budget arithmetic.
+
+    Every budget gate in this module used to price a variant at the DECLARED
+    ``variant_timeout_sec`` -- 1800s, sized for the synthetic 1024/1024 shape.
+    ``run_grid`` does not hand the round that number: under AgentX it raises the
+    cap to what an agentic round needs before launching. Pricing at 1800s while
+    granting 10800s admits a variant the budget cannot pay for, and the round
+    then has its cap clamped back down to the remaining time and is killed
+    mid-warmup -- the exact failure the cap-raise exists to prevent, just moved
+    from the grid runner into the sweep's admission check.
+
+    The same number is also the ceiling on the session soft deadline, for the
+    same reason: a soft deadline of 1800s ends an agentic round that has not
+    reached its measurement window yet.
+
+    With AgentX off this returns ``variant_timeout_sec`` untouched, so the
+    synthetic sweep prices and paces exactly as it did before.
+
+    ``shared_state`` carries the durable AgentX signal. A session resumed into a
+    shell that lost HYPERLOOM_AGENTX would otherwise price every rung as
+    synthetic here and then have the round granted the raised cap anyway -- the
+    two sides disagreeing again, in the direction that admits a rung the budget
+    cannot pay for.
+
+    ``conc`` prices the rung about to launch rather than the session; omitted
+    where the gate guards a whole arm rather than a single rung.
+
+    Args:
+        variant_timeout_sec: The declared per-variant hard timeout, in seconds.
+        shared_state: Session state; consulted only when the env var is absent.
+        conc: The rung's concurrency, when the gate guards one rung.
+
+    Returns:
+        float: The cap the round will actually be granted, in seconds.
+    """
+    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state, conc=conc))
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -110,19 +182,33 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
 
     Returns:
         A dict of the variant's metrics keyed for the curve row.
+
+    ``intvty_p90`` and ``total_token_throughput`` are the pair an agentic run is
+    plotted on; they are null on a synthetic run, which is plotted on the
+    output-throughput pair instead.
     """
     envs = v.extra_envs or {}
     try:
         conc = int(envs.get("CONC", "0"))
     except (TypeError, ValueError):
         conc = 0
+    # aiperf reports the total; the other parsers pass through whatever the
+    # framework named, leaving it null on a run that measured both halves. The
+    # sum is the same identity ``perf_snapshot_from_mapping`` applies, and a
+    # session graded on the total axis fails outright without it.
+    total = v.total_token_throughput
+    if total is None and v.input_throughput is not None and v.output_throughput is not None:
+        total = v.input_throughput + v.output_throughput
     return {
         "arm": arm,
         "conc": conc,
         "status": v.status,
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
-        "total_token_throughput": v.total_token_throughput,
+        "total_token_throughput": total,
+        "input_throughput": v.input_throughput,
+        "intvty_p90": v.intvty_p90,
+        "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
         "duration_seconds": v.duration_seconds,
@@ -175,6 +261,9 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "output_throughput",
         "request_throughput",
         "total_token_throughput",
+        "input_throughput",
+        "intvty_p90",
+        "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
         "duration_seconds",
@@ -693,7 +782,11 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     arm_results.append(skip_r)
                     _all_results_ref.append(skip_r)
                 break
-            if has_budget and _reuse_remaining is not None and _reuse_remaining < float(variant_timeout_sec):
+            if (
+                has_budget
+                and _reuse_remaining is not None
+                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
+            ):
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
                 _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
@@ -858,7 +951,11 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             arm_results.append(skip_r)
             _all_results_ref.append(skip_r)
             continue
-        if has_budget and _ob_rem is not None and _ob_rem < float(variant_timeout_sec):
+        if (
+            has_budget
+            and _ob_rem is not None
+            and _ob_rem < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
+        ):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
@@ -1092,7 +1189,9 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
         b_pts.sort(key=lambda p: p["conc"])
         o_pts.sort(key=lambda p: p["conc"])
 
-        comparison, summary = conc_pair_comparison(b_pts, o_pts)
+        comparison, summary = conc_pair_comparison(
+            b_pts, o_pts, metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+        )
         p: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "status": "in_progress" if partial else "unknown",
@@ -1100,6 +1199,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
             "isl": isl,
             "osl": osl,
             "tp": int(getattr(state, "tp", 0) or 0),
+            "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
             "concs_requested": concs,
             "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
             "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
@@ -1190,7 +1290,7 @@ async def run_conc_sweep(
     """
     session_dir = Path(session_dir)
     # ``None`` → default ladder; an explicit empty list short-circuits below.
-    concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
+    concs = list(concs) if concs is not None else default_concs_for_mode(getattr(state, "benchmark_mode", ""))
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
     baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
@@ -1252,6 +1352,38 @@ async def run_conc_sweep(
             workspace=str(workspace),
         )
 
+    # The module default is synthetic-sized and cannot fund a single AgentX rung.
+    # ``_granted_cap_sec`` prices a rung at what ``run_grid`` will actually grant
+    # it, which under AgentX is the raised cap (10800s at canonical settings) --
+    # larger than DEFAULT_TOTAL_BUDGET_SEC (9000s) on its own. Left alone, the
+    # first rung trips "insufficient_remaining_for_variant" and the whole ladder
+    # is skipped with zero measurements, which reads like a benchmark failure
+    # rather than a budget that was never sized for this workload.
+    #
+    # The CLI already raises this knob for AgentX; a caller that reaches
+    # ``run_conc_sweep`` directly (SDK, tests, any path that does not go through
+    # ``_apply_agentx_budget_profile``) got the synthetic default. Give it the
+    # same floor here, and only when the caller left the default in place -- a
+    # number the operator chose is never overridden. Safe to raise: this is the
+    # action's own slice, and the session deadline still clamps it via
+    # ``_session_soft_dl`` below.
+    if total_budget_sec is not None and int(total_budget_sec) == DEFAULT_TOTAL_BUDGET_SEC:
+        _rung_cost = _granted_cap_sec(variant_timeout_sec, state)
+        if _rung_cost > float(total_budget_sec):
+            _raised = int(_rung_cost * _AGENTX_MIN_FUNDED_RUNGS)
+            log.warning(
+                "conc_sweep: the default total budget %ds cannot fund even one rung at "
+                "the granted cap %.0fs, so every rung would be skipped as "
+                "insufficient_remaining_for_variant. Raising the budget to %ds (%d rungs) "
+                "for this AgentX sweep. Pass --conc-sweep-total-budget-sec to size it "
+                "yourself; the session deadline still clamps whatever is set here.",
+                total_budget_sec,
+                _rung_cost,
+                _raised,
+                _AGENTX_MIN_FUNDED_RUNGS,
+            )
+            total_budget_sec = _raised
+
     has_budget = total_budget_sec is not None
     started_at = time.time()
     deadline = started_at + total_budget_sec if has_budget else None
@@ -1271,7 +1403,7 @@ async def run_conc_sweep(
         if _sr is not None:
             _sr_sec = _sr * 60.0
             _clamped = max(0.0, _sr_sec - _SESSION_CLOSE_RESERVE_SEC)
-            _session_soft_dl = min(float(variant_timeout_sec), _clamped) if _clamped > 0 else None
+            _session_soft_dl = min(_granted_cap_sec(variant_timeout_sec, state), _clamped) if _clamped > 0 else None
 
     results: list[VariantResult] = []
     budget_exhausted = False
@@ -1298,69 +1430,93 @@ async def run_conc_sweep(
         ("optimized", opt_args, dict(opt_envs)),
         ("baseline", "", {}),
     ]
-    for arm_name, arm_args, arm_envs in arms_order:
-        skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
-            _an,
-            concs_desc,
-            isl=isl,
-            osl=osl,
-            num_prompts_factor=num_prompts_factor,
-            arm_args=_aa,
-            arm_envs=_ae,
-        )
+    try:
+        for arm_name, arm_args, arm_envs in arms_order:
+            skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
+                _an,
+                concs_desc,
+                isl=isl,
+                osl=osl,
+                num_prompts_factor=num_prompts_factor,
+                arm_args=_aa,
+                arm_envs=_ae,
+            )
 
-        # Check overall budget before starting each arm.
-        _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
-        if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
-        if has_budget and _arm_remaining is not None and _arm_remaining < float(variant_timeout_sec):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
-        if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "session_deadline_reserve"
-            _budget_state["budget_remaining_sec"] = 0.0
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
+            # Check overall budget before starting each arm.
+            _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
+            if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
+                _budget_state["budget_exhausted"] = True
+                _budget_state["budget_skip_reason"] = "total_budget_exhausted"
+                _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
+                for v in skip_grid_fn():
+                    results.append(_budget_skip_result(v))
+                continue
+            if (
+                has_budget
+                and _arm_remaining is not None
+                and _arm_remaining < _granted_cap_sec(variant_timeout_sec, state)
+            ):
+                _budget_state["budget_exhausted"] = True
+                _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
+                _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
+                for v in skip_grid_fn():
+                    results.append(_budget_skip_result(v))
+                continue
+            if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
+                _budget_state["budget_exhausted"] = True
+                _budget_state["budget_skip_reason"] = "session_deadline_reserve"
+                _budget_state["budget_remaining_sec"] = 0.0
+                for v in skip_grid_fn():
+                    results.append(_budget_skip_result(v))
+                continue
 
-        await _sweep_one_arm_single_server(
-            arm_name,
-            concs_desc,
-            isl=isl,
-            osl=osl,
-            num_prompts_factor=num_prompts_factor,
-            arm_args=arm_args,
-            arm_envs=arm_envs,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=_session_soft_dl,
-            deadline=deadline,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=results,
-            _budget_state=_budget_state,
-        )
-        # Results are added to `results` in place by _all_results_ref.
+            await _sweep_one_arm_single_server(
+                arm_name,
+                concs_desc,
+                isl=isl,
+                osl=osl,
+                num_prompts_factor=num_prompts_factor,
+                arm_args=arm_args,
+                arm_envs=arm_envs,
+                base_yaml_path=base_yaml_path,
+                workspace=workspace,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                variant_timeout_sec=variant_timeout_sec,
+                soft_deadline_sec=_session_soft_dl,
+                deadline=deadline,
+                state=state,
+                session_dir=session_dir,
+                json_path=json_path,
+                csv_path=csv_path,
+                started_at=started_at,
+                total_budget_sec=total_budget_sec,
+                has_budget=has_budget,
+                opt_args=opt_args,
+                opt_envs=opt_envs,
+                _all_results_ref=results,
+                _budget_state=_budget_state,
+            )
+            # Results are added to `results` in place by _all_results_ref.
+    finally:
+        # Safety net, independent of each arm's own per-variant teardown: by
+        # the time both arms have run (or one raised/was cut short), nothing
+        # this conc_sweep started should still be alive -- each arm's own
+        # server is only ever kept warm *between* its own CONC-ladder rounds,
+        # never past the arm itself. A round that timed out before its
+        # server_lifecycle pidfile was ever written leaves that pidfile-based
+        # teardown nothing to find, so this falls back to the broad /proc
+        # scan (AMD-AGI/Hyperloom#1354). Skipped under pytest (unsafe there),
+        # matching the same guard on the per-launch preclean in
+        # _grid_runner.py. Best-effort; never raises.
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                await asyncio.to_thread(_kill_stale_servers)
+            except Exception:  # noqa: BLE001 - best-effort safety net
+                log.warning(
+                    "conc_sweep: post-run _kill_stale_servers failed",
+                    exc_info=True,
+                )
 
     budget_exhausted = _budget_state["budget_exhausted"]
     budget_skip_reason = _budget_state["budget_skip_reason"]
@@ -1379,7 +1535,11 @@ async def run_conc_sweep(
     baseline_points.sort(key=lambda p: p["conc"])
     optimized_points.sort(key=lambda p: p["conc"])
 
-    comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
+    comparison, summary = conc_pair_comparison(
+        baseline_points,
+        optimized_points,
+        metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or "")),
+    )
     budget_limited_no_pair = _budget_limited_without_valid_pair(
         budget_exhausted=budget_exhausted,
         summary=summary,
@@ -1404,6 +1564,9 @@ async def run_conc_sweep(
         "isl": isl,
         "osl": osl,
         "tp": int(getattr(state, "tp", 0) or 0),
+        # Names the axis pair the points are drawn on, so a reader never has to
+        # infer it from whether intvty_p90 happens to be null.
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "concs_requested": concs,
         "baseline": {
             "extra_server_args": "",
@@ -1447,6 +1610,7 @@ async def run_conc_sweep(
 
 
 __all__ = [
+    "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
@@ -1457,5 +1621,6 @@ __all__ = [
     "_flush_partial_conc_sweep_report",
     "_order_concs_desc",
     "conc_sweep_declined_to_run",
+    "default_concs_for_mode",
     "run_conc_sweep",
 ]

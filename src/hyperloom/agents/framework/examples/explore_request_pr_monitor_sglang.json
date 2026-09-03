@@ -14,11 +14,11 @@
   "candidate_refs": [],
   "search_perf_prs": true,
   "max_search_candidates": 3,
-  "primus_cortex": {
+  "pr_monitor": {
     "base_url": "https://your-pr-monitor.example",
     "timeout_sec": 10.0
   },
-  "search_modes": ["primus_cortex"],
+  "search_modes": ["pr_monitor"],
   "gap_description": "improve sglang fp8 MoE attention on AMD ROCm MI300X",
   "prepare_candidate_env": false,
   "commands": {},

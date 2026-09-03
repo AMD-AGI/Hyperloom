@@ -197,8 +197,16 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
         )
 
 
-#: Opt-in env gate for the variant-discriminating TraceShapeManifest (P0-A/WP-1).
+#: Env gate for the variant-discriminating TraceShapeManifest (P0-A/WP-1). On by
+#: default: forge calls the manifest its preferred dense-shape source, and with
+#: the gate off Hyperloom produced one for nobody.
 _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
+#: Values of that env var that mean "off". Same vocabulary this file already
+#: documents for ``--steady-state-mode``, and it has to include the empty string
+#: and ``none``: launchers routinely disable a variable by exporting it empty
+#: rather than unsetting it, and a bare ``{"0","false","no","off"}`` check read
+#: every one of those as "enabled" -- the opposite of what was written.
+_SHAPE_MANIFEST_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disable", "disabled"})
 #: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
@@ -219,8 +227,13 @@ _VARIANT_RE = re.compile(r"(bs_\d+)", re.IGNORECASE)
 #: ``bs_<batch>`` token anywhere (both SGLang layouts) or the vLLM prefix whose
 #: batch/mode arrive via execution_details.json.
 _CAPTURE_FILE_RE = re.compile(r"bs_\d+|\Agraph_capture", re.IGNORECASE)
-#: Optional cap on how many capture files to index (0 = all). Logged when hit.
+#: Cap on how many capture files to index; 0 means all. Each shard costs a full
+#: ``analyze_trace`` pass plus a sha256, so an uncapped default would put that
+#: cost on every trace analysis now that the manifest is built by default. The
+#: cap is a budget, not a filter: shards are taken in discovery order and the
+#: drop is logged.
 _MAX_CAPTURES_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES"
+_DEFAULT_MAX_CAPTURES = 64
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -316,6 +329,18 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
     return out
 
 
+def _shard_order_key(shard: tuple[Path, str, str | None]) -> tuple[int, str, str]:
+    """Total order over capture shards: batch size, then label, then filename.
+
+    Discovery walks directories, so the natural order is filesystem order --
+    fine while every shard was indexed, but the cap turned it into a
+    machine-dependent choice of *which* variants the manifest describes.
+    """
+    _path, label, _mode = shard
+    match = re.search(r"bs_(\d+)", label, re.IGNORECASE)
+    return (int(match.group(1)) if match else 0, label, _path.name)
+
+
 def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
     """Provenance block for the TraceShapeManifest.
 
@@ -364,31 +389,50 @@ def _maybe_build_shape_manifest(
 ) -> dict[str, Any]:
     """Optionally build + write the variant-discriminating TraceShapeManifest.
 
-    Opt-in via ``HYPERLOOM_TRACE_SHAPE_MANIFEST`` (off by default -> returns
-    ``{"status": "disabled"}`` and writes nothing, so a run without the flag is
-    byte-for-byte unchanged). When enabled, capture shards are indexed per
+    Built by default; ``HYPERLOOM_TRACE_SHAPE_MANIFEST`` set to any of
+    :data:`_SHAPE_MANIFEST_OFF_VALUES` (including empty) returns
+    ``{"status": "disabled"}`` and writes nothing. When enabled, capture shards
+    are indexed per
     ``bs_<batch>`` variant; with no capture shards it falls back to an eager
     manifest built from the main analysis. Never raises -- any failure degrades
     to ``{"status": "error: ..."}`` and is logged to stderr.
     """
-    flag = os.environ.get(_SHAPE_MANIFEST_ENV, "0").strip().lower()
-    if flag not in {"1", "true", "yes", "on"}:
+    flag = os.environ.get(_SHAPE_MANIFEST_ENV, "1").strip().lower()
+    if flag in _SHAPE_MANIFEST_OFF_VALUES:
         return {"status": "disabled"}
     try:
         main_trace = analyze.get("trace_file", "") or ""
         main_hash = _sha256_file(main_trace) if main_trace else ""
         shards = _discover_capture_shards(args.trace_input, args.capture_folder or "")
         try:
-            max_caps = int(os.environ.get(_MAX_CAPTURES_ENV, "0") or 0)
+            raw_caps = os.environ.get(_MAX_CAPTURES_ENV, "")
+            max_caps = int(raw_caps) if str(raw_caps).strip() else _DEFAULT_MAX_CAPTURES
         except ValueError:
-            max_caps = 0
+            max_caps = _DEFAULT_MAX_CAPTURES
+        shards.sort(key=_shard_order_key)
         if max_caps > 0 and len(shards) > max_caps:
             print(
                 f"[trace_shape_manifest] capping capture files {len(shards)}->{max_caps} "
                 f"(set {_MAX_CAPTURES_ENV}=0 to index all)",
                 file=sys.stderr,
             )
-            shards = shards[:max_caps]
+            # Evenly spaced over the batch-sorted list, not the first N. Discovery
+            # order is directory order, so "first N" both varied between machines
+            # and -- once sorted -- would have kept only the small-batch end,
+            # indexing 64 decode variants and no prefill one. Each dropped shard
+            # costs a full analyze_trace + sha256, which is why the cap exists.
+            #
+            # Spaced inclusive of BOTH ends. A plain ``int(i * len / max_caps)``
+            # is even but half-open: its last index is short of the tail, so the
+            # widest batch -- the one prefill variant the spread exists to keep --
+            # was the single shard guaranteed to be dropped. With one slot there
+            # is no spread to speak of; take the widest, since a decode variant
+            # is the one the eager fallback can stand in for.
+            last = len(shards) - 1
+            if max_caps == 1:
+                shards = [shards[last]]
+            else:
+                shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
         capture_variants: list[tuple[str, dict[str, Any]]] = []
         capture_hashes: dict[str, str] = {}
         variant_meta: dict[str, dict[str, Any]] = {}
@@ -448,6 +492,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--framework", default="")
     p.add_argument("--target-platform", default="")
     p.add_argument("--analysis-mode", default="")
+    p.add_argument("--require-single-rank", action="store_true")
+    p.add_argument("--tensor-parallel-size", type=int, default=0)
     p.add_argument("--split-conc", default="")
     p.add_argument("--split-osl", default="")
     p.add_argument("--split-r", default="")
@@ -637,6 +683,8 @@ def main(argv: list[str] | None = None) -> int:
                 steady_state=enable_steady,
                 framework=args.framework,
                 emit_launches=True,
+                require_single_rank=args.require_single_rank,
+                tensor_parallel_size=args.tensor_parallel_size or None,
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
@@ -965,8 +1013,8 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None
 
-    # Optional variant-discriminating TraceShapeManifest (P0-A / WP-1; opt-in via
-    # HYPERLOOM_TRACE_SHAPE_MANIFEST). Off by default -> disabled, writes nothing.
+    # Variant-discriminating TraceShapeManifest (P0-A / WP-1). On by default;
+    # HYPERLOOM_TRACE_SHAPE_MANIFEST=0 disables it and writes nothing.
     shape_manifest = _maybe_build_shape_manifest(args, analyze, bypass_dir, generated_at=utc_now(timespec="seconds"))
 
     hot_kernels = candidates.get("hot_kernels", [])

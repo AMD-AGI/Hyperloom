@@ -3,7 +3,7 @@
 
 """GitHub Search backend for perf PR candidate discovery.
 
-Best-effort, zero-deps fallback when ``primus_cortex`` is unavailable.
+Best-effort, zero-deps fallback when ``pr_monitor`` is unavailable.
 No hard-fail: rate-limits, transport errors, or a non-GitHub remote return
 ``[]``. Queries are keyword-driven from ``gap_description`` via
 :func:`hyperloom.agents.framework.keywords.extract_keywords`, falling back to
@@ -103,7 +103,7 @@ def search_perf_prs(
 
     Best-effort: rate-limits or non-GitHub remotes return an empty list
     rather than raising. Callers that need hard-fail behaviour should
-    use the ``primus_cortex`` backend instead.
+    use the ``pr_monitor`` backend instead.
 
     Args:
         repo_url (str): Git URL of the target repo; parsed to an ``owner/name``

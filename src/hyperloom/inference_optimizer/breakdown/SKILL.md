@@ -143,7 +143,6 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
 | `collective`         | `state.{collective_only_mode, collective_attempts, last_collective}`                                                  |
 | `param_search`       | `state.{explore_search, discovered_flags}` (`synergy_attempted` now comes from `explore_search`; `winner_history` / `backend_winners_history` are emitted empty); `params` / `backends` ledgers are historical aliases only |
-| `sweep`              | `state.last_sweep` + `runs/sweep/<task>/variant_*/benchmark_*/benchmark_report.json`                                |
 | `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |
 | `telemetry`          | All `runs/**/benchmark_*/benchmark_report.json` + `torch_trace/` + `system_profile/` + `server*.log`                  |
 

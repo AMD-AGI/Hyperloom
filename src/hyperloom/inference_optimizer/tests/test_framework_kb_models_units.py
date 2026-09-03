@@ -187,7 +187,7 @@ def test_parse_keywords() -> None:
 
 
 def test_parse_search_modes() -> None:
-    assert _parse_search_modes(None) == ("primus_cortex", "github")
+    assert _parse_search_modes(None) == ("pr_monitor", "github")
     assert _parse_search_modes("github") == ("github",)
     with pytest.raises(ValueError):
         _parse_search_modes(123)
@@ -204,7 +204,7 @@ def test_explore_request_from_dict_valid() -> None:
             "baseline": {"throughput": 100.0},
             "commands": {"build": {"command": "make"}},
             "outputs": {"summary": "out.json"},
-            "primus_cortex": {"base_url": "http://primus"},
+            "pr_monitor": {"base_url": "http://pr_monitor"},
             "pr_filter": {"require_labels": ["perf"]},
             "search_modes": ["github"],
             "pr_states": ["open"],
@@ -214,7 +214,7 @@ def test_explore_request_from_dict_valid() -> None:
     assert req.framework == "vllm"
     assert req.repo_url == "https://github.com/acme/x"
     assert "build" in req.commands
-    assert req.primus_cortex is not None
+    assert req.pr_monitor is not None
 
 
 def test_explore_request_from_dict_validation_errors() -> None:
@@ -234,7 +234,7 @@ def test_explore_request_from_dict_validation_errors() -> None:
     with pytest.raises(ValueError):
         ExploreRequest.from_dict({**base, "outputs": "x"})
     with pytest.raises(ValueError):
-        ExploreRequest.from_dict({**base, "primus_cortex": "x"})
+        ExploreRequest.from_dict({**base, "pr_monitor": "x"})
 
 
 def test_candidate_slug_and_pr_number() -> None:

@@ -68,6 +68,8 @@ _CAPABLE_HELP = (
     "  --custom-dataset-type weka-trace ...\n"
     "  --scenario TEXT  Lock all benchmark invariants for a named scenario\n"
     "  --benchmark-duration FLOAT\n"
+    "  --api-host TEXT\n"
+    "  --api-port INTEGER\n"
 )
 
 
@@ -77,6 +79,17 @@ def test_capability_present_ok():
 
     # must not raise
     check_aiperf_capability("/venv/bin/aiperf", probe=_probe)
+
+
+def test_capability_rejects_build_without_progress_api():
+    help_text = "weka-trace --scenario --benchmark-duration"
+    with pytest.raises(AgentXPreflightError, match="phase progress"):
+        check_aiperf_capability(
+            "/venv/bin/aiperf",
+            require_progress_api=True,
+            probe=lambda _bin: help_text,
+            loader_probe=lambda _bin: _NEW,
+        )
 
 
 def test_capability_rejects_pre_scenario_build():
@@ -128,12 +141,22 @@ def _check(loaders, env=None):
     check_aiperf_capability(
         "/venv/bin/aiperf",
         loader_probe=lambda _b: loaders,
+        probe=lambda _b: _CAPABLE_HELP,
         env=env or {},
     )
 
 
 def test_pinned_allowlist_passes():
     _check(_NEW)
+
+
+def test_pinned_allowlist_does_not_require_help_probe():
+    check_aiperf_capability(
+        "/venv/bin/aiperf",
+        loader_probe=lambda _b: _NEW,
+        probe=lambda _b: (_ for _ in ()).throw(OSError("help unavailable")),
+        env={},
+    )
 
 
 def test_stale_build_is_rejected():
@@ -186,7 +209,7 @@ def test_unreadable_allowlist_falls_back_and_says_so(capsys):
     check_aiperf_capability(
         "/venv/bin/aiperf",
         loader_probe=lambda _b: None,
-        probe=lambda _b: "weka-trace --scenario --benchmark-duration",
+        probe=lambda _b: _CAPABLE_HELP,
         env={},
     )
     assert "could not read" in capsys.readouterr().err
@@ -234,7 +257,7 @@ def test_hung_interpreter_reaches_the_flag_fallback(monkeypatch, capsys):
     )
     check_aiperf_capability(
         "/venv/bin/aiperf",
-        probe=lambda _b: "weka-trace --scenario --benchmark-duration",
+        probe=lambda _b: _CAPABLE_HELP,
         env={},
     )
     assert "could not read" in capsys.readouterr().err

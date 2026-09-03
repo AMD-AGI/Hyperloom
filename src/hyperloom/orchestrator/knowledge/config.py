@@ -11,6 +11,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping
 
+from hyperloom.common.pr_monitor_urls import (
+    PR_MONITOR_ENABLED_ENV,
+    kb_store_url as resolve_kb_service_url,
+    pr_monitor_enabled as resolve_pr_monitor_enabled,
+)
+
 
 class KnowledgeStoreMode(str, Enum):
     """The selected knowledge backend."""
@@ -44,6 +50,7 @@ class KnowledgeConfig:
     local_root: str
     kb_store_url: str = ""
     kb_store_token: str = ""
+    pr_monitor_enabled: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "KnowledgeConfig":
@@ -76,8 +83,11 @@ class KnowledgeConfig:
         return cls(
             mode=mode,
             local_root=local_root,
-            kb_store_url=kb_store_url if mode is KnowledgeStoreMode.REMOTE else "",
+            # The URL also hosts PR Monitor and is therefore useful in local
+            # Recipe mode; only the Recipe bearer token is mode-specific.
+            kb_store_url=(kb_store_url if mode is KnowledgeStoreMode.REMOTE else resolve_kb_service_url(env=source)),
             kb_store_token=kb_store_token if mode is KnowledgeStoreMode.REMOTE else "",
+            pr_monitor_enabled=resolve_pr_monitor_enabled(source),
         )
 
     @property
@@ -91,11 +101,15 @@ class KnowledgeConfig:
 
         env["KNOWLEDGE_STORE_MODE"] = self.mode.value
         env["KNOWLEDGE_LOCAL_ROOT"] = self.local_root
+        env[PR_MONITOR_ENABLED_ENV] = "1" if self.pr_monitor_enabled else "0"
         if self.mode is KnowledgeStoreMode.REMOTE:
             env["KB_STORE_URL"] = self.kb_store_url
             env["KB_STORE_TOKEN"] = self.kb_store_token
         else:
-            env.pop("KB_STORE_URL", None)
+            if self.kb_store_url and self.pr_monitor_enabled:
+                env["KB_STORE_URL"] = self.kb_store_url
+            else:
+                env.pop("KB_STORE_URL", None)
             env.pop("KB_STORE_TOKEN", None)
         # GBrain credentials are used by the Framework PR client but must
         # never cross into the KernelForge child.

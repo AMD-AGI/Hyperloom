@@ -153,6 +153,28 @@ def test_grid_runner_emits_expected_error_class_labels():
     assert not missing, f"missing error_class labels in run_grid: {missing}"
 
 
+def test_grid_evidence_skips_prelaunch_failure(tmp_path: Path) -> None:
+    """A refused launch has an abort marker, not a measurement evidence record."""
+    output_root = tmp_path / "runs"
+    result = _grid_runner.VariantResult(
+        name="unsupported",
+        extra_server_args="--unsupported",
+        extra_envs={},
+        status="failed",
+        error_class="capability_unsupported",
+    )
+
+    _grid_runner._attach_grid_launch_evidence(
+        [result],
+        grid=[_grid_runner.GridVariant("unsupported")],
+        output_root=output_root,
+        caller_reused_ready_server=False,
+    )
+
+    assert result.launch_evidence == {}
+    assert not (output_root / "variant_00_unsupported" / "launch_evidence.json").exists()
+
+
 def test_variant_result_carries_error_class_field():
     vr = _grid_runner.VariantResult(
         name="x",
@@ -572,6 +594,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _empty_workspace(slot)
+        (slot / "server.log").write_text("launch evidence\n", encoding="utf-8")
         _write_leak(leak_dir / "inferencex_result.json", tput=1234.0)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -591,7 +614,99 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     r = results[0]
     assert r.status == "succeeded"
     assert r.output_throughput == pytest.approx(1234.0)
+    assert r.server_log_path == str(output_root / "variant_00_vA" / "server.log")
     assert any((w or "").startswith("rescued_from_leaked_path:") for w in r.nonfatal_warnings)
+
+
+@pytest.mark.asyncio
+async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path, monkeypatch):
+    """A measured round that reuses a ready server must retain its warmup log."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_mtime(base)
+    output_root = tmp_path / "out"
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        warm_log = slot / "warmup_round" / "variant_00_prior" / "server.log"
+        warm_log.parent.mkdir(parents=True)
+        warm_log.write_text(
+            "INFO server_args=ServerArgs(model_path='/model', tp_size=8, "
+            "mem_fraction_static=0.8, context_length=8192, kv_cache_dtype='fp8', "
+            "attention_backend='aiter', disable_radix_cache=False, trust_remote_code=True)\n",
+            encoding="utf-8",
+        )
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("reused")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+            server_already_ready=True,
+            warmup_before_measure=False,
+        )
+
+    result = results[0]
+    warm_log = output_root / "variant_00_reused" / "warmup_round" / "variant_00_prior" / "server.log"
+    assert result.status == "succeeded"
+    assert result.server_log_path == str(warm_log)
+    assert result.launch_evidence["actual_server_log_path"] == str(warm_log)
+    assert result.launch_evidence["warm_reuse"]["provenance"] == "warmup_round"
+    assert result.launch_evidence["observed_server_launch_flags"] == ""
+    assert result.launch_evidence["observed_server_identity"] == {
+        "attention_backend": "aiter",
+        "context_length": 8192,
+        "disable_radix_cache": False,
+        "kv_cache_dtype": "fp8",
+        "mem_fraction_static": 0.8,
+        "model_path": "/model",
+        "tp_size": 8,
+        "trust_remote_code": True,
+    }
+    persisted = json.loads(Path(result.launch_evidence_path).read_text(encoding="utf-8"))
+    assert persisted == result.launch_evidence
+
+
+@pytest.mark.asyncio
+async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tmp_path, monkeypatch):
+    """Failure paths use the same narrowly scoped ready-server log fallback."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_mtime(base)
+    output_root = tmp_path / "out"
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        warm_log = slot / "warmup_round" / "variant_00_prior" / "server.log"
+        warm_log.parent.mkdir(parents=True)
+        warm_log.write_text("server died\n", encoding="utf-8")
+        _empty_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 1, "", "benchmark failed")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("reused_failure")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+            server_already_ready=True,
+            warmup_before_measure=False,
+        )
+
+    result = results[0]
+    assert result.status == "failed"
+    assert result.server_log_path.endswith("warmup_round/variant_00_prior/server.log")
+    assert result.launch_evidence["actual_server_log_path"] == result.server_log_path
+    assert result.launch_evidence["warm_reuse"]["reused_ready_server"] is True
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:
@@ -1723,6 +1838,42 @@ class TestSessionBudgetAdmission:
         assert recorded == []
         assert [r.status for r in results] == ["skipped"]
 
+    @pytest.mark.asyncio
+    async def test_without_an_estimate_agentx_gates_on_its_raised_cap(self, tmp_path, monkeypatch):
+        """The AgentX-raised cap, not the declared one, must gate admission.
+
+        Gating on the declared ``variant_timeout_sec`` (600) would admit this
+        variant with 700s left on the clock; the round is then handed the
+        AgentX-raised cap (10800s) by ``_round_timeout_sec``, which
+        ``session_clamped_timeout_sec`` immediately clamps back down to the
+        ~700s actually remaining -- reproducing the mid-warmup kill this
+        AgentX cap-raise exists to prevent.
+        """
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        monkeypatch.setenv("AGENTX_DURATION", "3600")
+        monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
+        monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 700.0,
+                variant_expected_sec=None,
+            )
+
+        assert recorded == []
+        assert [r.status for r in results] == ["skipped"]
+
 
 class TestSessionBudgetTimeoutClamp:
     """A granted cap never exceeds what the session can still pay for.
@@ -2371,6 +2522,63 @@ class TestRemoveServerArgsPreservesJson:
         out = _grid_runner.remove_server_args(raw, ["--port"])
         assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {"cudagraph_mode": "FULL"}
 
+    def test_sign_prefixed_custom_op_survives_removal(self):
+        """A ``+``/``-`` prefixed custom-op value must survive the round trip.
+
+        Live regression: every variant of an explore round died at vLLM argv
+        parse with ``Invalid JSON: key must be a string`` -- including a control
+        leg that added one env var and zero args, because
+        ``strip_benchmark_harness_flags`` routes EVERY composed variant through
+        ``remove_server_args`` with a non-empty denylist. The old POSIX
+        ``shlex.split``/rejoin stripped the JSON quotes, and the bareword repair
+        heuristic could not re-quote ``+fused_rms_norm_gated`` (its ``+`` was
+        outside the charset), so the corruption reached the server verbatim.
+        """
+        raw = (
+            "--compilation-config "
+            '{"mode":3,"custom_ops":["+fused_rms_norm_gated"],'
+            '"cudagraph_capture_sizes":[1,2,3]} --port 8888'
+        )
+        out = _grid_runner.remove_server_args(raw, ["--port"])
+        assert "--port" not in out
+        blob = json.loads(out.split("--compilation-config ", 1)[1].strip())
+        assert blob["custom_ops"] == ["+fused_rms_norm_gated"]
+        assert blob["cudagraph_capture_sizes"] == [1, 2, 3]
+
+    def test_compose_preserves_json_for_every_args_mode(self):
+        """All four variant shapes keep both JSON flags ``json.loads``-able."""
+        cc = '{"mode":3,"custom_ops":["+fused_rms_norm_gated"]}'
+        sc = '{"method":"mtp","num_speculative_tokens":2}'
+        base = f"--max-num-seqs 20 --compilation-config {cc} --speculative-config {sc}"
+
+        def _blob(text, flag):
+            toks = text.split()
+            return json.loads(toks[toks.index(flag) + 1])
+
+        for kwargs in (
+            {"inherited_args": base},
+            {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
+            {"base_extra_args": base, "args_mode": "replace"},
+        ):
+            out = _grid_runner.compose_server_args(**kwargs)
+            assert _blob(out, "--compilation-config") == json.loads(cc)
+            assert _blob(out, "--speculative-config") == json.loads(sc)
+        # Removing the JSON flag and supplying a variant replacement.
+        repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
+        out = _grid_runner.compose_server_args(
+            inherited_args=base,
+            remove_args=["--compilation-config"],
+            variant_extra_args=f"--compilation-config {repl}",
+        )
+        assert out.count("--compilation-config") == 1
+        assert _blob(out, "--compilation-config") == json.loads(repl)
+        assert _blob(out, "--speculative-config") == json.loads(sc)
+
+    def test_shell_quoted_plain_operand_loses_its_wrappers(self):
+        """Magpie expands ``EXTRA_*_ARGS`` unquoted, so wrappers must not persist."""
+        out = _grid_runner.remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
+        assert out == "--tool-call-parser kimi_k3"
+
 
 # ---------------------------------------------------------------------------
 # benchmark_report settling (real-run race)
@@ -2462,3 +2670,104 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
         )
     assert reads["n"] == 1
     assert not measurement.get("valid_measurement")
+
+
+# --- the JSON-preserving tokenizer is on the DEFAULT path, not just AgentX -----
+
+
+class TestServerArgTokenizerOnTheSyntheticPath:
+    """``strip_benchmark_harness_flags`` runs for every variant, AgentX or not.
+
+    The PR note "AgentX-off is a no-op" does not hold in this file:
+    ``compose_server_args`` always calls ``strip_benchmark_harness_flags``, which
+    is ``remove_server_args`` with a non-empty denylist, so every synthetic grid
+    variant goes through the replaced tokenizer. These lock the behaviour that
+    matters there, with HYPERLOOM_AGENTX unset.
+    """
+
+    def _off(self, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+
+    def test_a_plain_synthetic_arg_string_round_trips(self, monkeypatch):
+        self._off(monkeypatch)
+        args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
+        assert _grid_runner.compose_server_args(base_extra_args=args) == args
+
+    def test_the_denylisted_flag_is_still_dropped(self, monkeypatch):
+        self._off(monkeypatch)
+        out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
+        assert "--no-enable-prefix-caching" not in out
+        assert "--max-num-seqs 512" in out
+
+    def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
+        """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
+        self._off(monkeypatch)
+        out = _grid_runner.compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
+        assert out == "--quantization fp8 --max-num-seqs 512"
+
+    def test_an_unbalanced_quote_leaves_the_string_alone(self, monkeypatch):
+        """Untokenizable input is returned untouched rather than guessed at."""
+        self._off(monkeypatch)
+        broken = "--served-model-name 'oops --max-num-seqs 512"
+        assert _grid_runner.remove_server_args(broken, ["--max-num-seqs"]) == broken
+
+    def test_a_synthetic_json_value_survives_a_removal(self, monkeypatch):
+        """Synthetic runs carry JSON flags too (compilation-config, and friends)."""
+        self._off(monkeypatch)
+        args = '--compilation-config {"mode":3} --max-num-seqs 512'
+        out = _grid_runner.remove_server_args(args, ["--max-num-seqs"])
+        assert out == '--compilation-config {"mode":3}'
+
+
+def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
+    """The window must cover ``remove_server_args``, which is what it is about.
+
+    It compared ``composed`` (already that function's output) against the final
+    string, so damage done during removal made the "before" side unparseable
+    too, ``healthy_before`` False, and the tripwire silent on precisely the
+    failure it was written for.
+    """
+    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+
+    real = gsa.remove_server_args
+
+    def _lossy(server_args, remove_args):
+        out = real(server_args, remove_args)
+        return out.replace('{"mode":3}', "{mode:3}")
+
+    args = '--compilation-config {"mode":3} --max-num-seqs 512'
+    with patch.object(gsa, "remove_server_args", side_effect=_lossy):
+        with caplog.at_level("ERROR"):
+            gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
+    assert any("CORRUPTED" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+# --- graded_objective field in VariantResult and explore decision records ---
+
+
+def test_variant_result_has_intvty_and_total_fields():
+    """VariantResult must carry both graded axes so the explore executor can stamp them."""
+    r = VariantResult(
+        name="v",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=183.0,
+        input_throughput=25800.0,
+        total_token_throughput=25983.0,
+        intvty_p90=447.2,
+    )
+    assert r.total_token_throughput == 25983.0
+    assert r.intvty_p90 == 447.2
+
+
+def test_variant_result_graded_axes_default_to_none():
+    r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded", output_throughput=100.0)
+    assert r.total_token_throughput is None
+    assert r.intvty_p90 is None
+
+
+def test_the_total_axis_has_exactly_one_attribute():
+    """One measured quantity, one name: `total_throughput` was a second alias for it."""
+    r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")
+    assert not hasattr(r, "total_throughput")

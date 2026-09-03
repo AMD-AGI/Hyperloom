@@ -25,11 +25,13 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import env_int
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -81,6 +83,14 @@ _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(
 # serialization-safe on a large TP=8 MoE. Tunable via
 # HYPERLOOM_PROFILE_MAX_STEPS_CAP.
 _DEFAULT_PROFILE_MAX_STEPS = 128
+# AgentX counterpart of the cap above. The 128 is calibrated in decode steps
+# against the synthetic 1024/1024 shape; an agentic step carries a measured ISL
+# p50 of 56k-96k tokens, so the same step count buffers orders of magnitude more
+# profiler events in HOST RAM. Measured on DeepSeek-V4-Pro: eight vLLM workers at
+# 113-127 GB each, Ray reported 1012/1024 GB and killed the capture three times.
+# The AgentX client bounds the window by wall clock anyway (~20s of steady
+# state), so the extra steps buy nothing. HYPERLOOM_PROFILE_MAX_ITERS overrides.
+_AGENTX_PROFILE_MAX_ITERS = 8
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
@@ -127,6 +137,46 @@ def agentx_enabled(env: dict[str, str] | None = None) -> bool:
     return str(raw).strip().lower() in _AGENTX_TRUE_VALUES
 
 
+def agentx_active(shared_state: Any = None) -> bool:
+    """Whether AgentX is enabled, preferring persisted state over the ambient env var.
+
+    ``benchmark_mode`` is stamped at seed precisely so it survives a restart,
+    while ``HYPERLOOM_AGENTX`` only describes the shell that happens to be
+    running -- an SDK caller, or a re-baseline/variant round driven from a
+    subprocess that did not inherit it, would otherwise miss the AgentX-sized
+    timeout or publish the agentic number under a synthetic tag. Either saying
+    "agentx" is enough.
+
+    Args:
+        shared_state: Session state, when the caller has one.
+
+    Returns:
+        True when AgentX is enabled for this session, by either signal.
+    """
+    if agentx_enabled():
+        return True
+    return is_agentx_mode(getattr(shared_state, "benchmark_mode", ""))
+
+
+def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
+    """The environment the AgentX derivations read, carrying a rung's own CONC.
+
+    Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
+    so every bound derived from it is linear in the concurrency being measured,
+    not in the one the session was launched at.
+
+    Args:
+        conc: The rung's concurrency, or ``None`` to read the session's.
+
+    Returns:
+        ``os.environ`` unchanged when no rung concurrency is given, else a copy
+        with ``CONC`` replaced.
+    """
+    if not conc or conc <= 0:
+        return os.environ
+    return {**os.environ, "CONC": str(conc)}
+
+
 def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     """Whether an agentic measurement must stay out of the cross-session KB.
 
@@ -143,26 +193,31 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     finalize, the runtime amend, and the T0 anchor), they were not all found at
     once, and a fourth should have something obvious to call.
 
-    Prefers the persisted mode over the ambient env var. ``benchmark_mode`` is
-    stamped at seed precisely so it survives a restart, while ``HYPERLOOM_AGENTX``
-    only describes the shell that happens to be running -- an SDK caller, or a
-    CLOSE re-driven in a subprocess that did not inherit it, would otherwise
-    publish the agentic number. Either saying "agentx" is enough.
-
     Args:
         shared_state: Session state, when the caller has one.
 
     Returns:
         True when the caller must skip its Recipe KB write.
     """
-    if agentx_enabled():
-        return True
-    return str(getattr(shared_state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+    return agentx_active(shared_state)
 
 
-def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> None:
-    """Switch serving-framework benchmarks to the AgentX aiperf client."""
-    if not agentx_enabled():
+def apply_agentx_switch(
+    bench: dict[str, Any],
+    model_path: str | None = None,
+    *,
+    conc: Any = None,
+    active: bool | None = None,
+) -> None:
+    """Switch serving-framework benchmarks to the AgentX aiperf client.
+
+    ``conc`` is the concurrency this round will run at; the inner benchmark cap
+    and the client's warmup grace are both derived from it (see
+    :func:`agentx_env_for_conc`).
+    """
+    if active is None:
+        active = agentx_enabled()
+    if not active:
         return
     from hyperloom.inference_optimizer import framework_registry
 
@@ -171,6 +226,47 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
         return
     envs = bench.setdefault("envs", {})
     bench["benchmark_script"] = "aiperf_client.sh"
+    # The Magpie benchmark config's flat wall-clock cap (``benchmark.timeout_seconds``,
+    # e.g. 7200s from baseline_vllm.yaml) is one deadline over server boot + warmup +
+    # the measurement window + result export. AgentX runs at the model's native
+    # context (``max_model_len`` lifted from the synthetic 6144 to e.g. 1M), so boot +
+    # warmup alone can consume ~45 min before the window even opens; the flat cap then
+    # SIGKILLs the benchmark before aiperf writes ``inferencex_result.json`` -- a 0-tput
+    # baseline that fails the session. Raise the inner cap to the same AgentX budget the
+    # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
+    # layers stay consistent. AgentX-only: this function returned early above when AgentX
+    # is off, so the default (synthetic) cap is untouched. The import is function-local
+    # to avoid a circular dependency (``baseline`` imports this module at load time).
+    #
+    # max(), never assignment: this is the ONLY place in the AgentX path that
+    # writes an existing cap, and a bare assignment LOWERS every config that
+    # already declares more than the AgentX derivation. profile_sglang.yaml
+    # declares 14400s ("Qwen-32B TP=1 profile with steady-state window can take
+    # ~3 h") against a default derivation of 10800s, so an AgentX profile round
+    # there was being cut from four hours to three -- the same mid-round kill this
+    # module exists to prevent, introduced by the fix for it. A declared cap is a
+    # measured statement about that config; the derivation is a floor under it,
+    # not a replacement for it.
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        agentx_baseline_timeout_sec,
+        agentx_warmup_grace_sec,
+    )
+
+    _agentx_env = agentx_env_for_conc(conc)
+    _derived = agentx_baseline_timeout_sec(_agentx_env)
+    try:
+        _declared = int(bench.get("timeout_seconds") or 0)
+    except (TypeError, ValueError):
+        _declared = 0
+    if _declared > _derived:
+        log.info(
+            "AgentX: keeping the config's declared benchmark timeout %ds (> the AgentX "
+            "derivation %ds). The derivation is a floor, never a ceiling -- lowering a "
+            "cap the config measured for itself is how a round gets killed mid-window.",
+            _declared,
+            _derived,
+        )
+    bench["timeout_seconds"] = max(_declared, _derived)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -182,6 +278,34 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
+    # ...but AGENTX_WARMUP_GRACE_PERIOD must not be forwarded raw. It is read by
+    # TWO layers that have to agree: this process derives the subprocess cap from
+    # it (scaled by CONC, because warmup is per-lane requests x CONC lanes), while
+    # aiperf_client.sh hands it to aiperf as --warmup-grace-period, which is what
+    # actually cuts the warmup off. The loop above copies the operator's raw
+    # value, so the client was bounded at the UNSCALED number while the cap
+    # budgeted the scaled one.
+    #
+    # Measured on a Kimi-K3 conc=32 round: cap 14400s of warmup vs client bound
+    # 3600s. Warmup would have been cut at 106 of 354 requests -- not a crash, a
+    # round that reports a prefix-reuse figure measured before the cache had
+    # anything in it. Export the derived value so both layers see one number.
+    #
+    # AgentX-only by construction: this function returned early when AgentX is
+    # off, and AGENTX_* has no meaning on the synthetic path.
+    _grace = agentx_warmup_grace_sec(_agentx_env)
+    _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
+    envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
+    envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
+    if _raw_grace != str(_grace):
+        log.info(
+            "AgentX: exporting the CONC-scaled warmup grace %ds to the client "
+            "(operator value %s). The client's --warmup-grace-period and this "
+            "process's subprocess cap are derived from the same number, so a "
+            "raw forward here would bound the warmup below what the cap pays for.",
+            _grace,
+            _raw_grace or "unset",
+        )
 
 
 def prepare_agentx_runtime(
@@ -190,10 +314,22 @@ def prepare_agentx_runtime(
     inferencex_path: str | None = None,
     config_path: Path | str | None = None,
     output_dir: Path | str | None = None,
+    active: bool | None = None,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
     runtime_env = env or os.environ
-    if not agentx_enabled(runtime_env):
+    if active is None:
+        active = agentx_enabled(runtime_env)
+        if not active and config_path:
+            try:
+                materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+                benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
+                active = (
+                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
+                )
+            except (OSError, ValueError, TypeError):
+                active = False
+    if not active:
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
@@ -785,6 +921,7 @@ def materialize_config_with_envs(
     establish_quality_ref: bool = False,
     drop_moe_runner_backend: bool = False,
     flydsl_source_dirs: bool = False,
+    agentx_mode: bool | None = None,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -798,7 +935,9 @@ def materialize_config_with_envs(
     ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
     ``benchmark.inferencex_path`` for one task (falling back to
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
-    into the framework env; ``extra_envs`` overrides any of the above.
+    into the framework env; ``--extra-env`` is copied into ``benchmark.envs``
+    so Magpie forwards it to vLLM/sglang workers; ``extra_envs`` overrides any
+    of the above.
     The session's ``--reference-script`` recipe is read from SharedState here
     rather than passed in, so it seeds a lowest-priority base (below the YAML
     base and ``extra_server_args``) for every caller.
@@ -830,6 +969,8 @@ def materialize_config_with_envs(
         flydsl_source_dirs: When True, name the FlyDSL source roots in
             ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper invalidates the JIT
             cache key. Off by default: only a run that applied such a patch needs it.
+        agentx_mode: Explicit session-level AgentX decision. ``None`` preserves
+            the legacy environment-based fallback.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -872,7 +1013,7 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    apply_agentx_switch(bench, model_path)
+    apply_agentx_switch(bench, model_path, active=agentx_mode)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
@@ -997,8 +1138,10 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
+        _cap_raw = os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
+        cap_explicit = _cap_raw.isdigit() and int(_cap_raw) >= 1
         try:
-            cap = int(os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip() or _DEFAULT_PROFILE_MAX_STEPS)
+            cap = int(_cap_raw or _DEFAULT_PROFILE_MAX_STEPS)
         except (TypeError, ValueError):
             cap = _DEFAULT_PROFILE_MAX_STEPS
         if cap < 1:
@@ -1066,18 +1209,89 @@ def materialize_config_with_envs(
         # host RAM until the OOM killer arrives.
         if agentx_enabled():
             delay_iters = 0
+            # ...and the bound itself has to come down, because the cap above is
+            # sized in DECODE STEPS against the synthetic OSL. Under AgentX the
+            # captured work per step is agentic: measured ISL p50 was 56k-96k
+            # tokens, two orders of magnitude past the 1024/1024 shape the cap
+            # was calibrated on. At the stock cap a DeepSeek-V4 profile round put
+            # each of the eight vLLM workers at 113-127 GB of HOST RAM -- Ray
+            # reported 1012/1024 GB and killed them mid-capture, three attempts
+            # in a row, so the round produced no trace at all.
+            #
+            # A shorter capture is not a worse trace here: the client already
+            # bounds the window by wall clock (~20s of steady state), so the
+            # extra steps buy nothing and only inflate the in-memory event
+            # buffer. HYPERLOOM_PROFILE_MAX_ITERS still overrides this below.
+            if max_iters > _AGENTX_PROFILE_MAX_ITERS:
+                if cap_explicit:
+                    # The operator asked for this cap explicitly (e.g. to widen
+                    # the steady-state window); silently overriding it with no
+                    # trace of the original value would hide why a deliberate
+                    # HYPERLOOM_PROFILE_MAX_STEPS_CAP setting had no effect.
+                    log.warning(
+                        "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
+                        "being overridden to %d. The cap is calibrated on the "
+                        "synthetic ISL/OSL shape; an agentic step carries orders "
+                        "of magnitude more, and the torch profiler buffers "
+                        "events in host RAM until the OOM killer arrives.",
+                        max_iters,
+                        _AGENTX_PROFILE_MAX_ITERS,
+                    )
+                else:
+                    log.info(
+                        "AgentX: lowering captured profile steps %d -> %d. The cap is "
+                        "calibrated on the synthetic ISL/OSL shape; an agentic step "
+                        "carries orders of magnitude more, and the torch profiler "
+                        "buffers events in host RAM until the OOM killer arrives.",
+                        max_iters,
+                        _AGENTX_PROFILE_MAX_ITERS,
+                    )
+                max_iters = _AGENTX_PROFILE_MAX_ITERS
+                if max_iters < steady_floor:
+                    log.warning(
+                        "AgentX: capped profile steps %d is below the steady-state "
+                        "floor of %d; the trace may lack a steady-state window "
+                        "(trace_split_no_steady_state).",
+                        max_iters,
+                        steady_floor,
+                    )
         # Operator hard-override of captured steps (e.g. a small eager FlyDSL
         # profile). Honored verbatim; warn when outside the safe band rather
         # than silently clamping.
         _ovr = os.environ.get("HYPERLOOM_PROFILE_MAX_ITERS", "").strip()
         if _ovr.isdigit() and int(_ovr) > 0:
             max_iters = int(_ovr)
-            try:
-                delay_iters = int(os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "8") or "8")
-            except (TypeError, ValueError):
-                delay_iters = 8
-            if delay_iters < 0:
-                delay_iters = 0
+            # Raising the capture bound must not revive the delay the AgentX
+            # branch above zeroed; the two knobs are documented together.
+            if agentx_enabled():
+                _delay_ovr = os.environ.get("HYPERLOOM_PROFILE_DELAY_ITERS", "").strip()
+                if _delay_ovr:
+                    log.warning(
+                        "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
+                        "profiling window is wall-clock, so an iteration delay never elapses "
+                        "inside it and the trace comes back empty",
+                        _delay_ovr,
+                    )
+            else:
+                delay_iters = max(0, env_int("HYPERLOOM_PROFILE_DELAY_ITERS", 8))
+            # The AgentX clamp above is a HOST RAM bound, and this override
+            # silently undoes it. Neither check below stands in for saying so:
+            # ``cap`` defaults to _DEFAULT_PROFILE_MAX_STEPS, so the obvious
+            # HYPERLOOM_PROFILE_MAX_ITERS=128 lands exactly on it, trips
+            # neither branch, and restores the very bound that kept the
+            # profiler from being OOM-killed -- without printing anything.
+            if agentx_enabled() and max_iters > _AGENTX_PROFILE_MAX_ITERS:
+                log.warning(
+                    "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
+                    "bound of %d. That bound is a host-RAM limit, not a "
+                    "serialization one: an agentic step carries orders of "
+                    "magnitude more events than the synthetic shape ``cap`` is "
+                    "sized against, and at the stock cap a DeepSeek-V4 profile "
+                    "round was OOM-killed mid-capture three times in a row. "
+                    "Unset it to restore the bound.",
+                    max_iters,
+                    _AGENTX_PROFILE_MAX_ITERS,
+                )
             if max_iters < steady_floor:
                 log.warning(
                     "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
@@ -1292,8 +1506,13 @@ def materialize_config_with_envs(
             envs[framework_env] = merge_server_args(existing, server_args)
         elif not replace_args:
             envs[framework_env] = server_args
+    # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
+    # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
+    combined_extra: dict[str, Any] = dict(_operator_extra_env())
+    if extra_envs:
+        combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
-        extra_envs,
+        combined_extra,
         allow_predicate=is_allowed_variant_env_key,
     )
     for _dk in dropped_extra_envs:
@@ -1449,7 +1668,7 @@ def materialize_config_with_envs(
     # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
     # empty) has no common block size with it, so KV-cache init aborts with
     # "No common block size for 16" -- baseline, roofline, and every
-    # explore/sweep variant crash at startup. Read the required size from the
+    # explore variant crash at startup. Read the required size from the
     # model config and pin --block-size at this shared choke point so it rides
     # EXTRA_VLLM_ARGS on every path (the roofline path in particular seeds from
     # the current-best delta and would otherwise drop the baseline's block size

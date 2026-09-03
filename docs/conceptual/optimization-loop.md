@@ -269,13 +269,15 @@ be attempted or explicitly rejected before report can close the run.
 
 ## SWEEP
 
-SWEEP checks whether the optimized stack still wins across workload
-frontiers. The normal sweep action explores concurrency and ISL/OSL
-points; `conc_sweep` can run a post-sweep concurrency ladder when
-enabled.
+SWEEP measures the optimized stack against the baseline across a
+concurrency ladder, one arm each, and produces the throughput-vs-
+interactivity curve. The ladder is sized for the workload: powers of two
+down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
+where a request carries orders of magnitude more prompt and the same card
+saturates far lower. Override either with `--conc-sweep-concs`.
 
-Sweep results update `last_sweep` / `last_conc_sweep` and feed the final
-report and breakdown.
+Results update `last_conc_sweep` and feed the final report and breakdown.
+The phase exits on `sweep_done` (or `sweep_failed`).
 
 ## CLOSE
 

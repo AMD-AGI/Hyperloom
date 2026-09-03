@@ -98,7 +98,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "critic_iterations": "item",
     "robustness_signals": "item",
     "telemetry": "singleton",
-    "kb_provenance": "singleton",
     "specialist_runs": "item",
     "optimization_stack": "item",
     "kernel_roofline": "singleton",

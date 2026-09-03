@@ -1130,26 +1130,6 @@ async def test_promote_explore_records_success_attempt(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_sweep_records_discarded_attempt(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        task = _mk_task("sweep", "t-sw-1")
-        result = {
-            "grid_size": 4,
-            "best_overall": {"name": "c8_isl1k_osl1k", "tput": 1200.0},
-            "pareto_front": [{"name": "a"}, {"name": "b"}],
-        }
-        await c._promote_to_shared_state("sweep", result, task=task)
-        c.shared_state.last_sweep_attempt = c.shared_state.last_sweep
-        assert c.shared_state.sweep_attempts[-1]["status"] == "succeeded"
-        assert c.shared_state.sweep_attempts[-1]["decision"] == "discarded"
-        assert c.shared_state.sweep_attempts[-1]["extras"]["grid_size"] == 4
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_promote_explore_updates_validated_gain(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)

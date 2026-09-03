@@ -63,9 +63,11 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
 # teardown agree.
 REUSE_PORT_DEFAULT = 8888
 
-# Server-boot budget for the persistent server phase.
+# Server-boot budget for the persistent server phase. Sized for a TB-scale
+# checkpoint, whose weight read alone outlasts a mid-size model's whole boot; a
+# hung server is still bounded by the phase and session budgets.
 # Override via ``INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC``.
-SERVER_READY_TIMEOUT_SEC = 2700
+SERVER_READY_TIMEOUT_SEC = 7200
 
 
 def _pick_free_port() -> int:

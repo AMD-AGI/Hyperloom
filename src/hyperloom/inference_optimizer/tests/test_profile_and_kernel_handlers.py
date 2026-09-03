@@ -28,7 +28,9 @@ from hyperloom.orchestrator.actions.executors.profile import (
     PROFILE_DEFAULT_CONFIG,
     ProfileExecutor,
     _default_profile_config,
+    _preferred_main_trace_path,
     _sanitize_profile_server_args,
+    _trace_rank,
     _trace_files_for_dir,
 )
 from hyperloom.orchestrator.roles import (
@@ -864,6 +866,101 @@ def test_materialize_profile_window_sglang_skill_formula(
     # max capped at 128; delay = 1024 * 2 * 3 - 128/2 = 6080.
     assert body["start_step"] == 6080
     assert body["num_steps"] == 128
+
+
+def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """AgentX's tighter capture cap (8) must warn when it undercuts steady_floor.
+
+    CONC=32/OSL=1024/R=1.0 -> steady_floor=ceil(1024*2/64)=32, far above the
+    AgentX cap of 8. The manual HYPERLOOM_PROFILE_MAX_ITERS override already
+    warns in this situation; the AgentX auto-clamp must match it instead of
+    silently capturing a trace with no steady-state window.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 8" in extra, extra
+    assert any("steady-state floor" in r.message for r in caplog.records)
+
+
+def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """An explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP must not be silently overridden.
+
+    Without this, an operator who explicitly raised the cap (e.g. to widen the
+    profiler's steady-state window) would see it clamped back to 8 by the
+    AgentX branch with no indication their override had no effect.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "64")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 8" in extra, extra
+    assert any("explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=64" in r.message for r in caplog.records)
+
+
+def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Overriding the AgentX capture bound must say so -- 128 warns about nothing else.
+
+    HYPERLOOM_PROFILE_MAX_ITERS is applied after the AgentX clamp and wins, so
+    it restores exactly the host-RAM exposure the clamp exists to remove. The
+    two pre-existing warnings cannot cover this: ``cap`` defaults to
+    _DEFAULT_PROFILE_MAX_STEPS (128), so an override of 128 is neither below
+    steady_floor's band nor above the cap, and the bound would be lifted in
+    silence.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    # The override is still honored verbatim; this is a visibility fix only.
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert any(
+        "HYPERLOOM_PROFILE_MAX_ITERS=128 overrides the AgentX capture bound of 8" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """The new warning is AgentX-only; the synthetic path has no host-RAM bound."""
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        _materialize_config_with_envs(src, tmp_path)
+    assert not any("AgentX capture bound" in r.message for r in caplog.records)
 
 
 def test_materialize_persists_inferencex_path_for_magpie(
@@ -1915,6 +2012,204 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert len(res.result["trace_files"]) == 2
     assert res.result["main_trace_path"] == str(merged_trace)
     assert res.result["profile_trace_selection_reason"] == "merged_trace_preferred"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("TP", "2")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_agentx"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(parents=True)
+        rank_zero = trace_dir / "177-TP-0-DECODE.trace.json.gz"
+        rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
+        merged = trace_dir / "merged-177.trace.json.gz"
+        rank_zero.write_bytes(b"rank-zero")
+        rank_one.write_bytes(b"rank-one")
+        merged.write_bytes(b"merged")
+        capture_status = Path(_ctx.task.params["extra_envs"]["AGENTX_CAPTURE_STATUS_PATH"])
+        capture_status.write_text(
+            json.dumps(
+                {
+                    "capture_id": _ctx.task.params["extra_envs"]["AGENTX_CAPTURE_ID"],
+                    "status": "succeeded",
+                    "reason": "capture_complete",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+            "submission_valid": True,
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-agentx-rank-zero",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    trace_dir = output_dir / "benchmark_sglang_agentx" / "torch_trace"
+    assert res.result["status"] == "succeeded"
+    assert res.result["main_trace_path"] == str(trace_dir / "177-TP-0-DECODE.trace.json.gz")
+    assert res.result["primary_rank"] == 0
+    assert res.result["profile_trace_selection_reason"] == "primary_rank_trace"
+    assert res.result["merged_trace_paths"] == [str(trace_dir / "merged-177.trace.json.gz")]
+    assert sorted(res.result["rank_trace_paths"]) == ["0", "1"]
+    assert res.result["trace_capture_status"] == "succeeded"
+    capture_status_path = Path(res.result["trace_capture_status_path"])
+    assert capture_status_path.parent.parent == output_dir / "agentx-profile"
+    manifest = json.loads(Path(res.result["trace_manifest_path"]).read_text())
+    assert manifest["capture_id"] == capture_status_path.parent.name
+    assert manifest["primary_trace_path"] == res.result["main_trace_path"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_capture_failed"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "rank-0.trace.json.gz").write_bytes(b"partial")
+        capture_status = Path(_ctx.task.params["extra_envs"]["AGENTX_CAPTURE_STATUS_PATH"])
+        capture_status.write_text(
+            json.dumps(
+                {
+                    "capture_id": _ctx.task.params["extra_envs"]["AGENTX_CAPTURE_ID"],
+                    "status": "failed",
+                    "reason": "trace_flush_failed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture-failed",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "profile_capture_failed"
+    assert res.result["measurement_status"] == "succeeded"
+    assert res.result["trace_capture_status"] == "failed"
+    assert res.result["trace_capture"]["reason"] == "trace_flush_failed"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_missing_status"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "rank-0.trace.json.gz").write_bytes(b"trace")
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+            "submission_valid": True,
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture-status-missing",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "profile_capture_failed"
+    assert res.result["measurement_status"] == "succeeded"
+    assert res.result["trace_capture_status"] == "missing"
+    assert res.result["trace_capture"]["reason"] == "capture_status_missing"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_failed"
+        stale_trace_dir = workspace / "torch_trace"
+        stale_trace_dir.mkdir(parents=True)
+        stale_trace = stale_trace_dir / "rank-0.trace.json.gz"
+        stale_trace.write_bytes(b"stale")
+        os.utime(stale_trace, (1, 1))
+        return {
+            "status": "failed",
+            "error_class": "cuda_graph_capture_failed",
+            "error": "CUDA graph capture failed before AgentX capture started",
+            "workspace": str(workspace),
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-before-capture-failed",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "cuda_graph_capture_failed"
+    assert res.result["measurement_status"] == "failed"
+    assert res.result["trace_capture_status"] == "not_reached"
+    assert res.result["trace_input_ready"] is False
+    assert "main_trace_path" not in res.result
     db.close()
 
 
@@ -4799,6 +5094,116 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
     found = _trace_files_for_dir(trace_dir)
 
     assert found == [large, small]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "rank"),
+    [
+        ("177-TP-0-DECODE.trace.json.gz", 0),
+        ("worker-rank-3.pt.trace.json.gz", 3),
+        ("worker-rank0.pt.trace.json.gz", 0),
+        ("dp0_pp0_tp0_dcp0_ep0_rank0.1787293265778058798.pt.trace.json.gz", 0),
+        ("dp0_pp0_tp7_dcp0_ep7_rank7.1787293266292722593.pt.trace.json.gz", 7),
+        ("dp1_pp0_tp0_dcp0_ep0_rank8.1787293265008841647.pt.trace.json.gz", 8),
+        ("dp1_pp0_tp3_dcp0_ep3_rank11.1787293275126074931.pt.trace.json.gz", 11),
+        ("rank_5/trace.pt.trace.json.gz", 5),
+        ("rank_5/worker-TP-3.pt.trace.json.gz", 3),
+        ("model-tp8.trace.json.gz", None),
+        ("benchmark_sglang_tp_8/torch_trace/trace.pt.trace.json.gz", None),
+        ("merged-177.trace.json.gz", None),
+    ],
+)
+def test_trace_rank_supports_framework_naming(relative_path, rank):
+    assert _trace_rank(Path(relative_path)) == rank
+
+
+def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    merged = trace_dir / "merged-177.trace.json.gz"
+    rank_zero_warmup = trace_dir / "100-TP-0-WARMUP.trace.json.gz"
+    rank_zero = trace_dir / "900-TP-0-DECODE.trace.json.gz"
+    rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
+    merged.write_bytes(b"merged")
+    rank_zero_warmup.write_bytes(b"x")
+    rank_zero.write_bytes(b"x" * 100)
+    rank_one.write_bytes(b"rank-one")
+
+    selected = _preferred_main_trace_path(
+        trace_dir,
+        [rank_zero_warmup, merged, rank_one, rank_zero],
+        require_single_rank=True,
+        tensor_parallel_size=2,
+    )
+
+    assert selected == rank_zero
+
+
+def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    merged = trace_dir / "merged-177.trace.json.gz"
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [merged],
+            require_single_rank=True,
+            tensor_parallel_size=8,
+        )
+        is None
+    )
+
+
+def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    trace = trace_dir / "worker.pt.trace.json.gz"
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [trace],
+            require_single_rank=True,
+            tensor_parallel_size=None,
+        )
+        == trace
+    )
+
+
+@pytest.mark.parametrize(
+    "trace_name",
+    [
+        "worker-rank-3.pt.trace.json.gz",
+        "worker.pt.trace.json.gz",
+    ],
+)
+def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_name):
+    trace_dir = tmp_path / "torch_trace"
+    trace = trace_dir / trace_name
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [trace],
+            require_single_rank=True,
+            tensor_parallel_size=8,
+        )
+        is None
+    )
+
+
+def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    merged = trace_dir / "merged-177.trace.json.gz"
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [merged],
+            require_single_rank=True,
+            tensor_parallel_size=1,
+        )
+        == merged
+    )
 
 
 def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):

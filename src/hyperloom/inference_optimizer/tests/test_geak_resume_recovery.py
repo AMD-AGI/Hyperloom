@@ -114,12 +114,6 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     assert saved["geak_pending"]["status"] == "awaiting_rebench"
     assert saved["geak_pending"]["revalidation_task_id"] == rebench[0].task_id
 
-    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
-
-    assert task.kind == "sweep"
-    assert task.params["geak_result"]["status"] == "ok"
-    assert task.params["geak_result"]["bench_script"].endswith("bench_e2e.sh")
-
 
 @pytest.mark.asyncio
 async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(

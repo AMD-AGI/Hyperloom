@@ -51,8 +51,8 @@ def test_allowed_actions_disjoint_phases():
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    assert "conc_sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
+    assert "conc_sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
@@ -166,7 +166,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "user_stop_requested",
         "recipe_kb_drain_failed",
         "plateau_explore",
-        "conc_sweep_failed",
+        "sweep_failed",
         "baseline_arg_error",
     ):
         assert phase_state.is_valid_stop_reason(reason), reason

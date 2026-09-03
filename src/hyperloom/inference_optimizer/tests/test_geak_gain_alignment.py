@@ -199,7 +199,7 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
 
     async def _fake_sweep(**_kwargs):
         # bench-e2e replay measured this throughput at the validated regime.
-        return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
+        return {"status": "succeeded", "promotion_measurement": {"conc": 64, "output_throughput": measured}}
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",
@@ -279,7 +279,7 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert provisional["validated"] is True
 
     async def _fake_sweep(**_kwargs):
-        return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
+        return {"status": "succeeded", "promotion_measurement": {"conc": 64, "output_throughput": measured}}
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",
@@ -399,7 +399,17 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
 
     result = {
         "output_throughput": measured,
-        "best_variant": {"fingerprint": "abc"},
+        "best_variant": {
+            "fingerprint": "abc",
+            "workspace": "/runs/rebench",
+            "server_log_path": "/runs/rebench/server.log",
+            "launch_evidence_path": "/runs/rebench/launch_evidence.json",
+            "launch_evidence": {
+                "framework": "sglang",
+                "actual_server_log_path": "/runs/rebench/server.log",
+                "observed_server_identity": {"model_path": "/models/gemma", "tp_size": 1},
+            },
+        },
         "winners": [],
     }
     await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
@@ -409,6 +419,12 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct, abs=1e-6)
     assert ss.resume_pending_revalidation is False
     assert ss.cumulative_gain_validated_stack_len == 1
+    assert ss.current_best_measurement["server_log_path"] == "/runs/rebench/server.log"
+    assert ss.current_best_measurement["launch_evidence_path"] == "/runs/rebench/launch_evidence.json"
+    assert ss.current_best_measurement["observed_server_identity"] == {
+        "model_path": "/models/gemma",
+        "tp_size": 1,
+    }
 
 
 @pytest.mark.asyncio

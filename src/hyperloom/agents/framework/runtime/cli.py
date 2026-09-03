@@ -7,7 +7,7 @@ Subcommands:
 
 * ``fa schema``     - placeholder schema summary.
 * ``fa candidates`` - enumerate PR/ref candidates from the configured
-  sources (primus_cortex + github).
+  sources (pr_monitor + github).
 * ``fa explore``    - run the full exploration pipeline; defaults to
   ``--plan`` mode (drop audit material only); ``--execute`` adds
   worktree + venv + build/benchmark/accuracy commands.
@@ -77,7 +77,7 @@ def _cmd_schema(args: argparse.Namespace) -> None:
                 "kb",
             ],
             "subcommands_planned": [],
-            "search_modes_supported": ["gbrain_pr_kb", "primus_cortex", "github"],
+            "search_modes_supported": ["gbrain_pr_kb", "pr_monitor", "github"],
             "modes": {
                 "plan": "drop audit material only (pr.patches + pr_files.json)",
                 "execute": "additionally create worktree+venv and run build/bench commands",

@@ -84,35 +84,6 @@ def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
 # returns on its own, so the unified tail record_action_attempt must not re-fire.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_promote_sweep_records_once_and_returns_before_tail(session_dir, monkeypatch):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.conc_sweep_enabled = False
-    calls = _count_record_attempt(coord, monkeypatch)
-
-    await coord._promote_to_shared_state(
-        "sweep",
-        {
-            "status": "succeeded",
-            "pareto_front": [1, 2, 3],
-            "grid_size": 7,
-            "output_throughput": 200.0,
-        },
-        task=_task("sweep"),
-    )
-
-    # Exactly ONE record_action_attempt (the in-branch one), never the tail.
-    assert len(calls) == 1
-    assert calls[0]["action"] == "sweep"
-    assert calls[0]["decision"] == "discarded"
-    assert calls[0]["status"] == "succeeded"
-    # The audit row landed in sweep_attempts; the tail segment never appended a 2nd.
-    assert len(s.sweep_attempts) == 1
-    # record_sweep ran (discovery bookkeeping) after the audit row.
-    assert s.last_sweep  # non-empty snapshot written by record_sweep
-
-
-@pytest.mark.asyncio
 async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_dir, monkeypatch):
     coord = _coord(session_dir)
     s = coord.shared_state
@@ -154,6 +125,12 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
             "warmup_round_tput": 80.0,
             "accuracy": 0.9,
             "subprocess_runtime_sec": 30.0,
+            "launch_evidence": {
+                "framework": "sglang",
+                "observed_server_identity": {"model_path": "/models/Qwen", "tp_size": 1},
+            },
+            "launch_evidence_path": "/baseline/launch_evidence.json",
+            "server_log_path": "/baseline/server.log",
         },
         task=_task("baseline"),
     )
@@ -164,6 +141,12 @@ async def test_promote_baseline_writes_state_and_audit(session_dir):
     assert s.baseline_runtime_sec == 30.0
     assert s.current_best["action"] == "baseline"
     assert s.current_best["tput"] == 100.0
+    assert s.current_best_measurement["launch_evidence_path"] == "/baseline/launch_evidence.json"
+    assert s.current_best_measurement["server_log_path"] == "/baseline/server.log"
+    assert s.current_best_measurement["observed_server_identity"] == {
+        "model_path": "/models/Qwen",
+        "tp_size": 1,
+    }
     # Audit row: promoted with key_metric = output_throughput.
     assert s.last_baseline["decision"] == "promoted"
     assert s.last_baseline["status"] == "succeeded"
@@ -453,6 +436,39 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
     assert s.pending_integrate == {}
     # Not an audited action: no last_integrate_patch attribute is created.
     assert not hasattr(s, "last_integrate_patch")
+
+
+@pytest.mark.asyncio
+async def test_promote_integrate_patch_carries_nested_launch_evidence(session_dir):
+    """The grid proof remains attached after an integrate-patch KEEP lift."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 100.0
+    observed_identity = {"model_path": "/models/Qwen", "tp_size": 1}
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 140.0,
+            "specialist_task_id": "spec-1",
+            "workspace": "/benchmark",
+            "bench_result": {
+                "launch_evidence": {
+                    "framework": "sglang",
+                    "observed_server_identity": observed_identity,
+                },
+                "launch_evidence_path": "/slot/launch_evidence.json",
+                "server_log_path": "/slot/server.log",
+            },
+        },
+        task=_task("integrate_patch", task_id="t1"),
+    )
+
+    measurement = s.current_best_measurement
+    assert measurement["launch_evidence"]["observed_server_identity"] == observed_identity
+    assert measurement["launch_evidence_path"] == "/slot/launch_evidence.json"
+    assert measurement["server_log_path"] == "/slot/server.log"
 
 
 @pytest.mark.asyncio

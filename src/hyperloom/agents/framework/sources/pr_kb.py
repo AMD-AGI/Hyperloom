@@ -7,7 +7,7 @@ Enumerates candidate PRs from the gbrain PR KB for ``request.repo_url``:
 index page (structured) ∪ semantic ``search`` (scoped to this repo's meta
 prefix), with a ``list_pages`` fallback when both yield nothing. Merged +
 deduped by PR number. Best-effort: any gbrain failure yields ``[]`` so the
-dispatcher falls back to Primus Cortex / GitHub.
+dispatcher falls back to PR Monitor / GitHub.
 """
 
 from __future__ import annotations

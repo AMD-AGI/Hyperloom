@@ -167,28 +167,6 @@ def agentx_state_is_stale(state: Any) -> str:
     return ""
 
 
-def _flag_explicitly_set(args: argparse.Namespace, dest: str) -> bool:
-    """Whether the operator actually typed a ``BooleanOptionalAction`` flag.
-
-    ``argparse`` gives these flags a real default, so the parsed value alone
-    cannot distinguish "left at the default" from "explicitly set to the same
-    value as the default" -- and a mode-scoped default must never override an
-    explicit choice. Reading ``sys.argv`` is the only signal available without
-    changing the parser's public behaviour.
-
-    Args:
-        args: Parsed namespace (accepted for symmetry / future use).
-        dest: The action ``dest``, e.g. ``enable_conc_sweep``.
-
-    Returns:
-        bool: True when ``--<flag>`` or ``--no-<flag>`` appears in ``sys.argv``.
-    """
-    del args  # signature kept uniform with the other bootstrap helpers
-    flag = dest.replace("_", "-")
-    wanted = {f"--{flag}", f"--no-{flag}"}
-    return any(a.split("=", 1)[0] in wanted for a in sys.argv[1:])
-
-
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -356,6 +334,7 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
+    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -439,17 +418,11 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase post-sweep concurrency sweep flags (on by default).
-        # A concurrency sweep is 16 runs. At AgentX's per-run cost that is the
-        # entire session budget spent without tuning a single server parameter,
-        # and the leaderboard treats each concurrency as a separate row anyway
-        # (so the "best" concurrency is not a thing to optimise toward). Default
-        # it off under AgentX; an explicit --enable-conc-sweep still wins.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True))
-        and not (_agentx_enabled() and not _flag_explicitly_set(args, "enable_conc_sweep")),
-        benchmark_mode="agentx" if _agentx_enabled() else "synthetic",
+        # SWEEP-phase concurrency sweep flags (on by default, both workloads).
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
-        conc_sweep_concs=_parse_conc_sweep_concs(args),
+        conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
         ),
@@ -779,11 +752,19 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
-    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
+def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
+    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped.
+
+    An unset flag falls back to *benchmark_mode*'s own ladder, which is why the
+    flag defaults to ``None`` rather than to a ladder string: a typed value must
+    be distinguishable from an omitted one.
+    """
+    from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
+
+    fallback = default_concs_for_mode(benchmark_mode)
     raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
     if not raw:
-        return [256, 128, 64, 32, 16, 8, 4, 2]
+        return fallback
     out: list[int] = []
     for tok in raw.split(","):
         t = tok.strip()
@@ -793,7 +774,7 @@ def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
             out.append(int(t))
         except ValueError:
             log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
-    return out or [256, 128, 64, 32, 16, 8, 4, 2]
+    return out or fallback
 
 
 def _read_failure_summary(session_dir: Path) -> dict | None:

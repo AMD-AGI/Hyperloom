@@ -720,7 +720,13 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
         dict[str, Any] | None: The probe record stamped with ``kind`` and
         ``source_file``, or ``None`` when no readable sidecar exists.
     """
-    matches = list(Path(workspace).rglob(EVAL_PROBE_FILENAME))
+    try:
+        matches = list(Path(workspace).rglob(EVAL_PROBE_FILENAME))
+    except OSError:
+        # A sibling directory under the search root can be removed by a parallel
+        # task while the recursive walk is in flight; an unscannable tree yields
+        # no probe verdict rather than an error.
+        return None
     if not matches:
         return None
     try:

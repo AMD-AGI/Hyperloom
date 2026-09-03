@@ -62,7 +62,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "explore": {"status": "kept", "attempts": 1, "keeps": 1},
             "backends": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "params": {"status": "not_attempted", "attempts": 0, "keeps": 0},
-            "sweep": {"status": "not_attempted", "attempts": 0, "keeps": 0, "grid_size": 9},
             "geak": {"status": "not_attempted", "attempts": 0, "keeps": 0},
             "validate_stack": {"status": "not_attempted", "attempts": 0, "keeps": 0},
         },
@@ -82,7 +81,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "discovered_flags": {},
             "synergy_attempted": [],
         },
-        "sweep": {"all_variants": [], "grid_size": 0},
         "critic_robustness": [],
         "telemetry": {
             "gpu_monitor_aggregate": {
@@ -128,7 +126,6 @@ def test_all_renderers_register_in_stable_order() -> None:
         "forge_invocations",
         "param_search",
         "decision_journal",
-        "sweep",
         "critic_robustness",
         "attribution",
         "optimizations",
@@ -325,7 +322,7 @@ def test_capability_decision_kind_round_trips(
     expected_kind: str,
 ) -> None:
     bd = _fixture_breakdown()
-    bd["capability_summary"]["sweep"] = {
+    bd["capability_summary"]["explore"] = {
         "status": cap_status,
         "attempts": 1,
         "keeps": 1 if cap_status == "kept" else 0,
@@ -333,7 +330,7 @@ def test_capability_decision_kind_round_trips(
     r = render_session_report(bd)
     cap = next(s for s in r.sections if s.section_id == "capability_summary")
     decisions = {d.subject: d.kind for d in cap.decisions}
-    assert decisions.get("sweep") == expected_kind
+    assert decisions.get("explore") == expected_kind
 
 
 def test_gain_that_belongs_to_nobody_gets_its_own_row() -> None:
