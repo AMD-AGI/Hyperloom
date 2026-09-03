@@ -22,6 +22,7 @@ factory overrides for tests. The SDK rewrites the tool name to
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable, Iterable
 
@@ -211,13 +212,54 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
     "intents in a single turn, call this tool multiple times."
 )
 
+# Exception-only: Claude Code stores a tool JSON string the streaming parser
+# did not promote to an object. Canonical input remains ``intent_type`` +
+# ``payload`` and is never rewritten when that shape is already present.
+_UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
+
+
+def _is_unparsed_tool_wrapper(raw_input: Any) -> bool:
+    """Whether ``input`` is Claude Code's wrapped unparsed tool JSON object."""
+    if not isinstance(raw_input, dict):
+        return False
+    if "intent_type" in raw_input:
+        return False
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    return isinstance(wrapped, dict) and isinstance(wrapped.get("raw"), str)
+
+
+def _coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
+    """Return native emit_intent input, decoding the wrapper only as fallback.
+
+    Canonical ``{intent_type, payload}`` is returned unchanged. The
+    ``__unparsedToolInput.raw`` object is decoded only when that native shape
+    is absent. Malformed JSON leaves the original dict so validation still
+    fails.
+    """
+    if not isinstance(raw_input, dict):
+        return {}
+    if "intent_type" in raw_input:
+        return raw_input
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    if not isinstance(wrapped, dict):
+        return raw_input
+    raw = wrapped.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return raw_input
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw_input
+    return parsed if isinstance(parsed, dict) else raw_input
+
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     """Eager single-intent validation (mirrors :func:`validate_envelope`).
 
-    Checks the tool-input shape (only ``intent_type`` and ``payload`` keys,
-    both present), that ``intent_type`` is a known :class:`IntentType`, and
-    that the inner payload carries every required field for that type.
+    Canonical input is ``intent_type`` + ``payload``. A Claude Code
+    ``__unparsedToolInput`` wrapper is decoded first only when that native
+    shape is missing, then the same checks apply: only those two top-level
+    keys, a known :class:`IntentType`, and every required payload field.
 
     Args:
         payload (dict[str, Any]): The raw ``emit_intent`` tool input to
@@ -230,16 +272,17 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
-    extra = set(payload.keys()) - {"intent_type", "payload"}
+    coerced = _coerce_emit_intent_input(payload)
+    extra = set(coerced.keys()) - {"intent_type", "payload"}
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
-    if "intent_type" not in payload or "payload" not in payload:
+    if "intent_type" not in coerced or "payload" not in coerced:
         raise IntentValidationError("emit_intent input requires both 'intent_type' and 'payload'")
     try:
-        intent_type = IntentType(payload["intent_type"])
+        intent_type = IntentType(coerced["intent_type"])
     except ValueError as exc:
-        raise IntentValidationError(f"emit_intent: unknown intent_type {payload['intent_type']!r}") from exc
-    inner = payload["payload"]
+        raise IntentValidationError(f"emit_intent: unknown intent_type {coerced['intent_type']!r}") from exc
+    inner = coerced["payload"]
     if not isinstance(inner, dict):
         raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
     required = _PAYLOAD_REQUIRED.get(intent_type, ())

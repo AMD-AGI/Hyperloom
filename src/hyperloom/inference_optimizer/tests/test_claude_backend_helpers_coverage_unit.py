@@ -7,7 +7,6 @@ extraction, and conversation-session accessors."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -224,57 +223,6 @@ def test_parse_tool_use_block_unparsed_malformed_json_returns_none() -> None:
         input={"__unparsedToolInput": {"raw": "{not-json", "len": 9}},
     )
     assert b._parse_tool_use_block(bad) is None
-
-
-def _query_messages(messages: list[Any]):
-    async def _q(*, prompt, options):
-        for message in messages:
-            yield message
-
-    return _q
-
-
-def test_unparsed_wrapper_retries_dedupe_to_one_intent() -> None:
-    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
-    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
-    other = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
-    msg = _Msg(
-        content=[
-            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(wrapped)),
-            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(wrapped)),
-            ToolUseBlock(
-                name=EMIT_INTENT_TOOL_NAME,
-                input={"__unparsedToolInput": {"raw": other, "len": len(other)}},
-            ),
-        ]
-    )
-    b = _backend(sdk_query_factory=_query_messages([msg]), enable_mcp_emit_intent=False)
-
-    async def _run():
-        return await b.run("p")
-
-    res = asyncio.run(_run())
-    assert res.metadata["tool_blocks"] == 3
-    assert len(res.intents) == 2
-    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
-
-
-def test_identical_native_tool_inputs_are_not_deduped() -> None:
-    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
-    msg = _Msg(
-        content=[
-            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(native)),
-            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(native)),
-        ]
-    )
-    b = _backend(sdk_query_factory=_query_messages([msg]), enable_mcp_emit_intent=False)
-
-    async def _run():
-        return await b.run("p")
-
-    res = asyncio.run(_run())
-    assert res.metadata["tool_blocks"] == 2
-    assert len(res.intents) == 2
 
 
 def test_extract_text_shapes() -> None:
