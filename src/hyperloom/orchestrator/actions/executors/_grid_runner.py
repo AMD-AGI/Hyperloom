@@ -2814,6 +2814,23 @@ async def run_grid(
                     len(grid) - (i + 1),
                     no_ws_error_summary,
                 )
+                # Recorded rather than dropped: a grid that just returns fewer
+                # points than it declared reads as a grid that was that size.
+                # The whole claim of this path is that a missing client is
+                # visible as a missing client, and silence about the points it
+                # cost is the same disappearance in a different place.
+                results.extend(
+                    VariantResult(
+                        name=rest.name,
+                        extra_server_args=rest.extra_server_args,
+                        extra_envs=dict(rest.extra_envs),
+                        status="skipped",
+                        error="AgentX preflight aborted the grid before this variant ran",
+                        error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
+                        note=rest.note,
+                    )
+                    for rest in grid[i + 1 :]
+                )
                 break
             if rc != 0 and not keep_going_on_failure:
                 break

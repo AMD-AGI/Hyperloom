@@ -561,7 +561,12 @@ async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, mo
         variant_timeout_sec=5,
         keep_going_on_failure=True,  # would otherwise walk every point
     )
-    assert len(results) == 1, "the grid kept going after an environment abort"
+    assert [r.status for r in results] == ["failed", "skipped", "skipped"], (
+        "the grid either kept benchmarking after an environment abort, or dropped "
+        "the abandoned points instead of recording why they never ran"
+    )
+    assert [r.name for r in results[1:]] == ["vB", "vC"]
+    assert all(r.error_class == "agentx_preflight" for r in results)
 
 
 @pytest.mark.asyncio
