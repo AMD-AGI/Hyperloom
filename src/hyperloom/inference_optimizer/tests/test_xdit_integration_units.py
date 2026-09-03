@@ -540,7 +540,7 @@ class TestValidateTraceStructureScriptable:
     """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are
     skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
 
-    def _write_trace(self, trace_dir, *, with_kernels: bool) -> None:
+    def _write_trace(self, trace_dir, *, with_kernels: bool, with_annotations: bool = False) -> None:
         import gzip
 
         if with_kernels:
@@ -549,6 +549,8 @@ class TestValidateTraceStructureScriptable:
         else:
             # Metadata-only (repeat=0 empty window) trace: no cpu_op / kernel.
             events = [{"name": "process_labels", "cat": "process_labels"}]
+        if with_annotations:
+            events.append({"name": "step[DECODE bs=8]", "cat": "user_annotation"})
         payload = {"traceEvents": events}
         p = trace_dir / "profile.trace.json.gz"
         with gzip.open(p, "wt", encoding="utf-8") as fh:
@@ -581,6 +583,23 @@ class TestValidateTraceStructureScriptable:
         # Same trace, serving framework: the LLM checks run and flag the missing
         # execute_*/user_annotation events.
         assert health["per_kernel_attribution_degraded"] is True
+
+    def test_serving_sees_annotations_recorded_under_cat(self, tmp_path):
+        """The annotation category lives in ``cat``; ``name`` holds the label.
+
+        A marker keyed on ``"name": "user_annotation"`` therefore matches a label
+        no producer writes: 53 of the 62 reference captures were reported as
+        carrying no annotations while each held several hundred, and the zero-hot-
+        kernel path then blamed CUDA-graph folding for an unrelated result.
+        """
+        from hyperloom.orchestrator.actions.executors import profile as pf
+
+        self._write_trace(tmp_path, with_kernels=True, with_annotations=True)
+
+        health = pf._validate_trace_structure(tmp_path, "sglang")
+
+        assert health["per_kernel_attribution_degraded"] is False
+        assert not any("[3]" in i for i in health["issues"])
 
     def test_empty_framework_falls_back_to_session_framework(self, monkeypatch, tmp_path):
         """An unset framework must not be treated as serving.

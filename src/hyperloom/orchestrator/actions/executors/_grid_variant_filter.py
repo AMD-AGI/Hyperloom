@@ -199,7 +199,7 @@ def apply_multi_node_invalid_variants(
     dropped: list[dict] = []
     for v in grid:
         m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
-        if conc > 0 and m and int(m.group(1)) < conc:
+        if m and int(m.group(1)) < conc:
             dropped.append(
                 {
                     "name": v.name,

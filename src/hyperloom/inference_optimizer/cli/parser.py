@@ -625,7 +625,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-tput",
         type=float,
         default=None,
-        help="Stop when current best reaches N (serving: tok/s/GPU; xDiT: img/s)",
+        help="Stop when current best reaches N, whole-server total (serving: tok/s; xDiT: img/s)",
     )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
@@ -1382,21 +1382,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wall-clock budget cap for CLOSE. Default: 0.02.",
-    )
-    opt.add_argument(
-        "--strict-phase",
-        dest="strict_phase",
-        action="store_true",
-        default=True,
-        help="Enforce PolicyGate R1 phase_incompatible. "
-        "Action proposals outside the current phase's allowlist "
-        "return policy_denied so the LLM self-corrects.",
-    )
-    opt.add_argument(
-        "--no-strict-phase",
-        dest="strict_phase",
-        action="store_false",
-        help="Disable R1 enforcement (warn-only). Useful for back-compat smoke tests; production should stay strict.",
     )
 
     rec = sub.add_parser(

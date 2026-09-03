@@ -118,9 +118,9 @@ def workspace_root() -> Path:
         The workspace root path.
     """
     global _WARNED_NO_USER_DATA
-    user_data = os.environ.get(ENV_USER_DATA_PATH)
+    user_data = (os.environ.get(ENV_USER_DATA_PATH) or "").strip()
     if user_data:
-        return Path(user_data)
+        return Path(user_data).expanduser()
     if not _WARNED_NO_USER_DATA:
         _WARNED_NO_USER_DATA = True
         log.warning(

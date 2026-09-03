@@ -202,14 +202,22 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     return agentx_active(shared_state)
 
 
-def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None, *, conc: Any = None) -> None:
+def apply_agentx_switch(
+    bench: dict[str, Any],
+    model_path: str | None = None,
+    *,
+    conc: Any = None,
+    active: bool | None = None,
+) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client.
 
     ``conc`` is the concurrency this round will run at; the inner benchmark cap
     and the client's warmup grace are both derived from it (see
     :func:`agentx_env_for_conc`).
     """
-    if not agentx_enabled():
+    if active is None:
+        active = agentx_enabled()
+    if not active:
         return
     from hyperloom.inference_optimizer import framework_registry
 
@@ -288,6 +296,7 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None, *,
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
+    envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
     if _raw_grace != str(_grace):
         log.info(
             "AgentX: exporting the CONC-scaled warmup grace %ds to the client "
@@ -305,10 +314,22 @@ def prepare_agentx_runtime(
     inferencex_path: str | None = None,
     config_path: Path | str | None = None,
     output_dir: Path | str | None = None,
+    active: bool | None = None,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
     runtime_env = env or os.environ
-    if not agentx_enabled(runtime_env):
+    if active is None:
+        active = agentx_enabled(runtime_env)
+        if not active and config_path:
+            try:
+                materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+                benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
+                active = (
+                    isinstance(benchmark, dict) and str(benchmark.get("benchmark_script") or "") == "aiperf_client.sh"
+                )
+            except (OSError, ValueError, TypeError):
+                active = False
+    if not active:
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
@@ -900,6 +921,7 @@ def materialize_config_with_envs(
     establish_quality_ref: bool = False,
     drop_moe_runner_backend: bool = False,
     flydsl_source_dirs: bool = False,
+    agentx_mode: bool | None = None,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -947,6 +969,8 @@ def materialize_config_with_envs(
         flydsl_source_dirs: When True, name the FlyDSL source roots in
             ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper invalidates the JIT
             cache key. Off by default: only a run that applied such a patch needs it.
+        agentx_mode: Explicit session-level AgentX decision. ``None`` preserves
+            the legacy environment-based fallback.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -989,7 +1013,7 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    apply_agentx_switch(bench, model_path)
+    apply_agentx_switch(bench, model_path, active=agentx_mode)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.

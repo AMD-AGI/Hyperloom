@@ -3814,12 +3814,17 @@ async def _capture_vllm_tunableop_shapes(
             if benchmark_script:
                 task_params["benchmark_script"] = benchmark_script
     else:
+        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM
+
         task_params.update(
             {
                 "config_path": config_path,
                 "timeout_sec": timeout_sec,
                 "disable_run_eval": True,
                 "baseline_double_run": False,
+                # Shape capture is a sub-step of the KERNEL phase's own event,
+                # not a dispatched measurement, so it leaves no baseline event.
+                SBD_INNER_STEP_PARAM: True,
             }
         )
     task = Task(
@@ -5575,6 +5580,14 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
+    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+        cmd += ["--require-single-rank"]
+        try:
+            state_tp = int(getattr(state, "tp", 0) or 0)
+        except (TypeError, ValueError):
+            state_tp = 0
+        if state_tp > 0:
+            cmd += ["--tensor-parallel-size", str(state_tp)]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
@@ -5646,6 +5659,97 @@ def _build_trace_analyze_cmd(
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode
+
+
+# TraceLens picks its steady-state window by writing split chunks and selecting
+# one file; the TraceLens-free reader picks a window in memory and never writes
+# chunks. Both answer "is the window this analysis rests on trustworthy", so the
+# event normalizes them onto one shape and keeps the raw form under ``selected``.
+_STEADY_SOURCE_SPLIT_CHUNK = "split_chunk"
+_STEADY_SOURCE_READER_WINDOW = "in_reader_window"
+
+
+def _analysis_steady_state(
+    result: dict[str, Any],
+    *,
+    requested_mode: str,
+    tool: str,
+) -> dict[str, Any]:
+    """Normalize the steady-state window across analysis tools.
+
+    Args:
+        result: The analysis tool's result dict.
+        requested_mode: The steady-state mode asked of the tool.
+        tool: ``tracelens`` or ``bypass``.
+
+    Returns:
+        A dict naming the requested mode, how the window was picked, the raw
+        selection, whether the tool fell back to the full trace, and the
+        aggregation scope the shares are anchored to.
+    """
+    run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
+    scope = str(result.get("aggregation_scope") or run_meta.get("aggregation_scope") or "")
+    if tool == "bypass":
+        selected = result.get("steady_window") or {}
+        fell_back = bool(result.get("estimated")) or (bool(scope) and scope != "steady_state")
+        source = _STEADY_SOURCE_READER_WINDOW
+    else:
+        selection = run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {}
+        selected = selection or {}
+        fell_back = bool(selection.get("fell_back_to_full_trace"))
+        source = _STEADY_SOURCE_SPLIT_CHUNK
+    return {
+        "requested_mode": str(requested_mode or ""),
+        "source": source,
+        "selected": selected if isinstance(selected, dict) else {"value": selected},
+        "fell_back_to_full_trace": fell_back,
+        "aggregation_scope": scope,
+    }
+
+
+def _build_analysis_meta(
+    result: dict[str, Any],
+    *,
+    route: str,
+    tool: str,
+    requested_mode: str,
+    trace_input: str,
+    duration_sec: float,
+) -> dict[str, Any]:
+    """Assemble the per-run analysis metadata the roofline timeline event carries.
+
+    The TraceLens agent and TraceLens-free reader share this envelope. ``route``
+    records the routing policy (``agent`` / ``bypass``), while ``tool`` records
+    the implementation that ran (``tracelens`` / ``bypass``). Tool-specific
+    analysis output lands under ``route_ext`` rather than widening the shared
+    envelope.
+
+    Args:
+        result: The analysis tool's result dict.
+        route: The requested analysis route (``agent`` / ``bypass``).
+        tool: The tool that actually ran (``tracelens`` / ``bypass``).
+        requested_mode: The steady-state mode asked of the tool.
+        trace_input: The trace the run analyzed.
+        duration_sec: Wall-clock seconds the subprocess took.
+
+    Returns:
+        The analysis metadata dict.
+    """
+    run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
+    steps = run_meta.get("steps")
+    return {
+        "route": str(route or ""),
+        "tool": str(tool or ""),
+        "steady_state_mode": str(requested_mode or ""),
+        "trace_input": str(trace_input or ""),
+        "duration_sec": duration_sec,
+        "steady_state": _analysis_steady_state(result, requested_mode=requested_mode, tool=tool),
+        "preflight": run_meta.get("preflight") if isinstance(run_meta.get("preflight"), dict) else {},
+        "split": run_meta.get("split") if isinstance(run_meta.get("split"), dict) else {},
+        "selection": run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {},
+        "steps": [row for row in steps if isinstance(row, dict)] if isinstance(steps, list) else [],
+        "route_ext": run_meta.get("route_ext") if isinstance(run_meta.get("route_ext"), dict) else {},
+    }
 
 
 async def trace_analyze_handler(
@@ -5850,15 +5954,27 @@ async def trace_analyze_handler(
                 trace_report_path=str(report_path or ""),
             )
 
+        # Route and tool are one-to-one after the no-LLM TraceLens route was
+        # removed: agent runs TraceLens, while bypass runs its standalone reader.
+        _disc_route = analysis_route
+        _disc_tool = "bypass" if is_bypass else "tracelens"
+        _disc_source = _disc_tool
+        # Surfaced for the caller's SBD V6 roofline event, which records the run
+        # as it happens rather than re-deriving it at export time.
+        result["analysis_meta"] = _build_analysis_meta(
+            result,
+            route=_disc_route,
+            tool=_disc_tool,
+            requested_mode=steady_state_mode,
+            trace_input=str(trace_input),
+            duration_sec=_disc_duration_sec,
+        )
+
         # Record hot-kernel discovery provenance (best-effort).
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
-            # Discovery source = the route that ran: the TraceLens-free bypass
-            # backend, or the TraceLens LLM route.
-            _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
-            _disc_source = "bypass" if (_orch_mode == "bypass" or is_bypass) else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
                 source=_disc_source,
@@ -8090,7 +8206,7 @@ async def integrate_handler(
         ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
         ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
     """
-    from ..actions.executors.baseline import BaselineExecutor
+    from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
@@ -8272,6 +8388,9 @@ async def integrate_handler(
             # already-anchored reference. It runs eval for the kernel accuracy
             # gate but never establishes a replacement quality reference.
             "quality_ref_exempt": True,
+            # A sub-step of the KERNEL phase's own event, not a dispatched
+            # measurement, so it leaves no baseline event.
+            SBD_INNER_STEP_PARAM: True,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )

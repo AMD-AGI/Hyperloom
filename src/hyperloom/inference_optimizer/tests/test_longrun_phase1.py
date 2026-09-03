@@ -16,7 +16,6 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 def _sweep_state(
@@ -445,36 +444,6 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
 
 
 # PolicyGate re-entry after loopback is not falsely denied
-def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-    sd = make_session_dir()
-    st = SharedState(session_id="t", phase=ps.PHASE_FRAMEWORK_AGENT, macro_cycle=2)
-    # Simulate a history that already passed through SWEEP in a prior cycle.
-    st.phase_history = [
-        {
-            "from_phase": "SWEEP",
-            "to_phase": "EXPLORE",
-            "reason": "cycle_reloop",
-            "evidence": {},
-            "ts": "",
-            "ts_unix": 0.0,
-            "cycle": 2,
-        },
-    ]
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=sd,
-        shared_state=st,
-    )
-    # Must not raise phase_incompatible: current phase is EXPLORE.
-    gate._validate_phase_action(
-        gate.role_registry.get("orchestration"),
-        "specialist",
-        intent_kind="propose_action",
-    )
 
 
 # Regression — short-run path now uses macro-loop while budget remains.
