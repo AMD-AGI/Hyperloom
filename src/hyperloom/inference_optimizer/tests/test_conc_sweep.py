@@ -1550,7 +1550,7 @@ class TestTheChartFollowsTheMode:
     def test_agentx_reads_interactivity_and_total(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        axes = plot.resolve_axes("agentx", tp_eff=8.0)
+        axes = plot._resolve_axes("agentx", tp_eff=8.0)
         xs, ys = plot._arm_series(self._payload("agentx")["baseline"]["points"], 8.0, axes)
         assert xs == [pytest.approx(447.2)]
         assert ys == [pytest.approx(25984.8 / 8.0)]
@@ -1560,7 +1560,7 @@ class TestTheChartFollowsTheMode:
     def test_synthetic_keeps_the_output_pair(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        axes = plot.resolve_axes("synthetic", tp_eff=8.0)
+        axes = plot._resolve_axes("synthetic", tp_eff=8.0)
         xs, ys = plot._arm_series(self._payload("synthetic")["baseline"]["points"], 8.0, axes)
         assert xs == [pytest.approx(183.44 / 8)]
         assert ys == [pytest.approx(183.44 / 8.0)]
@@ -1568,13 +1568,13 @@ class TestTheChartFollowsTheMode:
     def test_an_unset_mode_reads_as_synthetic(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        assert plot.resolve_axes("", tp_eff=1.0).agentic is False
-        assert plot.resolve_axes(None, tp_eff=1.0).agentic is False
+        assert plot._resolve_axes("", tp_eff=1.0).agentic is False
+        assert plot._resolve_axes(None, tp_eff=1.0).agentic is False
 
     def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        axes = plot.resolve_axes("agentx", tp_eff=1.0)
+        axes = plot._resolve_axes("agentx", tp_eff=1.0)
         points = [
             {"conc": 8, "total_token_throughput": 25984.8},
             {"conc": 4, "total_token_throughput": 20000.0, "intvty_p90": 500.0},
@@ -1614,7 +1614,7 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     from hyperloom.orchestrator.kernel import conc_sweep_plot
 
-    axes = conc_sweep_plot.resolve_axes("synthetic", 2.0)
+    axes = conc_sweep_plot._resolve_axes("synthetic", 2.0)
     xs, ys = conc_sweep_plot._arm_series(
         [
             {"conc": 4, "output_throughput": 800.0},

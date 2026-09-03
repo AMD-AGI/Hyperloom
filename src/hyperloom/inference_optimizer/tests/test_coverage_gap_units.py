@@ -1100,7 +1100,7 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
     assert plot._load_payload(payload) is payload
     assert plot._load_payload(payload_file) == payload
 
-    axes = plot.resolve_axes("synthetic", 2.0)
+    axes = plot._resolve_axes("synthetic", 2.0)
     xs, ys = plot._arm_series(payload["baseline"]["points"], 2.0, axes)
     assert xs == [200.0, 300.0]
     assert ys == [400.0, 300.0]
