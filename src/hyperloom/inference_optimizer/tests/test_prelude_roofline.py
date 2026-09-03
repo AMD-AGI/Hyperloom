@@ -833,3 +833,81 @@ async def test_kernel_entry_reprofiles_when_backend_config_changed_at_same_tput(
     coord.sub = _StubSub(coord.shared_state)
     await coord._maybe_reprofile_for_kernel()
     assert coord.sub.tasks_run == []
+
+
+class _LatchBus:
+    """Collects bus messages so the nomination entry can run to completion."""
+
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+
+    async def append_and_seq(self, message: Any) -> None:
+        self.sent.append(message)
+
+
+async def _latch_after(coord: Coordinator, monkeypatch, handler) -> Any:
+    """Run the nomination entry with ``handler`` and return the latch marker."""
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    coord.shared_state.last_trace_analyze = {"candidates_path": "/tmp/kernel_candidates.json"}
+    coord.shared_state.kernel_auto_pass_cycle = None
+    monkeypatch.setattr(krh, "run_optimization_handler", handler)
+    coord.phase_kernel.bus = _LatchBus()
+
+    await coord.phase_kernel._run_kernel_opt_nomination()
+
+    return coord.shared_state.kernel_auto_pass_cycle
+
+
+@pytest.mark.asyncio
+async def test_a_completed_auto_pass_latches_the_cycle(coord: Coordinator, monkeypatch):
+    """An empty nomination still counts: that is the case the phase hung on."""
+
+    async def _handler(_payload, **_kwargs):
+        return {"status": "complete", "auto": True, "queued": 0}
+
+    assert await _latch_after(coord, monkeypatch, _handler) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_auto_pass_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
+    """A failure answered for no kernel, so retryable ones must stay pending.
+
+    A failure without a kernel_id writes no attempt ledger either, so latching
+    here would declare the cycle done with nothing to contradict it.
+    """
+
+    async def _handler(_payload, **_kwargs):
+        return {"status": "failed", "auto": True, "queued": 0, "error": "rc=2"}
+
+    assert await _latch_after(coord, monkeypatch, _handler) is None
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_auto_pass_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
+    """A deadline kill is not a pass that had its say."""
+
+    async def _handler(_payload, **_kwargs):
+        return {"status": "timeout", "auto": True, "queued": 0}
+
+    assert await _latch_after(coord, monkeypatch, _handler) is None
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_selector_path_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
+    """auto=false is the baseline route and never ran a nomination at all."""
+
+    async def _handler(_payload, **_kwargs):
+        return {"status": "ok", "kernel_id": "k001"}
+
+    assert await _latch_after(coord, monkeypatch, _handler) is None
+
+
+@pytest.mark.asyncio
+async def test_a_raising_handler_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
+    """The entry still reports a failed result, but it answered for nothing."""
+
+    async def _handler(_payload, **_kwargs):
+        raise RuntimeError("boom")
+
+    assert await _latch_after(coord, monkeypatch, _handler) is None

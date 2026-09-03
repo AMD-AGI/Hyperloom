@@ -3758,12 +3758,15 @@ class KernelPhase(PhaseHandler):
                 "error_class": exc.__class__.__name__,
                 "error": repr(exc),
             }
-        finally:
-            # Stamped even for an empty nomination or a failure: a hot kernel
-            # forge looked at and passed over leaves no ledger row and stays
-            # "untried" forever, so the phase-exit predicate never goes quiet
-            # unless a completed pass answers for it (design doc s9). This is
-            # the one place that records the pass ran this cycle.
+        # Only a completed auto nomination pass answers for the kernels it looked
+        # at and passed over: those leave no ledger row and would otherwise stay
+        # untried forever, so the phase-exit predicate never goes quiet without
+        # it. An empty nomination still counts -- that is the case the phase used
+        # to hang on. A failure, a timeout and a skip answer for nothing, and the
+        # legacy selector path is not a nomination at all; latching on any of
+        # those declares the cycle done while retryable kernels remain, and a
+        # failure without a kernel_id writes no attempt ledger to contradict it.
+        if isinstance(result, dict) and result.get("auto") is True and result.get("status") == "complete":
             from .machine_state import mark_kernel_auto_pass_complete
 
             mark_kernel_auto_pass_complete(self.shared_state)
@@ -4533,9 +4536,17 @@ class KernelPhase(PhaseHandler):
         from ..kernel._kernel_decisions import enqueue_nominated_patch
         from ..kernel.nomination_result import parse_outcome
 
+        from ..kernel.request_handlers import _summarize_dropped_patches
+
         outcome = parse_outcome(result)
+        # Reported before the empty check: an envelope whose every entry was
+        # refused otherwise reads exactly like a run that kept nothing.
+        refused = _summarize_dropped_patches(outcome.dropped)
         if outcome.is_empty:
-            log.info("KERNEL entry: fusion KEPT but nominated no usable sibling; nothing to queue")
+            log.info(
+                "KERNEL entry: fusion KEPT but nominated no usable sibling; nothing to queue (refused=%s)",
+                refused or "none",
+            )
             return
         try:
             keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0"))
@@ -4551,9 +4562,10 @@ class KernelPhase(PhaseHandler):
             if record is not None:
                 queued += 1
         log.info(
-            "KERNEL entry: queued %d/%d fusion sibling(s) for SWEEP-entry integrate",
+            "KERNEL entry: queued %d/%d fusion sibling(s) for SWEEP-entry integrate (refused=%s)",
             queued,
             len(outcome.patches),
+            refused or "none",
         )
         try:
             self.shared_state.save(self.session_dir)

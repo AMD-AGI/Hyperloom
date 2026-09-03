@@ -6355,7 +6355,26 @@ def _write_nomination_request(
     return nomination_request.write_request(Path(session_dir), request)
 
 
-def _land_nomination_outcome(result: dict, *, session_dir: Path) -> int:
+def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
+    """Count dropped patch entries by reason, logging each one as it is counted.
+
+    ``parse_outcome`` names why every unusable entry was refused, but a reason
+    nobody reports is indistinguishable from forge never having offered the
+    entry at all.
+    """
+    counts: dict[str, int] = {}
+    for entry in dropped or ():
+        reason = str(getattr(entry, "reason", "") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+        log.warning(
+            "nomination landing: refused patch kernel=%s reason=%s",
+            str(getattr(entry, "kernel_name", "") or "<unnamed>"),
+            reason,
+        )
+    return counts
+
+
+def _land_nomination_outcome(result: dict, *, session_dir: Path) -> tuple[int, dict[str, int]]:
     """Queue every rewrite sibling forge nominated for the shared integrate lane.
 
     The consumer half of the ``--auto`` contract, mirroring ``_integrate_fusion``
@@ -6375,13 +6394,17 @@ def _land_nomination_outcome(result: dict, *, session_dir: Path) -> int:
         session_dir: Session directory whose SharedState the records live in.
 
     Returns:
-        The number of siblings queued.
+        The number of siblings queued, and a count per named drop reason. The
+        drops are reported even when nothing survived: an envelope whose every
+        entry was malformed otherwise reads exactly like a clean empty
+        nomination.
     """
     from ..state.shared_state import SharedState
 
     outcome = parse_outcome(result)
+    dropped = _summarize_dropped_patches(outcome.dropped)
     if outcome.is_empty:
-        return 0
+        return 0, dropped
     state = SharedState.load_or_init(session_dir)
     queued = 0
     for patch in outcome.patches:
@@ -6392,7 +6415,7 @@ def _land_nomination_outcome(result: dict, *, session_dir: Path) -> int:
         state.save(session_dir)
     except Exception:  # noqa: BLE001 - best-effort persist; the drain reloads state
         log.exception("nomination landing: could not persist queued patches")
-    return queued
+    return queued, dropped
 
 
 async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> HandlerResult:
@@ -6507,7 +6530,7 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
             "queued": 0,
             "error": forge_error,
         }
-    queued = _land_nomination_outcome(result, session_dir=session_dir)
+    queued, dropped = _land_nomination_outcome(result, session_dir=session_dir)
     nomination = result.get("nomination") if isinstance(result, dict) else None
     # GUARD (12g): forge nominated N siblings that each land as their own pending
     # record. This result must NOT carry a single-kernel identity (kernel_id /
@@ -6519,6 +6542,9 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         "status": "complete",
         "auto": True,
         "queued": queued,
+        # Named refusals ride on the result so the report and the operator can
+        # tell a malformed envelope from one that nominated nothing.
+        "dropped": dropped,
         "nomination": nomination if isinstance(nomination, dict) else {},
     }
 

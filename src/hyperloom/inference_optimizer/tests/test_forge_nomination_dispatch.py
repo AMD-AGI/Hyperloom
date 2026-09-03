@@ -330,6 +330,7 @@ def test_auto_true_one_candidate_inside_workspace_lets_the_run_proceed(tmp_path,
         "status": "complete",
         "auto": True,
         "queued": 0,
+        "dropped": {},
         "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 0},
     }
     assert (tmp_path / "forge_candidate_manifest.json").exists()
@@ -397,6 +398,7 @@ def test_auto_true_symlinked_workspace_root_does_not_produce_a_false_refusal(tmp
         "status": "complete",
         "auto": True,
         "queued": 0,
+        "dropped": {},
         "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 0},
     }
     assert (real_root / "forge_candidate_manifest.json").exists()
@@ -488,3 +490,80 @@ def test_auto_true_a_timed_out_run_queues_nothing_even_when_it_returns_patches(t
     assert result["queued"] == 0
     state = SharedState.load_or_init(tmp_path)
     assert state.pending_kernel_integrations == {}
+
+
+def test_auto_true_reports_named_refusals_alongside_the_queued_siblings(tmp_path, monkeypatch):
+    """A refused sibling must be visible, not absorbed into a lower queued count."""
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    good = _patch_entry("k001", micro=1.5)
+    envelope = _canned_envelope(
+        [
+            good,
+            # Same name as the keeper: collapses to the stronger claim.
+            {**good, "micro_speedup": 1.1},
+            # No patch_path: nothing to apply.
+            {"kernel_name": "k002_kernel", "target_file": "/repo/k002.py"},
+            "not-an-object",
+        ]
+    )
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: envelope)
+
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
+
+    assert result["status"] == "complete"
+    assert result["queued"] == 1
+    assert result["dropped"] == {
+        "duplicate_kernel_name": 1,
+        "missing_patch_path": 1,
+        "not_an_object": 1,
+    }
+
+
+def test_auto_true_an_all_malformed_envelope_is_not_a_clean_empty_nomination(tmp_path, monkeypatch):
+    """Every entry refused looks identical to "nominated nothing" without this.
+
+    ``queued == 0`` is the same number either way, so the named reasons are the
+    only thing that tells an operator the envelope was broken.
+    """
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    envelope = _canned_envelope([{"patch_path": "/repo/x.patch", "target_file": "/repo/x.py"}])
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: envelope)
+
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
+
+    assert result["status"] == "complete"
+    assert result["queued"] == 0
+    assert result["dropped"] == {"missing_kernel_name": 1}
+
+
+def test_auto_true_a_clean_empty_nomination_reports_no_refusals(tmp_path, monkeypatch):
+    """The other side of the same signal: nothing offered, nothing refused."""
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
+
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
+
+    assert result["status"] == "complete"
+    assert result["queued"] == 0
+    assert result["dropped"] == {}
