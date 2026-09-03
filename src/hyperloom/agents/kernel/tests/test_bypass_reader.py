@@ -668,6 +668,29 @@ def test_complete_malformed_object_resyncs_to_later_event():
     assert "malformed after 0 event(s)" in errors[0]
 
 
+def test_brace_inside_a_string_split_across_chunks_is_not_an_object_end():
+    """A refill must resume mid-string rather than close on a quoted brace.
+
+    The decoder reports this partial object as an error positioned at the
+    opening quote, well before the buffer end, so "the failure is not at the
+    end" cannot be used to conclude the input is corrupt.
+    """
+    good = {"cat": "kernel", "name": "a}b", "ts": 1}
+    payload = json.dumps({"traceEvents": [good]}).encode("utf-8")
+    errors: list[str] = []
+    assert list(reader.stream_events(io.BytesIO(payload), bufsize=payload.index(b"a}b") + 1, errors=errors)) == [good]
+    assert errors == []
+
+
+def test_unterminated_string_at_eof_reports_truncation_not_corruption():
+    """An object cut off inside a string is truncated, not malformed."""
+    payload = b'{"traceEvents": [{"cat": "kernel", "name": "abc'
+    errors: list[str] = []
+    assert list(reader.stream_events(io.BytesIO(payload), bufsize=8, errors=errors)) == []
+    assert len(errors) == 1
+    assert "truncated after 0 event(s)" in errors[0]
+
+
 def test_trace_prefix_growth_is_bounded(monkeypatch):
     """A missing late traceEvents key must not grow the prefix indefinitely."""
     monkeypatch.setattr(reader, "_MAX_TRACE_PREFIX_CHARS", 32)
