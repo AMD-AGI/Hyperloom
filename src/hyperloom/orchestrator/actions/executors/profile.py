@@ -501,20 +501,22 @@ def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p, trace_dir))
 
 
-_TRACE_RANK_RE = re.compile(
-    r"(?:^|[-_.])(?:tp|rank)[-_]?(\d+)(?=[-_.]|$)",
-    re.IGNORECASE,
+_TRACE_RANK_RES = (
+    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[-_.])tp[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
 )
 
 
 def _trace_rank(path: Path) -> int | None:
     """Return the rank encoded in a framework trace path, when present."""
-    match = _TRACE_RANK_RE.search(path.name)
-    if match:
-        return int(match.group(1))
-    parent_match = _TRACE_RANK_RE.fullmatch(path.parent.name)
-    if parent_match:
-        return int(parent_match.group(1))
+    for pattern in _TRACE_RANK_RES:
+        match = pattern.search(path.name)
+        if match:
+            return int(match.group(1))
+    for pattern in _TRACE_RANK_RES:
+        parent_match = pattern.fullmatch(path.parent.name)
+        if parent_match:
+            return int(parent_match.group(1))
     return None
 
 
