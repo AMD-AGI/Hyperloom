@@ -160,3 +160,61 @@ async def test_an_empty_nomination_queues_nothing_and_still_reports(phase, monke
     assert _queued_on_disk(phase.session_dir) == []
     (message,) = phase.bus.sent
     assert message.payload["result"]["status"] == "complete"
+
+
+def _staged_workspaces(monkeypatch) -> list[str]:
+    """Record the workspace each submit_auto call would stage into."""
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    seen: list[str] = []
+
+    def _fake(**kwargs):
+        seen.append(str(kwargs["output_dir"]))
+        return _envelope([])
+
+    monkeypatch.setattr(forge_submit, "submit_auto", _fake)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_each_attempt_stages_into_its_own_directory(phase, monkeypatch):
+    """Staging retains its worktree and refuses to reuse a path.
+
+    A directory fixed per session therefore fails every cycle after the first,
+    before the subprocess even starts, and a retry after a mid-run failure fails
+    the same way.
+    """
+    seen = _staged_workspaces(monkeypatch)
+
+    await phase._run_kernel_opt_nomination()
+    phase.shared_state.macro_cycle = 1
+    phase.shared_state.save(phase.session_dir)
+    await phase._run_kernel_opt_nomination()
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+
+
+@pytest.mark.asyncio
+async def test_two_attempts_in_one_cycle_do_not_collide(phase, monkeypatch):
+    """A retry within a cycle needs its own directory too."""
+    seen = _staged_workspaces(monkeypatch)
+
+    await phase._run_kernel_opt_nomination()
+    await phase._run_kernel_opt_nomination()
+
+    assert seen[0] != seen[1]
+
+
+@pytest.mark.asyncio
+async def test_the_attempt_directory_names_its_cycle(phase, monkeypatch):
+    """Grouped by cycle so a session's attempts stay readable on disk."""
+    seen = _staged_workspaces(monkeypatch)
+    # The handler reads the persisted state, which is where the loop stamps the
+    # cycle; uniqueness itself comes from the attempt id, not this number.
+    phase.shared_state.macro_cycle = 4
+    phase.shared_state.save(phase.session_dir)
+
+    await phase._run_kernel_opt_nomination()
+
+    assert "cycle-4" in seen[0]

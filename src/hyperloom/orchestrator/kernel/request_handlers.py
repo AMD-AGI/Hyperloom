@@ -6416,6 +6416,7 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         the run could not reach a campaign.
     """
     import asyncio
+    import uuid
 
     from ..state.shared_state import SharedState
     from ...agents.kernel.tools.backends import forge_submit
@@ -6469,7 +6470,15 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
             "error": str(error),
         }
 
-    output_dir = kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name)) / "auto"
+    # Unique per attempt. Staging retains its worktree for inspection and refuses
+    # to reuse a path, so a fixed directory fails the next cycle -- and any retry
+    # within one -- before the subprocess starts. Grouped by cycle to stay readable.
+    output_dir = (
+        kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name))
+        / "auto"
+        / f"cycle-{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        / f"attempt-{uuid.uuid4().hex[:12]}"
+    )
     target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
 
     # submit_auto blocks on subprocess.communicate for the whole forge run; run it
