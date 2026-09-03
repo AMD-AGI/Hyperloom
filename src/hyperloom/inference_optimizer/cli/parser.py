@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from ..gpu_types import GPU_TYPE_CHOICES
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.llm_config import provider_model_defaults
 from hyperloom.orchestrator.roles.agent_role import (
@@ -274,7 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        choices=["mi300x", "mi308x", "mi325x", "mi355x"],
+        choices=list(GPU_TYPE_CHOICES),
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
         "wins when both are present and disagree; a WARN is "
@@ -282,7 +283,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "verbatim only when the probe fails (CPU sandbox / no "
         "rocm-smi). Magpie runner_type is derived separately; "
         "mi308x and mi325x currently run with mi300x runner scripts because "
-        "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
+        "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts, "
+        "and every gfx11 choice runs the shared gfx11 scripts. Each choice is "
+        "still its own recipe-KB identity, so cards that share a runner script "
+        "never share learned recipes.",
     )
     opt.add_argument(
         "--framework",

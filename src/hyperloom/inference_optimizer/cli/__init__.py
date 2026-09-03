@@ -1931,8 +1931,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         if gpu_type and runner_gpu_type != gpu_type:
             print(
                 f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
-                f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
-                f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
+                f"runner_type (Magpie has no sglang_{gpu_type}.sh / "
+                f"vllm_{gpu_type}.sh; the {runner_gpu_type} scripts cover it)",
                 file=sys.stderr,
             )
         args.gpu_type = gpu_type or None
