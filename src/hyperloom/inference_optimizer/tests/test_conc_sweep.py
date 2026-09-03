@@ -1655,8 +1655,8 @@ class TestTheChartFollowsTheGradedAxis:
 
 
 class TestTheRooflineNeedsBothItsAxisAndARealShape:
-    """``_ceiling_series`` returns an output-throughput bound in the output
-    axis pair's units, computed from the session's ISL/OSL."""
+    """``_ceiling_series`` returns a decode-only output-throughput bound, in the
+    output pair's units, computed from the session's ISL/OSL."""
 
     def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
@@ -1676,28 +1676,23 @@ class TestTheRooflineNeedsBothItsAxisAndARealShape:
             "optimized": {"points": []},
         }
 
-    def _ceiling_calls(self, tmp_path: Path, monkeypatch, payload: dict[str, Any]) -> list[Any]:
-        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+    def _drew_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> bool:
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
 
-        calls: list[Any] = []
+        calls = _install_fake_matplotlib(monkeypatch)
+        out_path = tmp_path / "curve.png"
+        assert render_conc_sweep_curve(payload, out_path, tp=8, draw_ceiling=True) == out_path
+        return any("roofline" in str(kwargs.get("label", "")).lower() for _args, kwargs in calls["plots"])
 
-        def _spy(ceiling_data, tp_eff):
-            calls.append(ceiling_data)
-            return [], []
+    def test_a_synthetic_output_chart_draws_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Positive control: without it the two denials below prove nothing."""
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "output_throughput")) is True
 
-        monkeypatch.setattr(plot, "_ceiling_series", _spy)
-        assert plot.render_conc_sweep_curve(payload, tmp_path / "c.png", tp=8, draw_ceiling=True) is not None
-        return calls
+    def test_a_total_y_axis_is_not_the_bounds_axis(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "total_token_throughput")) is False
 
-    def test_a_synthetic_output_chart_draws_it(self, tmp_path: Path, monkeypatch):
-        """Positive control: the spy fires when both conditions hold."""
-        assert self._ceiling_calls(tmp_path, monkeypatch, self._payload("synthetic", "output_throughput"))
-
-    def test_a_total_y_axis_is_not_the_bounds_axis(self, tmp_path: Path, monkeypatch):
-        assert self._ceiling_calls(tmp_path, monkeypatch, self._payload("synthetic", "total_token_throughput")) == []
-
-    def test_an_agentic_replay_has_no_real_isl_to_bound(self, tmp_path: Path, monkeypatch):
-        assert self._ceiling_calls(tmp_path, monkeypatch, self._payload("agentx", "output_throughput")) == []
+    def test_an_agentic_replay_has_no_real_isl_to_bound(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("agentx", "output_throughput")) is False
 
 
 def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
@@ -1763,9 +1758,12 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     assert conc_sweep_plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, 1.0) == ([], [])
 
 
-def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Render through a stand-in pyplot and return what the chart asked it to do.
 
+    Lets a chart's decisions be asserted where matplotlib is not installed,
+    which is most CI shards.
+    """
     calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
 
     class _FakePatch:
@@ -1833,7 +1831,13 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
     fake_matplotlib.pyplot = fake_pyplot
     monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
     monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+    return calls
 
+
+def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    calls = _install_fake_matplotlib(monkeypatch)
     payload = {
         "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
         "optimized": {"points": [{"conc": 8, "output_throughput": 1200.0}]},
