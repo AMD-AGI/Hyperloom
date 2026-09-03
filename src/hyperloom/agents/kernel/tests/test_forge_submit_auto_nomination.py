@@ -1012,3 +1012,35 @@ def test_a_multi_file_patch_moves_every_write_path(tmp_path, monkeypatch):
     # The producer's artifacts are not tree paths and must not be moved.
     assert patch["patch_path"] == str(tmp_path / "attempt" / "forge_experiments" / "a.patch")
     assert patch["snapshot_dir"] == str(tmp_path / "attempt" / "forge_experiments" / "snap")
+
+
+def test_kernel_backend_env_shim_resolves_its_sibling_import():
+    """``_apply_kernel_backend_env`` must not defer a sibling-directory import.
+
+    The backends dir is on ``sys.path`` only while this module is loading, so a
+    function-scope ``from _llm_stability_env import ...`` raises
+    ``ModuleNotFoundError`` the first time the shim actually runs. The named
+    path never calls it; ``--auto`` does, which is why it surfaced only there.
+
+    Run in a CHILD process importing ``forge_submit`` alone: in-process this
+    passes either way, because a sibling tool module (``forge_fusion``) leaves
+    the same directory importable for whoever runs next. The e2e failure was a
+    fresh interpreter, and so is this.
+    """
+    root = Path(forge_submit.__file__).resolve().parents[5]
+    script = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from hyperloom.agents.kernel.tools.backends import forge_submit as fs\n"
+        "env = {}\n"
+        "fs._apply_kernel_backend_env(env)\n"
+        "print(env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'), env.get('DISABLE_AUTOUPDATER'))\n"
+    ) % str(root)
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"shim failed in a fresh interpreter:\n{proc.stderr}"
+    # The stability knobs are what the deferred import was there to apply.
+    assert proc.stdout.split() == ["1", "1"]

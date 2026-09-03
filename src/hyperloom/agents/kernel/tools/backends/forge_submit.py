@@ -48,6 +48,7 @@ _BACKENDS_DIR_INSERTED = _BACKENDS_DIR not in sys.path
 if _BACKENDS_DIR_INSERTED:
     sys.path.insert(0, _BACKENDS_DIR)
 import _flydsl_rewrite  # noqa: E402
+from _llm_stability_env import apply_llm_stability_env  # noqa: E402
 
 if _BACKENDS_DIR_INSERTED:
     sys.path.remove(_BACKENDS_DIR)
@@ -1871,8 +1872,8 @@ def _apply_kernel_backend_env(env: dict) -> None:
             env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
     # KernelBackend-hung mitigation: bound the claude CLI's own request timeout and cut
     # non-essential traffic / autoupdate that can block in headless containers.
-    from _llm_stability_env import apply_llm_stability_env
-
+    # Imported at module scope: the sibling directory is only on ``sys.path``
+    # during module load, so a deferred import here resolves nothing.
     apply_llm_stability_env(env)
     # The forge loop spends against the gateway for the whole of its run, and
     # every agent it drives inherits this env, so without a tag here that spend
