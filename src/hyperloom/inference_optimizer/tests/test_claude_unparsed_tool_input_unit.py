@@ -125,29 +125,14 @@ _WRAPPER_RAW = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"
 _WRAPPER_EMIT = {"__unparsedToolInput": {"raw": _WRAPPER_RAW, "len": len(_WRAPPER_RAW)}}
 
 
-async def _sdk_tools_call(arguments: dict[str, Any]) -> Any:
-    """Call emit_intent through the real SDK MCP server, including schema checks."""
+def _emit_intent_server() -> Any:
+    """The in-process MCP server, or a skip when the SDK is not installed."""
     pytest.importorskip("claude_agent_sdk")
     pytest.importorskip("mcp")
-    from mcp.types import CallToolRequest, CallToolRequestParams
-
     cfg = build_emit_intent_server()
     if cfg is None:
         pytest.skip("in-process MCP helpers unavailable")
-    # mcp.Server renamed the public dict to `_request_handlers` in some
-    # versions; both spellings reach the same jsonschema-then-handler path.
-    server = cfg["instance"]
-    handlers = getattr(server, "request_handlers", None) or getattr(server, "_request_handlers", None)
-    if not handlers:
-        pytest.skip("MCP server has no CallToolRequest handler map")
-    handler = handlers[CallToolRequest]
-    result = await handler(
-        CallToolRequest(
-            method="tools/call",
-            params=CallToolRequestParams(name=EMIT_INTENT_TOOL_NAME, arguments=arguments),
-        )
-    )
-    return getattr(result, "root", result)
+    return cfg["instance"]
 
 
 @pytest.mark.asyncio
@@ -165,7 +150,27 @@ async def test_sdk_tools_call_schema_accepts_native_and_wrapper(
     expect_error: bool,
     text_substr: str,
 ) -> None:
-    """jsonschema on tools/call runs before the handler; both legal shapes must pass it."""
-    result = await _sdk_tools_call(arguments)
+    """The tool schema is validated before the handler runs, so a shape the
+    handler accepts but the schema rejects never reaches it. Driven through a
+    real client session rather than the handler directly, which is the only
+    way that ordering is exercised."""
+    memory = pytest.importorskip("mcp.shared.memory")
+    server = _emit_intent_server()
+    async with memory.create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(EMIT_INTENT_TOOL_NAME, arguments)
     assert result.isError is expect_error
     assert text_substr in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_broadcast_schema_offers_both_shapes() -> None:
+    """tools/list is what the model reads, so the wrapper alternative has to
+    survive into the advertised schema and say it is internal."""
+    memory = pytest.importorskip("mcp.shared.memory")
+    server = _emit_intent_server()
+    async with memory.create_connected_server_and_client_session(server) as session:
+        tools = await session.list_tools()
+    schema = next(t.inputSchema for t in tools.tools if t.name == EMIT_INTENT_TOOL_NAME)
+    assert {"required": ["intent_type", "payload"]} in schema["anyOf"]
+    assert {"required": ["__unparsedToolInput"]} in schema["anyOf"]
+    assert "Never emit this deliberately" in schema["properties"]["__unparsedToolInput"]["description"]
