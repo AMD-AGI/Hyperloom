@@ -46,10 +46,10 @@ class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue a ``conc_sweep`` task on SWEEP entry.
+        """Auto-enqueue the ``conc_sweep`` task on SWEEP entry.
 
-        The automatic phase path runs the baseline-vs-current concurrency curve
-        directly; the full workload ``sweep`` remains a manual executor.
+        It is the phase's only action: the baseline-vs-current concurrency
+        curve, on the ladder this workload sweeps.
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -216,9 +216,6 @@ class SweepPhase(PhaseHandler):
                 params["concs"],
                 params["total_budget_sec"],
             )
-        # Stamp evidence so PolicyGate's sweep_phase_singleton denies a later
-        # LLM full-workload ``sweep`` (conc_sweep already ran on SWEEP entry).
-        self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 
     def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:

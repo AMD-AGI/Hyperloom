@@ -1241,13 +1241,15 @@ def _reset_state_file(session_dir: Path) -> None:
 # layering (see AGENTX_EXPLORE_TIMEOUT_CEILING_SEC), which is the real fix.
 #
 # The total is that measured round times the ladder: seven agentic rungs on each
-# of the baseline and optimized arms, so fourteen. It is a ceiling rather than a
-# reservation -- the SWEEP phase clamps it to the session's own remaining time
-# before the task is enqueued, and an exhausted budget skips the rungs it cannot
-# pay for rather than failing the sweep. Sizing it below the ladder would instead
-# truncate every run by default.
+# of the baseline and optimized arms, so fourteen runs. It is a ceiling rather
+# than a reservation -- the SWEEP phase clamps it to the session's own remaining
+# time before the task is enqueued, and an exhausted budget skips the rungs it
+# cannot pay for rather than failing the sweep. Sizing it below the ladder would
+# instead truncate every run by default. The per-variant cap above stays higher
+# than the measured round: it bounds a hung one, it does not predict a healthy
+# one.
 _AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
-_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 93600  # 26 h: ~111 min x 14 rungs
+_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 93600  # 26 h: ~111 min x 14 runs
 
 
 def _preflight_agentx_backend(args: argparse.Namespace) -> None:
