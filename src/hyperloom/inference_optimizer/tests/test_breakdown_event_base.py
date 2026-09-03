@@ -94,6 +94,18 @@ def test_a_fragment_key_refuses_an_empty_natural_id():
         rec.fragment_key(_EID, "lane", "")
 
 
+def test_a_fragment_key_refuses_the_separator_inside_a_value():
+    """The segments are joined on it, so a value carrying one is ambiguous.
+
+    ``("geak:rebench", "3")`` and ``("geak", "rebench:3")`` join to the same
+    string, and the fragment filename cannot separate them either: its digest
+    is taken over the joined key. The rows would deep-merge in place.
+    """
+    with pytest.raises(ValueError):
+        rec.fragment_key(_EID, "round", "geak:rebench", "3")
+    assert rec.fragment_key(_EID, "round", "geak", "rebench-3") == f"{_EID}:round:geak:rebench-3"
+
+
 # --- the sink --------------------------------------------------------------
 
 

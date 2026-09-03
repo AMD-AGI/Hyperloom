@@ -163,10 +163,9 @@ def fragment_key(event: str, row_type: str, *natural_ids: str) -> str:
         *natural_ids (str): The row's own identity, in narrowing order -- an
             attempt id, a task id plus a run index, whatever makes the row
             unique within its section for this event. Values come from the
-            data, so anything non-empty is accepted; the fragment filename is
-            digest-suffixed, so awkward characters cannot collide two keys onto
-            one file. Pass none at all for the event-level fragment, whose key
-            is the bare event id.
+            data, so anything non-empty is accepted except the separator these
+            segments are joined on. Pass none at all for the event-level
+            fragment, whose key is the bare event id.
 
     Returns:
         str: ``{event id}:{row type}:{natural ids...}``, or ``event`` when no
@@ -174,10 +173,13 @@ def fragment_key(event: str, row_type: str, *natural_ids: str) -> str:
 
     Raises:
         ValueError: If ``event`` is not a valid event id, if ``row_type`` is
-            empty or outside ``[a-z0-9_]``, or if any natural id is empty. An
-            empty natural id is rejected rather than tolerated because it makes
-            two distinct rows share a key, and the second one silently merges
-            into the first.
+            empty or outside ``[a-z0-9_]``, or if any natural id is empty or
+            contains the separator. An empty natural id is rejected because it
+            makes two distinct rows share a key, and the second one silently
+            merges into the first. A separator inside a value does the same
+            thing less visibly: ``("a:b", "c")`` and ``("a", "b:c")`` join to
+            one string, and the fragment filename cannot tell them apart
+            either, since its digest is taken over this key.
     """
     parse_event_id(event)
     if not row_type and not natural_ids:
@@ -187,5 +189,10 @@ def fragment_key(event: str, row_type: str, *natural_ids: str) -> str:
         token = str(natural_id if natural_id is not None else "").strip()
         if not token:
             raise ValueError(f"natural id at position {index} must be non-empty for row_type {row_type!r}")
+        if EVENT_ID_SEPARATOR in token:
+            raise ValueError(
+                f"natural id at position {index} must not contain {EVENT_ID_SEPARATOR!r} "
+                f"for row_type {row_type!r}, got {token!r}"
+            )
         segments.append(token)
     return EVENT_ID_SEPARATOR.join(segments)
