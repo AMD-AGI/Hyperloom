@@ -19,7 +19,10 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     run_opportunity_analysis,
 )
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.kernel_rewrite_controller.publisher import published_operator_dirs
+from kernelforge.kernel_rewrite_controller.publisher import (
+    PUBLICATION_FILENAME,
+    published_operator_dirs,
+)
 from kernelforge.kernel_rewrite_controller.recovery import recover_all_task_results
 from kernelforge.kernel_rewrite_controller.scheduler import dispatch_prepared_tasks
 
@@ -104,7 +107,13 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
     patches = published_operator_dirs(layout)
     if patches:
         lines.extend(["## Published Operator Patches", ""])
-        lines.extend(f"- `{path.name}`" for path in patches)
+        for path in patches:
+            try:
+                metadata = json.loads((path / PUBLICATION_FILENAME).read_text(encoding="utf-8"))
+                operator_id = str(metadata.get("operator_id") or path.name)
+            except (OSError, json.JSONDecodeError, AttributeError):
+                operator_id = path.name
+            lines.append(f"- `{operator_id}`")
         lines.append("")
     atomic_write_text(layout.summary_md, "\n".join(lines))
 

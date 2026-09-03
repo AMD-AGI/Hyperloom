@@ -62,7 +62,7 @@ kernel-agent/forge/cycle-<n>/
   result/
     summary.md
     patches/
-      <operator-id>/
+      <encoded-operator-id>/
         change.patch
         report.md
         publication.json
@@ -76,6 +76,10 @@ Only patch directories containing `change.patch`, `report.md`, and a schema-v2
 `publication.json` are eligible for integration. The publication binds the
 patch to its six-dimensional operator identity, source repository, kernel path,
 Controller base commit, and validated Forge commit.
+
+Filesystem directory names percent-encode the canonical ID separators
+(`:` → `%3A`) because some shared filesystems reject colons. The canonical
+operator ID remains unchanged inside `task.json` and `publication.json`.
 
 Hyperloom verifies the publication against configured patch roots and the
 Controller-entry Git baseline. It then applies patches by operator directory

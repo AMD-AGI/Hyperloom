@@ -11,6 +11,7 @@ import pytest
 
 from kernelforge.kernel_rewrite_controller import ControllerLayout, load_task
 from kernelforge.kernel_rewrite_controller import publisher
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 
 
 def _publication(task_dir: Path, best_commit: str, patch: str):
@@ -48,7 +49,9 @@ def test_publish_operator_result_exposes_one_complete_operator_directory(
     assert metadata["kernel_path"] == publication.kernel_path
     assert metadata["identity"]["kernel_name"] == "fused_moe"
     assert metadata["micro_validated"] is True
-    assert [path.name for path in publisher.published_operator_dirs(layout)] == [publication.operator_id]
+    assert [path.name for path in publisher.published_operator_dirs(layout)] == [
+        operator_directory_name(publication.operator_id)
+    ]
 
 
 def test_new_keep_atomically_replaces_the_public_operator_result(

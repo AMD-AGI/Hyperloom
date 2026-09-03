@@ -18,6 +18,7 @@ from kernelforge.kernel_rewrite_controller.contracts import (
     WORKLOAD_FILENAME,
 )
 from kernelforge.kernel_rewrite_controller.paths import (
+    operator_directory_name,
     safe_operator_id,
     safe_relative_path,
 )
@@ -78,3 +79,20 @@ def test_safe_relative_path_rejects_unsafe_values(value: str) -> None:
 def test_safe_operator_id_rejects_unsafe_directory_names(value: str) -> None:
     with pytest.raises(ValueError):
         safe_operator_id(value)
+
+
+def test_operator_directory_name_encodes_canonical_separators(operator_id: str) -> None:
+    directory = operator_directory_name(operator_id)
+
+    assert ":" not in directory
+    assert directory.startswith("kernel%3Aforge-loop%3A")
+    assert len(directory.encode("utf-8")) <= 240
+
+
+def test_operator_directory_name_hashes_values_above_portable_limit() -> None:
+    operator_id = "kernel:" + ":".join(["segment" * 60] * 6)
+
+    directory = operator_directory_name(operator_id)
+
+    assert directory.startswith("operator-")
+    assert len(directory.encode("utf-8")) <= 240

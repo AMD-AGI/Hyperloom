@@ -12,6 +12,7 @@ from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 
 BASE_COMMIT = "a" * 40
 
@@ -56,7 +57,7 @@ def task_payload(identity_payload: dict[str, str], tmp_path: Path) -> dict:
 
 @pytest.fixture
 def task_dir(tmp_path: Path, operator_id: str, task_payload: dict) -> Path:
-    root = tmp_path / "output" / "controller" / "tasks" / operator_id
+    root = tmp_path / "output" / "controller" / "tasks" / operator_directory_name(operator_id)
     root.mkdir(parents=True)
     (root / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
     (root / "task.json").write_text(

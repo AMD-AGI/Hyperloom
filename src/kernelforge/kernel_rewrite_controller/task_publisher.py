@@ -123,7 +123,7 @@ def publish_staged_task(
     temporary = Path(
         tempfile.mkdtemp(
             dir=str(layout.tasks_root),
-            prefix=f".{task.operator_id}.",
+            prefix=f".{destination.name}.",
         )
     )
     try:

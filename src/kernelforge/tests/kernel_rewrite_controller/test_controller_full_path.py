@@ -174,7 +174,7 @@ def test_controller_full_path_publishes_a_shared_base_patch(
         gpu="mi355x",
     )
     operator_id = kernel_recipe_canonical_id(identity)
-    patch_dir = tmp_path / "output" / "result" / "patches" / operator_id
+    patch_dir = controller.ControllerLayout(tmp_path / "output").patch_dir(operator_id)
     assert state.status == "completed"
     assert state.analysis_status == "completed"
     assert state.task_count == 1

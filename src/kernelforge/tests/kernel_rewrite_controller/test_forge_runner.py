@@ -14,6 +14,7 @@ from kernelforge.kernel_rewrite_controller.forge_runner import (
     build_forge_loop_invocation,
     run_forge_loop,
 )
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
@@ -31,7 +32,7 @@ def _task_and_worktree(tmp_path: Path):
         "gpu": "mi355x",
     }
     operator_id = kernel_recipe_canonical_id(KernelRecipeIdentity.from_mapping(identity_mapping))
-    task_dir = tmp_path / "tasks" / operator_id
+    task_dir = tmp_path / "tasks" / operator_directory_name(operator_id)
     task_dir.mkdir(parents=True)
     driver = task_dir / "driver.py"
     driver.write_text("print('SNR: 100 dB')\n", encoding="utf-8")

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read KernelForge controller patch publications without importing KernelForge."""
+"""Read and validate KernelForge controller patch publications."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 
 PUBLICATION_SCHEMA_VERSION = 2
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -99,7 +101,7 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
         identity[field] = value
     operator_id = str(payload.get("operator_id") or "")
     expected_id = ":".join(["kernel", *(identity[field] for field in _IDENTITY_FIELDS)])
-    if operator_id != expected_id or root.name != operator_id:
+    if operator_id != expected_id or root.name != operator_directory_name(operator_id):
         raise ControllerPublicationError("operator_id does not match identity or directory name")
 
     base_commit = str(payload.get("base_commit") or "").lower()

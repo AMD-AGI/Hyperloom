@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 from hyperloom.orchestrator.kernel.controller_publication import (
     ControllerPublicationError,
     discover_controller_patch_dirs,
@@ -17,7 +18,7 @@ from hyperloom.orchestrator.kernel.controller_publication import (
 
 def _publication(root: Path, repo: Path, kernel_name: str = "kernel") -> Path:
     operator_id = f"kernel:forge-loop:{kernel_name}:standalone:unknown:triton:mi355x"
-    patch_dir = root / operator_id
+    patch_dir = root / operator_directory_name(operator_id)
     patch_dir.mkdir(parents=True)
     (patch_dir / "change.patch").write_text("diff\n", encoding="utf-8")
     (patch_dir / "report.md").write_text("# Report\n", encoding="utf-8")

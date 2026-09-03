@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -45,6 +46,15 @@ def safe_operator_id(value: object) -> str:
     ):
         raise TaskContractError(f"unsafe operator_id: {operator_id!r}")
     return operator_id
+
+
+def operator_directory_name(value: object) -> str:
+    """Encode a canonical operator ID as one portable filesystem segment."""
+    operator_id = safe_operator_id(value)
+    encoded = operator_id.replace(":", "%3A")
+    if len(encoded.encode("utf-8")) <= 240:
+        return encoded
+    return f"operator-{hashlib.sha256(operator_id.encode('utf-8')).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -97,13 +107,13 @@ class ControllerLayout:
         return self.result_root / "summary.md"
 
     def task_dir(self, operator_id: str) -> Path:
-        return self.tasks_root / safe_operator_id(operator_id)
+        return self.tasks_root / operator_directory_name(operator_id)
 
     def workspace_dir(self, operator_id: str) -> Path:
-        return self.workspaces_root / safe_operator_id(operator_id)
+        return self.workspaces_root / operator_directory_name(operator_id)
 
     def patch_dir(self, operator_id: str) -> Path:
-        return self.patches_root / safe_operator_id(operator_id)
+        return self.patches_root / operator_directory_name(operator_id)
 
     @staticmethod
     def is_published_task_dir(path: Path) -> bool:
@@ -142,6 +152,7 @@ class TaskLayout:
 __all__ = [
     "ControllerLayout",
     "TaskLayout",
+    "operator_directory_name",
     "safe_operator_id",
     "safe_relative_path",
 ]

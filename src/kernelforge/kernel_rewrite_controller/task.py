@@ -20,6 +20,7 @@ from kernelforge.kernel_rewrite_controller.contracts import (
 from kernelforge.kernel_rewrite_controller.paths import (
     ControllerLayout,
     TaskLayout,
+    operator_directory_name,
     safe_relative_path,
 )
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
@@ -119,7 +120,7 @@ def parse_task_payload(
 
     identity, operator_id = _identity(payload.get("identity"))
     root = Path(task_dir).expanduser().resolve()
-    if enforce_directory_identity and root.name != operator_id:
+    if enforce_directory_identity and root.name != operator_directory_name(operator_id):
         raise TaskContractError(f"task directory {root.name!r} does not match canonical operator id {operator_id!r}")
 
     base_commit = _required_string(payload, "base_commit").lower()

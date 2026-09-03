@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.kernel_rewrite_controller import ControllerLayout, parse_task_payload
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 from kernelforge.kernel_rewrite_controller.worktree import (
     WorktreeError,
     create_operator_worktree,
@@ -62,7 +63,7 @@ def _task(tmp_path: Path, repo: Path, base_commit: str):
         "gpu": "mi355x",
     }
     operator_id = kernel_recipe_canonical_id(KernelRecipeIdentity.from_mapping(identity_mapping))
-    task_dir = tmp_path / "output" / "controller" / "tasks" / operator_id
+    task_dir = tmp_path / "output" / "controller" / "tasks" / operator_directory_name(operator_id)
     task_dir.mkdir(parents=True)
     (task_dir / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
     payload = {

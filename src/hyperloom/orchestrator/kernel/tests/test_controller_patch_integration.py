@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
     integrate_controller_patches,
 )
@@ -65,7 +66,7 @@ def _publish(
     patch: str,
 ) -> Path:
     operator_id = f"kernel:forge-loop:{kernel_name}:standalone:unknown:triton:mi355x"
-    patch_dir = patches_root / operator_id
+    patch_dir = patches_root / operator_directory_name(operator_id)
     patch_dir.mkdir(parents=True)
     (patch_dir / "change.patch").write_text(patch, encoding="utf-8")
     (patch_dir / "report.md").write_text("# Report\n", encoding="utf-8")
