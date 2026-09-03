@@ -25,7 +25,10 @@ def _request_file(tmp_path: Path, *, max_kernels: int = 1, rows: list[dict[str, 
     trace = _write(tmp_path / "decode.trace.json", {})
     candidates = _write(
         tmp_path / "kernel_candidates.json",
-        {"hot_kernels": rows if rows is not None else [{"kernel_name": "hot", "source_file": "/repo/hot.py"}]},
+        {
+            "manifest_version": nom.MANIFEST_VERSION,
+            "hot_kernels": rows if rows is not None else [{"kernel_name": "hot", "source_file": "/repo/hot.py"}],
+        },
     )
     return _write(
         tmp_path / "nomination.json",
@@ -115,34 +118,105 @@ def _resolution(tmp_path: Path) -> Any:
     return cli._resolve_nomination(auto=True, nomination_input=str(_request_file(tmp_path)), kernel=None, resume=False)
 
 
-def test_patches_read_the_published_path_from_the_manifest(tmp_path: Path) -> None:
-    """The published directory is versioned, so the path cannot be assumed."""
-    resolution = _resolution(tmp_path)
+def _publish(tmp_path: Path, *, with_snapshot: bool) -> Path:
+    """Lay out a published best bundle the way ``BestResultPublisher`` does."""
     campaign = tmp_path / "forge_experiments"
     published = campaign / "best" / "iter_007"
     published.mkdir(parents=True)
     (published / "forge.patch").write_text("diff", encoding="utf-8")
-    _write(campaign / "best" / "manifest.json", {"patch_path": "best/iter_007/forge.patch"})
-    entries = cli._nominated_patches(resolution, campaign_root=campaign, best_commit="abc123", micro_speedup=1.4)
+    if with_snapshot:
+        (published / "files" / "repo").mkdir(parents=True)
+        (published / "files" / "repo" / "hot.py").write_text("patched", encoding="utf-8")
+    _write(
+        campaign / "best" / "manifest.json",
+        {"patch_path": "best/iter_007/forge.patch", "artifact_dir": "best/iter_007"},
+    )
+    return campaign
+
+
+def test_patches_read_the_published_path_from_the_manifest(tmp_path: Path) -> None:
+    """The published directory is versioned, so the path cannot be assumed."""
+    resolution = _resolution(tmp_path)
+    campaign = _publish(tmp_path, with_snapshot=True)
+    entries = cli._nominated_patches(
+        resolution,
+        campaign_root=campaign,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="abc123",
+        micro_speedup=1.4,
+    )
     assert entries == [
         {
             "kernel_name": "hot",
-            "patch_path": str(published / "forge.patch"),
+            "patch_path": str(campaign / "best" / "iter_007" / "forge.patch"),
             "target_file": "/repo/hot.py",
             "micro_speedup": 1.4,
             "base_commit": "abc123",
+            "kernel_repo": str(tmp_path / "repo"),
+            "snapshot_dir": str(campaign / "best" / "iter_007" / "files"),
         }
     ]
 
 
+def test_a_bundle_without_a_snapshot_reports_no_snapshot_dir(tmp_path: Path) -> None:
+    """A patch touching nothing publishable has no ``files/`` tree, and naming
+    one that does not exist would fail the atomic apply it is meant to enable."""
+    campaign = _publish(tmp_path, with_snapshot=False)
+    entries = cli._nominated_patches(
+        _resolution(tmp_path),
+        campaign_root=campaign,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="abc123",
+        micro_speedup=1.4,
+    )
+    assert entries == [
+        {
+            "kernel_name": "hot",
+            "patch_path": str(campaign / "best" / "iter_007" / "forge.patch"),
+            "target_file": "/repo/hot.py",
+            "micro_speedup": 1.4,
+            "base_commit": "abc123",
+            "kernel_repo": str(tmp_path / "repo"),
+        }
+    ]
+
+
+def test_hyperloom_reads_back_the_repo_and_snapshot_forge_emitted(tmp_path: Path) -> None:
+    """The two fields exist for the consumer's atomic multi-file apply, so the
+    envelope is proved through the consumer that reads them."""
+    from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
+
+    campaign = _publish(tmp_path, with_snapshot=True)
+    entries = cli._nominated_patches(
+        _resolution(tmp_path),
+        campaign_root=campaign,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="abc123",
+        micro_speedup=1.4,
+    )
+    patch = parse_outcome({"patches": entries}).patches[0]
+    assert patch.kernel_repo == str(tmp_path / "repo")
+    assert patch.snapshot_dir == str(campaign / "best" / "iter_007" / "files")
+
+
 def test_no_best_commit_yields_no_patches(tmp_path: Path) -> None:
-    entries = cli._nominated_patches(_resolution(tmp_path), campaign_root=tmp_path, best_commit="", micro_speedup=1.4)
+    entries = cli._nominated_patches(
+        _resolution(tmp_path),
+        campaign_root=tmp_path,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="",
+        micro_speedup=1.4,
+    )
     assert entries == []
 
 
 def test_absent_manifest_yields_no_patches(tmp_path: Path) -> None:
     entries = cli._nominated_patches(
-        _resolution(tmp_path), campaign_root=tmp_path, best_commit="abc123", micro_speedup=1.4
+        _resolution(tmp_path),
+        campaign_root=tmp_path,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="abc123",
+        micro_speedup=1.4,
     )
     assert entries == []
 
@@ -152,7 +226,11 @@ def test_manifest_without_patch_path_yields_no_patches(tmp_path: Path) -> None:
     (campaign / "best").mkdir(parents=True)
     _write(campaign / "best" / "manifest.json", {"artifact_dir": "best/iter_001"})
     entries = cli._nominated_patches(
-        _resolution(tmp_path), campaign_root=campaign, best_commit="abc123", micro_speedup=1.4
+        _resolution(tmp_path),
+        campaign_root=campaign,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="abc123",
+        micro_speedup=1.4,
     )
     assert entries == []
 
@@ -162,7 +240,11 @@ def test_manifest_pointing_at_a_missing_patch_yields_no_patches(tmp_path: Path) 
     (campaign / "best").mkdir(parents=True)
     _write(campaign / "best" / "manifest.json", {"patch_path": "best/iter_001/forge.patch"})
     entries = cli._nominated_patches(
-        _resolution(tmp_path), campaign_root=campaign, best_commit="abc123", micro_speedup=1.4
+        _resolution(tmp_path),
+        campaign_root=campaign,
+        workspace_dir=str(tmp_path / "repo"),
+        best_commit="abc123",
+        micro_speedup=1.4,
     )
     assert entries == []
 

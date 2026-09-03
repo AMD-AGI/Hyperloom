@@ -744,12 +744,13 @@ def _resolve_nomination(*, auto, nomination_input, kernel, resume):
     return resolution
 
 
-def _nominated_patches(resolution, *, campaign_root, best_commit, micro_speedup):
+def _nominated_patches(resolution, *, campaign_root, workspace_dir, best_commit, micro_speedup):
     """Build the ``patches`` array for a nominated run that reached a best.
 
     Args:
         resolution: The nomination that chose this run's target.
         campaign_root: Campaign directory holding the published best bundle.
+        workspace_dir: Git workspace the patch and its snapshot are relative to.
         best_commit: Commit the best result was published from.
         micro_speedup: Forge's own mean-case speedup, a queue tiebreaker only.
 
@@ -773,12 +774,18 @@ def _nominated_patches(resolution, *, campaign_root, best_commit, micro_speedup)
     patch_path = root / relative
     if not patch_path.is_file():
         return []
+    # The bundle mirrors every changed file byte-exact under ``files/``, which is
+    # the snapshot an atomic multi-file apply reads. Taken from the patch's own
+    # bundle so the two can never come from different publications.
+    snapshot = patch_path.parent / "files"
     return [
         patch_entry(
             resolution.targets[0],
             patch_path=str(patch_path),
             base_commit=best_commit,
             micro_speedup=float(micro_speedup or 0.0),
+            kernel_repo=str(workspace_dir or ""),
+            snapshot_dir=str(snapshot) if snapshot.is_dir() else "",
         )
     ]
 
@@ -2143,6 +2150,7 @@ def forge_loop(
             result["patches"] = _nominated_patches(
                 nomination,
                 campaign_root=campaign_root,
+                workspace_dir=str(workspace),
                 best_commit=best_commit,
                 micro_speedup=total_speedup,
             )

@@ -21,7 +21,7 @@ def nominate_from_candidates(
     request: NominationRequest,
     candidates: list[Candidate],
 ) -> list[Target]:
-    """Take the hottest already-resolved, untried rows and split the budget evenly.
+    """Take the hottest already-resolved, unrejected rows and split the budget evenly.
 
     Args:
         request: The lane brief, for the budget and the ceiling.

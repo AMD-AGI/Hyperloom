@@ -23,6 +23,10 @@ from typing import Any
 #: risking a partially understood request.
 PROTOCOL_VERSION = 1
 
+#: Must equal the producer's ``candidate_manifest.MANIFEST_VERSION``. The
+#: producer always writes it, so an absent version is a skew too and is refused.
+MANIFEST_VERSION = 1
+
 LANE_REWRITE = "rewrite"
 LANE_FUSION = "fusion"
 LANE_GEMM = "gemm"
@@ -156,19 +160,27 @@ def read_candidates(path: str | Path) -> list[Candidate]:
         Candidates in file order; ranking is the nominator's business.
 
     Raises:
-        NominationError: On unreadable JSON or a missing ``hot_kernels`` array.
+        NominationError: On unreadable JSON, a manifest version this build does
+            not know, a missing ``hot_kernels`` array, or a row that is not an
+            object or carries no kernel name. A dropped row would hide the same
+            producer/consumer skew an unknown request field does.
     """
     payload = _load_json(path, what="candidate list")
-    rows = payload.get("hot_kernels") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        raise NominationError(f"candidate list must be a JSON object: {path}")
+    version = payload.get("manifest_version")
+    if version != MANIFEST_VERSION:
+        raise NominationError(f"unsupported candidate manifest {version!r}; this build speaks {MANIFEST_VERSION}")
+    rows = payload.get("hot_kernels")
     if not isinstance(rows, list):
         raise NominationError(f"candidate list has no hot_kernels array: {path}")
     candidates: list[Candidate] = []
-    for row in rows:
+    for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            continue
+            raise NominationError(f"candidate row {index} is not a JSON object: {path}")
         name = str(row.get("kernel_name") or row.get("name") or "").strip()
         if not name:
-            continue
+            raise NominationError(f"candidate row {index} has no kernel name: {path}")
         candidates.append(
             Candidate(
                 kernel_name=name,

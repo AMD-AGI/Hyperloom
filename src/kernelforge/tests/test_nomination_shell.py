@@ -33,8 +33,10 @@ def _request_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def _candidates_payload(rows: list[dict[str, object]]) -> dict[str, object]:
-    return {"hot_kernels": rows}
+def _candidates_payload(rows: list[dict[str, object]], **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {"manifest_version": nom.MANIFEST_VERSION, "hot_kernels": rows}
+    payload.update(overrides)
+    return payload
 
 
 def _row(name: str, **overrides: object) -> dict[str, object]:
@@ -147,20 +149,70 @@ def test_read_candidates_accepts_legacy_name_key(tmp_path: Path) -> None:
     assert nom.read_candidates(path)[0].kernel_name == "legacy"
 
 
-def test_read_candidates_drops_nameless_and_non_dict_rows(tmp_path: Path) -> None:
-    path = _write(tmp_path / "cand.json", _candidates_payload([_row("keep"), {"source_file": "/x.py"}, "junk"]))  # type: ignore[list-item]
-    assert [candidate.kernel_name for candidate in nom.read_candidates(path)] == ["keep"]
+def test_read_candidates_refuses_a_non_dict_row(tmp_path: Path) -> None:
+    """A row shape this build cannot read is a skew, so it must not be dropped."""
+    path = _write(tmp_path / "cand.json", _candidates_payload([_row("keep"), "junk"]))  # type: ignore[list-item]
+    with pytest.raises(nom.NominationError, match="candidate row 1 is not a JSON object"):
+        nom.read_candidates(path)
+
+
+def test_read_candidates_refuses_a_nameless_row(tmp_path: Path) -> None:
+    """The name is what a patch is reported back against; a row without one
+    would vanish with no error and no counter."""
+    path = _write(tmp_path / "cand.json", _candidates_payload([_row("keep"), {"source_file": "/x.py"}]))
+    with pytest.raises(nom.NominationError, match="candidate row 1 has no kernel name"):
+        nom.read_candidates(path)
+
+
+def test_read_candidates_accepts_the_known_manifest_version(tmp_path: Path) -> None:
+    path = _write(tmp_path / "cand.json", _candidates_payload([_row("hot")]))
+    assert [candidate.kernel_name for candidate in nom.read_candidates(path)] == ["hot"]
+
+
+def test_unknown_manifest_version_is_refused(tmp_path: Path) -> None:
+    path = _write(tmp_path / "cand.json", _candidates_payload([_row("hot")], manifest_version=nom.MANIFEST_VERSION + 1))
+    with pytest.raises(nom.NominationError, match="unsupported candidate manifest"):
+        nom.read_candidates(path)
+
+
+def test_absent_manifest_version_is_refused(tmp_path: Path) -> None:
+    """The producer always writes the version, so its absence is a skew too --
+    the same call ``read_request`` makes for ``protocol_version``."""
+    path = _write(tmp_path / "cand.json", {"hot_kernels": [_row("hot")]})
+    with pytest.raises(nom.NominationError, match="unsupported candidate manifest None"):
+        nom.read_candidates(path)
+
+
+def test_producer_manifest_round_trips_through_the_consumer(tmp_path: Path) -> None:
+    """``candidate_manifest`` claims the consumer refuses a version it does not
+    know, which only holds while the two constants agree."""
+    from hyperloom.orchestrator.kernel import candidate_manifest as producer
+
+    assert producer.MANIFEST_VERSION == nom.MANIFEST_VERSION
+    document, _stats = producer.build_manifest(
+        _write(tmp_path / "kernel_candidates.json", {"hot_kernels": [{"name": "hot", "source_file": "/repo/hot.py"}]})
+    )
+    candidates = nom.read_candidates(producer.write_manifest(tmp_path, document))
+    assert [candidate.kernel_name for candidate in candidates] == ["hot"]
 
 
 def test_missing_hot_kernels_array_is_refused(tmp_path: Path) -> None:
-    path = _write(tmp_path / "cand.json", {"routable_kernels": []})
+    path = _write(tmp_path / "cand.json", {"manifest_version": nom.MANIFEST_VERSION, "routable_kernels": []})
     with pytest.raises(nom.NominationError, match="no hot_kernels array"):
         nom.read_candidates(path)
 
 
+def test_a_non_object_candidate_list_is_refused(tmp_path: Path) -> None:
+    path = _write(tmp_path / "cand.json", [_row("hot")])
+    with pytest.raises(nom.NominationError, match="candidate list must be a JSON object"):
+        nom.read_candidates(path)
+
+
 def test_non_finite_gpu_pct_ranks_as_zero(tmp_path: Path) -> None:
-    path = tmp_path / "cand.json"
-    path.write_text('{"hot_kernels": [{"kernel_name": "nan", "source_file": "/a.py", "gpu_pct": null}]}', "utf-8")
+    path = _write(
+        tmp_path / "cand.json",
+        _candidates_payload([{"kernel_name": "nan", "source_file": "/a.py", "gpu_pct": None}]),
+    )
     assert nom.read_candidates(path)[0].gpu_pct == 0.0
 
 
@@ -191,6 +243,25 @@ def test_stub_honours_the_ceiling(tmp_path: Path) -> None:
     targets = nom.nominate(request, candidates)
     assert [target.kernel_name for target in targets] == ["b"]
     assert targets[0].budget_sec == 6000
+
+
+def test_stub_summary_line_describes_the_filter_it_applies() -> None:
+    """The summary is the only description of the seam's selection rule, so it
+    has to name the two properties the filter actually reads."""
+    from kernelforge.nomination.stub import nominate_from_candidates
+
+    assert (nominate_from_candidates.__doc__ or "").splitlines()[0] == (
+        "Take the hottest already-resolved, unrejected rows and split the budget evenly."
+    )
+
+
+def test_stub_still_picks_a_row_that_was_already_tried(tmp_path: Path) -> None:
+    """Attempt counts are orchestrator knowledge the stub deliberately ignores."""
+    request = nom.read_request(_write(tmp_path / "req.json", _request_payload(max_kernels=1)))
+    candidates = nom.read_candidates(
+        _write(tmp_path / "cand.json", _candidates_payload([_row("tried", attempts=4, gpu_pct=9.0)]))
+    )
+    assert [target.kernel_name for target in nom.nominate(request, candidates)] == ["tried"]
 
 
 def test_stub_skips_unresolved_and_rejected(tmp_path: Path) -> None:
