@@ -116,16 +116,18 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
-from .parser import (
-    _build_parser as _build_parser,
-    _positive_int_arg as _positive_int_arg,
-    _redact_unknown_args as _redact_unknown_args,
+from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
     DEFAULT_CONC,
     DEFAULT_TP,
     DEFAULT_EP,
     DEFAULT_PRECISION,
+)
+from .parser import (
+    _build_parser as _build_parser,
+    _positive_int_arg as _positive_int_arg,
+    _redact_unknown_args as _redact_unknown_args,
 )
 from .preflight import (
     _check_gfx_arch_resolvable,

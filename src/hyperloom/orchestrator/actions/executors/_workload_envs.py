@@ -42,6 +42,11 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
 )
+from hyperloom.common.workload_defaults import (
+    DEFAULT_CONC,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+)
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
@@ -270,14 +275,10 @@ def cli_workload_defaults() -> tuple[int, int, int]:
 
     Every last-resort fallback in this module reads them from here, so a
     materialized recipe and the workload spec published beside it cannot
-    disagree about what "unset" means.
-
-    Imported function-locally because ``cli.parser`` imports from
-    ``hyperloom.orchestrator``; a module-scope import here would close a cycle.
+    disagree about what "unset" means. The CLI resolves its own flags from the
+    same ``hyperloom.common`` constants, so the two cannot drift apart.
     """
-    from hyperloom.inference_optimizer.cli import parser
-
-    return parser.DEFAULT_ISL, parser.DEFAULT_OSL, parser.DEFAULT_CONC
+    return DEFAULT_ISL, DEFAULT_OSL, DEFAULT_CONC
 
 
 def build_agentx_workload_spec(

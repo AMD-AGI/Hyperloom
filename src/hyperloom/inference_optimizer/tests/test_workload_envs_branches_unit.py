@@ -7,8 +7,10 @@ sizing."""
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -793,3 +795,33 @@ def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatc
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     bench = _materialize(src, tmp_path / "out2")
     assert bench["workload_spec"]["metric_basis"] == "aggregate_output_tok_s"
+
+
+def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
+    """Both sides must resolve the same fallbacks without importing each other.
+
+    ``cli.parser`` imports from ``hyperloom.orchestrator``, so an orchestrator
+    module reaching back into the parser for these numbers closes an import
+    cycle. Keeping the constants in ``hyperloom.common`` is what lets a
+    materialized recipe and the workload spec beside it agree on "unset"; a
+    future edit that re-literals either side, or re-opens the cycle to share
+    them, fails here.
+    """
+    from hyperloom.common import workload_defaults
+    from hyperloom.inference_optimizer.cli import parser
+
+    canonical = (workload_defaults.DEFAULT_ISL, workload_defaults.DEFAULT_OSL, workload_defaults.DEFAULT_CONC)
+    assert we.cli_workload_defaults() == canonical
+    assert (parser.DEFAULT_ISL, parser.DEFAULT_OSL, parser.DEFAULT_CONC) == canonical
+
+    # The shared module has to stay a leaf, or it cannot break the cycle.
+    tree = ast.parse(Path(workload_defaults.__file__).read_text(encoding="utf-8"))
+    imported = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module] + [
+        alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    ]
+    assert imported == ["__future__"], imported
+
+    # And the orchestrator side must not import the CLI parser at any scope.
+    orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
+    assert "inference_optimizer.cli import parser" not in orchestrator_src
+    assert "inference_optimizer.cli.parser" not in orchestrator_src
