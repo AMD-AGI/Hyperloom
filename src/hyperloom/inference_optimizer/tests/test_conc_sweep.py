@@ -1347,6 +1347,33 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         assert graded_metric_key(benchmark_mode="") == "total_token_throughput"
 
 
+class TestAnUnreportedTotalComesFromItsHalves:
+    """A row graded on the total axis must not read as unmeasured."""
+
+    def _variant(self, **kw: Any) -> VariantResult:
+        return VariantResult(
+            name="baseline_c8", extra_server_args="", extra_envs={"CONC": "8"}, status="succeeded", **kw
+        )
+
+    def test_the_halves_sum_when_the_parser_named_no_total(self):
+        point = _point_from_variant(
+            self._variant(input_throughput=24000.0, output_throughput=180.0),
+            arm="baseline",
+        )
+        assert point["total_token_throughput"] == pytest.approx(24180.0)
+
+    def test_a_reported_total_is_not_recomputed(self):
+        point = _point_from_variant(
+            self._variant(input_throughput=1.0, output_throughput=1.0, total_token_throughput=25984.8),
+            arm="baseline",
+        )
+        assert point["total_token_throughput"] == pytest.approx(25984.8)
+
+    def test_a_missing_half_leaves_the_total_unmeasured(self):
+        point = _point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
+        assert point["total_token_throughput"] is None
+
+
 # --- the chart's data contract ---
 
 

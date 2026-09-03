@@ -192,13 +192,20 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         conc = int(envs.get("CONC", "0"))
     except (TypeError, ValueError):
         conc = 0
+    # aiperf reports the total; the other parsers pass through whatever the
+    # framework named, leaving it null on a run that measured both halves. The
+    # sum is the same identity ``perf_snapshot_from_mapping`` applies, and a
+    # session graded on the total axis fails outright without it.
+    total = v.total_token_throughput
+    if total is None and v.input_throughput is not None and v.output_throughput is not None:
+        total = v.input_throughput + v.output_throughput
     return {
         "arm": arm,
         "conc": conc,
         "status": v.status,
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
-        "total_token_throughput": v.total_token_throughput,
+        "total_token_throughput": total,
         "input_throughput": v.input_throughput,
         "intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
