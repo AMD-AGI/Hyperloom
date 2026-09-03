@@ -99,7 +99,7 @@ from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
-from hyperloom.orchestrator.state.objective import Objective, build_objective
+from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
@@ -350,7 +350,9 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
 
     Inspects the objective for the first recognised target attribute
     (``target_gain_pct`` → float, ``target_tput_per_gpu`` → float,
-    ``baseline_dir`` → str) and pairs it with the objective's ``kind()``.
+    ``target_within_pct`` → float, ``baseline_dir`` → str) and pairs it with the
+    objective's ``kind()``. A composite objective has no single value, so its
+    members' descriptions stand in for one.
 
     Args:
         objective (Objective): The run objective to summarise.
@@ -361,10 +363,14 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
     """
     kind = objective.kind()
     value: float | str | None = None
+    if isinstance(objective, AnyObjective):
+        return kind, objective.describe()
     if hasattr(objective, "target_gain_pct"):
         value = float(getattr(objective, "target_gain_pct"))
     elif hasattr(objective, "target_tput_per_gpu"):
         value = float(getattr(objective, "target_tput_per_gpu"))
+    elif hasattr(objective, "target_within_pct"):
+        value = float(getattr(objective, "target_within_pct"))
     elif hasattr(objective, "baseline_dir"):
         value = str(getattr(objective, "baseline_dir"))
     return kind, value
@@ -2611,6 +2617,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
             "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
             "TARGET_DIR": args.target_baseline_dir or "",
+            "TARGET_WITHIN_ROOFLINE_PCT": str(args.target_roofline) if args.target_roofline else "",
         }
     )
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")

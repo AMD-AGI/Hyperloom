@@ -23,7 +23,9 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
     TargetBaselineObjective,
+    AnyObjective,
     TargetGainObjective,
+    TargetRooflineObjective,
     TargetTputObjective,
     TimeOnlyObjective,
     build_objective,
@@ -575,3 +577,117 @@ async def test_run_async_stop_when_callback(session_dir):
         assert reason == "custom"
     finally:
         await c.stop()
+
+
+# --- the roofline target ---
+
+
+def _state_with_within(value: object) -> SharedState:
+    st = SharedState(session_id="s")
+    st.roofline_snapshots = [{"snapshot_id": 1, "within_roofline_pct": value}]
+    return st
+
+
+class TestARooflineTargetOnlyCountsAMeasuredRoofline:
+    """The objective has no separate "was it profiled" gate; an unmeasured
+    ceiling simply reads as zero progress."""
+
+    def test_no_snapshot_reads_as_unmeasured(self):
+        st = SharedState(session_id="s")
+        assert st.current_within_roofline_pct() is None
+        obj = TargetRooflineObjective(80.0)
+        assert obj.reached(st) is False
+        assert obj.progress(st) == 0.0
+        assert obj.gap_pct(st) == pytest.approx(80.0)
+
+    @pytest.mark.parametrize("value", [None, "62.5", True])
+    def test_a_non_numeric_within_reads_as_unmeasured(self, value):
+        st = _state_with_within(value)
+        assert st.current_within_roofline_pct() is None
+        assert TargetRooflineObjective(80.0).reached(st) is False
+
+    def test_the_latest_snapshot_wins(self):
+        st = _state_with_within(20.0)
+        st.roofline_snapshots.append({"snapshot_id": 2, "within_roofline_pct": 81.0})
+        assert st.current_within_roofline_pct() == pytest.approx(81.0)
+        assert TargetRooflineObjective(80.0).reached(st) is True
+
+    def test_below_and_at_the_bar(self):
+        obj = TargetRooflineObjective(80.0)
+        assert obj.reached(_state_with_within(79.99)) is False
+        assert obj.reached(_state_with_within(80.0)) is True
+        assert obj.gap_pct(_state_with_within(62.5)) == pytest.approx(17.5)
+        assert obj.progress(_state_with_within(40.0)) == pytest.approx(0.5)
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, 100.1])
+    def test_the_target_is_a_percentage(self, bad):
+        with pytest.raises(ObjectiveError):
+            TargetRooflineObjective(bad)
+
+
+class TestEitherTargetEndsTheRun:
+    """Gain and roofline measure different axes, so they compose rather than
+    compete."""
+
+    def _both(self) -> AnyObjective:
+        return AnyObjective([TargetGainObjective(300.0), TargetRooflineObjective(80.0)])
+
+    def test_the_roofline_alone_is_enough(self):
+        st = _state_with_within(81.0)
+        st.cumulative_gain_validated = 5.0
+        assert self._both().reached(st) is True
+
+    def test_the_gain_alone_is_enough(self):
+        st = _state_with_within(10.0)
+        st.cumulative_gain_validated = 301.0
+        assert self._both().reached(st) is True
+
+    def test_neither_leaves_the_run_going(self):
+        st = _state_with_within(10.0)
+        st.cumulative_gain_validated = 5.0
+        assert self._both().reached(st) is False
+
+    def test_the_gap_comes_from_the_closest_member_not_the_smaller_number(self):
+        """The two gaps are percentage points of different quantities, so the
+        smaller number is not the nearer target.
+
+        Gain is 100 points short of 300 and roofline 40 short of 80, yet gain is
+        the two-thirds-done one and roofline only half. A numeric minimum would
+        report 40 and hand the specialists the wrong target to chase.
+        """
+        st = _state_with_within(40.0)
+        st.cumulative_gain_validated = 200.0
+        both = self._both()
+        assert both.progress(st) == pytest.approx(2 / 3)
+        assert both.gap_pct(st) == pytest.approx(100.0)
+
+    def test_a_composite_needs_two_members(self):
+        with pytest.raises(ObjectiveError):
+            AnyObjective([TargetGainObjective(1.0)])
+
+
+class TestBuildObjectiveComposesTheRooflineTarget:
+    def test_the_roofline_target_alone(self):
+        obj = build_objective({"MAX_HOURS": 1, "TARGET_WITHIN_ROOFLINE_PCT": "80"})
+        assert isinstance(obj, TargetRooflineObjective)
+        assert obj.kind() == "roofline_pct"
+
+    def test_composed_with_the_gain_target(self):
+        obj = build_objective({"MAX_HOURS": 1, "TARGET_GAIN_PCT": "300", "TARGET_WITHIN_ROOFLINE_PCT": "80"})
+        assert isinstance(obj, AnyObjective)
+        assert obj.kind() == "gain_pct+roofline_pct"
+
+    def test_the_throughput_targets_stay_mutually_exclusive(self):
+        with pytest.raises(ObjectiveError):
+            build_objective({"MAX_HOURS": 1, "TARGET_GAIN_PCT": "300", "TARGET_TPUT_PER_GPU": "900"})
+
+    def test_it_does_not_relax_that_when_a_roofline_target_is_present(self):
+        with pytest.raises(ObjectiveError):
+            build_objective(
+                {
+                    "MAX_HOURS": 1,
+                    "TARGET_GAIN_PCT": "300",
+                    "TARGET_TPUT_PER_GPU": "900",
+                    "TARGET_WITHIN_ROOFLINE_PCT": "80",
+                }
+            )

@@ -2088,6 +2088,27 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             return str(latest.get("top_bottleneck") or "")
         return ""
 
+    def current_within_roofline_pct(self) -> float | None:
+        """Return the latest snapshot's achieved share of its roofline ceiling.
+
+        ``None`` until a roofline has been measured, which is what keeps a
+        roofline target inert on a session that never ran one.
+
+        Returns:
+            float | None: ``within_roofline_pct`` from the newest snapshot, or
+                ``None`` when no snapshot carries a numeric one.
+        """
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            return None
+        value = latest.get("within_roofline_pct")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
     def current_comm_pct(self) -> float | None:
         """Return the latest exposed-communication percentage."""
         snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
