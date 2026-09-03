@@ -100,6 +100,34 @@ def test_parse_unparsed_wrapper_missing_required_payload_returns_none() -> None:
     assert b._parse_tool_use_block(block) is None
 
 
+def test_parse_tool_use_block_ignores_extra_native_keys() -> None:
+    """Stream ingest stays lenient: extra native keys are not a reason to drop."""
+    b = _backend()
+    block = ToolUseBlock(
+        name="emit_intent",
+        input={
+            "intent_type": "send_message",
+            "payload": {"topic": "heartbeat"},
+            "reasoning": "why this emit exists",
+        },
+    )
+    intent = b._parse_tool_use_block(block)
+    assert intent is not None
+    assert intent.type is IntentType.SEND_MESSAGE
+    assert intent.payload["topic"] == "heartbeat"
+
+
+def test_parse_tool_use_block_records_malformed_wrapper_decode_error() -> None:
+    b = _backend()
+    b._active_turn_diagnostic = {"parse_errors": []}
+    block = ToolUseBlock(
+        name="emit_intent",
+        input={"__unparsedToolInput": {"raw": "{not-json"}},
+    )
+    assert b._parse_tool_use_block(block) is None
+    assert any("__unparsedToolInput.raw is not valid JSON" in err for err in b._active_turn_diagnostic["parse_errors"])
+
+
 def test_parse_tool_use_block_prefers_native_intent_type() -> None:
     """Canonical input remains authoritative when a fallback is also present."""
     b = _backend()

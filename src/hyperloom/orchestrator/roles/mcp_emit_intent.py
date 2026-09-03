@@ -231,7 +231,7 @@ _UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
 _EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
 
 
-def _decode_emit_intent_input(raw_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def decode_emit_intent_input(raw_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     """Decode a parser fallback and report why decoding failed.
 
     Canonical input always wins when ``intent_type`` is present. The fallback
@@ -274,7 +274,7 @@ def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
     """
     if not isinstance(raw_input, dict):
         return {}
-    coerced, _ = _decode_emit_intent_input(raw_input)
+    coerced, _ = decode_emit_intent_input(raw_input)
     return coerced
 
 
@@ -300,7 +300,7 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if original_extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(original_extra)!r}")
-    coerced, decode_error = _decode_emit_intent_input(payload)
+    coerced, decode_error = decode_emit_intent_input(payload)
     if decode_error is not None:
         raise IntentValidationError(f"emit_intent: {decode_error}")
     extra = set(coerced) - _EMIT_INTENT_TOP_LEVEL_KEYS
@@ -403,6 +403,7 @@ __all__ = [
     "build_emit_intent_server",
     "build_intent_envelope_schema",
     "coerce_emit_intent_input",
+    "decode_emit_intent_input",
     "is_unparsed_tool_wrapper",
     "payload_contract",
     "validate_emit_intent_input",

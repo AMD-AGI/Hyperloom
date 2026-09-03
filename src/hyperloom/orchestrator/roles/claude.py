@@ -55,9 +55,9 @@ from .mcp_emit_intent import (
     build_emit_intent_server,
     coerce_emit_intent_input,
     constraints_sentence,
+    decode_emit_intent_input,
     is_unparsed_tool_wrapper,
     payload_contract,
-    validate_emit_intent_input,
 )
 
 
@@ -1058,9 +1058,15 @@ class ClaudeBackend:
             fails (the failure is logged, not raised).
         """
         block_input = getattr(block, "input", None) or {}
+        if not isinstance(block_input, dict):
+            block_input = {}
+        raw_input, decode_error = decode_emit_intent_input(block_input)
+        if decode_error is not None:
+            log.info("claude tool_use decode failed: %s", decode_error)
+            if self._active_turn_diagnostic is not None:
+                self._active_turn_diagnostic["parse_errors"].append(decode_error)
+            return None
         try:
-            validate_emit_intent_input(block_input)
-            raw_input = coerce_emit_intent_input(block_input)
             envelope = {
                 "intents": [
                     {
