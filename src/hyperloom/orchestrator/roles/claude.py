@@ -57,6 +57,7 @@ from .mcp_emit_intent import (
     constraints_sentence,
     is_unparsed_tool_wrapper,
     payload_contract,
+    validate_emit_intent_input,
 )
 
 
@@ -674,6 +675,7 @@ class ClaudeBackend:
             "raw_text": "",
             "tool_blocks": [],
             "parse_errors": [],
+            "deduped_fallback_intents": 0,
             "usage": {},
             "stderr_tail": [],
         }
@@ -934,6 +936,12 @@ class ClaudeBackend:
                             if is_unparsed_tool_wrapper(getattr(block, "input", None)):
                                 fingerprint = _intent_fingerprint(intent)
                                 if fingerprint in seen_fallback_intents:
+                                    if self._active_turn_diagnostic is not None:
+                                        self._active_turn_diagnostic["deduped_fallback_intents"] += 1
+                                    log.info(
+                                        "claude fallback intent deduped (fingerprint=%s)",
+                                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
+                                    )
                                     continue
                                 seen_fallback_intents.add(fingerprint)
                             intents.append(intent)
@@ -1049,8 +1057,10 @@ class ClaudeBackend:
             Intent | None: The validated intent, or ``None`` if validation
             fails (the failure is logged, not raised).
         """
-        raw_input = coerce_emit_intent_input(getattr(block, "input", None) or {})
+        block_input = getattr(block, "input", None) or {}
         try:
+            validate_emit_intent_input(block_input)
+            raw_input = coerce_emit_intent_input(block_input)
             envelope = {
                 "intents": [
                     {
@@ -1094,8 +1104,9 @@ class ClaudeBackend:
         raw_input = getattr(block, "input", None)
         if isinstance(raw_input, dict):
             summary["input_keys"] = sorted(str(key) for key in raw_input)
-            coerced = coerce_emit_intent_input(raw_input)
-            intent_type = coerced.get("intent_type")
+            intent_type = raw_input.get("intent_type")
+            if not isinstance(intent_type, str) and is_unparsed_tool_wrapper(raw_input):
+                intent_type = coerce_emit_intent_input(raw_input).get("intent_type")
             if isinstance(intent_type, str):
                 summary["intent_type"] = intent_type
         diag["tool_blocks"].append(summary)

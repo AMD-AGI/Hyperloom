@@ -523,11 +523,13 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
         sdk_query_factory=_make_query_factory([msg]),
         sdk_options_cls=FakeOptions,
         enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
     )
     res = await backend.run("p")
     assert res.metadata["tool_blocks"] == 3
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])

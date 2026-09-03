@@ -213,6 +213,9 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# The fallback branch lets the MCP handler acknowledge parser-generated
+# wrappers instead of returning an error the model cannot repair. Native
+# ``intent_type`` + ``payload`` remains the canonical and preferred contract.
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "
@@ -225,6 +228,30 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
 # did not promote to an object. Canonical input remains ``intent_type`` +
 # ``payload`` and is never rewritten when that shape is already present.
 _UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
+_EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
+
+
+def _decode_emit_intent_input(raw_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Decode a parser fallback and report why decoding failed.
+
+    Canonical input always wins when ``intent_type`` is present. The fallback
+    is inspected only when canonical input is absent.
+    """
+    if "intent_type" in raw_input or _UNPARSED_TOOL_INPUT_KEY not in raw_input:
+        return raw_input, None
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    if not isinstance(wrapped, dict):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY} must be an object"
+    raw = wrapped.get("raw")
+    if not isinstance(raw, str) or not raw.strip():
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON"
+    if not isinstance(parsed, dict):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object"
+    return parsed, None
 
 
 def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
@@ -247,19 +274,8 @@ def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
     """
     if not isinstance(raw_input, dict):
         return {}
-    if "intent_type" in raw_input:
-        return raw_input
-    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
-    if not isinstance(wrapped, dict):
-        return raw_input
-    raw = wrapped.get("raw")
-    if not isinstance(raw, str) or not raw.strip():
-        return raw_input
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return raw_input
-    return parsed if isinstance(parsed, dict) else raw_input
+    coerced, _ = _decode_emit_intent_input(raw_input)
+    return coerced
 
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> None:
@@ -281,8 +297,13 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
-    coerced = coerce_emit_intent_input(payload)
-    extra = set(coerced.keys()) - {"intent_type", "payload"}
+    original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
+    if original_extra:
+        raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(original_extra)!r}")
+    coerced, decode_error = _decode_emit_intent_input(payload)
+    if decode_error is not None:
+        raise IntentValidationError(f"emit_intent: {decode_error}")
+    extra = set(coerced) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
     if "intent_type" not in coerced or "payload" not in coerced:

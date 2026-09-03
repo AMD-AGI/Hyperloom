@@ -100,6 +100,22 @@ def test_parse_unparsed_wrapper_missing_required_payload_returns_none() -> None:
     assert b._parse_tool_use_block(block) is None
 
 
+def test_parse_tool_use_block_prefers_native_intent_type() -> None:
+    """Canonical input remains authoritative when a fallback is also present."""
+    b = _backend()
+    block = ToolUseBlock(
+        name="emit_intent",
+        input={
+            "intent_type": "send_message",
+            "payload": {"topic": "native"},
+            "__unparsedToolInput": {"raw": '{"intent_type": "send_message", "payload": {"topic": "fallback"}}'},
+        },
+    )
+    intent = b._parse_tool_use_block(block)
+    assert intent is not None
+    assert intent.payload["topic"] == "native"
+
+
 def test_diagnostic_records_unwrapped_intent_type() -> None:
     b = _backend()
     b._active_turn_diagnostic = {"tool_blocks": []}
@@ -123,6 +139,8 @@ def test_intent_fingerprint_is_stable() -> None:
 _NATIVE_EMIT = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
 _WRAPPER_RAW = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
 _WRAPPER_EMIT = {"__unparsedToolInput": {"raw": _WRAPPER_RAW, "len": len(_WRAPPER_RAW)}}
+_MIXED_EMIT = {**_NATIVE_EMIT, **_WRAPPER_EMIT}
+_WRAPPER_WITH_JUNK = {**_WRAPPER_EMIT, "junk": 1}
 
 
 def _registered_emit_intent_tool() -> Any:
@@ -147,11 +165,17 @@ def _registered_emit_intent_tool() -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "arguments,schema_ok",
-    [(_NATIVE_EMIT, True), (_WRAPPER_EMIT, True), ({"nonsense": 1}, False)],
-    ids=["native", "wrapper", "junk"],
+    "arguments,accepted",
+    [
+        (_NATIVE_EMIT, True),
+        (_WRAPPER_EMIT, True),
+        (_MIXED_EMIT, True),
+        ({"nonsense": 1}, False),
+        (_WRAPPER_WITH_JUNK, False),
+    ],
+    ids=["native", "wrapper", "native-with-wrapper", "junk", "wrapper-with-junk"],
 )
-async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], schema_ok: bool) -> None:
+async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], accepted: bool) -> None:
     """The declared schema gates the call before the handler ever runs, so a
     shape the handler accepts but the schema rejects can never land. Both are
     checked here against the same tool the SDK registers, because they used to
@@ -160,15 +184,33 @@ async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], sc
     jsonschema = pytest.importorskip("jsonschema")
     tool = _registered_emit_intent_tool()
 
-    if not schema_ok:
+    if accepted:
+        jsonschema.validate(instance=arguments, schema=tool.input_schema)
+    else:
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(instance=arguments, schema=tool.input_schema)
-        return
 
-    jsonschema.validate(instance=arguments, schema=tool.input_schema)
     result = await tool.handler(arguments)
-    assert result["content"][0]["text"] == "ok"
-    assert "is_error" not in result
+    assert ("is_error" not in result) is accepted
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_extra_key_inside_wrapped_raw() -> None:
+    """Decoded fallback JSON observes the canonical top-level key contract."""
+    tool = _registered_emit_intent_tool()
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}, "junk": 1}'
+    result = await tool.handler({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
+    assert result["is_error"] is True
+    assert "unexpected keys: ['junk']" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_handler_reports_malformed_wrapped_raw() -> None:
+    """A parser fallback reports its malformed JSON instead of blaming its key."""
+    tool = _registered_emit_intent_tool()
+    result = await tool.handler({"__unparsedToolInput": {"raw": "{not-json"}})
+    assert result["is_error"] is True
+    assert "__unparsedToolInput.raw is not valid JSON" in result["content"][0]["text"]
 
 
 def test_registered_schema_offers_both_shapes() -> None:
