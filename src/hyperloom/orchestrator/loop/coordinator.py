@@ -52,6 +52,7 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 # Default resume-drift floor (%): a re-measured current_best below this fraction
 # of its recorded tput is flagged as drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
+from hyperloom.common.timeutil import now_iso
 from ..phases import machine_state as _phase_state
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
@@ -864,12 +865,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: float | None = None
-        # Set while a success terminal (a met objective) is being routed into
-        # CLOSE. Distinct from ``closing_phase``, which means the wall clock ran
-        # out and the sequencer should shed expensive work; a met target has to
-        # produce the full set of artifacts. ``True`` lifts the session bound for
-        # that routing without claiming a rescue is under way.
-        self._terminal_closing: bool = False
+        # Set while a met objective is being routed onward. Distinct from
+        # ``closing_phase``, which means the wall clock ran out and the sequencer
+        # should shed expensive work; a met target has to produce the full set of
+        # artifacts. ``True`` lifts the session bound for that one advance
+        # without claiming a rescue is under way.
+        self._unbounded_advance: bool = False
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -1646,7 +1647,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         Returns:
             Remaining seconds, or ``None`` when no bound is armed.
         """
-        if self._terminal_closing:
+        if self._unbounded_advance:
             return None
         if bool(getattr(self.shared_state, "closing_phase", False)):
             bound = self._closing_deadline
@@ -1699,7 +1700,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (via the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (routed through SWEEP, then the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
@@ -1838,39 +1839,34 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state):
-                    # Route the terminal through CLOSE. ``machine_state``
-                    # registers ``target_reached`` as an "any phase -> CLOSE"
-                    # transition reason, but nothing ever produced it, so a met
-                    # target skipped the 7-step close sequencer and left only
-                    # the cli safety-net report.
-                    #
                     # The transition runs in THIS tick rather than the next one.
                     # Every ``_advance_phase_if_needed`` in the tick body sits
                     # behind ``_await_within_session_bound``, which skips the
                     # step once the session bound has elapsed -- so a target met
-                    # at or after the deadline would never get another advance,
-                    # and deferring the close would silently fall back to the
-                    # safety net.
-                    if not self.shared_state.stop_reason:
-                        self.shared_state.set_stop_reason("target_reached")
-                        # Best-effort: the terminal is already set in memory and
-                        # CLOSE persists state itself, so a failed write must not
-                        # cost the run its close sequence.
+                    # at or after the deadline would never get another advance.
+                    if not self.shared_state.target_reached_at:
+                        self.shared_state.target_reached_at = now_iso()
+                        # Best-effort: the marker is already set in memory and
+                        # the phases persist state themselves, so a failed write
+                        # must not cost the run its close sequence.
                         try:
                             self.shared_state.save(self.session_dir)
                         except Exception:  # noqa: BLE001
                             log.exception(
-                                "Coordinator: persisting target_reached failed; closing anyway",
+                                "Coordinator: persisting target_reached_at failed; routing anyway",
                             )
+                    routed_to_sweep = _phase_state.phase_index(
+                        str(self.shared_state.phase or "")
+                    ) < _phase_state.phase_index(_phase_state.PHASE_SWEEP)
+                    if routed_to_sweep or not self.shared_state.stop_reason:
                         # Lift the session bound for this one advance so the
                         # elapsed run deadline cannot skip it. ``closing_phase``
                         # is deliberately NOT set: that flag means the wall clock
                         # ran out, and CLOSE reads it to shed expensive work --
                         # ``_maybe_run_close_post_opt_roofline`` returns early on
                         # it, which would drop the very artifact this routing
-                        # exists to produce. The sequencer's own per-step
-                        # timeouts bound the work.
-                        self._terminal_closing = True
+                        # exists to produce.
+                        self._unbounded_advance = True
                         try:
                             await self._await_within_session_bound(
                                 self._advance_phase_if_needed,
@@ -1878,13 +1874,31 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             )
                         except Exception:  # noqa: BLE001
                             log.exception(
-                                "Coordinator: close transition on target_reached failed",
+                                "Coordinator: target_reached transition failed",
                             )
                         finally:
-                            self._terminal_closing = False
-                    stop_reason = self.shared_state.stop_reason or "target_reached"
-                    break
-                if deadline is not None and time.monotonic() >= deadline and not in_closing:
+                            self._unbounded_advance = False
+                    # SWEEP has to run before the session can close on the
+                    # target, so only a phase that already has its measurement
+                    # stops here; the rest leave through the stop_reason check
+                    # once SWEEP names the exit.
+                    if not routed_to_sweep:
+                        if not self.shared_state.stop_reason:
+                            self.shared_state.set_stop_reason("target_reached")
+                        stop_reason = self.shared_state.stop_reason
+                        break
+                # A met target outranks the wall clock for the two hops it
+                # needs. conc_sweep clamps itself to the remaining session
+                # budget and declines outright when nothing is left, so SWEEP
+                # collapses to an immediate terminal skip rather than running
+                # past --max-hours; max_ticks, emergency and signal still bound
+                # the loop.
+                if (
+                    deadline is not None
+                    and time.monotonic() >= deadline
+                    and not in_closing
+                    and not self.shared_state.target_reached_at
+                ):
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break

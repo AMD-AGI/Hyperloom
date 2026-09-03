@@ -614,6 +614,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "plateau_overrides",
         # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
+        # Objective-met marker; the Coordinator is its only writer.
+        "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,

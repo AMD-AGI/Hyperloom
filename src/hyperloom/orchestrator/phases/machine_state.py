@@ -504,6 +504,18 @@ def _cumulative_gain_validated(state: Any) -> float:
         return 0.0
 
 
+def target_was_reached(state: Any) -> bool:
+    """Whether the run objective has been met.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``target_reached_at``.
+
+    Returns:
+        bool: True once the Coordinator has stamped the marker.
+    """
+    return bool(str(getattr(state, "target_reached_at", "") or "").strip())
+
+
 def should_reloop_to_explore(
     state: Any,
     *,
@@ -546,6 +558,10 @@ def should_reloop_to_explore(
     """
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"macro_cycle": cycle}
+
+    if target_was_reached(state):
+        evidence["reloop_blocked"] = "target_reached"
+        return False, evidence
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
     # "gained" only when its validated gain rose by at least the decaying KEEP bar.
@@ -2809,6 +2825,13 @@ def compute_next_phase(
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
 
+    # A met target closes through SWEEP, so the concurrency curve measures the
+    # configuration the target was met on. A forward jump on the monotonic
+    # chain, and deliberately not terminal: marking it so would mirror the
+    # reason onto ``stop_reason``, which routes the next tick to CLOSE.
+    if target_was_reached(state) and phase_index(current) < phase_index(PHASE_SWEEP):
+        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
+
     # Global terminal stop_reason overrides phase-local judgments.
     terminal = _global_terminal(state)
     if terminal is not None and current != PHASE_CLOSE:
@@ -2892,6 +2915,11 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
+            # The target is why the run stopped optimizing, so it names the
+            # exit -- but only a clean one. A sweep that failed still says so:
+            # its exit code is the signal that the closing curve is missing.
+            if exit_reason == "sweep_done" and target_was_reached(state):
+                return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
             # reloop is blocked (budget, convergence, or max_cycles).
@@ -3380,6 +3408,7 @@ __all__ = [
     "is_long_run",
     "resolve_keep_threshold",
     "should_reloop_to_explore",
+    "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
     "bank_phase_segment",

@@ -257,7 +257,8 @@ async def test_run_stops_on_max_ticks(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_run_stops_on_objective_reached(session_dir):
+async def test_run_routes_a_met_objective_through_sweep(session_dir):
+    """A met target marks the session and leaves through SWEEP, not straight to CLOSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.baseline_tput = 1000.0
@@ -267,7 +268,11 @@ async def test_run_stops_on_objective_reached(session_dir):
             objective=TargetGainObjective(target_gain_pct=10.0),
             max_ticks=10,
         )
-        assert reason == "target_reached"
+        assert c.shared_state.target_reached_at
+        assert [row.get("to_phase") for row in c.shared_state.phase_history].count("SWEEP") == 1
+        # The ladder never ran in this harness, so SWEEP names its own failure
+        # rather than borrowing the target's success.
+        assert reason == "sweep_failed"
     finally:
         await c.stop()
 

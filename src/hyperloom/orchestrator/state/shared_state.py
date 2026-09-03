@@ -647,6 +647,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
+    # Stamped once when the run objective is first met. Separate from
+    # ``stop_reason`` because that routes to CLOSE from any phase, which is what
+    # this exists to avoid: a met target goes to SWEEP first.
+    target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by
     # ``_parse_conc_sweep_concs``. Empty is not an instruction: both readers
     # send None instead, which resolves to the ladder for this workload.
