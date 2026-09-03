@@ -234,7 +234,7 @@ fusion that already succeeded this session.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, letting forge choose the kernels instead of the Hyperloom selector. Unset leaves the KERNEL phase byte-for-byte as it was before the nomination contract landed. Read independently of `KERNEL_OPT_BACKEND_ORDER`, so it also takes effect on the default `geak` backend; an explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
+| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, letting forge choose the kernels instead of the Hyperloom selector. Unset leaves the KERNEL phase byte-for-byte as it was before the nomination contract landed. Takes effect on the `forge` backend only: with `KERNEL_OPT_BACKEND_ORDER` unset, GEAK owns the whole KERNEL phase and hands straight to SWEEP without reaching nomination. An explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
 
 ---
 
