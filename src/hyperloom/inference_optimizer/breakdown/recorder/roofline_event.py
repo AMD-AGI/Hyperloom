@@ -103,6 +103,15 @@ ANALYSIS_ATTEMPT_INITIAL = "initial"
 ANALYSIS_ATTEMPT_N26_RETRY = "n26_steady_state_retry"
 ANALYSIS_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
 
+# The two halves of a roofline action, named because ``failed_substep`` reports
+# which one failed and the crash path has only the in-flight half to go on.
+SUBSTEP_PROFILE = "profile"
+SUBSTEP_ANALYSIS = "analysis"
+# The executor names its failure exits after the step that produced them
+# (``profile_no_trace``, ``trace_analyze``, ...), which is finer than the two
+# halves above; these are the spellings that mean the analysis half.
+_ANALYSIS_PHASES = frozenset({SUBSTEP_ANALYSIS, "trace_analyze"})
+
 __all__ = [
     "ANALYSIS_ATTEMPT_COMPUTE_BOUND",
     "ANALYSIS_ATTEMPT_INITIAL",
@@ -123,6 +132,8 @@ __all__ = [
     "SECTION_ANALYSIS_RUN",
     "SECTION_EVENT",
     "SECTION_PROFILE_RUN",
+    "SUBSTEP_ANALYSIS",
+    "SUBSTEP_PROFILE",
     "RooflineEventRecorder",
     "assemble_roofline_action",
     "assemble_roofline_ext",
@@ -308,7 +319,7 @@ class RooflineEventRecorder:
         self._owns_event = bool(owns_event)
         self._sequence: int | None = None
         self._closed = False
-        self._substep = "profile"
+        self._substep = SUBSTEP_PROFILE
         params = _as_dict(params)
         # ``arm`` names the configuration the run measured, which only a roofline
         # dispatch does. A roofline task may legitimately carry no reason, so the
@@ -455,7 +466,7 @@ class RooflineEventRecorder:
                 adopted trace.
         """
         result = _as_dict(profile_result)
-        self._substep = "analysis"
+        self._substep = SUBSTEP_ANALYSIS
         self._record_action(
             {
                 "profile_effective_run_index": int(run_index),
@@ -626,16 +637,24 @@ class RooflineEventRecorder:
         """Close the action as failed, naming the sub-step that failed.
 
         Args:
-            phase (str): The failed sub-step (``profile`` / ``profile_no_trace``
-                / ``profile_capture_only`` / ``profile_zero_ops`` /
-                ``trace_analyze``).
+            phase (str): The failed step, either one of the executor's own exit
+                names (``profile`` / ``profile_no_trace`` /
+                ``profile_capture_only`` / ``profile_zero_ops`` /
+                ``trace_analyze``) or, from the crash path, the in-flight
+                substep (:data:`SUBSTEP_PROFILE` / :data:`SUBSTEP_ANALYSIS`).
             error_class (str): The failure class the action reported.
             message (Any): The failure message.
         """
+        # Matched against the analysis spellings rather than prefixed, because
+        # the crash path passes the in-flight substep itself: ``"analysis"``
+        # does not start with ``"trace_analyze"``, so a crash after the profile
+        # had already been adopted was reported as a profile failure.
+        named = str(phase or "")
+        analysis = named in _ANALYSIS_PHASES or named.startswith("trace_analyze")
         self._close(
             status="failed",
             payload={
-                "failed_substep": "analysis" if str(phase or "").startswith("trace_analyze") else "profile",
+                "failed_substep": SUBSTEP_ANALYSIS if analysis else SUBSTEP_PROFILE,
                 "failure": _failure_row(
                     phase=phase,
                     error_class=error_class or f"{phase}_failed",

@@ -594,6 +594,35 @@ def test_crash_closes_the_event(tmp_path: Path) -> None:
     action = event["ext"]["actions"][0]
     assert action["failure"]["error_class"] == "RuntimeError"
     assert action["failure"]["phase"] == "profile"
+    assert action["failed_substep"] == "profile"
+
+
+def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Path) -> None:
+    """The profile succeeded and was adopted, so it is not what failed.
+
+    ``finish_crashed`` reports the in-flight substep, which ``adopt_profile_run``
+    has already moved to ``analysis``. Deciding the blame by prefixing that
+    against the executor's ``trace_analyze`` exit name meant the crash landed on
+    the half that had just been recorded as complete.
+    """
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.record_profile_run(
+        run_index=0,
+        attempt_reason=PROFILE_ATTEMPT_INITIAL,
+        status="succeeded",
+        started_at="2026-01-01T00:00:00+00:00",
+        duration_sec=30.0,
+        disable_cuda_graph=False,
+        profile_result=_profile_result(),
+    )
+    recorder.adopt_profile_run(run_index=0, profile_result=_profile_result(), params={"reason": "kernel_followup"})
+    recorder.finish_crashed(RuntimeError("trace_analyze_handler blew up"))
+
+    action = _actions(tmp_path)[0]
+    assert action["failed_substep"] == "analysis"
+    assert action["failure"]["phase"] == "analysis"
+    assert action["profile"]["runs"][0]["status"] == "succeeded"
 
 
 def test_crash_does_not_overwrite_a_closed_action(tmp_path: Path) -> None:
