@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -34,6 +35,17 @@ from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
+    ROUND_ACCURACY,
+    ROUND_MEASURE,
+    ROUND_SINGLE,
+    ROUND_WARMUP,
+    RUN_AFTER_EVAL_FAILURE,
+    RUN_AFTER_MOE_RUNNER_FAILURE,
+    RUN_INITIAL,
+    make_baseline_recorder,
+)
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
@@ -85,6 +97,7 @@ from ._accuracy_gate import (
 from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
+    agentx_active,
     agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
@@ -113,6 +126,23 @@ from .benchmark_backend import build_benchmark_command
 
 
 log = logging.getLogger(__name__)
+
+
+#: The producer label the baseline event's fragments are written under.
+_RECORDER_PRODUCER = "orchestrator"
+
+#: Set on the params of a measurement that is a sub-step of a phase which
+#: records it itself, to stop it opening a timeline event of its own. The
+#: kernel phase measures through this executor -- stack integration, candidate
+#: A/B re-baselines, vLLM shape capture -- and those measurements belong to the
+#: kernel event that asked for them. A second telling of them as top-level
+#: baseline events is the duplication the recorded timeline exists to remove.
+#:
+#: It is a flag the caller sets rather than something the executor infers,
+#: because whether a run is a sub-step is a property of the caller and nothing
+#: on the task says it: these arrive as synthetic ``kind="baseline"`` tasks
+#: indistinguishable from a dispatched one.
+SBD_INNER_STEP_PARAM = "sbd_inner_step"
 
 
 # Markers identifying an InferenceX ``run_eval`` (lm-eval) failure as the root
@@ -929,15 +959,22 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
     total = duration + overhead
     # Log every input, so a timeout in the field can be read back to the value
-    # that produced it instead of guessing which knob was in play.
-    log.info(
-        "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
-        total,
-        duration,
-        overhead,
-        "explicit AGENTX_BASELINE_OVERHEAD_SEC"
-        if grace is None
-        else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
+    # that produced it instead of guessing which knob was in play. Once per
+    # distinct derivation, not once per call: a concurrency sweep resolves this
+    # for every rung, at each of the cap and budget-gate sites, so an
+    # unconditional line would repeat the same arithmetic tens of times per
+    # ladder and bury the one line per rung that carries information.
+    _say_once(
+        lambda: log.info(
+            "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
+            total,
+            duration,
+            overhead,
+            "explicit AGENTX_BASELINE_OVERHEAD_SEC"
+            if grace is None
+            else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
+        ),
+        ("baseline-timeout", total, duration, overhead, grace),
     )
     return total
 
@@ -2686,6 +2723,169 @@ class BaselineExecutor:
         )
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Run the Magpie baseline, recording it as a timeline event.
+
+        The event is opened here rather than inside the retry logic so it
+        covers everything the action does, and closed on every exit including
+        a raise. A dangling ``status="running"`` baseline event is then
+        unambiguous: the session was killed mid-measurement.
+
+        The session the context names is bound for the duration of the run
+        whenever it is not the one already bound. The Coordinator binds its own
+        session at startup and every action it dispatches agrees with it, so
+        this normally changes nothing; it is what keeps a caller that reached
+        the executor another way from recording into whichever session was
+        bound last instead of its own.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying ``task.params``
+                (config / model / timeout knobs) and ``extra`` (workspace).
+
+        Returns:
+            dict[str, Any]: The baseline result dict (see :meth:`_run_once`).
+
+        Raises:
+            FileNotFoundError: If the resolved baseline config does not exist.
+        """
+        from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
+
+        # Only a context that names its session binds one. The bare
+        # ``_resolve_session_dir`` fallback is the working directory, and
+        # writing a session's timeline into whatever directory the process
+        # happens to be in is worse than not recording.
+        named = (getattr(ctx, "extra", None) or {}).get("session_dir")
+        with ExitStack() as stack:
+            with suppress(Exception):
+                session = Path(named).resolve() if named else None
+                if session is not None and bound_session_or_none() != session:
+                    stack.enter_context(session_scope(session))
+            return await self._run_recorded(ctx)
+
+    async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Open the baseline event, run the action, and close it either way.
+
+        Args:
+            ctx (RunnerContext): The runner context.
+
+        Returns:
+            dict[str, Any]: The baseline result dict.
+        """
+        params = ctx.task.params or {}
+        recorder = make_baseline_recorder(
+            self._resolve_sink(ctx),
+            task_id=str(getattr(ctx.task, "task_id", "") or ""),
+            task_kind=str(getattr(ctx.task, "kind", "") or ""),
+            reason=str(params.get("reason") or ""),
+            framework=self._resolve_framework(ctx),
+            establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+            params=params,
+        )
+        try:
+            result = await self._run_retrying(ctx, recorder=recorder)
+        except BaseException as exc:
+            if recorder is not None:
+                recorder.finish_crashed(exc)
+            raise
+        if recorder is not None:
+            recorder.finish(result)
+        return result
+
+    def _resolve_sink(self, ctx: RunnerContext) -> Any:
+        """Decide which event this measurement's rows belong to.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying the task params.
+
+        Returns:
+            Any: A sink writing into this action's baseline event, or ``None``
+                to decline -- when there is no session to record into, or when
+                the caller marked the run an inner step of a phase that
+                records it itself (see :data:`SBD_INNER_STEP_PARAM`).
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import baseline_event_id
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.session.session_binding import session_is_bound
+
+        params = ctx.task.params or {}
+        try:
+            if is_truthy(params.get(SBD_INNER_STEP_PARAM)):
+                return None
+            if not session_is_bound():
+                log.warning(
+                    "baseline timeline: no session bound; this measurement's whole event will "
+                    "be missing from the breakdown. The coordinator binds at startup, so this "
+                    "means either that never happened or the context did not name a session"
+                )
+                return None
+            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+            event = baseline_event_id(
+                str(getattr(state, "phase", "") or "unphased"),
+                int(getattr(state, "macro_cycle", 0) or 0),
+            )
+            return make_sink(event, producer=_RECORDER_PRODUCER)
+        except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
+            log.warning(
+                "baseline timeline: could not resolve an event to record into; this "
+                "measurement's whole event will be missing from the breakdown",
+                exc_info=True,
+            )
+            return None
+
+    def _resolve_framework(self, ctx: RunnerContext) -> str:
+        """Name the serving framework this measurement runs against.
+
+        Read before the config is materialized, so it takes the task's own
+        declaration and falls back to the session's -- the authoritative
+        answer lives in the materialized YAML, which does not exist yet.
+
+        Args:
+            ctx (RunnerContext): The runner context.
+
+        Returns:
+            str: The framework name, or ``""`` when nothing declared one.
+        """
+        params = ctx.task.params or {}
+        with suppress(Exception):
+            state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
+            return str(
+                params.get("framework") or getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "")
+            ).strip()
+        return str(params.get("framework") or os.environ.get("FRAMEWORK", "")).strip()
+
+    async def _run_pass(
+        self,
+        ctx: RunnerContext,
+        *,
+        recorder: Any,
+        attempt_reason: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Run one pass through :meth:`_run_once`, recorded as its own row.
+
+        Args:
+            ctx (RunnerContext): The runner context.
+            recorder (Any): The baseline event recorder, or ``None``.
+            attempt_reason (str): Why this pass ran (a ``RUN_*`` value).
+            **kwargs (Any): The pass's :meth:`_run_once` arguments.
+
+        Returns:
+            dict[str, Any]: The pass's result dict.
+        """
+        index = recorder.begin_run(attempt_reason=attempt_reason) if recorder is not None else 0
+        try:
+            result = await self._run_once(ctx, recorder=recorder, run_index=index, **kwargs)
+        except BaseException as exc:
+            if recorder is not None:
+                recorder.end_run(
+                    run_index=index,
+                    result={"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)},
+                )
+            raise
+        if recorder is not None:
+            recorder.end_run(run_index=index, result=result)
+        return result
+
+    async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
         """Run the Magpie baseline, with a one-shot eval-failure fallback.
 
         Delegates to :meth:`_run_once`. When the run fails for an eval-rooted
@@ -2710,6 +2910,8 @@ class BaselineExecutor:
         Args:
             ctx (RunnerContext): The runner context carrying ``task.params``
                 (config / model / timeout knobs) and ``extra`` (workspace).
+            recorder (Any): The baseline event recorder, or ``None`` when the
+                run is not being recorded.
 
         Returns:
             dict[str, Any]: The baseline result dict (see :meth:`_run_once`).
@@ -2717,7 +2919,7 @@ class BaselineExecutor:
         Raises:
             FileNotFoundError: If the resolved baseline config does not exist.
         """
-        result = await self._run_once(ctx)
+        result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
         params = ctx.task.params or {}
         # A failed required patch timeline means the donor is incompatible with
         # the current tree. The run restored Recipe + Kernel changes and the
@@ -2768,7 +2970,12 @@ class BaselineExecutor:
                 "RUN_EVAL=false to salvage the throughput baseline without "
                 "the accuracy gate."
             )
-            retry = await self._run_once(ctx, force_disable_eval=True)
+            retry = await self._run_pass(
+                ctx,
+                recorder=recorder,
+                attempt_reason=RUN_AFTER_EVAL_FAILURE,
+                force_disable_eval=True,
+            )
             retry.setdefault("nonfatal_warnings", [])
             retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
             if retry.get("status") == "succeeded":
@@ -2784,8 +2991,10 @@ class BaselineExecutor:
             )
             # Carry the eval fallback forward: the eval that broke above must
             # stay off, and its bookkeeping must survive onto this result.
-            retry = await self._run_once(
+            retry = await self._run_pass(
                 ctx,
+                recorder=recorder,
+                attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE,
                 force_disable_eval=eval_disabled_by_fallback,
                 force_drop_moe_runner_backend=True,
             )
@@ -3180,6 +3389,8 @@ class BaselineExecutor:
         *,
         force_disable_eval: bool = False,
         force_drop_moe_runner_backend: bool = False,
+        recorder: Any = None,
+        run_index: int = 0,
     ) -> dict[str, Any]:
         """Run the Magpie baseline benchmark and parse its result.
 
@@ -3198,6 +3409,11 @@ class BaselineExecutor:
             force_drop_moe_runner_backend: When True, strip any inherited
                 ``--moe-runner-backend`` and skip the AMD MoE injection (the
                 one-shot fallback after the backend killed the server).
+            recorder: The baseline event recorder, or ``None`` when the run is
+                not being recorded. Passed through to the rounds so each is
+                recorded under the pass it belonged to.
+            run_index: The 1-based index of this pass within the action, which
+                the rounds are recorded under.
 
         Returns:
             dict[str, Any]: On success, a ``status="succeeded"`` dict with
@@ -3324,6 +3540,7 @@ class BaselineExecutor:
                 establish_quality_ref=is_genuine_baseline,
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
+                agentx_mode=agentx_active(live_shared_state),
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.
@@ -3369,6 +3586,7 @@ class BaselineExecutor:
             env=os.environ,
             inferencex_path=effective_inferencex_path,
             config_path=config_path,
+            active=agentx_active(live_shared_state),
         )
         if _agx_err:
             return {
@@ -3646,9 +3864,11 @@ class BaselineExecutor:
                 )
             try:
                 result = await self._run_reported_round(
-                    label="single",
+                    label=ROUND_SINGLE,
                     config_path=config_path,
                     output_dir=output_dir,
+                    recorder=recorder,
+                    run_index=run_index,
                     **common,
                 )
                 if applied_patches:
@@ -3713,9 +3933,11 @@ class BaselineExecutor:
             # round can follow is asked after this pass, priced with what it
             # actually cost rather than a prediction of what it would.
             warmup_result = await self._run_reported_round(
-                label="warmup",
+                label=ROUND_WARMUP,
                 config_path=warmup_cfg,
                 output_dir=warmup_dir,
+                recorder=recorder,
+                run_index=run_index,
                 **common,
             )
             if warmup_result.get("status") != "succeeded":
@@ -3804,9 +4026,11 @@ class BaselineExecutor:
                 warmup_tput or 0.0,
             )
             result = await self._run_reported_round(
-                label="measure",
+                label=ROUND_MEASURE,
                 config_path=measure_cfg,
                 output_dir=measure_dir,
+                recorder=recorder,
+                run_index=run_index,
                 **common,
             )
             if applied_patches:
@@ -3920,9 +4144,11 @@ class BaselineExecutor:
                         except (TypeError, ValueError):
                             accuracy_timeout_sec = timeout_sec
                         accuracy_result = await self._run_reported_round(
-                            label="accuracy",
+                            label=ROUND_ACCURACY,
                             config_path=accuracy_cfg,
                             output_dir=accuracy_dir,
+                            recorder=recorder,
+                            run_index=run_index,
                             **{
                                 **common,
                                 "timeout_sec": max(
@@ -4337,30 +4563,62 @@ class BaselineExecutor:
         label: str,
         config_path: Path,
         output_dir: Path,
+        recorder: Any = None,
+        run_index: int = 0,
         **common: Any,
     ) -> dict[str, Any]:
-        """Announce a benchmark round before it blocks, then run it.
+        """Announce a benchmark round before it blocks, run it, and record it.
 
         Reported on entry, not on completion: a round can boot a server, warm
         JIT and bench for the better part of an hour, and one that never
         returns is exactly the case the heartbeat has to be able to show.
 
+        The single choke point every reported round passes through, which is
+        why the timeline row is written here: the round's start is a fact only
+        this frame holds, and recording it at each of the four call sites would
+        be four chances to record it differently.
+
         Args:
-            label (str): Round name carried on the progress note
-                (``"single"``, ``"warmup"``, ``"measure"``, ``"accuracy"``).
+            label (str): Round name carried on the progress note and the
+                recorded row (a ``ROUND_*`` value).
             config_path (Path): The materialized Magpie YAML for this round.
             output_dir (Path): The per-round workspace slot.
+            recorder (Any): The baseline event recorder, or ``None``.
+            run_index (int): The pass within the action this round belongs to.
             **common (Any): Remaining :meth:`_run_single_benchmark` arguments.
 
         Returns:
             dict[str, Any]: The round's benchmark result, unchanged.
         """
         await report_progress(unit="baseline_round", label=label, status="started")
-        return await self._run_single_benchmark(
-            config_path=config_path,
-            output_dir=output_dir,
-            **common,
-        )
+        started_at = now_iso("seconds")
+        started_monotonic = time.monotonic()
+
+        def _record(result: dict[str, Any]) -> None:
+            if recorder is None:
+                return
+            recorder.record_round(
+                run_index=run_index,
+                label=label,
+                started_at=started_at,
+                duration_sec=round(time.monotonic() - started_monotonic, 3),
+                timeout_sec=common.get("timeout_sec"),
+                result=result,
+            )
+
+        try:
+            result = await self._run_single_benchmark(
+                config_path=config_path,
+                output_dir=output_dir,
+                **common,
+            )
+        except BaseException as exc:
+            # A round that raised still happened, and its row is the only place
+            # the timeline can say which round the action died in.
+            _record({"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)})
+            raise
+        _record(result)
+        return result
 
     async def _mn_warmup_pass(
         self,

@@ -31,23 +31,29 @@ This page describes the contract from a consumer's perspective.
 ## Versioning
 
 The top-level `schema_version` field is a stable string. New exports use the
-unified optimization wire shape:
+recorded-timeline wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v5.0"
+"schema_version": "hyperloom.session_breakdown.v6.0"
 ```
 
-V5 is a breaking cutover for optimization results: consumers read only
+V6 is a breaking cutover for the timeline: each action records its own event
+while it runs, so an event's `start_time` is when the work began rather than
+when its artefacts were written, and the KERNEL and BASELINE projections are no
+longer emitted. Consumers that ordered events around the old collapsed windows
+see a different ordering.
+
+V5 was the preceding cutover, for optimization results: consumers read only
 `optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
 Forge invocation, and GEMM-tuning result projections are no longer emitted.
-Archived V2/V3/V4 documents require a downstream migration before V5 readers
+Archived V2/V3/V4/V5 documents require a downstream migration before V6 readers
 consume them.
 
 Compatibility rules:
 
 * **Parse the version, do not gate on string equality**. Read the
   `vN[.M]` prefix and compare the major component so a future minor
-  revision of V5 is still accepted.
+  revision of V6 is still accepted.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields require a major
@@ -71,7 +77,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v5.0",
+  "schema_version": "hyperloom.session_breakdown.v6.0",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -84,7 +90,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "geak":               { /* GEAK route diagnostics; {} when GEAK never ran */ },
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
-  "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
@@ -431,13 +436,17 @@ downstream consumers:
 
 | Field                              | Meaning                                                                                   |
 |------------------------------------|-------------------------------------------------------------------------------------------|
-| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number.                                 |
-| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.         |
+| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number. See the scope note below.        |
+| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.          |
 | `action_path`                      | Ordered list of `action:variant` labels that made the final stack — the recipe.            |
 | `extra_server_args`                | The exact extra args needed to reproduce the final config.                                 |
 | `extra_envs`                       | The exact env overrides needed to reproduce the final config (allowlisted, no secrets).    |
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
+
+> **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
+> The key name is a misnomer held fixed by this contract; do not divide it by a GPU count.
+> `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
 
 > Consumer best practice: index on
 > `(session.session_id, final.throughput_tok_s_per_gpu,
@@ -460,7 +469,7 @@ T+90 min" charts.
 
 ## `capability_summary` — `CapabilitySummary`
 
-One card per live capability (`geak`, `forge`, `explore`, `sweep`,
+One card per live capability (`geak`, `forge`, `explore`,
 `specialist`) with: `status`, `attempts`, `keeps`, `micro_only_keeps`,
 `pending_integrate`, `reverts`, `e2e_gain_pct`, `tested`, `best_gain_pct`,
 `reason`. Legacy `backends`, `params`, and `validate_stack` rows can appear
@@ -541,24 +550,6 @@ The canonical field is `explore_search` (the native merged ledger), with
 `params` and `backends` are older compatibility aliases emitted for archived
 sessions and old readers. The section also includes
 `synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
-
----
-
-## `sweep`
-
-Final concurrency / input sequence length (ISL) / output sequence length (OSL) sweep. Always includes `all_variants`
-(a `SweepPoint[]`) and `best_overall`. `best_for_each_conc` and
-`pareto_front` are populated when the sweep grid is large enough.
-
-Each `all_variants` row carries `status`:
-
-* `ok` — a readable JSON object was loaded from `benchmark_report.json` and its `success` field was not `false`. Metrics may still be `null` (for example an empty object, or `success: true` with throughput 0); `ok` means the measurement landed, not that it is selectable.
-* `failed` — the report recorded a failure, the file existed but could not be read as a JSON object (truncated, empty, or a non-object top-level value), or no report was found but `abort_reason.json` is present (the grid runner's tested-but-failed marker).
-* `skipped` — neither `benchmark_report.json` nor `abort_reason.json` was found for that variant.
-
-`error` is present on every row and is always a non-empty string when `status` is `failed` (singular `error`, Magpie-compatible `errors` list, abort marker, or a fixed fallback). It is `null` on `ok` / `skipped` rows. Downstream consumers can rely on a stable key set across `ok` / `failed` / `skipped` rows.
-
-This `status` tightening does not bump `schema_version`. No field is renamed or removed; `error` is additive; the value set remains `ok` / `failed` / `skipped`. The change restores the stability guarantee that missing measurements are not fabricated as success.
 
 ---
 
@@ -757,7 +748,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v5.0",
+  "schema_version": "hyperloom.session_breakdown.v6.0",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -856,7 +847,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "state": "state.json",
     "baseline_report": "runs/baseline/report.json",
     "profile_reports": ["runs/profile/report.json"],
-    "sweep_reports": ["runs/sweep/grid.json"],
     "kernel_attempts": ["kernel-agent/runs/sess-20260517-1130/optimization_attempts.jsonl"],
     "critic_workdir": "critic-workdir",
     "robustness_workdir": "agents/robustness"

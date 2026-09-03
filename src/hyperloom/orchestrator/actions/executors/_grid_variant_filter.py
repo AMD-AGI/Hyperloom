@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pre-flight variant filtering and ordering for explore/sweep grids.
+"""Pre-flight variant filtering and ordering for the explore grid.
 
 Operates purely on lists of ``GridVariant``: user skip patterns, multi-node
 invalid-variant drops and prioritisation, aiter-MoE pinning, xDiT env
@@ -199,7 +199,7 @@ def apply_multi_node_invalid_variants(
     dropped: list[dict] = []
     for v in grid:
         m = _RE_CUDA_GRAPH_MAX_BS.search(v.extra_server_args or "")
-        if conc > 0 and m and int(m.group(1)) < conc:
+        if m and int(m.group(1)) < conc:
             dropped.append(
                 {
                     "name": v.name,

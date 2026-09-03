@@ -90,6 +90,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
   Hyperloom and KernelForge.
 
+- **AgentX profiling now follows AIPerf's measured phase.** Trace capture opens
+  from the pinned client's progress API instead of a fixed warmup delay, records
+  an independent capture status, and keeps single-rank TraceLens analysis off
+  merged multi-rank traces. `AGENTX_PROFILE_WARMUP_S` is now ignored;
+  `AGENTX_PROFILE_WINDOW_S` remains the capture bound. Each invocation gets an
+  explicit capture ID and writes `capture-status.json` plus
+  `trace-manifest.json` under its task-owned artifact directory. Capture failure
+  fails the profile action while preserving benchmark measurement status.
+  Multi-node AgentX profiling fails explicitly until it can use the same
+  phase-gated lifecycle.
+
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP
   `${KB_STORE_URL}/pr-monitor/mcp/` URLs for Framework discovery,
@@ -170,6 +181,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **SWEEP is one concurrency sweep, and it produces the chart a submission is
+  read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
+  three axes carried nothing under an agentic replay — request shapes come from
+  the trace corpus, so ISL and OSL are inert placeholders — and the concurrency
+  axis is what `conc_sweep` already swept. `conc_sweep` is now the only sweep,
+  on by default for both workloads, and every rung carries `intvty_p90`,
+  `input_throughput` and `tpot_p90_ms` alongside the output-axis figures. The
+  chart it renders follows the payload's `benchmark_mode`: an agentic run is
+  plotted on p90 interactivity against token throughput per chip — the pair
+  InferenceX ranks a submission by — and anything else keeps the previous
+  output-throughput pair unchanged.<br/>
+  **Operator note**: the default ladder is now per workload —
+  `256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under
+  `HYPERLOOM_AGENTX`, where a request carries a measured ISL p50 near 108k
+  tokens and the same card saturates two orders of magnitude lower.
+  `--conc-sweep-concs` still overrides both. The sweep is no longer off by
+  default under AgentX, and its budget default is sized at the ladder it has to
+  fund (seven rungs on each of two arms); `--conc-sweep-total-budget-sec` is
+  still a ceiling the session's own remaining time clamps. The `sweep` action
+  is gone from the LLM catalogue, the executor registry and the phase contract,
+  and the SWEEP exit reasons `conc_sweep_done` / `conc_sweep_failed` collapse
+  into `sweep_done` / `sweep_failed` with no alias for the old spelling — a
+  resumed session carrying one will not map to a clean exit code.
+
+- **Each concurrency-sweep rung is bounded by its own concurrency.** The inner
+  benchmark cap, the client's `--warmup-grace-period` and the variant
+  subprocess cap all derived from the session's `CONC`, so a ladder rung at 64
+  was given the bound of a session sitting at 8 while having to drain eight
+  times the warmup. All three now take the rung's own concurrency, and the five
+  budget gates that admit a rung price it at the same number. Inert unless the
+  operator has declared both `AGENTX_WARMUP_GRACE_PERIOD` and
+  `AGENTX_WARMUP_GRACE_CONC`.
+
 - **The AgentX baseline overhead is derived from the warmup bound instead of a
   flat constant.** `AGENTX_BASELINE_OVERHEAD_SEC` was a single measured number
   (7200s, calibrated on GLM-5.2/Qwen3.8) covering setup, corpus load, warmup and
@@ -230,19 +274,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
   measured at one concurrency under-budgets every higher one (measured on
   Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
-  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
-  lives in one function that both consumers call: this process derives the
-  subprocess cap from it, and `apply_agentx_switch` exports its result into the
-  benchmark env so the client's `--warmup-grace-period` — the thing that
-  actually stops the warmup — cannot disagree with the cap. A sweep variant
-  re-derives from its own `CONC` after the variant envs are merged, since the
-  switch runs before that concurrency exists.<br/>
-  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
-  grace was measured at and defaults to 8, so every existing configuration
-  derives exactly what it derived before. Declare it when you measured
-  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
-  passed in without the anchor is read as an 8-anchored number and doubled.
-  The floor only ever raises a bound.
+  The grace can now be scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the
+  scaling lives in one function that both consumers call: this process derives
+  the subprocess cap from it, and `apply_agentx_switch` exports its result into
+  the benchmark env so the client's `--warmup-grace-period` — the thing that
+  actually stops the warmup — cannot disagree with the cap.<br/>
+  **Operator note**: the scaling is **opt-in**. `AGENTX_WARMUP_GRACE_CONC`
+  declares the concurrency the grace was measured at, and with no anchor
+  declared the grace is used flat — a ratio needs two numbers, and assuming the
+  second one made the same value mean different things depending on whether it
+  was typed (an explicit `AGENTX_WARMUP_GRACE_PERIOD=1800` yielded a 23400s cap
+  at CONC=64 while leaving it unset yielded 10800s, and the conc sweep then
+  priced every rung against the inflated number). So declare the anchor whenever
+  you run above the concurrency you measured at: without it, a 3600s grace
+  measured at conc=8 stays 3600s at CONC=32, where the warmup needs roughly
+  three times that — and the round does not fail, it reports a prefix-reuse
+  figure taken before the cache filled. When the anchor is declared the scaling
+  only ever raises the bound, and stays identity at or below the anchor.<br/>
+  A conc sweep bounds each rung by **its own** concurrency, not the session's:
+  the grace, the inner Magpie cap and the variant subprocess cap all derive from
+  the rung's `CONC`, and the budget gates that admit a rung price it at the same
+  number, so admission and grant cannot disagree. Raising only the client's
+  grace would be strictly worse than leaving all three alone — the round would
+  wait inside a bound its own caps do not cover and be killed mid-warmup.
 
 - **Budget admission prices a variant at the cap it will actually be granted.**
   Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the

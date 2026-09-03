@@ -11,6 +11,7 @@ from FRAMEWORK / AGENTX_SERVER_SCRIPT. POSIX-only (skipped elsewhere).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -76,9 +77,58 @@ _FAKE_CURL = r"""#!/usr/bin/env bash
 # /start_profile call so tests can assert what was (or was not) forwarded.
 for a in "$@"; do case "$a" in *v1/models*) echo '{"data":[{"id":"m"}]}'; exit 0;; esac; done
 for a in "$@"; do
-  case "$a" in *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";; esac
+  case "$a" in
+    *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";;
+    *stop_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}";;
+  esac
 done
 exit 0
+"""
+
+_FAKE_PHASE_GATE = r"""#!/usr/bin/env python3
+import os
+import sys
+import json
+
+if sys.argv[1] == "pick-port":
+    print("19090")
+    raise SystemExit(0)
+if sys.argv[1] == "wait-phase":
+    marker = os.environ.get("AGENTX_PHASE_GATE_ARGS_MARKER")
+    if marker:
+        with open(marker, "w", encoding="utf-8") as handle:
+            json.dump(sys.argv, handle)
+    if os.environ.get("FAKE_PHASE_GATE_FAIL") == "1":
+        print("fake phase gate failure", file=sys.stderr)
+        raise SystemExit(1)
+    print("123456789")
+    raise SystemExit(0)
+if sys.argv[1] == "wait-capture-stop":
+    if os.environ.get("FAKE_CAPTURE_GATE_FAIL") == "1":
+        print("fake capture gate failure", file=sys.stderr)
+        raise SystemExit(1)
+    print('{"stop_reason":"wall_clock_limit","elapsed_seconds":0}')
+    raise SystemExit(0)
+if sys.argv[1] == "write-capture-status":
+    def value(name):
+        return sys.argv[sys.argv.index(name) + 1]
+    with open(value("--output"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "schema_version": 1,
+                "capture_id": value("--capture-id"),
+                "status": value("--status"),
+                "reason": value("--reason"),
+                "phase": "profiling",
+                "phase_start_ns": int(value("--phase-start-ns")),
+                "requested_window_seconds": float(value("--requested-window-seconds")),
+                "decision": json.loads(value("--decision-json") or "{}"),
+                "recorded_at_ns": 1,
+            },
+            handle,
+        )
+    raise SystemExit(0)
+raise SystemExit(2)
 """
 
 _FAKE_FUSER = "#!/usr/bin/env bash\nexit 0\n"
@@ -93,6 +143,7 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
     res.mkdir()
     shutil.copy2(agentx_asset_dir() / "aiperf_client.sh", bench / "aiperf_client.sh")
     shutil.copy2(agentx_asset_dir() / "map_aiperf.py", bench / "map_aiperf.py")
+    (bench / "aiperf_phase_gate.py").write_text(_FAKE_PHASE_GATE, encoding="utf-8")
     if make_builtin:
         _write_exec(bench / "vllm_mi300x.sh", _fake_builtin(write_pid))
     _write_exec(bind / "aiperf", _FAKE_AIPERF)
@@ -484,18 +535,25 @@ def test_realtime_metrics_survive_the_scrub(tmp_path):
 
 def _run_profile(bench, bind, res, tmp_path, **extra_env):
     """PROFILE=1 with the window collapsed, so the branch runs in seconds."""
+    capture_dir = res / "agentx-profile" / "test-capture"
+    capture_dir.mkdir(parents=True, exist_ok=True)
     return _run(
         bench,
         bind,
         res,
         tmp_path,
         PROFILE="1",
-        AGENTX_PROFILE_WARMUP_S="1",
         AGENTX_PROFILE_WINDOW_S="0",
+        AGENTX_CAPTURE_ID="test-capture",
+        AGENTX_CAPTURE_STATUS_PATH=str(capture_dir / "capture-status.json"),
         FAKE_AIPERF_SLEEP="6",
         AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
         **extra_env,
     )
+
+
+def _capture_status_path(res: Path) -> Path:
+    return res / "agentx-profile" / "test-capture" / "capture-status.json"
 
 
 def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
@@ -527,52 +585,83 @@ def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
     assert "-d" not in argv
 
 
-def test_profile_delay_safe_bound_accounts_for_warmup_grace(tmp_path):
-    """The `_pmax` clamp must not treat DURATION as the whole round's clock.
-
-    A large model's warmup drain is bounded by WARMGRACE, not DURATION, and
-    happens *before* the measurement window opens. With WARMGRACE=65,
-    DURATION=5, PWIN=0: the old DURATION-only bound (5 - 0 - 60 = -55, clamped
-    to 0) would force *any* positive PWARM to clamp to 0 and fire immediately
-    -- squarely inside warmup. The WARMGRACE-inclusive bound (65 + 5 - 0 - 60
-    = 10) correctly leaves room for a delay that clears the drain first.
-    """
+def test_profile_enables_the_aiperf_progress_api(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
-    r = _run(
+    r = _run_profile(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    argv = _aiperf_args(res).splitlines()
+    assert argv[argv.index("--api-host") + 1] == "127.0.0.1"
+    assert argv[argv.index("--api-port") + 1] == "19090"
+    assert "AIPerf measured phase started" in (r.stdout + r.stderr)
+    assert '"stop_reason":"wall_clock_limit"' in (r.stdout + r.stderr)
+
+
+def test_profile_phase_wait_has_bounded_fallback(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    marker = tmp_path / "phase-gate-args.json"
+    r = _run_profile(
         bench,
         bind,
         res,
         tmp_path,
-        PROFILE="1",
-        AGENTX_PROFILE_WARMUP_S="8",
-        AGENTX_PROFILE_WINDOW_S="0",
-        AGENTX_DURATION="5",
-        AGENTX_WARMUP_GRACE_PERIOD="65",
-        FAKE_AIPERF_SLEEP="0.2",
-        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+        AGENTX_DATASET_CONFIG_TIMEOUT="7",
+        AGENTX_WARMUP_GRACE_PERIOD="11",
+        AGENTX_PHASE_GATE_ARGS_MARKER=str(marker),
     )
     assert r.returncode == 0, r.stderr
-    assert "clamping to" not in (r.stdout + r.stderr)
+    argv = json.loads(marker.read_text())
+    assert argv[argv.index("--timeout-seconds") + 1] == "3618"
 
 
-def test_profile_delay_is_still_clamped_when_it_exceeds_the_full_bound(tmp_path):
-    """A PWARM that exceeds even WARMGRACE + DURATION is still clamped early."""
+def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
-    r = _run(
+    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
+    assert r.returncode == 0, r.stderr
+    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
+
+
+def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    marker = tmp_path / "curl.txt"
+    r = _run_profile(
         bench,
         bind,
         res,
         tmp_path,
-        PROFILE="1",
-        AGENTX_PROFILE_WARMUP_S="30",
-        AGENTX_PROFILE_WINDOW_S="0",
-        AGENTX_DURATION="5",
-        AGENTX_WARMUP_GRACE_PERIOD="65",
-        FAKE_AIPERF_SLEEP="0.2",
-        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+        FAKE_PHASE_GATE_FAIL="1",
     )
     assert r.returncode == 0, r.stderr
-    assert "clamping to 10s" in (r.stdout + r.stderr)
+    assert (res / "inferencex_result.json").exists()
+    assert not marker.exists()
+    assert "without trace capture" in (r.stdout + r.stderr)
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "profiling_phase_unavailable"
+
+
+def test_capture_gate_failure_still_stops_profiler(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    stop_marker = tmp_path / "stop.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FAKE_CAPTURE_GATE_FAIL="1",
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+    )
+    assert r.returncode == 0, r.stderr
+    assert stop_marker.exists()
+    assert "stopping the profiler immediately" in (r.stdout + r.stderr)
+
+
+def test_missing_phase_gate_leaves_status_for_executor_to_mark_missing(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    (bench / "aiperf_phase_gate.py").unlink()
+    r = _run_profile(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert not _capture_status_path(res).exists()
+    assert "cannot write trace-capture status" in (r.stdout + r.stderr)
 
 
 def test_agentx_server_script_override_without_framework(tmp_path):
@@ -964,8 +1053,6 @@ def test_a_framework_script_disagreement_is_said_out_loud(tmp_path):
     "knob,value",
     [
         ("AGENTX_PROFILE_WINDOW_S", "20.5"),
-        ("AGENTX_PROFILE_WARMUP_S", "2700s"),
-        ("AGENTX_PROFILE_WARMUP_S", "abc"),
         ("AGENTX_DURATION", "3600.0"),
     ],
 )
@@ -1038,6 +1125,8 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     assert "trace flush did not settle" in out, out[-1500:]
     assert "TRUNCATED" in out
     assert "AGENTX_TRACE_FLUSH_TIMEOUT_S" in out
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == "trace_flush_timeout"
 
 
 def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
@@ -1085,6 +1174,29 @@ def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
     # Crucially, it must not have entered the polling loop at all: the default
     # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
     assert "waiting for the profiler trace" not in out
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == "profiler_output_unconfigured"
+
+
+def test_configured_trace_dir_is_waited_on_before_it_exists(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    configured = tmp_path / "profiler-output-created-during-flush"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        SGLANG_TORCH_PROFILER_DIR=str(configured),
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="1",
+        AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="1",
+    )
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "waiting for the profiler trace" in out
+    assert "no trace file appeared" in out
+    assert "no profiler output directory is configured" not in out
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == "trace_files_missing"
 
 
 def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):

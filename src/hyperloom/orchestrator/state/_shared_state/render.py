@@ -197,7 +197,7 @@ class _RenderMixin:
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
-            llm_proposable_actions_for,
+            allowed_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
             phase_cumulative_seconds,
@@ -226,8 +226,8 @@ class _RenderMixin:
                 f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
                 f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
             )
-        proposable = llm_proposable_actions_for(phase)
-        allowed_line = f"allowed   : {', '.join(proposable) if proposable else '(none)'}"
+        actions_in_phase = allowed_actions_for(phase)
+        allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
         lines = [
             f"phase     : {phase}",
             f"cycle     : {int(getattr(self, 'macro_cycle', 0) or 0)}",
@@ -694,7 +694,6 @@ class _RenderMixin:
                 f"(stack_len_at_validation={self.cumulative_gain_validated_stack_len}, "
                 f"ts={self.cumulative_gain_validated_ts or '(never)'})"
             ),
-            f"last_sweep={self._format_last_sweep()}",
             f"current_action={self.current_action or '(idle)'}",
             f"crash_count={self.crash_count}",
             f"pruned_families={self.pruned_families or '(none)'}",
@@ -720,8 +719,6 @@ class _RenderMixin:
             f"last_profile={self._format_attempt(self.last_profile)}",
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
             f"last_explore={self._format_attempt(self.last_explore)}",
-            # last_sweep is already rendered above via the richer
-            # _format_last_sweep() (grid/best/tput); no second generic line.
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
@@ -1029,10 +1026,8 @@ class _RenderMixin:
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
                 "work that does not need analysis.md. `roofline` and "
-                "`profile` are Coordinator-managed and absent from "
-                "`PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 "
-                "denies any LLM-emitted propose_action/delegate "
-                "against either name with rule `phase_incompatible`.)"
+                "`profile` are Coordinator-managed; you may also propose "
+                "them directly if the situation warrants it.)"
             )
         md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
@@ -1131,22 +1126,3 @@ class _RenderMixin:
             else:
                 rendered.append(code)
         return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
-
-    def _format_last_sweep(self) -> str:
-        """Render the last workload sweep result for the prompt.
-
-        Returns:
-            str: ``grid_size=... best=... tput=... conc/isl/osl=...``, or
-                ``"(none)"`` when no sweep has run.
-        """
-        if not self.last_sweep:
-            return "(none)"
-        best = self.last_sweep.get("best_overall") or {}
-        if not best:
-            return f"grid_size={self.last_sweep.get('grid_size', 0)} best=(none)"
-        return (
-            f"grid_size={self.last_sweep.get('grid_size', 0)} "
-            f"best={best.get('name', '?')} "
-            f"tput={best.get('output_throughput', '?')} "
-            f"conc={best.get('conc', '?')} isl={best.get('isl', '?')} osl={best.get('osl', '?')}"
-        )

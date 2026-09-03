@@ -42,6 +42,12 @@ _AGENTX_ENV = "HYPERLOOM_AGENTX"
 # at seed so it outlives the shell that started the run.
 _AGENTX_MODE = "agentx"
 
+
+def is_agentx_mode(benchmark_mode: Any) -> bool:
+    """Whether a ``benchmark_mode`` names the agentic workload."""
+    return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
+
+
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the
 # concurrency regime, so the veto band opens to the top of that range instead of
 # rejecting movement upstream would call noise.
@@ -70,7 +76,25 @@ def total_tput_grading_enabled(*, benchmark_mode: str = "") -> bool:
         return raw == COMPOSITE_V1
     if env_bool(_AGENTX_ENV):
         return True
-    return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
+    return is_agentx_mode(benchmark_mode)
+
+
+GRADED_TOTAL = "total_throughput"
+GRADED_OUTPUT = "output_throughput"
+
+
+def graded_metric_key(*, benchmark_mode: str = "") -> str:
+    """The curve-row field a session's speedups are measured on.
+
+    Follows :func:`total_tput_grading_enabled`, so a summary is computed on
+    whatever axis the KEEP verdicts were taken on -- including when
+    ``HYPERLOOM_PERF_METRIC`` overrides the workload's default in either
+    direction. Curve rows name the total ``total_token_throughput``, unlike
+    the ``total_throughput`` a perf snapshot carries.
+    """
+    if total_tput_grading_enabled(benchmark_mode=benchmark_mode):
+        return "total_token_throughput"
+    return GRADED_OUTPUT
 
 
 def total_tput_serving_grading_enabled(*, scriptable: bool = False, benchmark_mode: str = "") -> bool:
@@ -131,10 +155,6 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         if value is not None:
             snap[key] = value
     return snap
-
-
-GRADED_TOTAL = "total_throughput"
-GRADED_OUTPUT = "output_throughput"
 
 
 def output_tput_of(source: Mapping[str, Any] | None) -> float:
@@ -252,6 +272,8 @@ __all__ = [
     "GRADED_OUTPUT",
     "GRADED_TOTAL",
     "graded_axes_of",
+    "graded_metric_key",
+    "is_agentx_mode",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "passes_intvty_gate",

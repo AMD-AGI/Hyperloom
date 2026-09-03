@@ -2754,14 +2754,20 @@ def test_variant_result_has_intvty_and_total_fields():
         status="succeeded",
         output_throughput=183.0,
         input_throughput=25800.0,
-        total_throughput=25983.0,
+        total_token_throughput=25983.0,
         intvty_p90=447.2,
     )
-    assert r.total_throughput == 25983.0
+    assert r.total_token_throughput == 25983.0
     assert r.intvty_p90 == 447.2
 
 
 def test_variant_result_graded_axes_default_to_none():
     r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded", output_throughput=100.0)
-    assert r.total_throughput is None
+    assert r.total_token_throughput is None
     assert r.intvty_p90 is None
+
+
+def test_the_total_axis_has_exactly_one_attribute():
+    """One measured quantity, one name: `total_throughput` was a second alias for it."""
+    r = VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")
+    assert not hasattr(r, "total_throughput")

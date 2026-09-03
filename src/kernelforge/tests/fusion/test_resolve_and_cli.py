@@ -108,6 +108,21 @@ def test_auto_agent_backend_rejects_unconfigured_environment(clean_agent_env):
         _resolve_agent_choice("auto", None)
 
 
+@pytest.mark.parametrize("retired", ["SAFE_API_KEY", "FORGE_API_KEY"])
+def test_a_retired_key_does_not_configure_a_provider(clean_agent_env, monkeypatch, retired):
+    """A key the gateway rejects must not satisfy ``auto``.
+
+    ``resolve_openai_gateway`` stopped accepting these, so treating one as an
+    OpenAI credential picked codex and failed later at the call, hiding the
+    real problem: nothing is configured.
+    """
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv(retired, "retired-value")
+
+    with pytest.raises(click.UsageError, match="no OpenAI or Anthropic credentials"):
+        _resolve_agent_choice("auto", None)
+
+
 def test_explicit_agent_backend_wins_over_credential_shape(clean_agent_env, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     provider, model = _resolve_agent_choice("codex", None)

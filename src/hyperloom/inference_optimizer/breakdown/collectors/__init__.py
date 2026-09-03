@@ -66,7 +66,6 @@ from .sessions import (
     collect_final as collect_final,
     collect_enablement as collect_enablement,
     _runtime_summary as _runtime_summary,
-    _find_latest_validate_stack_report as _find_latest_validate_stack_report,
     _find_current_best_report as _find_current_best_report,
     _find_stack_top_report as _find_stack_top_report,
     _find_matching_action_report as _find_matching_action_report,
@@ -124,10 +123,6 @@ from .explore import (
     _shape_ledger as _shape_ledger,
     _shape_winners_history as _shape_winners_history,
     collect_explore_search as collect_explore_search,
-    _VARIANT_NAME_RE as _VARIANT_NAME_RE,
-    _scan_sweep_variants as _scan_sweep_variants,
-    _shape_sweep_point as _shape_sweep_point,
-    collect_sweep as collect_sweep,
 )
 from .attribution import (
     _normalize_specialist_key as _normalize_specialist_key,
@@ -190,12 +185,7 @@ from .v6 import (
     collect_v6_timeline as collect_v6_timeline,
 )
 from .v6_close import collect_v6_close as collect_v6_close
-from .v6_stages import (
-    project_baseline_event as project_baseline_event,
-    project_conc_sweep_event as project_conc_sweep_event,
-    project_kernel_events as project_kernel_events,
-    project_sweep_event as project_sweep_event,
-)
+from .v6_stages import project_conc_sweep_event as project_conc_sweep_event
 
 __all__ = [
     "collect_attribution",
@@ -215,17 +205,13 @@ __all__ = [
     "collect_session",
     "collect_source_files",
     "collect_specialist_runs",
-    "collect_sweep",
     "collect_telemetry",
     "collect_token_usage",
     "collect_v6_close",
     "collect_v6_metadata",
     "collect_v6_outcome",
     "collect_v6_timeline",
-    "project_baseline_event",
     "project_conc_sweep_event",
-    "project_kernel_events",
-    "project_sweep_event",
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",

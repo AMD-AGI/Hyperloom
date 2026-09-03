@@ -96,8 +96,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     # No specialist below: SWEEP is the validation window and CLOSE only reports.
     PHASE_SWEEP: frozenset(
         {
-            # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark.
-            "sweep",
+            # conc_sweep: Coordinator-internal CONC-ladder benchmark.
             "conc_sweep",
             "recover",
         }
@@ -111,64 +110,32 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
 }
 
-
-def _action_in_phase_map(action_name: str, phase: str, mapping: dict[str, frozenset[str]]) -> bool:
-    """Return True iff stripped ``action_name`` is a member of ``mapping[phase]`` (unknown phase → deny)."""
-    actions = mapping.get((phase or "").strip().upper())
-    if actions is None:
-        return False
-    return (action_name or "").strip() in actions
-
-
-def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
-    return _action_in_phase_map(action_name, phase, PHASE_ALLOWED_ACTIONS)
+# Dispatched by the Coordinator or owned by the Robustness ladder.
+_NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_ALLOWED_ACTIONS[phase]`` as a sorted tuple (deterministic).
+    """Return the phase's LLM-proposable actions as a sorted tuple (deterministic).
+
+    Both callers render this into the prompt, which must not advertise a lever
+    the gate refuses.
 
     Args:
         phase (str): Phase name; stripped and upper-cased before lookup.
 
     Returns:
-        tuple[str, ...]: The phase's allowed actions sorted ascending, or an
-        empty tuple for an unknown phase.
+        tuple[str, ...]: The phase's LLM-proposable actions sorted ascending, or
+        an empty tuple for an unknown phase.
     """
-    return tuple(sorted(PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())))
+    actions = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())
+    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE))
 
 
-# Phase ↔ LLM-proposable set: allowlist minus Coordinator-managed and
-# robustness-delegate-only actions (what PolicyGate accepts for Orchestration).
-PHASE_LLM_PROPOSABLE_ACTIONS: dict[str, frozenset[str]] = {
-    phase: actions - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS
-    for phase, actions in PHASE_ALLOWED_ACTIONS.items()
-}
-
-
-def is_action_llm_proposable_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``action_name`` is LLM-proposable in ``phase`` (unknown → deny)."""
-    return _action_in_phase_map(action_name, phase, PHASE_LLM_PROPOSABLE_ACTIONS)
-
-
-def llm_proposable_actions_for(phase: str) -> tuple[str, ...]:
-    """Return ``PHASE_LLM_PROPOSABLE_ACTIONS[phase]`` sorted (deterministic).
-
-    Args:
-        phase (str): Phase name; stripped and upper-cased before lookup.
-
-    Returns:
-        tuple[str, ...]: The phase's LLM-proposable actions sorted ascending,
-        or an empty tuple for an unknown phase.
-    """
-    return tuple(sorted(PHASE_LLM_PROPOSABLE_ACTIONS.get((phase or "").strip().upper(), frozenset())))
-
-
-def render_phase_proposable_bullets(
+def render_phase_action_bullets(
     *,
     disabled_suffix: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render per-phase LLM-proposable action bullets (shared by the prompt builders).
+    """Render per-phase action bullets for the prompt (informational, not enforced).
 
     Args:
         disabled_suffix (dict[str, str] | None): Optional ``phase -> flag`` map;
@@ -181,12 +148,12 @@ def render_phase_proposable_bullets(
     suffix = disabled_suffix or {}
     out: list[str] = []
     for phase in PHASE_NAMES:
-        proposable = llm_proposable_actions_for(phase)
+        actions = allowed_actions_for(phase)
         flag = suffix.get(phase)
         if flag:
-            out.append(f"- **{phase}**: {', '.join(proposable)} (DISABLED: {flag} — phase skipped)")
+            out.append(f"- **{phase}**: {', '.join(actions)} (DISABLED: {flag} — phase skipped)")
         else:
-            out.append(f"- **{phase}**: {', '.join(proposable)}")
+            out.append(f"- **{phase}**: {', '.join(actions)}")
     return out
 
 
@@ -202,9 +169,8 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "optimize_budget_cap",  # OPTIMIZE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
-        "sweep_done",
-        "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
-        "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
+        "sweep_done",  # SWEEP → CLOSE when the concurrency ladder settles
+        "sweep_failed",  # SWEEP → CLOSE when the ladder reaches a failed terminal result
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # FRAMEWORK_AGENT → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
@@ -278,8 +244,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "plateau_kernel",
         "no_kernel_skipped",
         "sweep_done",
-        "conc_sweep_done",
-        "conc_sweep_failed",
+        "sweep_failed",
         "framework_agent_phase_done",
         "framework_agent_plateau",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
@@ -1636,24 +1601,18 @@ def compute_plateau_kernel(
     }
 
 
-# Statuses on last_sweep / last_conc_sweep that exit_normal_sweep already
-# treats as SWEEP closeout. skip_to_close must not override those: the LLM
-# emits it when conc_sweep was refused, and mapping that to
-# robustness_escalated turns a successful run into a CI failure.
-_SWEEP_DONE_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed"})
-_CONC_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
+# Statuses on last_conc_sweep that exit_normal_sweep already treats as SWEEP
+# closeout. skip_to_close must not override those: the LLM emits it when the
+# sweep was refused, and mapping that to robustness_escalated turns a
+# successful run into a CI failure.
+_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 
 def _sweep_has_recorded_closeout(state: Any) -> bool:
     """Whether SWEEP already recorded a result the phase machine can close on."""
-    last_sweep = getattr(state, "last_sweep", None) or {}
-    if isinstance(last_sweep, dict):
-        if str(last_sweep.get("status") or "").lower() in _SWEEP_DONE_STATUSES:
-            return True
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
-        if str(last_conc.get("status") or "").lower() in _CONC_SWEEP_CLOSEOUT_STATUSES:
-            return True
+        return str(last_conc.get("status") or "").lower() in _SWEEP_CLOSEOUT_STATUSES
     return False
 
 
@@ -2572,13 +2531,12 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit: sweep_done, conc_sweep terminal, or budget exhausted.
+    """SWEEP normal exit: the concurrency ladder's terminal state, or budget exhausted.
 
-    Emits an exit on concurrency-sweep completion so a singleton-blocked sweep does not idle.
+    The ladder is the only sweep, so its status is the phase's.
 
     Args:
-        state (Any): Frozen SharedState view exposing ``last_sweep`` and
-            ``last_conc_sweep``.
+        state (Any): Frozen SharedState view exposing ``last_conc_sweep``.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
@@ -2587,28 +2545,23 @@ def exit_normal_sweep(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the SWEEP
         exit, or ``None`` when SWEEP should continue.
     """
-    last_sweep = getattr(state, "last_sweep", None) or {}
-    if isinstance(last_sweep, dict):
-        status = str(last_sweep.get("status") or "").lower()
-        if status in ("succeeded", "partial", "completed"):
-            return "sweep_done", {"sweep_status": status}
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
-        cs_status = str(last_conc.get("status") or "").lower()
-        if cs_status == "failed":
-            return "conc_sweep_failed", {"conc_sweep_status": cs_status}
-        if cs_status in ("succeeded", "partial", "completed", "skipped"):
-            evidence: dict[str, Any] = {"conc_sweep_status": cs_status}
+        status = str(last_conc.get("status") or "").lower()
+        if status == "failed":
+            return "sweep_failed", {"sweep_status": status}
+        if status in ("succeeded", "partial", "completed", "skipped"):
+            evidence: dict[str, Any] = {"sweep_status": status}
             # A sweep that declined to run is also terminal, and the exit
             # reason alone cannot tell the two apart afterwards. was_skipped
             # covers both declining and spending the whole budget without a
             # comparable pair, so it is only carried with the flag that
             # separates them (see kernel.conc_sweep.conc_sweep_declined_to_run).
             if last_conc.get("was_skipped"):
-                evidence["conc_sweep_was_skipped"] = True
-                evidence["conc_sweep_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
-                evidence["conc_sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
-            return "conc_sweep_done", evidence
+                evidence["sweep_was_skipped"] = True
+                evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
+                evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
+            return "sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
         state,
         budget_pct=budget_pct,
@@ -2937,7 +2890,7 @@ def compute_next_phase(
             exit_reason, exit_evidence = norm
             # Failed conc_sweep closeout is terminal: preserve the honest
             # stop_reason instead of opening another macro-cycle.
-            if exit_reason == "conc_sweep_failed":
+            if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
@@ -3408,7 +3361,6 @@ __all__ = [
     "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
     "PHASE_ALLOWED_ACTIONS",
-    "PHASE_LLM_PROPOSABLE_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_EXIT_REASONS",
     "PHASE_FRAMEWORK_AGENT",
@@ -3457,9 +3409,7 @@ __all__ = [
     "prelude_can_afford",
     "prelude_exit_viability",
     "session_usable_seconds",
-    "is_action_allowed_in_phase",
-    "is_action_llm_proposable_in_phase",
-    "llm_proposable_actions_for",
+    "render_phase_action_bullets",
     "is_valid_escalate_hint",
     "is_valid_phase_exit_reason",
     "is_valid_stop_reason",

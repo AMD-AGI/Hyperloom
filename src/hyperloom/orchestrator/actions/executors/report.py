@@ -403,9 +403,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Search / phase plateaus and completions.
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
-    "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
-    "conc_sweep_done": "Post-sweep concurrency sweep finished.",
-    "conc_sweep_failed": "Post-sweep concurrency sweep reached a failed terminal result.",
+    "sweep_done": "SWEEP finished the concurrency ladder.",
+    "sweep_failed": "The concurrency sweep reached a failed terminal result.",
     "optimize_no_more_leverage": (
         "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
     ),
@@ -441,8 +440,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
 def _explain_stop_reason(stop_reason, state=None):
     """Return a human-readable explanation for a terminal ``stop_reason``.
 
-    ``conc_sweep_done`` is the SWEEP exit for a concurrency sweep that reached
-    a terminal result, which includes one that declined to run at all and one
+    ``sweep_done`` is the SWEEP exit for a concurrency sweep that reached a
+    terminal result, which includes one that declined to run at all and one
     that spent its budget without a comparable pair. The generic wording then
     tells the reader a sweep finished when none happened, so a skip is named
     when ``state`` is available to say so.
@@ -451,7 +450,7 @@ def _explain_stop_reason(stop_reason, state=None):
     """
     reason = str(stop_reason or "").strip()
     text = _STOP_REASON_EXPLANATIONS.get(reason, "")
-    if reason == "conc_sweep_done" and text:
+    if reason == "sweep_done" and text:
         return _explain_conc_sweep_skip(state) or text
     return text
 
@@ -1191,11 +1190,9 @@ def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     lines.append("## Concurrency Sweep — Throughput vs Interactivity")
     lines.append("")
-    lines.append(
-        "Efficiency (tok/s/GPU) vs Interactivity (tok/s/user) across the "
-        "post-optimization concurrency ladder.  "
-        "Red = baseline, orange = optimized."
-    )
+    # The PNG draws its own axis labels, and they differ by workload; naming
+    # them here too drifts from the chart.
+    lines.append("The post-optimization concurrency ladder.  Red = baseline, orange = optimized.")
     lines.append("")
     lines.append(f"![Concurrency sweep curve]({png_md_rel})")
     lines.append("")
@@ -1210,7 +1207,8 @@ def _render_conc_sweep_curve_for_report(
     """Render the concurrency-sweep curve PNG into the reports directory.
 
     Loads the full ``conc_sweep_summary.json`` (not the slim pointer), calls
-    :func:`render_conc_sweep_curve`, and returns the path on success.
+    :func:`render_conc_sweep_curve`, and returns the path on success. The
+    renderer drops a payload with nothing plottable on its own axes.
 
     Args:
         session_dir: Session directory used to locate
@@ -1227,25 +1225,15 @@ def _render_conc_sweep_curve_for_report(
     from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
-    if not json_path.exists():
-        return None
     try:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
         return None
 
-    # Quick check: need at least one arm with a non-None output_throughput.
-    def _has_data(arm_key: str) -> bool:
-        pts = (payload.get(arm_key) or {}).get("points") or []
-        return any(p.get("output_throughput") is not None for p in pts)
-
-    if not _has_data("baseline") and not _has_data("optimized"):
-        log.debug("report_executor: conc_sweep_summary has no throughput data — skipping plot")
-        return None
-
     png_path = output_dir / "conc_sweep_curve.png"
     tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
+
     model_label = str(getattr(state, "model_name", "") or "")
     gpu_label = str(getattr(state, "gpu_type", "") or "").upper()
     isl = int(payload.get("isl") or 0)

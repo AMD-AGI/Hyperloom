@@ -1259,6 +1259,8 @@ def apply_runtime_benchmark_overrides(
     model_path: str | None = None,
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
+    conc: Any = None,
+    agentx_mode: bool | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
 
@@ -1274,10 +1276,15 @@ def apply_runtime_benchmark_overrides(
             ``{framework}_{gpu_type}.sh`` script.
         benchmark_script (str | None): Pre-sanitized script name that
             force-selects a Magpie script (applied last).
+        agentx_mode (bool | None): Explicit AgentX decision; when omitted, an
+            already-materialized AgentX script or the ambient env decides.
 
     Returns:
         dict[str, Any]: The mutated ``benchmark["envs"]`` mapping.
     """
+    if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
+        agentx_mode = True
+
     if model_path:
         bench["model"] = str(model_path)
 
@@ -1306,7 +1313,7 @@ def apply_runtime_benchmark_overrides(
     # module-load cycle with _workload_envs.
     from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
 
-    apply_agentx_switch(bench, model_path)
+    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
 
     envs = bench.setdefault("envs", {})
     # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare

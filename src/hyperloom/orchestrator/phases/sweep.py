@@ -6,7 +6,6 @@
 from __future__ import annotations
 import logging as _logging
 from typing import Any
-from ..state.shared_state import SharedState, inject_stack_base_params
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -47,10 +46,10 @@ class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue a ``conc_sweep`` task on SWEEP entry.
+        """Auto-enqueue the ``conc_sweep`` task on SWEEP entry.
 
-        The automatic phase path runs the baseline-vs-current concurrency curve
-        directly; the full workload ``sweep`` remains a manual executor.
+        It is the phase's only action: the baseline-vs-current concurrency
+        curve, on the ladder this workload sweeps.
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -102,7 +101,7 @@ class SweepPhase(PhaseHandler):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001 — a failed enqueue must still close the phase
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
@@ -112,27 +111,23 @@ class SweepPhase(PhaseHandler):
                 auto_conc_sweep_error=repr(exc)[:240],
             )
             return
+        # The only None is the helper's own budget decline, which records its
+        # terminal skip before returning.
         if task is None:
-            # The enqueue helper declines with its own terminal skip when the
-            # session clock leaves nothing to spend; don't overwrite that reason.
-            last = getattr(state, "last_conc_sweep", None) or {}
-            if not str(last.get("status") or "").strip():
-                self._record_terminal_conc_sweep_skip(
-                    skip_reason="enqueue_returned_none",
-                    auto_conc_sweep_error="enqueue_returned_none",
-                )
             return
         log.info(
             "SWEEP entry (from=%s): auto-enqueued conc_sweep task=%s (concs=%s total_budget_sec=%s)",
             from_phase or "<unknown>",
             task.task_id,
-            task.params.get("concs") or [],
+            task.params.get("concs"),
             task.params.get("total_budget_sec"),
         )
         self._record_phase_entry_evidence(
             auto_conc_sweep_enqueued=True,
             auto_conc_sweep_task_id=task.task_id,
-            auto_conc_sweep_concs=list(task.params.get("concs") or []),
+            # Verbatim: None records "the workload picks", which is not the
+            # same statement as an empty ladder.
+            auto_conc_sweep_concs=task.params.get("concs"),
         )
 
     async def _enqueue_internal_conc_sweep_task(
@@ -140,7 +135,7 @@ class SweepPhase(PhaseHandler):
         *,
         reason: str,
     ) -> Task | None:
-        """Build + enqueue a Coordinator-internal ``conc_sweep`` task; returns None on error.
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task.
 
         Idempotency key + PolicyGate singleton ensure at most one per SWEEP.
 
@@ -148,8 +143,10 @@ class SweepPhase(PhaseHandler):
             reason: Tag used in the task's idempotency key and logging.
 
         Returns:
-            The created (or existing) ``conc_sweep`` task, or ``None`` on
-            enqueue error.
+            The created (or existing) ``conc_sweep`` task, or ``None`` when the
+            session clock leaves nothing to spend -- which records its own
+            terminal skip. An enqueue failure raises to the phase hook, which
+            records the error text a swallowed one would have lost.
         """
         state = self.shared_state
         configured_budget = int(state.conc_sweep_total_budget_sec or 0)
@@ -181,23 +178,19 @@ class SweepPhase(PhaseHandler):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
-            "concs": list(state.conc_sweep_concs or []),
+            # None, not [], when the state carries no ladder: the executor reads
+            # [] as a deliberate "no concs" and skips, while None lets it fall
+            # back to the ladder for this workload.
+            "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
             "total_budget_sec": clamped_budget,
         }
-        try:
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind="conc_sweep",
-                params=params,
-                idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
-            )
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.exception(
-                "conc_sweep: failed to enqueue internal task: %r",
-                exc,
-            )
-            return None
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="conc_sweep",
+            params=params,
+            idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
+            lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
+        )
         if was_existing:
             log.info(
                 "internal-conc_sweep task already exists (idempotent: task_id=%s, state=%s)",
@@ -212,9 +205,6 @@ class SweepPhase(PhaseHandler):
                 params["concs"],
                 params["total_budget_sec"],
             )
-        # Stamp evidence so PolicyGate's sweep_phase_singleton denies a later
-        # LLM full-workload ``sweep`` (conc_sweep already ran on SWEEP entry).
-        self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 
     def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
@@ -248,162 +238,3 @@ class SweepPhase(PhaseHandler):
             }
         )
         self.shared_state.save(self.session_dir)
-
-    async def _enqueue_internal_sweep_task(
-        self,
-        *,
-        reason: str,
-    ) -> Task:
-        """Build + enqueue a Coordinator-internal ``sweep`` task.
-
-        Grid priority: warm_start_recipe.sweep_grid then SKILL.md defaults.
-
-        Args:
-            reason: Tag used in the task's idempotency key and logging.
-
-        Returns:
-            The created (or existing idempotent) ``sweep`` :class:`Task`.
-        """
-        state = self.shared_state
-        grid_params = self._build_sweep_params_from_recipe(state)
-        params: dict[str, Any] = {
-            "source": grid_params["source"],
-            "reason": str(reason),
-            "conc_values": list(grid_params["conc_values"]),
-            "isl_osl_configs": list(grid_params["isl_osl_configs"]),
-            "num_prompts_factor": int(grid_params["num_prompts_factor"]),
-        }
-        if state.baseline_config_path:
-            params["config_path"] = state.baseline_config_path
-        # Hand the GEAK e2e result to the sweep so it reuses GEAK's bench_e2e.sh
-        # + overlay instead of relaunching via Magpie.
-        ps_result = getattr(state, "geak_result", None) or {}
-        if isinstance(ps_result, dict) and ps_result.get("status") == "ok" and ps_result.get("bench_script"):
-            params["geak_result"] = ps_result
-        inject_stack_base_params(params, state)
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            # Mirror baseline's benchmark_script so re-launch uses the same wrapper.
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
-        lanes, ttl = self._registry_lanes_ttl("sweep")
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind="sweep",
-            params=params,
-            idempotency_key=f"internal-sweep-{reason}{self._cycle_idem_suffix()}",
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
-        )
-        if was_existing:
-            log.info(
-                "internal-sweep task already exists (idempotent: task_id=%s, state=%s)",
-                task.task_id,
-                task.state,
-            )
-        return task
-
-    @staticmethod
-    def _build_sweep_params_from_recipe(state: SharedState) -> dict[str, Any]:
-        """Pick a sweep grid: warm_start_recipe.sweep_grid over SKILL.md defaults, per-field.
-
-        Args:
-            state: The session SharedState whose ``warm_start_recipe`` may carry
-                a ``sweep_grid`` override.
-
-        Returns:
-            A dict with ``source`` (``"recipe_kb"`` or
-            ``"skill_md_default"``), ``conc_values``, ``isl_osl_configs`` and
-            ``num_prompts_factor``.
-        """
-        from ..actions.executors.sweep import (
-            DEFAULT_CONC_VALUES,
-            DEFAULT_ISL_OSL,
-            DEFAULT_NUM_PROMPTS_FACTOR,
-        )
-
-        recipe = getattr(state, "warm_start_recipe", None)
-        sweep_grid = None
-        if isinstance(recipe, dict):
-            sg = recipe.get("sweep_grid")
-            if isinstance(sg, dict):
-                sweep_grid = sg
-
-        def _coerce_int_list(value: Any) -> list[int] | None:
-            """Coerce a recipe value into a non-empty list of ints.
-
-            Args:
-                value (Any): The raw recipe field (expected: list of ints).
-
-            Returns:
-                list[int] | None: The coerced ints, or ``None`` if ``value`` is
-                    not a non-empty all-int list.
-            """
-            if not isinstance(value, list) or not value:
-                return None
-            out: list[int] = []
-            for v in value:
-                try:
-                    out.append(int(v))
-                except (TypeError, ValueError):
-                    return None
-            return out if out else None
-
-        def _coerce_isl_osl_list(value: Any) -> list[str] | None:
-            """Coerce a recipe value into a list of ``"<ISL>:<OSL>"`` strings.
-
-            Accepts either ``"<ISL>:<OSL>"`` strings or ``[isl, osl]`` pairs.
-
-            Args:
-                value (Any): The raw recipe field.
-
-            Returns:
-                list[str] | None: Normalized ISL:OSL strings, or ``None`` if the
-                    value is not a recognisable non-empty list.
-            """
-            if not isinstance(value, list) or not value:
-                return None
-            out: list[str] = []
-            for v in value:
-                if isinstance(v, str) and ":" in v:
-                    out.append(v)
-                    continue
-                if isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(x, (int, str)) for x in v):
-                    out.append(f"{int(v[0])}:{int(v[1])}")
-                    continue
-                return None
-            return out if out else None
-
-        conc_values: list[int] = list(DEFAULT_CONC_VALUES)
-        isl_osl_configs: list[str] = list(DEFAULT_ISL_OSL)
-        num_prompts_factor: int = int(DEFAULT_NUM_PROMPTS_FACTOR)
-        used_recipe = False
-
-        if sweep_grid is not None:
-            cv = _coerce_int_list(sweep_grid.get("conc_values"))
-            if cv is not None:
-                conc_values = cv
-                used_recipe = True
-            io = _coerce_isl_osl_list(sweep_grid.get("isl_osl_configs"))
-            if io is not None:
-                isl_osl_configs = io
-                used_recipe = True
-            npf_raw = sweep_grid.get("num_prompts_factor")
-            try:
-                npf = int(npf_raw) if npf_raw is not None else None
-            except (TypeError, ValueError):
-                npf = None
-            if npf is not None and npf > 0:
-                num_prompts_factor = npf
-                used_recipe = True
-            if not used_recipe:
-                log.warning(
-                    "sweep recipe present but unusable (no recognisable fields); falling back to SKILL.md defaults"
-                )
-
-        return {
-            "source": "recipe_kb" if used_recipe else "skill_md_default",
-            "conc_values": conc_values,
-            "isl_osl_configs": isl_osl_configs,
-            "num_prompts_factor": num_prompts_factor,
-        }

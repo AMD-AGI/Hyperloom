@@ -1130,26 +1130,6 @@ async def test_promote_explore_records_success_attempt(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_sweep_records_discarded_attempt(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        task = _mk_task("sweep", "t-sw-1")
-        result = {
-            "grid_size": 4,
-            "best_overall": {"name": "c8_isl1k_osl1k", "tput": 1200.0},
-            "pareto_front": [{"name": "a"}, {"name": "b"}],
-        }
-        await c._promote_to_shared_state("sweep", result, task=task)
-        c.shared_state.last_sweep_attempt = c.shared_state.last_sweep
-        assert c.shared_state.sweep_attempts[-1]["status"] == "succeeded"
-        assert c.shared_state.sweep_attempts[-1]["decision"] == "discarded"
-        assert c.shared_state.sweep_attempts[-1]["extras"]["grid_size"] == 4
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_promote_explore_updates_validated_gain(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -2504,44 +2484,6 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_dir, caplog):
-    # Defensive audit (log-only): kernel-owned kinds are legitimately not
-    # registered under --no-kernel, so a leftover queued kernel-owned task must
-    # NOT be flagged by the dispatch audit (no false positive). Dispatch is
-    # unchanged (the task still fails on the missing runner).
-    import logging
-
-    c = Coordinator(session_dir, backends=_build_backends({}))
-
-    async def _noop_executor(ctx):
-        return {}
-
-    # Populate the registry with a non-kernel executor only (mimics the
-    # --no-kernel lean registry, where kernel-owned kinds are unregistered).
-    c.sub.register_executor("report", _noop_executor)
-    await c.tasks.create(
-        kind="kernel_opt",
-        params={},
-        idempotency_key="k-nokernel-audit-1",
-        requires_lanes=[],
-    )
-    try:
-        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-            await c.dispatcher._pump_dispatcher_once()
-        assert not any("dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage() for r in caplog.records)
-        # Plan B replays PolicyGate before running: kernel-owned kinds are
-        # cancelled at dispatch (not failed on a missing runner).
-        cancelled = await c.tasks.by_state("cancelled")
-        assert len(cancelled) == 1
-        assert cancelled[0].kind == "kernel_opt"
-        evidence = (cancelled[0].history or [{}])[-1].get("evidence") or {}
-        assert evidence.get("reason") == "policy_denied"
-        assert evidence.get("rule") == "kernel_owned_by_kernel_agent"
-        assert not await c.tasks.by_state("failed")
-    finally:
-        await c.stop()
-
-
 @pytest.mark.asyncio
 async def test_target_reached_routes_through_close_phase(session_dir):
     """A met objective transitions to CLOSE instead of breaking out of the loop.

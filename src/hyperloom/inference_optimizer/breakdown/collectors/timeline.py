@@ -19,6 +19,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     is_phase_transition_row as _is_phase_transition_row,
     phase_history_event_name,
 )
+from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
@@ -28,7 +29,6 @@ from ._common import (
     _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
-    _to_int,
 )
 
 
@@ -37,10 +37,6 @@ _AUDIT_ACTIONS = (
     "baseline",
     "profile",
     "explore",
-    "backends",
-    "params",
-    "validate_stack",
-    "sweep",
     "roofline",
 )
 
@@ -544,42 +540,6 @@ def collect_capability_summary(
         elif geak_cap.get("status") == "not_attempted":
             geak_cap["status"] = "attempted"
 
-    # Legacy capability rows for archived sessions.
-    backends = _capability_for_action(state, "backends")
-    backends_search = state.get("backends_search") or {}
-    if isinstance(backends_search, dict):
-        backends["tested"] = len(backends_search.get("tested") or {})
-        if backends_search.get("accepted"):
-            backends["best_gain_pct"] = max(
-                (_to_float(v.get("gain_pct")) or 0.0 for v in backends_search["accepted"] if isinstance(v, dict)),
-                default=None,
-            )
-        _fold_search_ledger_keeps(backends, backends_search)
-
-    params = _capability_for_action(state, "params")
-    params_search = state.get("params_search") or {}
-    if isinstance(params_search, dict):
-        params["tested"] = len(params_search.get("tested") or {})
-        if params_search.get("accepted"):
-            params["best_gain_pct"] = max(
-                (_to_float(v.get("gain_pct")) or 0.0 for v in params_search["accepted"] if isinstance(v, dict)),
-                default=None,
-            )
-        _fold_search_ledger_keeps(params, params_search)
-
-    validate = _capability_for_action(state, "validate_stack")
-    validate["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
-
-    sweep_cap = _capability_for_action(state, "sweep")
-    last_sweep = state.get("last_sweep") or {}
-    if isinstance(last_sweep, dict):
-        sweep_cap["grid_size"] = _to_int(last_sweep.get("grid_size"))
-        bo = last_sweep.get("best_overall")
-        if isinstance(bo, dict):
-            sweep_cap["best_throughput"] = _to_float(bo.get("output_throughput") or bo.get("tput"))
-        if sweep_cap.get("attempts", 0) > 0:
-            sweep_cap["status"] = "completed"
-
     # Merged explore row carrying the unified explore_search ledger activity.
     explore = _capability_for_action(state, "explore")
     explore["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
@@ -609,12 +569,7 @@ def collect_capability_summary(
     return {
         "geak": geak_cap,
         "forge": forge_cap,
-        # Primary post-merge row; backends/params/validate_stack are compat rows.
         "explore": explore,
-        "backends": backends,
-        "params": params,
-        "sweep": sweep_cap,
-        "validate_stack": validate,
         "specialist": specialist_row,
     }
 
@@ -743,17 +698,7 @@ def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
 
 
 # Mirror of the SpecialistDomain.key catalogue (orchestrator/specialists/domains.py),
-# inlined to keep breakdown free of orchestrator deps for offline use. Lags the
-# catalogue: static_recon / enablement / cross_framework_rewrite are not seeded.
-_SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
-    "serving_specialist",
-    "kernel_switch_specialist",
-    "comm_specialist",
-    "compiler_specialist",
-    "system_specialist",
-    "candidate_discovery_specialist",
-    "research_scout_specialist",
-)
+_SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = tuple(d.key for d in SPECIALIST_DOMAINS)
 
 
 def collect_phase_segments(

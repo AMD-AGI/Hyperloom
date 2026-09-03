@@ -1551,20 +1551,6 @@ async def test_promote_explore_discovered_flags_and_bad_winner(
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
-async def test_promote_sweep_chains_conc_sweep(coord: Coordinator) -> None:
-    coord.shared_state.conc_sweep_enabled = True
-    await coord._promote_to_shared_state(
-        "sweep",
-        {
-            "status": "succeeded",
-            "grid_size": 4,
-            "pareto_front": [{"x": 1}],
-        },
-    )
-
-
-@pytest.mark.asyncio
 async def test_promote_conc_sweep_records(coord: Coordinator) -> None:
     task = _ptask("cs-1", "conc_sweep")
     await coord._promote_to_shared_state(
@@ -1599,8 +1585,8 @@ async def test_unpromotable_conc_sweep_records_failed_terminal_state(coord: Coor
     result = exit_normal_sweep(coord.shared_state)
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_failed"
-    assert evidence["conc_sweep_status"] == "failed"
+    assert reason == "sweep_failed"
+    assert evidence["sweep_status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1626,8 +1612,8 @@ async def test_budget_limited_conc_sweep_skip_records_done(coord: Coordinator) -
     result = exit_normal_sweep(coord.shared_state)
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_done"
-    assert evidence["conc_sweep_status"] == "skipped"
+    assert reason == "sweep_done"
+    assert evidence["sweep_status"] == "skipped"
 
 
 # -- _promote_to_shared_state additional branches ---------------------------

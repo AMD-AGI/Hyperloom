@@ -199,7 +199,7 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
 
     async def _fake_sweep(**_kwargs):
         # bench-e2e replay measured this throughput at the validated regime.
-        return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
+        return {"status": "succeeded", "promotion_measurement": {"conc": 64, "output_throughput": measured}}
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",
@@ -279,7 +279,7 @@ async def test_geak_harness_fallback_no_promote_below_current_best(
     assert provisional["validated"] is True
 
     async def _fake_sweep(**_kwargs):
-        return {"status": "succeeded", "best_for_each_conc": {"64": {"output_throughput": measured}}}
+        return {"status": "succeeded", "promotion_measurement": {"conc": 64, "output_throughput": measured}}
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",

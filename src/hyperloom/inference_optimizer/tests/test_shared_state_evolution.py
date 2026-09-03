@@ -368,71 +368,6 @@ def test_enablement_accepted_config_path_roundtrips(tmp_path):
     assert loaded.enablement.active_runtime == {"bin_path": "/attempt/bin", "venv_root": "/attempt/venv"}
 
 
-# 7. EnablementRound v3→v4 migration
-def test_v3_flat_enablement_fields_migrate_to_nested(tmp_path):
-    """A v3 state.json with flat enablement_* keys loads into a populated EnablementRound."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    v3_state = {
-        "schema_version": 3,
-        "enablement_launch_log": "RuntimeError: Engine core initialization failed.",
-        "enablement_attempts": 2,
-        "enablement_stall_streak": 1,
-        "enablement_kept_patches": ["/p/001.patch"],
-        "enablement_succeeded": False,
-        "enablement_inflight_task_id": "spec-v3",
-        "enablement_mode": "launch",
-    }
-    (sd / "state.json").write_text(json.dumps(v3_state))
-    loaded = SharedState.load_or_init(sd)
-    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
-    assert loaded.enablement.launch_log == "RuntimeError: Engine core initialization failed."
-    assert loaded.enablement.attempts == 2
-    assert loaded.enablement.stall_streak == 1
-    assert loaded.enablement.kept_patches == ["/p/001.patch"]
-    assert loaded.enablement.succeeded is False
-    assert loaded.enablement.inflight_task_id == "spec-v3"
-    # session-scoped field stays top-level
-    assert loaded.enablement_mode == "launch"
-
-
-# 8. FRAMEWORK field rename v4→v5 migration
-def test_v4_legacy_framework_fields_migrate_to_current_names(tmp_path):
-    """A state written before the framework_agent rename keeps its progress.
-
-    Without the migration these keys are not dataclass fields, so the
-    unknown-key filter drops them and the phase restarts from scratch: already
-    benchmarked PRs are re-run and a persisted --no-framework-agent flips back
-    on. Nothing raises, which is why it went unnoticed.
-    """
-    sd = tmp_path / "session"
-    sd.mkdir()
-    legacy = {
-        "schema_version": 4,
-        "framework_phase_enabled": False,
-        "framework_pr_phase_progress": [{"candidate_id": "PR:1", "status": "kept"}],
-        "framework_pr_batches": [{"batch_id": "b1", "candidates": []}],
-        "framework_pr_phase_done": True,
-        "framework_pr_discover_failures": 2,
-        "framework_pr_consecutive_empty_discoveries": 3,
-        "framework_pr_authoring_enabled": False,
-        "framework_pr_specialist_candidate_map": {"spec-1": "PR:1"},
-    }
-    (sd / "state.json").write_text(json.dumps(legacy))
-
-    loaded = SharedState.load_or_init(sd)
-
-    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
-    assert loaded.framework_agent_phase_enabled is False
-    assert loaded.framework_agent_phase_progress == [{"candidate_id": "PR:1", "status": "kept"}]
-    assert loaded.framework_agent_batches == [{"batch_id": "b1", "candidates": []}]
-    assert loaded.framework_agent_phase_done is True
-    assert loaded.framework_agent_discover_failures == 2
-    assert loaded.framework_consecutive_empty_discoveries == 3
-    assert loaded.framework_agent_authoring_enabled is False
-    assert loaded.framework_agent_specialist_candidate_map == {"spec-1": "PR:1"}
-
-
 def test_v5_migration_prefers_the_current_spelling(tmp_path):
     """A half-migrated state carrying both spellings keeps the current one."""
     sd = tmp_path / "session"
@@ -448,61 +383,6 @@ def test_v5_migration_prefers_the_current_spelling(tmp_path):
     )
 
     assert SharedState.load_or_init(sd).framework_agent_discover_failures == 1
-
-
-def test_v5_migration_strips_the_promote_prefix_from_stacked_framework_keeps(tmp_path):
-    """An in-flight session's already-stacked KEEPs must reconcile after the upgrade.
-
-    Renaming the fields alone leaves ``variant_name`` spelled the promote-side
-    way. Resume reconciliation keys on the bare candidate key, so those entries
-    keep reporting as orphaned KEEPs, and the ``(action, variant_name)`` dedup
-    that stops a second append for the same PR no longer matches either.
-    """
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 4,
-                "optimization_stack": [
-                    {"action": "framework", "variant_name": "framework:PR-1", "tput": 1.0},
-                    {"action": "framework", "variant_name": "PR-2", "tput": 2.0},
-                    {"action": "explore", "variant_name": "framework:not-mine", "tput": 3.0},
-                ],
-            }
-        )
-    )
-
-    stack = SharedState.load_or_init(sd).optimization_stack
-
-    assert stack[0]["variant_name"] == "PR-1"
-    assert stack[1]["variant_name"] == "PR-2"
-    # Only the framework family carried that prefix; explore names are its own.
-    assert stack[2]["variant_name"] == "framework:not-mine"
-
-
-def test_v5_stack_action_label_matches_the_writeback_constant():
-    """The migration hardcodes the stack label; writeback owns the real one."""
-    from hyperloom.orchestrator.loop.writeback import _FRAMEWORK_STACK_ACTION
-    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_STACK_ACTION_V5
-
-    assert _FRAMEWORK_STACK_ACTION_V5 == _FRAMEWORK_STACK_ACTION
-
-
-def test_v5_rename_table_targets_are_real_fields():
-    """Every rename target must still exist, or the migration drops the data.
-
-    The table is the only thing standing between an old state.json and the
-    unknown-key filter, and a target that no longer exists fails the same
-    silent way the missing migration did.
-    """
-    from hyperloom.orchestrator.state.shared_state import _FRAMEWORK_FIELD_RENAMES_V5
-
-    fields = set(SharedState.__dataclass_fields__)
-    missing = sorted(t for t in _FRAMEWORK_FIELD_RENAMES_V5.values() if t not in fields)
-    assert not missing, f"rename targets that are no longer fields: {missing}"
-    stale = sorted(legacy for legacy in _FRAMEWORK_FIELD_RENAMES_V5 if legacy in fields)
-    assert not stale, f"legacy names that are somehow still fields: {stale}"
 
 
 def test_class_constants_are_not_persisted_fields():
@@ -539,29 +419,6 @@ def test_the_profile_identity_keys_stay_off_disk(tmp_path):
     loaded = SharedState.load_or_init(sd)
     assert loaded.PROFILE_WORKLOAD_IDENTITY_KEYS == (SharedState.PROFILE_WORKLOAD_IDENTITY_KEYS)
     assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
-
-
-def test_v6_rename_table_targets_are_real_fields():
-    """Same contract as the v5 table: targets exist, legacy names do not."""
-    from hyperloom.orchestrator.state.shared_state import _KERNEL_OPT_FIELD_RENAMES_V6
-
-    fields = set(SharedState.__dataclass_fields__)
-    missing = sorted(t for t in _KERNEL_OPT_FIELD_RENAMES_V6.values() if t not in fields)
-    assert not missing, f"rename targets that are no longer fields: {missing}"
-    stale = sorted(legacy for legacy in _KERNEL_OPT_FIELD_RENAMES_V6 if legacy in fields)
-    assert not stale, f"legacy names that are somehow still fields: {stale}"
-
-
-def test_v6_carries_the_pre_rename_kernel_opt_optout(tmp_path):
-    """A resumed opt-out keeps opting out instead of reverting to the default."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(json.dumps({"schema_version": 5, "continue_kernel_after_gemm": False}))
-
-    loaded = SharedState.load_or_init(sd)
-
-    assert loaded.auto_kernel_opt_enabled is False
-    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
 
 
 def test_v6_prefers_the_current_spelling_when_both_are_present(tmp_path):

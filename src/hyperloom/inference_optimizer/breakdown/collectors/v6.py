@@ -15,7 +15,6 @@ from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
     _AUTHORING_TASK_KINDS,
     _FRAMEWORK_PHASES,
-    _KERNEL_PHASES,
     _dict_rows,
     _first,
     _mapping,
@@ -27,12 +26,7 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
-from .v6_stages import (
-    project_baseline_event,
-    project_conc_sweep_event,
-    project_kernel_events,
-    project_sweep_event,
-)
+from .v6_stages import project_conc_sweep_event
 
 
 _SUCCESS_STOP_REASONS = frozenset(
@@ -42,7 +36,6 @@ _SUCCESS_STOP_REASONS = frozenset(
         "time_exhausted",
         "max_ticks",
         "sweep_done",
-        "conc_sweep_done",
     }
 )
 _ABORTED_STOP_REASONS = frozenset({"signal", "user_stop_requested"})
@@ -1981,22 +1974,19 @@ def collect_v6_timeline(
     state: dict[str, Any] | None = None,
     recorded_operations: list[dict[str, Any]] | None = None,
     critic_iterations: list[dict[str, Any]] | None = None,
-    baseline: Any = None,
-    sweep: Any = None,
     conc_sweep_summary: Any = None,
     phase_timeline: Any = None,
-    optimizations: Any = None,
-    kernel_journey: Any = None,
-    collective: Any = None,
-    geak: Any = None,
 ) -> list[dict[str, Any]]:
     """Load durable events and project stage work without mutating V5 state.
 
-    ``install`` and ``model_gate`` are read back from the durable event
-    directory because they run before the Coordinator exists. Everything else
-    is projected here from V5 sections the exporter has already built, so the
-    keyword arguments are all optional: a caller that passes none still gets
-    the durable events plus the framework projection.
+    ``install``, ``model_gate``, ``kernel``, ``roofline`` and ``baseline`` are
+    read back from the durable event directory: the first two run before the
+    Coordinator exists, and the rest are recorded by the phase or the action
+    that produces them, which knows things no projection over ``state.json``
+    can recover -- when the work started, most plainly. The remaining
+    measurement stages are projected here from V5 sections the exporter has
+    already built, so the keyword arguments are all optional: a caller that
+    passes none still gets the durable events plus the framework projection.
 
     Every projection is isolated (see :func:`_projected`). The durable events
     are read first and are never discarded by a later stage's failure.
@@ -2013,26 +2003,7 @@ def collect_v6_timeline(
             for window in windows
         ]
 
-    def _kernel_events() -> list[dict[str, Any]]:
-        return project_kernel_events(
-            state,
-            _phase_windows(state, _KERNEL_PHASES),
-            warnings,
-            optimizations=optimizations,
-            kernel_journey=kernel_journey,
-            collective=collective,
-            geak=geak,
-            baseline=baseline,
-            recorded_operations=operations,
-        )
-
     timeline.extend(_projected("framework_agent", _framework_events, warnings))
-    timeline.extend(
-        _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
-    )
-    timeline.extend(
-        _projected("sweep", lambda: project_sweep_event(sweep, state, baseline, phase_timeline, warnings), warnings)
-    )
     timeline.extend(
         _projected(
             "conc_sweep",
@@ -2040,7 +2011,6 @@ def collect_v6_timeline(
             warnings,
         )
     )
-    timeline.extend(_projected("kernel", _kernel_events, warnings))
     timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
@@ -2119,7 +2089,7 @@ def _stage_reached(
             if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning", "last_collective"))
             else "kernel_agent"
         ),
-        "SWEEP": ("conc_sweep" if state.get("last_conc_sweep") or state.get("last_conc_sweep_watermark") else "sweep"),
+        "SWEEP": "conc_sweep",
         "CLOSE": "close",
     }
     if phase in phase_map:

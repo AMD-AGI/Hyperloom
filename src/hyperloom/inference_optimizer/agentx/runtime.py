@@ -20,7 +20,7 @@ import yaml
 # aiperf capability preflight is memoized per resolved binary: the probe shells
 # out with a timeout and its result cannot change within a run, so a multi-point
 # grid must not re-probe every round.
-_PREFLIGHTED_BINS: set[str] = set()
+_PREFLIGHTED_BINS: dict[str, bool] = {}
 
 
 def maybe_prepare_agentx(
@@ -64,13 +64,27 @@ def maybe_prepare_agentx(
     # memoization state.
     deploy_agentx_assets(Path(inferencex_path) / "benchmarks")
     aiperf_bin = resolve_aiperf_bin(env)
-    if aiperf_bin not in _PREFLIGHTED_BINS:
-        aiperf_bin = _preflight_or_repair(aiperf_bin, env=env)
-        _PREFLIGHTED_BINS.add(aiperf_bin or "")
+    bench_envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    profiler = bench.get("profiler") if isinstance(bench.get("profiler"), dict) else {}
+    torch_profiler = profiler.get("torch_profiler") if isinstance(profiler.get("torch_profiler"), dict) else {}
+    require_progress_api = str(bench_envs.get("PROFILE") or "") == "1" or bool(torch_profiler.get("enabled"))
+    preflight_key = aiperf_bin or ""
+    previous_check = _PREFLIGHTED_BINS.get(preflight_key)
+    if previous_check is None or (require_progress_api and not previous_check):
+        # A missing or stale client is installed here rather than reported, so
+        # the memoized key is the binary that actually passed -- which the repair
+        # may have only just put on PATH.
+        aiperf_bin = _preflight_or_repair(aiperf_bin, env=env, require_progress_api=require_progress_api)
+        _PREFLIGHTED_BINS[aiperf_bin or ""] = require_progress_api or bool(previous_check)
     return True
 
 
-def _preflight_or_repair(aiperf_bin: str | None, *, env: Mapping[str, str]) -> str | None:
+def _preflight_or_repair(
+    aiperf_bin: str | None,
+    *,
+    env: Mapping[str, str],
+    require_progress_api: bool = False,
+) -> str | None:
     """Capability-check aiperf, installing the pinned build once if it is absent.
 
     aiperf is a dependency AgentX declares for itself and whose install this
@@ -102,7 +116,7 @@ def _preflight_or_repair(aiperf_bin: str | None, *, env: Mapping[str, str]) -> s
     from .preflight import AgentXPreflightError, check_aiperf_capability, resolve_aiperf_bin
 
     try:
-        check_aiperf_capability(aiperf_bin, env=env)
+        check_aiperf_capability(aiperf_bin, env=env, require_progress_api=require_progress_api)
         return aiperf_bin
     except AgentXPreflightError as exc:
         if not getattr(exc, "repairable", False):
@@ -134,7 +148,7 @@ def _preflight_or_repair(aiperf_bin: str | None, *, env: Mapping[str, str]) -> s
     # lookup (possibly None) says nothing about what is there now.
     repaired_bin = resolve_aiperf_bin(env)
     try:
-        check_aiperf_capability(repaired_bin, env=env)
+        check_aiperf_capability(repaired_bin, env=env, require_progress_api=require_progress_api)
     except AgentXPreflightError as exc:
         # The install reported success and the build is still unusable, so this
         # is no longer a supply gap this process can close. Re-raise it as

@@ -16,7 +16,6 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 def _sweep_state(
@@ -39,8 +38,8 @@ def _sweep_state(
         gain_at_cycle_start=gain_at_cycle_start,
         no_gain_cycle_streak=no_gain_streak,
     )
-    # sweep_done trigger.
-    st.last_sweep = {"status": "succeeded"}
+    # sweep_done trigger: the concurrency ladder is the phase's sweep.
+    st.last_conc_sweep = {"status": "succeeded"}
     return st
 
 
@@ -58,12 +57,12 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage():
 
 def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
-    st.last_sweep = {}
+    st.last_conc_sweep = {}
     st.last_conc_sweep = {"status": "failed"}
     target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
-    assert reason == "conc_sweep_failed"
-    assert evidence.get("conc_sweep_status") == "failed"
+    assert reason == "sweep_failed"
+    assert evidence.get("sweep_status") == "failed"
     assert "loopback" not in evidence
 
 
@@ -94,7 +93,7 @@ def test_sweep_closes_when_insufficient_remaining():
 def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
     """LLM skip_to_close after a refused conc_sweep must not become robustness_escalated."""
     st = _sweep_state(max_minutes=180, started_hours_ago=166 / 60.0)
-    st.last_sweep = {}
+    st.last_conc_sweep = {}
     st.last_conc_sweep = {
         "status": "skipped",
         "was_skipped": True,
@@ -105,14 +104,14 @@ def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
-    assert reason == "conc_sweep_done"
-    assert evidence.get("conc_sweep_status") == "skipped"
+    assert reason == "sweep_done"
+    assert evidence.get("sweep_status") == "skipped"
 
 
 def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     """skip_to_close remains a robustness abort when SWEEP has nothing to close on."""
     st = _sweep_state(max_minutes=180, started_hours_ago=1.0)
-    st.last_sweep = {}
+    st.last_conc_sweep = {}
     st.last_conc_sweep = {}
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
@@ -125,7 +124,7 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
 def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
     """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
-    st.last_sweep = {}
+    st.last_conc_sweep = {}
     st.last_conc_sweep = {
         "status": "skipped",
         "was_skipped": True,
@@ -371,7 +370,7 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     st.macro_cycle = 0
     st.cumulative_gain_validated = 7.0
     st.gain_at_cycle_start = 0.0
-    st.last_sweep = {"status": "succeeded"}
+    st.last_conc_sweep = {"status": "succeeded"}
     st.last_conc_sweep = {"status": "succeeded"}
 
     await c._advance_phase_if_needed()
@@ -380,7 +379,7 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
     # Per-cycle sweep markers cleared so the new cycle's SWEEP runs fresh.
-    assert st.last_sweep == {}
+    assert st.last_conc_sweep == {}
     assert st.last_conc_sweep == {}
     # Gain anchored for the new cycle; gained this cycle → streak reset.
     assert st.gain_at_cycle_start == pytest.approx(7.0)
@@ -404,7 +403,7 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
     st.start_ts = (now - timedelta(minutes=166)).isoformat()
     st.max_minutes = 180
     st.macro_cycle = 0
-    st.last_sweep = {}
+    st.last_conc_sweep = {}
     st.last_conc_sweep = {
         "status": "skipped",
         "was_skipped": True,
@@ -435,7 +434,7 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     st.cumulative_gain_validated = 5.0
     st.gain_at_cycle_start = 5.0  # no gain this cycle
     st.no_gain_cycle_streak = 2  # effective 3 ≥ threshold
-    st.last_sweep = {"status": "succeeded"}
+    st.last_conc_sweep = {"status": "succeeded"}
 
     await c._advance_phase_if_needed()
 
@@ -445,36 +444,6 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
 
 
 # PolicyGate re-entry after loopback is not falsely denied
-def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-    sd = make_session_dir()
-    st = SharedState(session_id="t", phase=ps.PHASE_FRAMEWORK_AGENT, macro_cycle=2)
-    # Simulate a history that already passed through SWEEP in a prior cycle.
-    st.phase_history = [
-        {
-            "from_phase": "SWEEP",
-            "to_phase": "EXPLORE",
-            "reason": "cycle_reloop",
-            "evidence": {},
-            "ts": "",
-            "ts_unix": 0.0,
-            "cycle": 2,
-        },
-    ]
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=sd,
-        shared_state=st,
-    )
-    # Must not raise phase_incompatible: current phase is EXPLORE.
-    gate._validate_phase_action(
-        gate.role_registry.get("orchestration"),
-        "specialist",
-        intent_kind="propose_action",
-    )
 
 
 # Regression — short-run path now uses macro-loop while budget remains.

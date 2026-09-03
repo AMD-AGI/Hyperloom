@@ -417,7 +417,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",
         "profile",
-        "sweep",
         "explore",
         # ``roofline`` runs profile + trace_analyze atomically.
         "roofline",
@@ -428,48 +427,13 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline": ("output_throughput", "output_throughput"),
     "profile": ("output_throughput", "output_throughput"),
-    "sweep": ("output_throughput", "output_throughput"),
     "explore": ("best_gain_pct", "gain_pct"),
     "roofline": ("snapshot_id", "snapshot_id"),
 }
 
 
-#: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
+#: top-level state.json schema version, stamped on every save.
 LATEST_STATE_SCHEMA_VERSION: int = 6
-
-#: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
-#: name. A state written before that rename spells them the old way, and the
-#: unknown-key filter in ``from_dict`` drops anything not in this table, which
-#: is why an un-migrated resume silently restarted the phase from scratch.
-#: ``framework_pr_max_candidates`` and ``framework_pr_critic_decisions`` are
-#: deliberately absent: both fields have since been removed, so there is
-#: nothing left to migrate them into.
-_FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
-    "framework_phase_enabled": "framework_agent_phase_enabled",
-    "framework_pr_phase_progress": "framework_agent_phase_progress",
-    "framework_pr_batches": "framework_agent_batches",
-    "framework_pr_phase_done": "framework_agent_phase_done",
-    "framework_pr_discover_failures": "framework_agent_discover_failures",
-    "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
-    "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
-    "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
-}
-
-#: KERNEL-entry dispatch switch renamed by the auto-dispatch rename, old name ->
-#: current name. The old spelling tied the switch to GEMM tuning, which stopped
-#: being true once the dispatch moved into the shared entry tail. Without this
-#: table the unknown-key filter in ``from_dict`` would drop the old spelling and
-#: a resumed opt-out session would silently start dispatching again.
-_KERNEL_OPT_FIELD_RENAMES_V6: dict[str, str] = {
-    "continue_kernel_after_gemm": "auto_kernel_opt_enabled",
-}
-
-#: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
-#: onto their ``variant_name``. Resume reconciliation keys on the bare candidate
-#: key, so an entry still carrying the prefix reads as an orphaned KEEP and
-#: misses the ``(action, variant_name)`` dedup that stops a second append.
-_FRAMEWORK_STACK_ACTION_V5: str = "framework"
-_FRAMEWORK_VARIANT_PREFIX_V5: str = "framework:"
 
 
 def effective_closing_grace_sec(
@@ -683,10 +647,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
-    # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
-    conc_sweep_concs: list[int] = field(
-        default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
-    )
+    # CONC ladder for conc_sweep, seeded from the workload's own ladder by
+    # ``_parse_conc_sweep_concs``. Empty is not an instruction: both readers
+    # send None instead, which resolves to the ladder for this workload.
+    conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
     # Per-variant Magpie subprocess timeout (s), clamped to remaining total budget.
@@ -998,9 +962,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     explore_variant_timeout_sec_override: int = 0
     # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
     explore_variant_timeout_safety_margin: float = 0.5
-    # Most recent workload sweep (CONC/ISL/OSL frontier).
-    last_sweep: dict[str, Any] = field(default_factory=dict)
-    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE exits on conc_sweep completion.
+    # The concurrency ladder's terminal state; SWEEP→CLOSE exits on it.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Durable watermark from the last real conc_sweep measurement; survives the
     # macro-cycle reloop clearing ``last_conc_sweep`` so redundant closeout is
@@ -1037,7 +999,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
-    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Capped roofline audit log with snapshot ids and analysis paths.
@@ -1545,22 +1506,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+        """Construct a :class:`SharedState` from a raw mapping.
 
-        Acts as the unified migration entry point: an absent
-        ``schema_version`` is treated as 1 and unknown keys are dropped. The
-        operation is idempotent and short-circuits when already at the latest
-        schema.
+        Unknown keys are dropped and missing keys take their field defaults;
+        the result is stamped with :data:`LATEST_STATE_SCHEMA_VERSION`.
 
         Args:
             raw: Decoded state mapping (e.g. from JSON on disk).
 
         Returns:
-            A fully-populated, migrated :class:`SharedState` instance.
+            A fully-populated :class:`SharedState` instance.
         """
-        # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
-        incoming_version = int(raw.get("schema_version") or 1)
-
         # Filter to known fields; unknown keys dropped, missing keys default.
         # ``fields()`` rather than ``__dataclass_fields__``: the latter also
         # holds ClassVar pseudo-fields, which ``__init__`` does not accept, so a
@@ -1595,61 +1551,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
         )
-
-        if incoming_version < 4:
-            # Lift flat enablement_* keys from old state.json into EnablementRound.
-            _ENABLEMENT_ROUND_FIELDS = {f.name for f in fields(EnablementRound)}
-            flat = {
-                k[len("enablement_") :]: v
-                for k, v in raw.items()
-                if k.startswith("enablement_") and k[len("enablement_") :] in _ENABLEMENT_ROUND_FIELDS
-            }
-            # Prefer any nested blob already present (from a partial migration).
-            if not isinstance(filtered.get("enablement"), dict):
-                filtered["enablement"] = flat
-            else:
-                for k, v in flat.items():
-                    filtered["enablement"].setdefault(k, v)
-
-        if incoming_version < 5:
-            # Carry the pre-rename FRAMEWORK fields over. Read from ``raw``:
-            # the old spellings are not dataclass fields, so the filter above
-            # has already discarded them. A state holding both spellings is
-            # mid-migration, and the current one wins.
-            for legacy, current in _FRAMEWORK_FIELD_RENAMES_V5.items():
-                if legacy in raw and current not in raw:
-                    filtered[current] = raw[legacy]
-
-            # Renaming the fields is not enough: a session that already promoted
-            # a FRAMEWORK KEEP has stack entries whose variant_name still carries
-            # the promote-side prefix, and reconciliation keys on the bare
-            # candidate key. Left alone they read as orphaned KEEPs for the rest
-            # of the session and no longer collide with the dedup key.
-            stack = filtered.get("optimization_stack")
-            if isinstance(stack, list):
-                # Rebuilt rather than edited in place: ``filtered`` is a shallow
-                # copy, so mutating an entry would also rewrite the caller's
-                # ``raw`` — and ``from_dict`` takes a mapping it does not own.
-                filtered["optimization_stack"] = [
-                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5) :]}
-                    if (
-                        isinstance(entry, dict)
-                        and str(entry.get("action") or "") == _FRAMEWORK_STACK_ACTION_V5
-                        and str(entry.get("variant_name") or "").startswith(_FRAMEWORK_VARIANT_PREFIX_V5)
-                    )
-                    else entry
-                    for entry in stack
-                ]
-
-        if incoming_version < 6:
-            # Carry the pre-rename KERNEL-entry dispatch switch over. Same
-            # reasoning as the v5 block: the old spelling is not a dataclass
-            # field, so the filter above has already dropped it, and a state
-            # holding both spellings is mid-migration with the current one
-            # winning.
-            for legacy, current in _KERNEL_OPT_FIELD_RENAMES_V6.items():
-                if legacy in raw and current not in raw:
-                    filtered[current] = bool(raw[legacy])
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -3726,46 +3627,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         except Exception:  # noqa: BLE001 — never block record on render concerns
             pass
 
-    def record_sweep(self, result: dict[str, Any]) -> None:
-        """Snapshot the most recent workload sweep into ``last_sweep``.
-
-        Selects the best succeeded grid entry by ``output_throughput`` and
-        records grid size, per-concurrency bests, the Pareto front, and the
-        workspace path.
-
-        Args:
-            result (dict[str, Any]): The sweep executor result envelope. A
-                non-dict result is a no-op.
-        """
-        if not isinstance(result, dict):
-            return
-        grid = result.get("sweep_grid") or []
-        best = None
-        if isinstance(grid, list):
-            best = max(
-                (
-                    e
-                    for e in grid
-                    if isinstance(e, dict)
-                    and e.get("status") == "succeeded"
-                    and isinstance(e.get("output_throughput"), (int, float))
-                ),
-                default=None,
-                key=lambda e: e.get("output_throughput") or 0.0,
-            )
-        self.last_sweep = {
-            "ts": _now_iso(),
-            "grid_size": result.get("grid_size", len(grid) if isinstance(grid, list) else 0),
-            "best_overall": best or {},
-            "best_for_each_conc": result.get("best_for_each_conc") or {},
-            "pareto_front": result.get("pareto_front") or [],
-            "workspace": result.get("workspace", ""),
-            # Watermark of validated gain at the moment this manual/full sweep ran.
-            "cumulative_gain_validated_at_record": float(getattr(self, "cumulative_gain_validated", 0.0) or 0.0),
-        }
-
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record conc_sweep task completion (mirrors record_sweep). The status field lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE can fire on conc_sweep alone.
+        """Record the concurrency sweep's completion into ``last_conc_sweep``.
+
+        The status field is what lets ``exit_normal_sweep`` return ``sweep_done``:
+        the ladder is the only sweep there is, so its terminal state is the
+        phase's.
 
         Args:
             result (dict[str, Any]): The conc_sweep result envelope; a

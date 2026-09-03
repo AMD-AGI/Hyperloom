@@ -159,6 +159,31 @@ def test_target_baseline_missing_report_rejected(tmp_path):
         TargetBaselineObjective(baseline_dir=str(workspace))
 
 
+def _write_report(root, rel, tput):
+    path = root / rel / "benchmark_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"throughput": {"output_throughput": tput}}))
+    return path
+
+
+def test_target_baseline_falls_back_to_a_warmup_only_reference(tmp_path):
+    """A budget-dropped measure round leaves the warmup as the only report.
+
+    Raising there refuses to start a session against a reference the earlier
+    run really did produce.
+    """
+    workspace = tmp_path / "warmup-only"
+    _write_report(workspace, "warmup_round/bench", 800.0)
+    assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(800.0)
+
+
+def test_target_baseline_prefers_the_measured_round_over_the_warmup(tmp_path):
+    workspace = tmp_path / "both"
+    _write_report(workspace, "warmup_round/bench", 800.0)
+    _write_report(workspace, "measured/bench", 1200.0)
+    assert TargetBaselineObjective(baseline_dir=str(workspace))._ref_tput == pytest.approx(1200.0)
+
+
 # TimeOnlyObjective
 def test_time_only_never_reached():
     obj = TimeOnlyObjective()

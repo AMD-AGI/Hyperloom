@@ -230,7 +230,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_FRAMEWORK_AGENT,
 )
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -249,53 +248,6 @@ def gate() -> PolicyGate:
 _INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
 
 
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_delegate_with_analysis_action_is_denied(gate, action_name):
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": action_name,
-            "predicted_gain_pct": 1.0,
-            "params": {},
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-    assert action_name in str(exc.value)
-    assert "Coordinator-managed" in str(exc.value)
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_propose_action_with_analysis_action_is_denied(gate, action_name):
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": action_name,
-            "predicted_gain_pct": 1.0,
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-    assert action_name in str(exc.value)
-
-
-@pytest.mark.parametrize("action_name", _INTERNAL_ANALYSIS_ACTIONS)
-def test_request_with_analysis_kind_is_denied(gate, action_name):
-    """A REQUEST whose ``kind`` names roofline/profile is denied by R1 phase_incompatible."""
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": action_name,
-        },
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", intent)
-    assert exc.value.rule == "phase_incompatible"
-
-
 # Supporting infrastructure parity
 def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set."""
@@ -312,19 +264,24 @@ def test_phase_explore_allowlist_drops_legacy_actions():
 
 
 def test_full_enabled_actions_still_contains_explore():
-    """Sanity: ``explore`` / ``sweep`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled."""
+    """Sanity: ``explore`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled.
+
+    ``sweep`` is absent by design: the concurrency ladder is Coordinator-internal
+    and the workload grid it used to fan out over is gone.
+    """
     assert "explore" in FULL_ENABLED_ACTIONS
-    assert "sweep" in FULL_ENABLED_ACTIONS
+    assert "sweep" not in FULL_ENABLED_ACTIONS
     assert "recover" not in FULL_ENABLED_ACTIONS
     assert "baseline" in FULL_ENABLED_ACTIONS
 
 
-def test_cli_real_executors_still_contains_explore_and_sweep():
+def test_cli_real_executors_still_contains_explore():
     """Sanity: the canonical EXPLORE-phase executors stay registered."""
     from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
 
     assert "explore" in _REAL_EXECUTORS_FULL
-    assert "sweep" in _REAL_EXECUTORS_FULL
+    assert "conc_sweep" in _REAL_EXECUTORS_FULL
+    assert "sweep" not in _REAL_EXECUTORS_FULL
     assert "baseline" in _REAL_EXECUTORS_FULL
 
 

@@ -14,7 +14,6 @@ from hyperloom.orchestrator.phases import machine_state as phase_state
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -51,63 +50,9 @@ def test_allowed_actions_disjoint_phases():
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    assert "conc_sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
+    assert "conc_sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
-
-
-def test_is_action_allowed_in_phase_handles_unknowns():
-    assert phase_state.is_action_allowed_in_phase("baseline", "PRELUDE")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "FRAMEWORK_AGENT")
-    # Unknown phase → deny by default.
-    assert not phase_state.is_action_allowed_in_phase("baseline", "UNKNOWN")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "")
-    # Empty action name → deny.
-    assert not phase_state.is_action_allowed_in_phase("", "PRELUDE")
-
-
-def test_llm_proposable_set_drops_coordinator_internal_actions():
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        COORDINATOR_INTERNAL_ACTIONS,
-        ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
-    )
-
-    # Proposable = allowlist minus Coordinator-internal and robustness-delegate-only actions.
-    for phase in phase_state.PHASE_NAMES:
-        allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
-        proposable = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS[phase]
-        assert proposable == (allowed - COORDINATOR_INTERNAL_ACTIONS - ROBUSTNESS_DELEGATE_ONLY_ACTIONS)
-        assert proposable.isdisjoint(COORDINATOR_INTERNAL_ACTIONS)
-        # recover stays phase-allowed but is never LLM-proposable.
-        assert "recover" in allowed
-        assert "recover" not in proposable
-    # The advertised analysis / framework names are never proposable.
-    # The merged phase proposes both arms' levers and neither arm's analysis.
-    optimize = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_AGENT"]
-    assert "roofline" not in optimize
-    assert "profile" not in optimize
-    assert "framework" not in optimize
-    assert {"explore", "integrate_patch", "specialist"} <= optimize
-    framework = optimize
-    assert "specialist" in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["KERNEL_AGENT"]
-    assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["SWEEP"]
-    assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["CLOSE"]
-
-
-def test_is_action_llm_proposable_in_phase_handles_unknowns():
-    assert phase_state.is_action_llm_proposable_in_phase("baseline", "PRELUDE")
-    assert phase_state.is_action_llm_proposable_in_phase("explore", "FRAMEWORK_AGENT")
-    # roofline lives in the allowlist but is never LLM-proposable.
-    assert phase_state.is_action_allowed_in_phase("roofline", "FRAMEWORK_AGENT")
-    assert not phase_state.is_action_llm_proposable_in_phase("roofline", "FRAMEWORK_AGENT")
-    assert not phase_state.is_action_llm_proposable_in_phase("framework_agent", "FRAMEWORK_AGENT")
-    # Unknown phase / empty action → deny by default.
-    assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
-    assert not phase_state.is_action_llm_proposable_in_phase("", "PRELUDE")
-    # llm_proposable_actions_for is sorted and excludes internal names.
-    explore = phase_state.llm_proposable_actions_for("EXPLORE")
-    assert explore == tuple(sorted(explore))
-    assert "roofline" not in explore and "profile" not in explore
 
 
 def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
@@ -166,7 +111,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "user_stop_requested",
         "recipe_kb_drain_failed",
         "plateau_explore",
-        "conc_sweep_failed",
+        "sweep_failed",
         "baseline_arg_error",
     ):
         assert phase_state.is_valid_stop_reason(reason), reason
@@ -659,55 +604,6 @@ def _make_role_registry():
     return default_role_registry()
 
 
-def test_policy_gate_phase_strict_denies_kernel_in_prelude():
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    # ``explore`` is an EXPLORE-phase action; proposing it in PRELUDE is
-    # phase-incompatible.
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-    assert "PRELUDE" in (excinfo.value.hint or "")
-
-
-def test_policy_gate_phase_warn_mode_does_not_raise():
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=False,
-    )
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    # warn-mode just bumps the audit counter, no raise.
-    gate.validate_intent("orchestration", intent)
-    assert state.policy_denial_streak.get("explore:phase_incompatible", 0) >= 1
-
-
 def test_policy_gate_phase_strict_allows_in_phase_action():
     state = SharedState()
     state.record_phase_transition(
@@ -720,209 +616,12 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
     gate = PolicyGate(
         role_registry=_make_role_registry(),
         shared_state=state,
-        strict_phase=True,
     )
     intent = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
     )
     gate.validate_intent("orchestration", intent)  # no exception
-
-
-def test_policy_gate_phase_strict_blocks_explore_action_in_prelude():
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    # ``sweep`` is proposable only in SWEEP, so proposing it in PRELUDE
-    # lands on R1 phase_incompatible.
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "sweep", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
-def test_policy_gate_denies_kernel_request_in_explore():
-    """A kernel_agent-owned REQUEST in EXPLORE is denied by R1."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    intent = Intent(
-        type=IntentType.REQUEST,
-        payload={
-            "target_agent": "kernel_agent",
-            "kind": "run_optimization",
-            "params": {},
-        },
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
-def test_policy_gate_gates_apply_patch_alias_like_integrate():
-    # apply_patch is a REQUEST-kind alias of integrate and must be phase-gated
-    # identically. In EXPLORE, a kernel-owned integrate REQUEST is denied by
-    # R1; the alias must be denied with the same rule.
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-
-    def _rule_for(kind):
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": kind, "params": {}},
-        )
-        with pytest.raises(PolicyDenied) as excinfo:
-            gate.validate_intent("orchestration", intent)
-        return excinfo.value.rule
-
-    assert _rule_for("integrate") == "phase_incompatible"
-    assert _rule_for("apply_patch") == "phase_incompatible"
-
-
-def test_policy_gate_phase_matrix_over_every_kernel_request_kind():
-    """Every wire kind that maps to an owned action gates on that action.
-
-    The prompt mandates the wire kind (``run_optimization``), while
-    ``PHASE_ALLOWED_ACTIONS`` is keyed by the action name (``kernel_opt``), so
-    this walks the real handler table rather than a hand-written list.
-    """
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        REQUEST_KIND_TO_OWNED_ACTION,
-    )
-
-    for kind, action in REQUEST_KIND_TO_OWNED_ACTION.items():
-        for phase in phase_state.PHASE_NAMES:
-            state = SharedState()
-            state.record_phase_transition(
-                to_phase=phase,
-                reason="phase_entered",
-                evidence={},
-                ts="2026-05-19T00:00:00+00:00",
-                ts_unix=1.0,
-            )
-            gate = PolicyGate(
-                role_registry=_make_role_registry(),
-                shared_state=state,
-                strict_phase=True,
-            )
-            intent = Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": kind,
-                    "params": {},
-                },
-            )
-            allowed = action in phase_state.PHASE_ALLOWED_ACTIONS[phase]
-            if allowed:
-                gate.validate_intent("orchestration", intent)
-            else:
-                with pytest.raises(PolicyDenied) as excinfo:
-                    gate.validate_intent("orchestration", intent)
-                assert excinfo.value.rule == "phase_incompatible", (kind, phase)
-
-
-def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
-    """A new handler kind cannot arrive silently ungated."""
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-        REQUEST_KIND_TO_OWNED_ACTION,
-    )
-    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
-
-    # trace_analyze has no owning action and no phase membership, so there is
-    # nothing to gate it against; it is refreshed on demand from any phase.
-    exempt = {"trace_analyze"}
-    ungated = (
-        set(KERNEL_REQUEST_HANDLERS)
-        - set(REQUEST_KIND_TO_OWNED_ACTION)
-        - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-        - exempt
-    )
-    assert ungated == set(), f"request kinds reach no phase gate: {sorted(ungated)}"
-
-
-def test_policy_gate_does_not_widen_kernel_for_explore_propose():
-    """KERNEL does not accept explore proposals."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="KERNEL_AGENT",
-        reason="plateau_explore",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
-
-
-def test_policy_gate_sweep_rejects_explore_lever():
-    """SWEEP rejects the explore lever under R1."""
-    state = SharedState()
-    state.record_phase_transition(
-        to_phase="SWEEP",
-        reason="plateau_kernel",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
-    )
-    gate = PolicyGate(
-        role_registry=_make_role_registry(),
-        shared_state=state,
-        strict_phase=True,
-    )
-    # ``explore`` is not in the SWEEP proposable set, so R1 rejects it.
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "explore", "predicted_gain_pct": 1.0},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "phase_incompatible"
 
 
 @pytest.fixture

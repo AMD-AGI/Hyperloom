@@ -10,13 +10,10 @@ from typing import Any
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 
 _CAPABILITY_ORDER = (
-    # ``explore`` is primary; other rows are for archived sessions.
     "explore",
-    "backends",
-    "params",
-    "sweep",
     "geak",
-    "validate_stack",
+    "specialist",
+    "forge",
 )
 
 
@@ -50,9 +47,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         status = str(v.get("status") or "not_attempted")
         attempts = int(v.get("attempts") or 0)
         keeps = int(v.get("keeps") or 0)
-        # Mark validate_stack with a prior validated gain as ``stale_validated``.
-        if name == "validate_stack" and status == "not_attempted" and v.get("last_validated_gain_pct") is not None:
-            status = "stale_validated"
         extras: list[str] = []
         if "best_gain_pct" in v and v["best_gain_pct"] is not None:
             extras.append(f"best_gain={fmt_pct(v['best_gain_pct'])}")

@@ -32,7 +32,6 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
     invocations as _r_invocations,
     param_search as _r_param_search,
     decision_journal as _r_decision_journal,
-    sweep as _r_sweep,
     critic_robustness as _r_critic_robustness,
     attribution as _r_attribution,
     optimizations as _r_optimizations,
@@ -48,7 +47,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
         "Performance Results",
         ["baseline", "final", "roofline", "optimizations", "attribution"],
     ),
-    ("Capability Search", ["capability_summary", "param_search", "decision_journal", "sweep"]),
+    ("Capability Search", ["capability_summary", "param_search", "decision_journal"]),
     (
         "Kernel Optimization",
         [
@@ -85,7 +84,6 @@ __all__ = [
     "_r_invocations",
     "_r_param_search",
     "_r_decision_journal",
-    "_r_sweep",
     "_r_critic_robustness",
     "_r_attribution",
     "_r_optimizations",

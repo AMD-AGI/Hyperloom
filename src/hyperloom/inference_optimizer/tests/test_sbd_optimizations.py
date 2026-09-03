@@ -154,7 +154,8 @@ def test_a_session_whose_records_never_arrived_says_so(tmp_path):
     result = exporter.build(tmp_path)
     optimizations = result["optimizations"]
 
-    assert result["schema_version"] == "hyperloom.session_breakdown.v5.0"
+    assert result["schema_version"] == "hyperloom.session_breakdown.v6.0"
+    # The section keeps its own number: v6.0 reshaped the timeline, not this.
     assert optimizations["schema_version"] == 5
     assert optimizations["source_of_truth"] == "recorder"
     assert optimizations["available"] is False

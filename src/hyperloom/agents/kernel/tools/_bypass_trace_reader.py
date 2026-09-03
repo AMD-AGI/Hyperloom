@@ -37,6 +37,7 @@ from typing import Any, Iterator
 # Stdlib-only sibling; keeps this reader independent of TraceLens while sharing
 # one capture-vs-workload rule with the TraceLens route.
 from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+from _trace_rank import select_primary_trace, trace_rank as _rank_of
 
 # GPU device-side event categories (Kineto ``cat`` values).
 _GPU_KERNEL_CAT = "kernel"
@@ -61,9 +62,6 @@ _DECODER = json.JSONDecoder()
 # events a few KiB, so these retain generous headroom for embedded metadata.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
-
-# Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
-_RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
 
 
 def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
@@ -120,12 +118,6 @@ def _file_size(fp: Path) -> int:
         return 0
 
 
-def _rank_of(path: str | Path) -> int | None:
-    """Parse the rank index from a trace filename (``None`` if not rank-tagged)."""
-    m = _RANK_RE.search(Path(path).name)
-    return int(m.group(1)) if m else None
-
-
 def _trace_candidates(root: Path) -> list[Path]:
     """Return all trace-shaped files under ``root`` (recursive)."""
     out: list[Path] = []
@@ -158,7 +150,14 @@ def _main_trace_candidates(candidates: list[Path], root: str | Path | None = Non
     return main or candidates
 
 
-def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -> Path:
+def _select_trace_file(
+    candidates: list[Path],
+    root: str | Path | None = None,
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
+) -> Path | None:
     """Deterministically pick one trace file from candidates.
 
     Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
@@ -168,6 +167,13 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     largest file. Ties always break by name so selection is reproducible.
     """
     candidates = _main_trace_candidates(candidates, root)
+    if require_single_rank:
+        return select_primary_trace(
+            candidates,
+            file_size=_file_size,
+            preferred_rank=preferred_rank,
+            tensor_parallel_size=tensor_parallel_size,
+        )
     merged = [c for c in candidates if c.name.startswith("merged-")]
     if merged:
         return max(merged, key=lambda c: (_file_size(c), c.name))
@@ -177,7 +183,13 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     return max(candidates, key=lambda c: (_file_size(c), c.name))
 
 
-def resolve_trace_file(trace_input: str | Path) -> Path | None:
+def resolve_trace_file(
+    trace_input: str | Path,
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
+) -> Path | None:
     """Resolve a trace input (file or directory) to a single trace file.
 
     For a directory (e.g. a ``torch_trace/`` capture dir), selection is
@@ -193,13 +205,26 @@ def resolve_trace_file(trace_input: str | Path) -> Path | None:
     """
     p = Path(trace_input)
     if p.is_file():
+        if require_single_rank:
+            return select_primary_trace(
+                [p],
+                file_size=_file_size,
+                preferred_rank=preferred_rank,
+                tensor_parallel_size=tensor_parallel_size,
+            )
         return p
     if not p.is_dir():
         return None
     candidates = _trace_candidates(p)
     if not candidates:
         return None
-    return _select_trace_file(candidates, p)
+    return _select_trace_file(
+        candidates,
+        p,
+        require_single_rank=require_single_rank,
+        preferred_rank=preferred_rank,
+        tensor_parallel_size=tensor_parallel_size,
+    )
 
 
 def _trace_rank_count(trace_input: str | Path) -> int:
@@ -229,6 +254,59 @@ def _open_trace_binary(path: Path):
     if path.name.lower().endswith(".gz"):
         return gzip.open(path, "rb")
     return open(path, "rb")
+
+
+class _ObjectBalance:
+    """Resumable brace balancer for a single ``traceEvents`` element.
+
+    Only the recovery path of :func:`stream_events` needs it, so it keeps its
+    scan position across refills instead of restarting over the grown buffer.
+    """
+
+    __slots__ = ("_depth", "_escaped", "_in_string", "_scan")
+
+    def __init__(self, start: int) -> None:
+        self._scan = start
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+
+    def advance(self, buf: str) -> int | None:
+        """Consume newly buffered characters.
+
+        Returns:
+            The index one past the element's closing brace once the object
+            balances, or ``None`` when the buffer ends mid-object.
+        """
+        scan = self._scan
+        depth = self._depth
+        in_string = self._in_string
+        escaped = self._escaped
+        end: int | None = None
+        while scan < len(buf):
+            char = buf[scan]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = scan + 1
+                    break
+            scan += 1
+        self._scan = scan
+        self._depth = depth
+        self._in_string = in_string
+        self._escaped = escaped
+        return end
 
 
 def stream_events(
@@ -417,60 +495,47 @@ def stream_events(
             continue
 
         object_start = pos
-        scan = pos
-        depth = 0
-        in_string = False
-        escaped = False
-        object_end: int | None = None
-        while object_end is None:
-            while scan < len(buf):
-                char = buf[scan]
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif char == "\\":
-                        escaped = True
-                    elif char == '"':
-                        in_string = False
-                elif char == '"':
-                    in_string = True
-                elif char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                    if depth == 0:
-                        object_end = scan + 1
-                        break
-                scan += 1
-            if object_end is not None:
-                break
-            buffered = len(buf) - object_start
-            if buffered >= _MAX_EVENT_CHARS:
-                _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-                return
-            if eof:
-                _record(f"traceEvents object truncated after {emitted} event(s): unterminated object")
-                return
-            _refill(_MAX_EVENT_CHARS - buffered)
+        obj: dict[str, Any] | None = None
+        decoded_end = object_start
+        balance = _ObjectBalance(object_start)
+        while True:
+            try:
+                obj, decoded_end = _DECODER.raw_decode(buf, object_start)
+            except json.JSONDecodeError as exc:
+                # raw_decode cannot distinguish corrupt input from an object the
+                # buffer merely has not reached the end of yet, so balance braces
+                # to tell the two apart. Only this path pays for that scan, and
+                # it stops at the object's own end rather than the buffer's.
+                object_end = balance.advance(buf)
+                if object_end is not None:
+                    _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
+                    pos = object_end
+                    break
+                buffered = len(buf) - object_start
+                if buffered >= _MAX_EVENT_CHARS:
+                    _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
+                    return
+                if eof:
+                    _record(f"traceEvents object truncated after {emitted} event(s): unterminated object")
+                    return
+                _refill(_MAX_EVENT_CHARS - buffered)
+                continue
+            break
 
-        if object_end - object_start > _MAX_EVENT_CHARS:
-            _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
-            return
-        try:
-            obj, decoded_end = _DECODER.raw_decode(buf, object_start)
-        except json.JSONDecodeError as exc:
-            _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
-            pos = object_end
+        if obj is None:
             _trim_consumed()
             continue
-        if decoded_end != object_end or not isinstance(obj, dict):
+        if decoded_end - object_start > _MAX_EVENT_CHARS:
+            _record(f"traceEvents object exceeds {_MAX_EVENT_CHARS} characters after {emitted} event(s)")
+            return
+        if not isinstance(obj, dict):
             _record(f"traceEvents object malformed after {emitted} event(s): invalid object boundary")
-            pos = object_end
+            pos = decoded_end
             _trim_consumed()
             continue
         yield obj
         emitted += 1
-        pos = object_end
+        pos = decoded_end
         _trim_consumed()
 
 
@@ -955,6 +1020,8 @@ def analyze_trace(
     steady_state: bool = False,
     framework: str = "",
     emit_launches: bool = False,
+    require_single_rank: bool = False,
+    tensor_parallel_size: int | None = None,
 ) -> dict[str, Any]:
     """Stream a Kineto trace and return timeline + op/kernel aggregates.
 
@@ -984,7 +1051,11 @@ def analyze_trace(
           ``event_total`` (events scanned).
         On resolution failure, ``status='failed'`` with an ``error`` string.
     """
-    tf = resolve_trace_file(trace_input)
+    tf = resolve_trace_file(
+        trace_input,
+        require_single_rank=require_single_rank,
+        tensor_parallel_size=tensor_parallel_size,
+    )
     if tf is None:
         return {
             "status": "failed",

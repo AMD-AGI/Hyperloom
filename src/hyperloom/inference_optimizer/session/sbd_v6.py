@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,13 @@ from .session_paths import (
 SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
-_EVENT_TYPES = ("install", "model_gate")
+# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
+# event per phase and macro cycle that dispatched the work. Their sub-steps are
+# nested in ``ext`` rather than emitted as sibling events, because none of them
+# is dispatchable on its own: roofline's profile / analysis are atomic halves of
+# one action, a kernel event's lanes only exist inside a phase entry, and a
+# baseline's rounds only exist inside a measurement.
+_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline")
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 
@@ -84,8 +91,69 @@ def _read_event_file(
     return _public_event(event)
 
 
-def write_timeline_event(session_dir: Path | str, event: dict[str, Any]) -> Path:
-    """Persist one event without replacing an earlier run of the same stage."""
+def timeline_sequence(event: Mapping[str, Any]) -> int | None:
+    """Return the storage sequence stamped on ``event``, if it has one.
+
+    The sequence is private to this module's on-disk layout, so callers that
+    need to carry it -- onto an event-level fragment, or back onto an event
+    they are updating -- go through this and :func:`set_timeline_sequence`
+    rather than naming the key.
+
+    Args:
+        event (Mapping[str, Any]): An event dict, or an event-level fragment
+            payload that stored the sequence under the same name.
+
+    Returns:
+        int | None: The sequence, or ``None`` when absent or unparseable.
+    """
+    raw = event.get(_STORAGE_SEQUENCE_KEY, event.get("timeline_sequence"))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def set_timeline_sequence(event: dict[str, Any], sequence: int) -> None:
+    """Stamp ``sequence`` onto ``event`` so writing it updates that entry.
+
+    Args:
+        event (dict[str, Any]): The event dict, mutated in place.
+        sequence (int): The storage sequence to update.
+    """
+    event[_STORAGE_SEQUENCE_KEY] = int(sequence)
+
+
+def write_timeline_event(event: dict[str, Any]) -> Path:
+    """Persist one event into the bound session.
+
+    Args:
+        event (dict[str, Any]): The event dict, mutated in place with its
+            storage sequence so a later write updates the same file.
+
+    Returns:
+        Path: The event file written.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+        ValueError: If the event type is not a V6 timeline type, or its
+            sequence belongs to an event of another type.
+    """
+    from .session_binding import bound_session
+
+    return write_timeline_event_at(bound_session(), event)
+
+
+def write_timeline_event_at(session_dir: Path | str, event: dict[str, Any]) -> Path:
+    """Persist one event without replacing an earlier run of the same stage.
+
+    For the writers that own a session directory without being under its
+    binding: the pre-session CLI stages, which write ``install`` and
+    ``model_gate`` events for a session the coordinator has not started yet.
+    Everything recorded during a run goes through :func:`write_timeline_event`
+    instead.
+    """
     event_type = _validate_event_type(str(event.get("type") or "").strip())
     history = _history_files(session_dir)
 
@@ -231,7 +299,7 @@ def persist_pending_install_event(args: Namespace | None, session_dir: Path | st
     event = pending_install_event(args)
     if event is None:
         return None
-    return write_timeline_event(session_dir, event)
+    return write_timeline_event_at(session_dir, event)
 
 
 __all__ = [
@@ -244,5 +312,8 @@ __all__ = [
     "read_timeline_events",
     "record_write_warning",
     "set_pending_install_event",
+    "set_timeline_sequence",
+    "timeline_sequence",
     "write_timeline_event",
+    "write_timeline_event_at",
 ]

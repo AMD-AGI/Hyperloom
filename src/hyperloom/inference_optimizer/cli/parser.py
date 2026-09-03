@@ -625,7 +625,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-tput",
         type=float,
         default=None,
-        help="Stop when current best reaches N (serving: tok/s/GPU; xDiT: img/s)",
+        help="Stop when current best reaches N, whole-server total (serving: tok/s; xDiT: img/s)",
     )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
@@ -1186,8 +1186,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default="256,128,64,32,16,8,4,2",
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 256,128,64,32,16,8,4,2 (high-to-low for single-server arm reuse).",
+        default=None,
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
+        "high-to-low internally for single-server arm reuse, so the order given "
+        "does not matter. Defaults to the ladder for the workload: "
+        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
+        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
+        "prompt, so the same card saturates far lower).",
     )
     opt.add_argument(
         "--conc-sweep-timeout-sec",
@@ -1377,21 +1382,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wall-clock budget cap for CLOSE. Default: 0.02.",
-    )
-    opt.add_argument(
-        "--strict-phase",
-        dest="strict_phase",
-        action="store_true",
-        default=True,
-        help="Enforce PolicyGate R1 phase_incompatible. "
-        "Action proposals outside the current phase's allowlist "
-        "return policy_denied so the LLM self-corrects.",
-    )
-    opt.add_argument(
-        "--no-strict-phase",
-        dest="strict_phase",
-        action="store_false",
-        help="Disable R1 enforcement (warn-only). Useful for back-compat smoke tests; production should stay strict.",
     )
 
     rec = sub.add_parser(

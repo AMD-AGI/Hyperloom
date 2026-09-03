@@ -1519,31 +1519,20 @@ def _geak_overlay_digest(overlay: str) -> str:
 
 
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
-    """Extract a single measured throughput from a ``sweep_via_geak`` result.
+    """The measured throughput a ``sweep_via_geak`` replay produced, or None.
 
-    Used by the GEAK-harness (2a) rebench to source the MEASURED headline
-    throughput (rather than GEAK's self-reported speedup). Prefers
-    ``best_for_each_conc`` (already the per-conc best), falling back to the first
-    succeeded ``sweep_grid`` entry. Returns ``None`` when no positive throughput
-    is present.
+    The GEAK-harness rebench sources its headline from this rather than from
+    GEAK's self-reported speedup, so the leaderboard number is a same-harness
+    measurement. ``promotion_measurement`` is already the fastest succeeded
+    point, so there is nothing left to scan when it carries no throughput.
     """
     if not isinstance(res, dict):
         return None
-    best = res.get("best_for_each_conc")
-    if isinstance(best, dict):
-        for entry in best.values():
-            if isinstance(entry, dict):
-                t = entry.get("output_throughput")
-                if isinstance(t, (int, float)) and t > 0:
-                    return float(t)
-    grid = res.get("sweep_grid")
-    if isinstance(grid, list):
-        for entry in grid:
-            if isinstance(entry, dict) and entry.get("status") == "succeeded":
-                t = entry.get("output_throughput")
-                if isinstance(t, (int, float)) and t > 0:
-                    return float(t)
-    return None
+    best = res.get("promotion_measurement")
+    if not isinstance(best, dict):
+        return None
+    tput = best.get("output_throughput")
+    return float(tput) if isinstance(tput, (int, float)) and tput > 0 else None
 
 
 def _parse_server_arg_value(server_args: str, flag: str) -> str | None:

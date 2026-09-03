@@ -522,7 +522,7 @@ def _shm_pressure_symptoms(
                 source="local",
                 suggestion=(
                     "lower TP or restart pod with --shm-size; the next "
-                    "validate_stack will likely fail with shared memory error"
+                    "serving will likely fail with shared memory error"
                     if severity is SymptomSeverity.HIGH
                     else "monitor; restart the affected server if SHM keeps climbing"
                 ),

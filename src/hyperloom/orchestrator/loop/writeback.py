@@ -49,7 +49,7 @@ from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..state.shared_state import SharedState, resolve_graded_comparison
+from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -87,7 +87,6 @@ from ..actions.executors._accuracy_gate import (
 from ..knowledge.agent_kb import PatchKB
 
 from .coordinator import (
-    _AUDIT_ACTIONS,
     _BASELINE_MAX_TOTAL_FAILURES,
     _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
     _ENABLEMENT_MAX_STALL,
@@ -115,7 +114,6 @@ _FRAMEWORK_STACK_ACTION = "framework"
 #: lever buckets contradict ``_geak_contribution`` for the very same row.
 _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
-    "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
     "gemm_tuning": LEVER_KERNEL,
     "collective": LEVER_KERNEL,
@@ -671,10 +669,9 @@ class WritebackCollaborator:
                 cannot divide an output numerator by a total denominator.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
-            measurement_basis: ``e2e_rebench`` when ``new_tput`` came from a
-                full-stack revalidation, ``e2e_decision_round`` when it is the
-                round an explore variant was graded on, ``derived_speedup``
-                when it was inferred from a micro-benchmark.
+            measurement_basis: How the reading was obtained — ``e2e_rebench``
+                for a full-stack revalidation, ``e2e_decision_round`` for the
+                round an explore variant was graded on.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
@@ -730,7 +727,9 @@ class WritebackCollaborator:
         """
         from hyperloom.common.perf_metric import graded_axes_of
 
-        new_tput = result.get("new_tput")
+        new_tput = result.get("output_throughput")
+        if new_tput is None:
+            new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
         lifted = self._lift_to_current_best(
@@ -791,9 +790,10 @@ class WritebackCollaborator:
                 return False
             return is_valid_measurement(result)
         if task_kind == "profile":
+            measurement_status = result.get("measurement_status")
+            if measurement_status is not None and str(measurement_status) != "succeeded":
+                return False
             return is_valid_measurement(result)
-        if task_kind == "sweep":
-            return result.get("status") == "succeeded"
         # replay_warm_recipe always routes through _promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":
             return True
@@ -3139,7 +3139,6 @@ class WritebackCollaborator:
         "roofline": "_promote_roofline",
         "explore": "_promote_explore",
         "integrate_patch": "_promote_integrate_patch",
-        "sweep": "_promote_sweep",
         "conc_sweep": "_promote_conc_sweep",
     }
 
@@ -3623,8 +3622,16 @@ class WritebackCollaborator:
                 "output_throughput": result.get("output_throughput"),
             }
         # Surface the trace path so Orch passes a real path to trace_analyze.
-        trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        trace_path = (
+            None
+            if result.get("trace_input_ready") is False
+            else result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        )
         profile_status = str(result.get("status") or "")
+        measurement_status = str(result.get("measurement_status") or profile_status)
+        audit_extras["measurement_status"] = measurement_status
+        audit_extras["trace_capture_status"] = result.get("trace_capture_status")
+        audit_extras["trace_capture_reason"] = (result.get("trace_capture") or {}).get("reason")
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             self.shared_state.last_profile_status = "failed"
             self.shared_state.last_profile_workload = {}
@@ -3671,7 +3678,7 @@ class WritebackCollaborator:
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
             changed = True
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
-        if profile_status == "succeeded":
+        if measurement_status == "succeeded":
             anchor_tput = self._current_tput_from_validated_gain()
             if anchor_tput > 0:
                 self.shared_state.last_roofline_tput = float(anchor_tput)
@@ -3682,6 +3689,67 @@ class WritebackCollaborator:
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
+
+    def _record_geak_rebench_timeline(
+        self,
+        *,
+        task: Any,
+        decision: str,
+        pending_status: str,
+        measured: Any,
+        config_matched: bool | None,
+        overlay_loaded: bool | None,
+        got_hash: str,
+        got_overlay_digest: str,
+    ) -> None:
+        """Record one GEAK rebench attempt on the kernel timeline event.
+
+        The attempt is recorded whatever the verdict, including one the slot
+        ownership check goes on to reject: a measured rebench that was dropped
+        as orphaned or late is exactly the case that is hard to reconstruct
+        afterwards.
+
+        Args:
+            task: The settled rebench task.
+            decision: The final verdict.
+            pending_status: The candidate slot's status.
+            measured: The throughput the attempt measured.
+            config_matched: Whether the config fingerprint survived the run.
+            overlay_loaded: Whether the overlay survived the run.
+            got_hash: The fingerprint the run reported.
+            got_overlay_digest: The overlay digest observed after the run.
+        """
+        recorder = self.phase_kernel._kernel_timeline()
+        if recorder is None:
+            return
+        from ..phases.geak_rebench import MAX_REBENCH_ATTEMPTS_PER_CYCLE
+
+        params = task.params or {}
+        try:
+            recorder.record_geak_rebench_attempt(
+                max_attempts=MAX_REBENCH_ATTEMPTS_PER_CYCLE,
+                attempt_id=str(task.idempotency_key or task.task_id or ""),
+                source_ref=None,
+                idempotency_key=str(task.idempotency_key or ""),
+                task_id=str(task.task_id or ""),
+                dispatched_at=None,
+                settled_at=None,
+                base_tput=params.get("base_tput"),
+                measured_tput=measured,
+                decision=decision,
+                decision_reason=str(params.get("reason") or ""),
+                status=pending_status,
+                engagement={
+                    "config_matched": config_matched,
+                    "overlay_loaded": overlay_loaded,
+                    "expected_cfg_hash": params.get("expected_cfg_hash"),
+                    "observed_cfg_hash": got_hash,
+                    "expected_overlay_digest": params.get("expected_overlay_digest"),
+                    "observed_overlay_digest": got_overlay_digest,
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change the verdict
+            log.debug("kernel timeline: geak rebench record failed", exc_info=True)
 
     async def _promote_roofline(
         self,
@@ -3866,6 +3934,7 @@ class WritebackCollaborator:
                 # identity here; a miss is inconclusive, not validated.
                 expected_overlay = str((task.params or {}).get("expected_overlay") or "")
                 overlay_loaded = True
+                got_digest = ""
                 if expected_overlay:
                     expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
                     got_digest = _geak_overlay_digest(expected_overlay)
@@ -3920,6 +3989,23 @@ class WritebackCollaborator:
 
                 macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+                # Both engagement facts were computed above to choose between
+                # ``validated`` and ``fallback``, and were then discarded: the
+                # V5 attempt row has no field for either, so a reader could see
+                # the verdict but not the evidence that the configuration under
+                # test had actually engaged. Record them with the attempt.
+                self._record_geak_rebench_timeline(
+                    task=task,
+                    decision=decision,
+                    pending_status=pending_status,
+                    measured=measured,
+                    config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
+                    if str((task.params or {}).get("expected_cfg_hash") or "")
+                    else None,
+                    overlay_loaded=overlay_loaded if expected_overlay else None,
+                    got_hash=got_hash,
+                    got_overlay_digest=got_digest,
+                )
                 if not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
                     # The slot either names another task or already carries a
                     # verdict, so this result is orphaned or late. Record it:
@@ -4415,40 +4501,6 @@ class WritebackCollaborator:
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
 
-    async def _promote_sweep(
-        self,
-        result: dict,
-        task: "Task | None",
-        outcome: _PromoteOutcome,
-    ) -> None:
-        """Promote a sweep result: self-audit + record_sweep + save; discovery-only, never promotes."""
-        outcome.early_return = True
-        pareto = result.get("pareto_front") or []
-        self.shared_state.record_action_attempt(
-            action="sweep",
-            task_id=getattr(task, "task_id", "") if task is not None else "",
-            status="succeeded",
-            decision="discarded",
-            result=result,
-            extras={
-                "grid_size": result.get("grid_size"),
-                "best_overall": result.get("best_overall"),
-                "best_for_each_conc": result.get("best_for_each_conc"),
-                "pareto_front_size": (len(pareto) if isinstance(pareto, list) else None),
-            },
-        )
-        self.shared_state.record_sweep(result)
-        # Sweep is discovery-only (never promotes) and must not mutate params_no_promote_streak.
-        self.shared_state.save(self.session_dir)
-        # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in.
-        if getattr(self.shared_state, "conc_sweep_enabled", False) and result.get("status") == "succeeded":
-            try:
-                await self._enqueue_internal_conc_sweep_task(
-                    reason="post_sweep",
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("conc_sweep: post-sweep enqueue raised (non-fatal)")
-
     async def _promote_conc_sweep(
         self,
         result: dict,
@@ -4475,7 +4527,7 @@ class WritebackCollaborator:
                 "report_path": result.get("report_json_path"),
             },
         )
-        # Write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done.
+        # Write last_conc_sweep so exit_normal_sweep can fire sweep_done.
         self.shared_state.record_conc_sweep(result)
         self.shared_state.save(self.session_dir)
 
@@ -5820,7 +5872,10 @@ class WritebackCollaborator:
             result=ps,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
-            output_root=unique_runs_dir(self.session_dir, "sweep", "revalidate_geak"),
+            # A kernel-lane re-benchmark, not a dispatched action: it borrows the
+            # ``integrate`` workspace namespace under a task id that names it,
+            # as the stack re-validation and the GEAK integrate rebench do.
+            output_root=unique_runs_dir(self.session_dir, "integrate", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts

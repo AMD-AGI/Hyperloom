@@ -27,6 +27,11 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_KERNEL,
 )
 from ..kernel import collective_recovery as _collective_recovery
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+    ROUTE_COLLECTIVE_ONLY,
+    ROUTE_FORGE,
+    ROUTE_GEAK,
+)
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
@@ -41,6 +46,9 @@ from ..loop.coordinator_helpers import (
     _MAX_ROOFLINE_FAILURE_RETRIES,
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
+    _geak_spec_name,
+    geak_is_cand_tag,
+    geak_spec_is_env,
     _resolve_roofline_watermark_ratio,
     _accepted_config_as_variant,
     _resolve_serving_fidelity,
@@ -344,18 +352,37 @@ class KernelPhase(PhaseHandler):
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Reprofile inline when projected tput diverges from the last measured trace, so GEAK targets the live bottleneck."""
+        """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck.
+
+        Every caller is on the forge or collective-only route. GEAK is handed no
+        trace -- its handoff carries a launch recipe and a workload, never a
+        trace path or a candidates path -- and profiles from scratch itself, so
+        re-profiling ahead of it would spend a full profile plus analysis on a
+        trace it never reads. The naming here predates that: GEAK once ran
+        inline at the tail of the entry hook, downstream of this call.
+        """
         before = self._last_measured_roofline_tput()
         cur = self._current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
         workload_changed = self._profile_workload_changed()
+        recorder = self._kernel_timeline()
+
+        def _note_reprofile(**fields: Any) -> None:
+            if recorder is None:
+                return
+            try:
+                recorder.record_reprofile(**fields)
+            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+                log.debug("kernel timeline: reprofile record failed", exc_info=True)
+
         if cur <= 0:
+            _note_reprofile(ran=False, skipped_reason="no_projected_tput")
             return
         # With a measured trace, reprofile only on a material gain or a change in
         # what is being measured. Backend/env changes invalidate shapes even at
         # equal tput, so a staleness signal is a reason to reprofile: a missed
-        # reprofile silently points GEAK at a bottleneck that no longer exists.
+        # reprofile silently points the lanes at a bottleneck that no longer exists.
         #
         # Staleness is judged from the recorded serving config, NOT from
         # ``current_profile_workload_context()``: that context derives its
@@ -369,7 +396,9 @@ class KernelPhase(PhaseHandler):
             and not config_changed
             and not workload_changed
         ):
+            _note_reprofile(ran=False, skipped_reason="within_tolerance")
             return
+        trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
         if config_changed or workload_changed:
             log.info("kernel-entry reprofile: active runtime context changed")
         snapshots_before = len(getattr(self.shared_state, "roofline_snapshots", None) or [])
@@ -385,9 +414,16 @@ class KernelPhase(PhaseHandler):
             separators=(",", ":"),
         )
         profile_fingerprint = hashlib.sha256(profile_identity.encode("utf-8")).hexdigest()[:12]
+        idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
+        task_kind = self._internal_analysis_kind()
         try:
+            # The re-profile is this entry's own sub-step, not an action of its
+            # own: it exists to decide whether the analysis the lanes will
+            # target is stale, and it is never dispatched by anything else. So
+            # its rows join this event rather than leaving a sibling one.
             reprofile_task = await self._enqueue_internal_analysis_task(
-                reason=f"kernel_entry_g{stack_len}_{profile_fingerprint}"
+                reason=idempotency_reason,
+                inline_event=recorder.event_id if recorder is not None else "",
             )
             # An idempotent reuse can return a task that already reached a
             # terminal state (its snapshot from a prior cycle is still valid).
@@ -395,13 +431,29 @@ class KernelPhase(PhaseHandler):
             # so reuse the existing snapshot instead of re-running.
             if str(getattr(reprofile_task, "state", "")) in TERMINAL_STATES:
                 log.info(
-                    "kernel-entry reprofile reuses terminal analysis task (state=%s); GEAK targets existing snapshot",
+                    "kernel-entry reprofile reuses terminal analysis task (state=%s); the phase targets the existing snapshot",
                     reprofile_task.state,
+                )
+                _note_reprofile(
+                    ran=False,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason="terminal_task_reused",
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
                 )
                 return
             await self.run_task_registered(reprofile_task)
-        except Exception:  # noqa: BLE001 — never block GEAK on a reprofile failure
-            log.exception("kernel-entry reprofile failed; GEAK proceeds on existing snapshot")
+        except Exception:  # noqa: BLE001 — never block the phase on a reprofile failure
+            log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
+            _note_reprofile(
+                ran=True,
+                task_kind=task_kind,
+                trigger=trigger,
+                skipped_reason="dispatch_failed",
+                idempotency_reason=idempotency_reason,
+                snapshot_id_before=snapshot_id_before,
+            )
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
@@ -419,7 +471,17 @@ class KernelPhase(PhaseHandler):
             self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()
             self.shared_state.save(self.session_dir)
         else:
-            log.warning("kernel-entry reprofile produced no new snapshot; GEAK targets existing trace")
+            log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
+        _note_reprofile(
+            ran=True,
+            task_kind=task_kind,
+            trigger=trigger,
+            idempotency_reason=idempotency_reason,
+            snapshot_landed=bool(snapshot_landed),
+            snapshot_id_before=snapshot_id_before,
+            snapshot_id_after=snapshot_id_after,
+            task_id=str(getattr(reprofile_task, "task_id", "") or ""),
+        )
 
     def _geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer.
@@ -430,6 +492,83 @@ class KernelPhase(PhaseHandler):
         from ..kernel.request_handlers import geak_selected
 
         return geak_selected()
+
+    def _kernel_timeline(self) -> Any:
+        """The in-flight kernel timeline recorder, or ``None``.
+
+        Read through ``getattr`` because the handler delegates unknown
+        attributes to its Coordinator, so an unset recorder must not raise.
+
+        Returns:
+            The recorder, or ``None`` when this entry is not recording.
+        """
+        return getattr(self, "_kernel_timeline_recorder", None)
+
+    def _open_kernel_timeline(self, *, route: str, route_reason: str, from_phase: str) -> None:
+        """Open the kernel timeline event for this KERNEL entry.
+
+        Args:
+            route: The dispatch route the entry hook selected.
+            route_reason: Why that route was selected.
+            from_phase: The phase being left; ``resume`` marks a re-entry.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
+
+        state = self.shared_state
+        recorder = make_kernel_recorder(
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            route=route,
+            route_reason=route_reason,
+            resumed=str(from_phase or "") == "resume",
+            code_revision=str(getattr(state, "code_revision", "") or ""),
+        )
+        self._kernel_timeline_recorder = recorder
+        if recorder is None:
+            return
+        cached = getattr(state, "last_trace_analyze", None) or {}
+        current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        try:
+            recorder.begin(
+                stack_depth_in=getattr(state, "cumulative_gain_validated_stack_len", None),
+                tput_before=current_best.get("tput"),
+                session_baseline_tput=getattr(state, "baseline_tput", None),
+                snapshot=cached,
+                snapshot_staleness="absent" if not cached else "fresh",
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: begin failed", exc_info=True)
+
+    def _close_kernel_timeline(self, *, verdict: str = "", exit_reason: str = "") -> None:
+        """Close the kernel timeline event when the phase is left.
+
+        The phase machine has entry hooks only, so the seam in
+        :meth:`_on_phase_entered` calls this before dispatching the next
+        phase's hook. A recorder left open by a killed session keeps
+        ``status="running"``, which is the honest reading of what happened.
+
+        Args:
+            verdict: The entry's conclusion. Left empty by the phase seam, which
+                is the only production caller: the conclusion is the rebench
+                join's to make, and assembly derives it from the settled
+                candidate rows rather than from a word named here.
+            exit_reason: The phase's own exit reason.
+        """
+        recorder = self._kernel_timeline()
+        if recorder is None:
+            return
+        self._kernel_timeline_recorder = None
+        state = self.shared_state
+        current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        try:
+            recorder.finish(
+                verdict=verdict,
+                exit_reason=exit_reason,
+                tput_after=current_best.get("tput"),
+                cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
+                stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: finish failed", exc_info=True)
 
     async def _on_enter_kernel(self, *, from_phase: str) -> None:
         """Run deterministic KERNEL-entry optimization and re-profile gates.
@@ -467,11 +606,21 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001
             log.debug("kernel v4 strategy selection recording failed", exc_info=True)
         if collective_only:
+            self._open_kernel_timeline(
+                route=ROUTE_COLLECTIVE_ONLY,
+                route_reason="collective_only_mode",
+                from_phase=from_phase,
+            )
             self.shared_state.collective_only_mode = True
             self.shared_state.save(self.session_dir)
             await self._maybe_reprofile_for_kernel()
             await self._maybe_run_collective_before_kernel_opt()
             return
+        self._open_kernel_timeline(
+            route=ROUTE_GEAK if geak_enabled else ROUTE_FORGE,
+            route_reason=f"kernel_optimizer={str(getattr(self.shared_state, 'kernel_optimizer', '') or '')}",
+            from_phase=from_phase,
+        )
         if geak_enabled:
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run
             # seeded with the best config so far, then hand straight to SWEEP.
@@ -915,6 +1064,14 @@ class KernelPhase(PhaseHandler):
         out_dir.mkdir(parents=True, exist_ok=True)
         handoff_path = out_dir / "handoff.json"
         handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
+
+        recorder = self._kernel_timeline()
+        if recorder is not None:
+            try:
+                recorder.enter_stage("geak_delegation")
+                recorder.record_geak_handoff(handoff)
+            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+                log.debug("kernel timeline: geak handoff record failed", exc_info=True)
 
         from ..kernel.request_handlers import _kernel_agent_tool_path
 
@@ -1514,6 +1671,24 @@ class KernelPhase(PhaseHandler):
             },
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        recorder = self._kernel_timeline()
+        if recorder is not None:
+            try:
+                recorder.record_geak_claim(
+                    self.shared_state.geak_pending,
+                    specs=self._geak_acceptance_specs(result),
+                )
+                recorder.record_geak_product(
+                    accepted_flags=accepted_flags,
+                    accepted_envs=dict(parsed_envs),
+                    accepted_config=result.get("accepted_config"),
+                    final_overlay=result.get("final_overlay") or "",
+                    final_launch_script=result.get("final_launch_script") or "",
+                    bench_script=result.get("bench_script") or "",
+                    final_patch=result.get("final_patch") or "",
+                )
+            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+                log.debug("kernel timeline: geak claim record failed", exc_info=True)
         # Surface a large cross-harness measurement divergence as a warning only.
         bb = result.get("baseline_basis") or {}
         mdiv = bb.get("measurement_divergence_pct")
@@ -1529,6 +1704,73 @@ class KernelPhase(PhaseHandler):
                 float(mdiv),
                 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
             )
+
+    @staticmethod
+    def _geak_acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return every GEAK acceptance, tagged with the queue that proposed it.
+
+        This differs from :func:`_geak_accepted_kernel_specs` in the two ways the
+        timeline needs. Env acceptances are kept rather than filtered: they
+        select an existing library or environment variable and author no kernel,
+        so they belong to the config half of GEAK's gain -- but dropping them
+        left that gain unattributed anywhere. And each row records which queue
+        named it, because an acceptance lands in ``accepted_kernels`` or
+        ``accepted_heads`` purely by which one proposed it while both carry the
+        same parity-checked ``e2e_delta_pct``.
+
+        Alias twins -- one acceptance written under both the candidate tag and
+        the kernel symbol -- are collapsed on ``(op_kind, e2e_delta_pct)`` so a
+        single acceptance is not counted twice, and the surviving row is the one
+        named after the kernel. An acceptance carrying no usable delta is not a
+        twin candidate: it is kept as its own row, since there is nothing to
+        match it against.
+
+        Args:
+            result: The normalized GEAK ``result.json``.
+
+        Returns:
+            The tagged acceptance rows.
+        """
+        lanes: list[tuple[str, Any]] = [
+            *(("kernelQueue", row) for row in (result.get("accepted_kernels") or [])),
+            *(("headQueue", row) for row in (result.get("accepted_heads") or [])),
+        ]
+        out: list[dict[str, Any]] = []
+        index: dict[tuple[str, str], int] = {}
+        for lane, raw in lanes:
+            if not isinstance(raw, dict):
+                continue
+            stated = raw.get("e2e_delta_pct")
+            try:
+                delta = None if stated is None or stated == "" else float(stated)
+            except (TypeError, ValueError):
+                delta = None
+            name = _geak_spec_name(raw)
+            if not name:
+                continue
+            row = {**raw, "lane": lane, "alias_collapsed": False}
+            if geak_spec_is_env(raw):
+                row["kind"] = "env"
+            if delta is None:
+                # Collapsing is a claim that two rows measured the same thing,
+                # and an absent or unparseable delta is no evidence for it. Two
+                # env selections on one op_kind that merely both lack a delta
+                # are two acceptances, so they are kept apart -- and kept at
+                # all, rather than dropped for having nothing to compare.
+                out.append(row)
+                continue
+            twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
+            position = index.get(twin)
+            if position is None:
+                index[twin] = len(out)
+                out.append(row)
+                continue
+            kept = out[position]
+            kept["alias_collapsed"] = True
+            if geak_is_cand_tag(_geak_spec_name(kept)) and not geak_is_cand_tag(name):
+                row["alias_collapsed"] = True
+                out[position] = row
+        return out
 
     @staticmethod
     def _geak_stack_entry_extra(result: dict[str, Any], *, overlay_loaded: bool | None) -> dict[str, Any]:
@@ -2008,6 +2250,13 @@ class KernelPhase(PhaseHandler):
         journey = self._load_geak_journey(result)
         if not journey:
             return
+
+        recorder = self._kernel_timeline()
+        if recorder is not None:
+            try:
+                recorder.record_geak_attempts(journey)
+            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+                log.debug("kernel timeline: geak attempts record failed", exc_info=True)
 
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -3639,8 +3888,6 @@ class KernelPhase(PhaseHandler):
                 budget_minutes=per_tuner_budget_minutes,
                 extra_server_args=("--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else ""),
             )
-            if paired is not None:
-                result["paired_confirmation"] = paired.to_dict()
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(
                     running_tput,
@@ -4612,8 +4859,6 @@ class KernelPhase(PhaseHandler):
         flags on the re-baseline server, and KEEPs only when measured e2e throughput
         clears the threshold. ``base_tput`` is filled from state by integrate_handler.
         """
-        import os
-
         from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
 
         patch = str(result.get("patch") or "").strip()
@@ -4658,7 +4903,7 @@ class KernelPhase(PhaseHandler):
                         "kernel_repo": kernel_repo,
                         "snapshot_dir": snapshot_dir,
                         "extra_envs": merged_envs,
-                        "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
+                        "keep_threshold_pct": 3.0,
                     },
                     session_dir=self.session_dir,
                 )
