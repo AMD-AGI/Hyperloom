@@ -6345,48 +6345,46 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
     return counts
 
 
-def _land_nomination_outcome(result: dict, *, session_dir: Path) -> tuple[int, dict[str, int]]:
-    """Queue every rewrite sibling forge nominated for the shared integrate lane.
+def _read_nomination_outcome(result: dict) -> tuple[list[Any], dict[str, int]]:
+    """Read the forge ``--auto`` envelope into siblings the caller can queue.
 
-    The consumer half of the ``--auto`` contract, mirroring ``_integrate_fusion``
-    (phases/kernel.py) but on the REWRITE lane: parse the forge envelope with the
-    generic ``parse_outcome``, then enqueue each patch as a ``status="pending"``
-    integrate record. The SWEEP-entry drain (``_drain_pending_keep_integrates``)
-    applies, re-benches, and decides KEEP/REVERT per patch later -- nothing is
-    integrated inline here.
-
-    Crucially the lane is ``"rewrite"``, NOT ``"fusion"``: a rewrite patch stamped
-    with the fusion fields would lift as ``action="fusion"`` and be misfiled into
-    the fusion Recipe column (and flip ``last_fusion_integrate``). The rewrite lane
-    omits those fields so the KEEP lifts as the generic ``action="integrate"``.
+    This deliberately does not touch SharedState. The phase that invoked the
+    handler holds its own instance and saves it in full afterwards, so anything
+    written to a second instance here is overwritten the moment the handler
+    returns; the owner of the state does the queuing.
 
     Args:
         result: The raw forge ``--auto`` envelope (``patches[]`` + ``nomination``).
-        session_dir: Session directory whose SharedState the records live in.
 
     Returns:
-        The number of siblings queued, and a count per named drop reason. The
-        drops are reported even when nothing survived: an envelope whose every
-        entry was malformed otherwise reads exactly like a clean empty
-        nomination.
+        The usable sibling patches, and a count per named drop reason. Drops are
+        reported even when nothing survived: an envelope whose every entry was
+        malformed otherwise reads exactly like a clean empty nomination.
     """
-    from ..state.shared_state import SharedState
-
     outcome = parse_outcome(result)
-    dropped = _summarize_dropped_patches(outcome.dropped)
-    if outcome.is_empty:
-        return 0, dropped
-    state = SharedState.load_or_init(session_dir)
+    return list(outcome.patches), _summarize_dropped_patches(outcome.dropped)
+
+
+def queue_nominated_siblings(state: Any, patches: Any) -> int:
+    """Queue rewrite siblings on the caller's own state, returning how many landed.
+
+    The lane is ``"rewrite"``, never ``"fusion"``: a rewrite patch stamped with the
+    fusion fields lifts as ``action="fusion"`` and is misfiled into the fusion
+    Recipe column. The SWEEP-entry drain applies and re-benches each record later,
+    so nothing is integrated here.
+
+    Args:
+        state: The SharedState the caller owns and will persist.
+        patches: Sibling patches from :func:`_read_nomination_outcome`.
+
+    Returns:
+        The number of siblings queued.
+    """
     queued = 0
-    for patch in outcome.patches:
-        record = enqueue_nominated_patch(state, patch=patch, lane=LANE_REWRITE)
-        if record is not None:
+    for patch in patches or ():
+        if enqueue_nominated_patch(state, patch=patch, lane=LANE_REWRITE) is not None:
             queued += 1
-    try:
-        state.save(session_dir)
-    except Exception:  # noqa: BLE001 - best-effort persist; the drain reloads state
-        log.exception("nomination landing: could not persist queued patches")
-    return queued, dropped
+    return queued
 
 
 async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> HandlerResult:
@@ -6494,17 +6492,20 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         return {
             "status": forge_status,
             "auto": True,
-            "queued": 0,
+            # Same shape as the success path, so the caller queues nothing here
+            # without having to special-case a missing key.
+            "nominated_patches": [],
             "error": forge_error,
         }
-    queued, dropped = _land_nomination_outcome(result, session_dir=session_dir)
+    patches, dropped = _read_nomination_outcome(result)
     nomination = result.get("nomination") if isinstance(result, dict) else None
     # Carries no single-kernel identity: every sibling lands as its own pending
     # record, so a kernel_id here would misattribute all of them to one phantom.
     return {
         "status": "complete",
         "auto": True,
-        "queued": queued,
+        # The caller owns the state, so the siblings ride back to be queued there.
+        "nominated_patches": patches,
         # Named refusals ride on the result so the report and the operator can
         # tell a malformed envelope from one that nominated nothing.
         "dropped": dropped,

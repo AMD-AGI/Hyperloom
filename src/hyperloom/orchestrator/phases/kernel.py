@@ -3837,6 +3837,15 @@ class KernelPhase(PhaseHandler):
                 priority=1,
             )
         )
+        # Queued on this instance, which is the one saved below. The handler reads
+        # the envelope but owns no state: a record written to a second instance is
+        # lost the moment this full save runs.
+        if isinstance(result, dict) and result.get("nominated_patches"):
+            from ..kernel.request_handlers import queue_nominated_siblings
+
+            queued = queue_nominated_siblings(self.shared_state, result["nominated_patches"])
+            result["queued"] = queued
+            log.info("KERNEL entry: queued %d nominated rewrite sibling(s)", queued)
         if isinstance(result, dict):
             self.shared_state.record_kernel_opt(result)
         self.shared_state.save(self.session_dir)

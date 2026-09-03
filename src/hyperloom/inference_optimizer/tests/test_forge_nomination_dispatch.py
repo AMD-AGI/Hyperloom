@@ -108,7 +108,7 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
     # The handler reports the auto outcome, not a single-kernel result.
     assert result["status"] == "complete"
     assert result["auto"] is True
-    assert result["queued"] == 2
+    assert len(result["nominated_patches"]) == 2
     # No single-kernel stamping leaked onto the auto result.
     assert "kernel_id" not in result
     assert "kernel_id_pinned" not in result
@@ -134,9 +134,10 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
     # submit_auto was handed the request path, not a named kernel.
     assert Path(seen["nomination_input"]) == (tmp_path / "forge_nomination_input.json")
 
-    # Both siblings landed as pending integrate records on the REWRITE lane (no
-    # fusion stamping), so the drain will lift them as action="integrate".
+    # Queued on the caller's own state, on the REWRITE lane (no fusion stamping),
+    # so the drain lifts them as action="integrate".
     state = SharedState.load_or_init(tmp_path)
+    assert krh.queue_nominated_siblings(state, result["nominated_patches"]) == 2
     records = list(state.pending_kernel_integrations.values())
     assert len(records) == 2
     for record in records:
@@ -159,7 +160,7 @@ def test_auto_true_empty_nomination_queues_nothing(tmp_path, monkeypatch):
 
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "complete"
-    assert result["queued"] == 0
+    assert result["nominated_patches"] == []
     state = SharedState.load_or_init(tmp_path)
     assert not state.pending_kernel_integrations
 
@@ -184,7 +185,7 @@ def test_auto_true_forge_timeout_is_surfaced_not_reported_complete(tmp_path, mon
     # The forge status and its error ride through; NOT collapsed to complete.
     assert result["status"] == "timeout"
     assert result["auto"] is True
-    assert result["queued"] == 0
+    assert result["nominated_patches"] == []
     assert result["error"] == "deadline exceeded"
     state = SharedState.load_or_init(tmp_path)
     assert not state.pending_kernel_integrations
@@ -336,7 +337,7 @@ def test_auto_true_a_row_outside_the_session_dir_still_proceeds(tmp_path, monkey
     assert result == {
         "status": "complete",
         "auto": True,
-        "queued": 0,
+        "nominated_patches": [],
         "dropped": {},
         "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 0},
     }
@@ -436,7 +437,7 @@ def test_auto_true_a_failed_run_queues_nothing_even_when_it_returns_patches(tmp_
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
     assert result["status"] == "failed"
-    assert result["queued"] == 0
+    assert result["nominated_patches"] == []
     assert result["error"] == "forge-loop --auto exited rc=2"
     state = SharedState.load_or_init(tmp_path)
     assert state.pending_kernel_integrations == {}
@@ -462,7 +463,7 @@ def test_auto_true_a_timed_out_run_queues_nothing_even_when_it_returns_patches(t
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
     assert result["status"] == "timeout"
-    assert result["queued"] == 0
+    assert result["nominated_patches"] == []
     state = SharedState.load_or_init(tmp_path)
     assert state.pending_kernel_integrations == {}
 
@@ -493,7 +494,7 @@ def test_auto_true_reports_named_refusals_alongside_the_queued_siblings(tmp_path
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
     assert result["status"] == "complete"
-    assert result["queued"] == 1
+    assert len(result["nominated_patches"]) == 1
     assert result["dropped"] == {
         "duplicate_kernel_name": 1,
         "missing_patch_path": 1,
@@ -521,7 +522,7 @@ def test_auto_true_an_all_malformed_envelope_is_not_a_clean_empty_nomination(tmp
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
     assert result["status"] == "complete"
-    assert result["queued"] == 0
+    assert result["nominated_patches"] == []
     assert result["dropped"] == {"missing_kernel_name": 1}
 
 
@@ -540,5 +541,5 @@ def test_auto_true_a_clean_empty_nomination_reports_no_refusals(tmp_path, monkey
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
     assert result["status"] == "complete"
-    assert result["queued"] == 0
+    assert result["nominated_patches"] == []
     assert result["dropped"] == {}
