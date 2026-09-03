@@ -22,14 +22,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **Install time** now keys on something it can actually know. A build that
   ships `assets/agentx/` is a build whose boxes may be asked to run AgentX, so
   the client is installed on that signal rather than on a runtime mode flag
-  nobody sets while provisioning. A failure there only warns: the pre-warm must
-  not block a provision that was never going to use it.<br/>
+  nobody sets while provisioning. The pre-warm is deliberately timid: a failure
+  only warns, and an aiperf already on `PATH` is left alone even when its
+  recorded ref is stale, because replacing it takes `pip --force-reinstall`
+  (deliberately not `--no-deps`) and that rebuilds a dependency tree on a box
+  which may run nothing but the synthetic path.<br/>
   **Run time** repairs what is still missing — once per process, when the
-  preflight finds aiperf absent or off the pinned `AIPERF_REF`. A failed repair
-  is folded into the preflight error alongside the original diagnosis, never
-  swallowed. An operator config error (a corpus pin the scenario does not admit)
-  does not trigger an install — reinstalling the same build cannot change that
-  verdict.<br/>
+  preflight finds aiperf absent or off the pinned `AIPERF_REF`. This is where a
+  stale client is upgraded, because here AgentX is demonstrably in use. A failed
+  repair is folded into the preflight error alongside the original diagnosis,
+  never swallowed. Two verdicts do not trigger an install: a corpus pin the
+  scenario does not admit (reinstalling the same build cannot change it), and a
+  build named by `AIPERF_BIN` (no install can replace an operator's override —
+  the error says so and names the variable).<br/>
   **Operator note**: a default install now pays one pinned aiperf install
   (measured ~30s; `ensure_aiperf` records the ref and skips on every later run).
   Set `AIPERF_BIN` to an existing build to skip it, or `AGENTX_ASSET_DIR` to
@@ -51,8 +56,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `agentx_client_unavailable` stop reason, and the report names the fix.
   The grid runner also stops filing this abort as `no_benchmark_workspace`:
   no workspace exists because Magpie never ran, and the generic class erased the
-  one fact that decides what to do next. Nothing about the enablement channel
-  itself changes.
+  one fact that decides what to do next. A grid that hits it abandons its
+  remaining points rather than re-attempting each one — the client is missing
+  for the whole grid, and the stop above is baseline-scoped so nothing else
+  would have halted it. Nothing about the enablement channel itself changes.
 
 - **Enablement setup commands are judged by what they do, not how they are
   spelled.** The install-only allowlist matched from the start of the command
@@ -61,15 +68,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   same operation — was allowed. Measured: two sessions hit one missing
   dependency and got opposite outcomes, decided by nothing but how the
   specialist happened to spell the path. The executable's directory is now
-  stripped before matching, and `uv venv` / `python -m venv` are allowed:
-  without them the only spelling that survived was installing into the system
-  interpreter (`PIP_BREAK_SYSTEM_PACKAGES=1`), so the gate was steering repairs
-  toward the less safe of its two options. `rm`, `systemctl`, `./configure` and
-  `uv run` stay rejected with or without a path.<br/>
-  Rejected commands also reach the conclusion now, as
-  `setup_commands_skipped` and a named clause in the round's `reason`. They were
-  a lone log warning, so downstream saw an outcome with no link to the cause and
-  re-authored the same proposal until the budget ran out.
+  stripped before matching — but only when it is an absolute system prefix
+  (`/opt/<name>`, `/usr`, `/usr/local`, `/bin`, `/sbin`). The allowlist is
+  matched on a normalised copy while the replay executes the original string, so
+  a blanket strip would let `./pip install foo` borrow an allowlisted name and
+  run a script the specialist had just written; `/opt/venv/bin/uv pip install`
+  normalises, `./pip`, `bin/pip` and `/tmp/pip` do not.
+  `uv venv` / `python -m venv` are also allowed now: without them the only
+  spelling that survived was installing into the system interpreter
+  (`PIP_BREAK_SYSTEM_PACKAGES=1`), so the gate was steering repairs toward the
+  less safe of its two options. `rm`, `systemctl`, `./configure` and `uv run`
+  stay rejected with or without a path.<br/>
+  Rejected commands also reach the conclusion now, as `setup_commands_skipped`
+  and a named clause in the round's `reason` — redacted and length-bounded,
+  since they are LLM-written text that lands in the journal, the report and the
+  KB. They were a lone log warning, so downstream saw an outcome with no link to
+  the cause and re-authored the same proposal until the budget ran out.
 
 - **Codex sandbox bypass uses a single env var.** Set
   `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
