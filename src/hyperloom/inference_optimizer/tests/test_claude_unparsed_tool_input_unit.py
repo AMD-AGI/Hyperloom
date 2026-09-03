@@ -137,9 +137,7 @@ async def _sdk_tools_call(arguments: dict[str, Any]) -> Any:
     # mcp.Server renamed the public dict to `_request_handlers` in some
     # versions; both spellings reach the same jsonschema-then-handler path.
     server = cfg["instance"]
-    handlers = getattr(server, "request_handlers", None) or getattr(
-        server, "_request_handlers", None
-    )
+    handlers = getattr(server, "request_handlers", None) or getattr(server, "_request_handlers", None)
     if not handlers:
         pytest.skip("MCP server has no CallToolRequest handler map")
     handler = handlers[CallToolRequest]
