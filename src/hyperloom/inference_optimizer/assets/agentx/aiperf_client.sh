@@ -473,7 +473,7 @@ log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} durat
 #   --model              upstream uses ${SERVED_MODEL_NAME:-$MODEL}; the probed
 #                        /v1/models id is more robust when a server is reused.
 #   --max-context-length omitted (see the replay-context note above).
-AIPERF_API_ARGS=()
+AIPERF_PROGRESS_ARGS=()
 run_aiperf() {
   "$AIPERF" profile \
     --scenario inferencex-agentx-mvp \
@@ -498,7 +498,7 @@ run_aiperf() {
     --no-gpu-telemetry \
     ${CTX_ARGS[@]+"${CTX_ARGS[@]}"} \
     ${SMOKE_ARGS[@]+"${SMOKE_ARGS[@]}"} \
-    ${AIPERF_API_ARGS[@]+"${AIPERF_API_ARGS[@]}"} \
+    ${AIPERF_PROGRESS_ARGS[@]+"${AIPERF_PROGRESS_ARGS[@]}"} \
     --artifact-dir "$ART" --ui simple
 }
 
@@ -520,7 +520,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
   PHASE_WAIT_TIMEOUT=0
   CAPTURE_STATUS_FILE="${RESULT_DIR}/agentx_profile_capture.json"
   rm -f "$CAPTURE_STATUS_FILE"
-  AIPERF_API_PORT=""
+  AIPERF_PROGRESS_PORT=""
   PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
   _write_profile_capture_status() {
     _status="$1"
@@ -560,8 +560,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
     log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
   fi
   if [ -f "$PHASE_GATE" ]; then
-    if AIPERF_API_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
-      AIPERF_API_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_API_PORT")
+    if AIPERF_PROGRESS_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
+      AIPERF_PROGRESS_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_PROGRESS_PORT")
     else
       PHASE_GATE_FAILURE_REASON="api_port_allocation_failed"
       log "WARN failed to allocate an AIPerf progress API port; the measurement will run without trace capture"
@@ -662,9 +662,9 @@ if [ "${PROFILE:-0}" = "1" ]; then
   log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
   run_aiperf & APID=$!
   PHASE_START_NS=""
-  if [ -n "$AIPERF_API_PORT" ] && PHASE_START_NS="$(
+  if [ -n "$AIPERF_PROGRESS_PORT" ] && PHASE_START_NS="$(
     python3 "$PHASE_GATE" wait-phase \
-      --api-url "http://127.0.0.1:${AIPERF_API_PORT}" \
+      --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
       --phase profiling \
       --pid "$APID" \
       --timeout-seconds "$PHASE_WAIT_TIMEOUT"
@@ -688,7 +688,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
       log "start_profile OK"
       if CAPTURE_RESULT="$(
         python3 "$PHASE_GATE" wait-capture-stop \
-          --api-url "http://127.0.0.1:${AIPERF_API_PORT}" \
+          --api-url "http://127.0.0.1:${AIPERF_PROGRESS_PORT}" \
           --phase profiling \
           --pid "$APID" \
           --max-window-seconds "$PWIN"
