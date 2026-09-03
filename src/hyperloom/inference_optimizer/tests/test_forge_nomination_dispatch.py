@@ -273,20 +273,24 @@ def test_auto_true_without_candidates_path_skips(tmp_path, monkeypatch):
     assert result["reason"] == "no_candidates"
 
 
-def test_auto_true_all_candidates_outside_workspace_fails_before_writing_anything(tmp_path, monkeypatch):
-    """Every nominatable row outside the workspace makes the forge run futile.
+def test_auto_true_no_nominatable_row_fails_before_writing_anything(tmp_path, monkeypatch):
+    """With nothing to stage from, no workspace could make a nomination runnable.
 
-    forge resolves the nominated kernel against the workspace and rejects anything
-    outside it, and nothing stages a nominated source in. The handler must say so
-    itself instead of letting forge die on a bare ValueError.
+    submit_auto stages a worktree of the tree the candidates live in, so being
+    outside the session directory is normal and not a refusal. What is futile is
+    a brief whose every row lacks a resolved source or was already rejected:
+    there is no tree to branch from, and forge's containment check would refuse
+    whatever was picked.
     """
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
     trace.write_text("{}", encoding="utf-8")
-    outside = tmp_path.parent / "elsewhere"
     candidates = _candidates(
         tmp_path,
-        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=outside, gpu_pct=10.0)],
+        [
+            {"kernel_id": "k001", "name": "unlocated", "gpu_pct": 30.0, "reusable_native_kernel": True},
+            {"kernel_id": "k002", "name": "also_unlocated", "gpu_pct": 10.0, "reusable_native_kernel": True},
+        ],
     )
     _seed_state(tmp_path, trace=trace)
 
@@ -302,22 +306,25 @@ def test_auto_true_all_candidates_outside_workspace_fails_before_writing_anythin
     assert result["status"] == "failed"
     assert result["auto"] is True
     assert result["error_class"] == "forge_workspace_staging_unavailable"
-    assert "not implemented" in result["error"]
-    assert str(tmp_path) in result["error"]
+    assert "no runnable target" in result["error"]
     # The refusal happens before any write, so no artifact is left behind.
     assert not (tmp_path / "forge_candidate_manifest.json").exists()
     assert not (tmp_path / "forge_nomination_input.json").exists()
 
 
-def test_auto_true_one_candidate_inside_workspace_lets_the_run_proceed(tmp_path, monkeypatch):
-    """A single stageable row is enough; the guard must not refuse the whole run."""
+def test_auto_true_a_row_outside_the_session_dir_still_proceeds(tmp_path, monkeypatch):
+    """The live install tree is never inside the session dir, so it must proceed.
+
+    Refusing here is what kept the lane dormant: every real candidate lives in a
+    framework tree elsewhere on disk, and staging is what brings it in.
+    """
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
     trace.write_text("{}", encoding="utf-8")
     outside = tmp_path.parent / "elsewhere"
     candidates = _candidates(
         tmp_path,
-        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=tmp_path, gpu_pct=10.0)],
+        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=outside, gpu_pct=10.0)],
     )
     _seed_state(tmp_path, trace=trace)
 
@@ -336,15 +343,21 @@ def test_auto_true_one_candidate_inside_workspace_lets_the_run_proceed(tmp_path,
     assert (tmp_path / "forge_candidate_manifest.json").exists()
 
 
-def test_auto_true_rejected_candidate_inside_workspace_does_not_rescue_the_run(tmp_path, monkeypatch):
-    """A rejected row can never be nominated, so it cannot satisfy the guard."""
+def test_auto_true_a_rejected_row_does_not_count_as_nominatable(tmp_path, monkeypatch):
+    """A rejected row can never be picked, so it cannot satisfy the guard.
+
+    Its source resolves, which is the only reason it could be mistaken for a
+    stageable target; the other row has no source at all.
+    """
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
     trace.write_text("{}", encoding="utf-8")
-    outside = tmp_path.parent / "elsewhere"
     candidates = _candidates(
         tmp_path,
-        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=tmp_path, gpu_pct=10.0)],
+        [
+            {"kernel_id": "k001", "name": "unlocated", "gpu_pct": 30.0, "reusable_native_kernel": True},
+            _row("k002", root=tmp_path, gpu_pct=10.0),
+        ],
     )
     state = SharedState.load_or_init(tmp_path)
     state.max_minutes = 600.0
@@ -357,51 +370,13 @@ def test_auto_true_rejected_candidate_inside_workspace_does_not_rescue_the_run(t
     monkeypatch.setattr(
         forge_submit,
         "submit_auto",
-        lambda **_: (_ for _ in ()).throw(AssertionError("the only inside row is rejected; forge must not run")),
+        lambda **_: (_ for _ in ()).throw(AssertionError("the only resolved row is rejected; forge must not run")),
     )
 
     result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "failed"
     assert result["error_class"] == "forge_workspace_staging_unavailable"
     assert not (tmp_path / "forge_candidate_manifest.json").exists()
-
-
-def test_auto_true_symlinked_workspace_root_does_not_produce_a_false_refusal(tmp_path, monkeypatch):
-    """A candidate under a symlinked workspace root is genuinely inside it.
-
-    ``/link/k001.py`` shares no string prefix with the real ``/real`` root, so a
-    prefix test refuses it; both sides must be resolved before comparing.
-    """
-    monkeypatch.setenv(_AUTO_ENV, "1")
-    real_root = tmp_path / "real"
-    real_root.mkdir()
-    linked_root = tmp_path / "link"
-    linked_root.symlink_to(real_root, target_is_directory=True)
-
-    trace = real_root / "decode.trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    # The row names the path through the symlink; the workspace is the real dir.
-    candidates = _candidates(real_root, [_row("k001", root=linked_root, gpu_pct=30.0)])
-    _seed_state(real_root, trace=trace)
-
-    from hyperloom.agents.kernel.tools.backends import forge_submit
-
-    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
-
-    result = asyncio.run(
-        krh.run_optimization_handler(
-            {"candidates_path": str(candidates), "workspace_path": str(real_root)},
-            session_dir=real_root,
-        )
-    )
-    assert result == {
-        "status": "complete",
-        "auto": True,
-        "queued": 0,
-        "dropped": {},
-        "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 0},
-    }
-    assert (real_root / "forge_candidate_manifest.json").exists()
 
 
 # --------------------------------------------------------------------------- #

@@ -6223,46 +6223,37 @@ def _build_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> dict
     return document
 
 
-def _forge_auto_staging_blocker(document: dict[str, Any], workspace_path: str) -> str:
+def _forge_auto_staging_blocker(document: dict[str, Any]) -> str:
     """Name why a ``--auto`` run cannot reach a campaign, or ``""`` when it can.
 
-    forge derives its kernel from the nomination and then resolves that path
-    against the workspace, rejecting anything outside it. Nothing stages a
-    nominated source into the workspace, so when every row forge could nominate
-    lies outside it the run is futile and must be declined here rather than left
-    to die on a bare ``ValueError`` deep inside forge.
-
-    Containment resolves both sides: an unexpanded symlinked root (e.g.
-    ``USER_DATA_PATH=/primus/x/... -> /primus/data/x/...``) otherwise rejects a
-    candidate that is genuinely inside the workspace.
+    forge resolves the nominated kernel against its workspace and refuses
+    anything outside it, so ``submit_auto`` stages a worktree of the tree the
+    candidates live in and rewrites their paths into it. That needs one row with
+    a resolved source to stage from; with none, no workspace could make any
+    nomination runnable and the run is futile before any artifact is written.
 
     Args:
         document: The manifest document forge would receive.
-        workspace_path: The workspace the run would be given.
 
     Returns:
-        An operator-readable reason, or an empty string when at least one
-        nominatable candidate already resolves inside the workspace.
+        An operator-readable reason, or an empty string when at least one row is
+        nominatable.
     """
-    from ..framework.paths import resolved_within
-
     rows = document.get("hot_kernels")
     rows = rows if isinstance(rows, list) else []
     # Mirror the nominator's own eligibility: a row with no source file, or one
     # this session already rejected, can never be picked.
-    nominatable = [
-        str(row.get("source_file") or "").strip()
+    nominatable = sum(
+        1
         for row in rows
         if isinstance(row, dict) and str(row.get("source_file") or "").strip() and not row.get("rejected")
-    ]
-    if any(resolved_within(source, workspace_path) for source in nominatable):
+    )
+    if nominatable:
         return ""
     return (
-        f"forge --auto has no runnable target: none of the {len(nominatable)} nominatable "
-        f"candidate(s) resolves inside the workspace {workspace_path}, and forge requires the "
-        "nominated kernel to be inside it. Staging the nominated source into the workspace "
-        "(and synthesizing the driver --auto never supplies) is not implemented, so this lane "
-        "stays dormant until it is."
+        f"forge --auto has no runnable target: none of the {len(rows)} candidate row(s) carries a "
+        "resolved source file this session has not already rejected, so there is no tree to stage "
+        "a workspace from and any nomination would be refused by forge's own containment check."
     )
 
 
@@ -6466,10 +6457,9 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
     if manifest_document is None:
         return {"status": "skipped", "reason": "no_candidates"}
 
-    workspace_path = payload.get("workspace_path") or str(session_dir)
     # Same reason the budget is checked first: decline before anything is written,
     # so a futile run leaves no stale manifest behind.
-    blocker = _forge_auto_staging_blocker(manifest_document, str(workspace_path))
+    blocker = _forge_auto_staging_blocker(manifest_document)
     if blocker:
         log.warning("nomination auto: %s", blocker)
         return {
@@ -6501,7 +6491,6 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
             "error": str(error),
         }
 
-    Path(workspace_path).mkdir(parents=True, exist_ok=True)
     output_dir = kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name)) / "auto"
     target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
 
@@ -6512,7 +6501,6 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
     result = await asyncio.to_thread(
         forge_submit.submit_auto,
         nomination_input=str(request_path),
-        workspace=workspace_path,
         output_dir=output_dir,
         timeout_s=_optimization_wrapper_timeout_sec(payload),
         gpu_type=target_platform,

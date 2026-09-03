@@ -242,6 +242,7 @@ when no fusion is found.
 | `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
 | `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
+| `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
 | `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, e.g. `gfx950`; detected via `rocminfo` when omitted. |
 

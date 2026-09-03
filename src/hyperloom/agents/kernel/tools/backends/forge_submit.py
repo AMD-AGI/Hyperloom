@@ -5004,10 +5004,110 @@ def submit(
             log.exception("forge workspace finalization failed")
 
 
+class _NominationStagingError(RuntimeError):
+    """The brief names no candidate that a workspace could be staged from."""
+
+
+def _nominatable_rows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rows the nominator could actually pick, hottest first.
+
+    Mirrors the stub's own eligibility -- a row with no source file, or one this
+    session already rejected, can never be selected -- so a row that could never
+    be picked cannot decide which tree gets staged.
+    """
+    rows = manifest.get("hot_kernels")
+    rows = rows if isinstance(rows, list) else []
+    eligible = [
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("source_file") or "").strip() and not row.get("rejected")
+    ]
+    eligible.sort(key=lambda row: float(row.get("gpu_pct") or 0.0), reverse=True)
+    return eligible
+
+
+def _stage_nomination_brief(
+    *,
+    nomination_input: str,
+    output_dir: Path,
+    branch: str,
+) -> tuple[str, str, str, int]:
+    """Stage a workspace the nominator can pick inside, and re-point the brief.
+
+    forge resolves the nominated kernel against ``--workspace`` and refuses
+    anything outside it, so a brief listing paths in the live install tree can
+    never yield a runnable target. A worktree of that tree is staged instead --
+    the live tree is never edited -- and every candidate path is rewritten into
+    it, so whichever row the nominator picks is already inside the workspace.
+
+    The tree is the hottest eligible row's, which is the row the nominator ranks
+    first. Rows from any other tree are dropped from the staged brief and
+    counted: one worktree cannot hold two trees, and leaving them in would offer
+    the nominator targets that must fail the containment check.
+
+    Args:
+        nomination_input: Path to the request JSON written by Hyperloom.
+        output_dir: Per-attempt directory the worktree is created under.
+        branch: Branch name for the staged worktree.
+
+    Returns:
+        ``(workspace, staged_request, base_commit, dropped_offtree_rows)``.
+
+    Raises:
+        _NominationStagingError: When no eligible row resolves into a stageable
+            tree, so no workspace could make any nomination runnable.
+    """
+    request_path = Path(nomination_input).resolve()
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    manifest_path = Path(str(request.get("candidates_path") or "")).resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    eligible = _nominatable_rows(manifest)
+    if not eligible:
+        raise _NominationStagingError("the nomination brief lists no candidate with a resolved source file")
+
+    hottest = eligible[0]
+    source_file = str(hottest.get("source_file") or "").strip()
+    repo = str(hottest.get("kernel_repo") or "").strip() or _git_toplevel(source_file)
+    if not repo:
+        raise _NominationStagingError(f"could not resolve a source tree to stage from {source_file}")
+
+    staged = _prepare_worktree(source_file, repo, output_dir, branch)
+    if staged is None:
+        staged = _prepare_worktree_nogit(source_file, repo, output_dir, branch)
+    if staged is None:
+        raise _NominationStagingError(f"{repo} is neither a usable git checkout nor a copyable source tree")
+    workspace, _staged_kernel, base_commit = staged
+
+    repo_root = Path(repo).resolve()
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for row in manifest.get("hot_kernels") or []:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("source_file") or "").strip()
+        if not raw:
+            # Unresolved rows carry no path to rewrite and are the whole point of
+            # handing the full list over, so they travel untouched.
+            kept.append(row)
+            continue
+        try:
+            relative = Path(raw).resolve().relative_to(repo_root)
+        except ValueError:
+            dropped += 1
+            continue
+        kept.append({**row, "source_file": str(Path(workspace) / relative), "kernel_repo": workspace})
+
+    staged_manifest = output_dir / "forge_candidate_manifest.staged.json"
+    staged_manifest.write_text(json.dumps({**manifest, "hot_kernels": kept}), encoding="utf-8")
+    staged_request = output_dir / "forge_nomination_input.staged.json"
+    staged_request.write_text(json.dumps({**request, "candidates_path": str(staged_manifest)}), encoding="utf-8")
+    return workspace, str(staged_request), base_commit, dropped
+
+
 def submit_auto(
     *,
     nomination_input: str,
-    workspace: str,
     output_dir: Path,
     timeout_s: int = 1800,
     gpu_target: str = "",
@@ -5033,9 +5133,12 @@ def submit_auto(
     ``ForgeLoopOutcome``: the handler needs every sibling patch, so nothing may be
     lost in a single-best normalization.
 
+    The workspace is deliberately not an argument. A campaign edits the tree it
+    is handed, so this entry stages its own worktree of whatever tree the
+    candidates live in rather than letting a caller aim it at the live install.
+
     Args:
         nomination_input: Path to the ``forge_nomination_input.json`` request.
-        workspace: Git workspace dir the loop runs in.
         output_dir: Where diagnostics/checkpoints and the result sidecar live.
         timeout_s: Wall-clock budget; the child is hard-killed at the deadline.
         gpu_target: gfx arch override; resolved from env/probe when empty.
@@ -5064,6 +5167,39 @@ def submit_auto(
     branch = _new_forge_branch(output_dir, "auto-nomination")
     deadline_unix = max(time.time() + 1.0, started + timeout_s)
 
+    # A fresh campaign needs a kernel AND a driver, and resolves both against the
+    # workspace. --auto supplies the kernel from the nomination and no driver at
+    # all, so both have to be arranged here before forge is launched.
+    try:
+        # forge reports the commit each patch is diffed against on the envelope,
+        # so the staged base is not needed again here.
+        workspace, nomination_input, _base_commit, offtree = _stage_nomination_brief(
+            nomination_input=nomination_input,
+            output_dir=output_dir,
+            branch=branch,
+        )
+    except (
+        _NominationStagingError,
+        _RetainedWorkspaceCollision,
+        _WorktreePreparationError,
+        OSError,
+        ValueError,
+    ) as exc:
+        return {
+            "status": "failed",
+            "patches": [],
+            "error": f"forge --auto workspace staging failed: {exc}",
+        }
+    if offtree:
+        log.warning(
+            "forge --auto: %d candidate row(s) live outside the staged tree %s and were not offered",
+            offtree,
+            workspace,
+        )
+    # forge-loop requires --driver to exist before its task preparer authors the
+    # real one; the placeholder fails loudly rather than passing for a driver.
+    driver = _write_generated_driver(workspace, _TASK_PREPARER_PLACEHOLDER)
+
     env = dict(os.environ)
     env["GPU_TARGET"] = resolved_target
     _apply_gpu_type_env(env, resolved_type)
@@ -5083,6 +5219,8 @@ def submit_auto(
         str(Path(nomination_input).resolve()),
         "--workspace",
         workspace,
+        "--driver",
+        driver,
         "--max-hours",
         str(max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0)),
         "--git-branch",
