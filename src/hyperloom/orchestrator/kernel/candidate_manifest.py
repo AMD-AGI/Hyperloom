@@ -140,11 +140,13 @@ def _project_row(
     # never become a patch even if it were nominated.
     if not (kernel_id or name):
         return None
+    kernel_name = name or kernel_id
     return {
+        # Provenance only: the ordinal is reassigned by reranking, so two
+        # kernels can claim it across cycles.
         "kernel_id": kernel_id,
-        # The consumer keys on this; prefer the trace symbol and fall back to
-        # the ordinal id so the field is never empty.
-        "kernel_name": name or kernel_id,
+        # The accounting identity on this lane, and what the consumer keys on.
+        "kernel_name": kernel_name,
         "gpu_pct": _finite_float(row.get("gpu_pct")),
         "duration_us": _finite_float(row.get("duration_us")),
         "call_count": _non_negative_int(row.get("call_count")),
@@ -162,19 +164,29 @@ def _project_row(
         "shapes": row.get("shapes") if isinstance(row.get("shapes"), list) else [],
         "trace_report_path": str(row.get("trace_report_path") or "").strip(),
         # Orchestrator-only knowledge: forge cannot derive either of these.
-        "attempts": _non_negative_int(_attempts_for(attempts, kernel_id)),
-        "rejected": bool(kernel_id and kernel_id in rejected),
+        # Read under the kernel name first, because that is what this lane writes
+        # its ledger and its rejections under; the ordinal is the fallback that
+        # keeps history recorded by the legacy selector from being lost.
+        "attempts": _non_negative_int(_attempts_for(attempts, kernel_name, kernel_id)),
+        "rejected": bool((kernel_name and kernel_name in rejected) or (kernel_id and kernel_id in rejected)),
     }
 
 
-def _attempts_for(attempts: dict, kernel_id: str) -> Any:
-    """Read an attempt count that may be a bare number or a ledger entry."""
-    if not kernel_id:
-        return 0
-    value = attempts.get(kernel_id)
-    if isinstance(value, dict):
-        return value.get("attempts", 0)
-    return value
+def _attempts_for(attempts: dict, *keys: str) -> Any:
+    """Read an attempt count under the first key that has one.
+
+    Each key may hold a bare number or a ledger entry. Keys are tried in the
+    order given, so the caller decides which identity is authoritative.
+    """
+    for key in keys:
+        if not key:
+            continue
+        value = attempts.get(key)
+        if isinstance(value, dict):
+            value = value.get("attempts", 0)
+        if value is not None:
+            return value
+    return 0
 
 
 def _load(path: str | Path) -> dict[str, Any]:

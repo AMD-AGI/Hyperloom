@@ -224,3 +224,98 @@ def test_the_forge_consumer_can_read_what_we_write(tmp_path: Path) -> None:
     assert candidates[1].is_resolved is False
     assert candidates[1].reason_class == "source_not_resolved"
     assert candidates[1].rejected is True
+
+
+def test_a_rejection_recorded_under_the_kernel_name_is_honoured(tmp_path: Path) -> None:
+    """The nomination lane keys its ledger on the kernel name, not the ordinal.
+
+    A REVERT on the auto lane appends the kernel NAME to the rejected set, so
+    looking the row up by its trace-local ordinal reports ``rejected=False`` and
+    the same kernel is nominated again next cycle, re-burning campaign budget.
+    """
+    document, _ = _build(tmp_path, [_row("k001")], rejected_kernel_ids=["k001_kernel"])
+    (entry,) = document["hot_kernels"]
+    assert entry["rejected"] is True
+
+
+def test_attempts_recorded_under_the_kernel_name_are_honoured(tmp_path: Path) -> None:
+    """Attempt counts land under the same name the rejection does."""
+    document, _ = _build(tmp_path, [_row("k001")], attempts_by_kernel_id={"k001_kernel": 3})
+    (entry,) = document["hot_kernels"]
+    assert entry["attempts"] == 3
+
+
+def test_history_under_the_trace_ordinal_still_counts(tmp_path: Path) -> None:
+    """The legacy selector keys on the ordinal, so that history is not lost."""
+    document, _ = _build(
+        tmp_path,
+        [_row("k001")],
+        rejected_kernel_ids=["k001"],
+        attempts_by_kernel_id={"k001": 2},
+    )
+    (entry,) = document["hot_kernels"]
+    assert entry["rejected"] is True
+    assert entry["attempts"] == 2
+
+
+def test_the_name_keyed_attempt_wins_over_the_ordinal(tmp_path: Path) -> None:
+    """The name is the accounting identity; the ordinal is only provenance.
+
+    An ordinal is reassigned by reranking, so two kernels can claim the same one
+    across cycles -- the name-keyed entry is the one that describes this kernel.
+    """
+    document, _ = _build(
+        tmp_path,
+        [_row("k001")],
+        attempts_by_kernel_id={"k001_kernel": 5, "k001": 1},
+    )
+    (entry,) = document["hot_kernels"]
+    assert entry["attempts"] == 5
+
+
+def test_a_reverted_nomination_is_not_offered_again_next_cycle(tmp_path: Path) -> None:
+    """The accounting identity must survive a full lap of the auto lane.
+
+    Enqueue a nominated sibling, land a REVERT on it, then rebuild the manifest
+    from the same SharedState. Without one identity end to end the rejection is
+    written under the kernel name and read back under the trace ordinal, so the
+    kernel is nominated again and re-burns a campaign budget every cycle.
+    """
+    from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+    from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState()
+    record = enqueue_nominated_patch(
+        state,
+        patch=NominatedPatch(
+            kernel_name="paged_attention_v1",
+            patch_path="/repo/pa.patch",
+            target_file="/repo/pa.py",
+        ),
+        lane="rewrite",
+    )
+    assert record is not None
+    state.record_kernel_integrate_result(
+        {
+            "status": "ok",
+            "decision": "REVERT",
+            "kernel_id": record["kernel_id"],
+            "integration_id": record["integration_id"],
+            "patch_path": record["artifact_path"],
+            "target_file": record["source_file"],
+            "gain_pct": -1.0,
+        }
+    )
+    assert state.rejected_kernel_ids == ["paged_attention_v1"]
+
+    document, _ = _build(
+        tmp_path,
+        [_row("k001", name="paged_attention_v1", source_file="/repo/pa.py")],
+        rejected_kernel_ids=state.rejected_kernel_ids,
+    )
+
+    (entry,) = document["hot_kernels"]
+    assert entry["kernel_name"] == "paged_attention_v1"
+    assert entry["kernel_id"] == "k001"
+    assert entry["rejected"] is True
