@@ -90,15 +90,9 @@ from ..state.kernel_decision_settings import (
 
 log = logging.getLogger(__name__)
 
-# Recognized trace-analysis routes; an unknown value falls back to ``agent``.
+# Recognized trace-analysis routes. Only an omitted value defaults to ``agent``;
+# an explicit unknown value fails before dispatch so it cannot start an LLM.
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "agent"})
-#: Routes that were removed. Named so the fallback warning can point the caller
-#: at the surviving route with the same intent, rather than reading as a typo.
-_RETIRED_ANALYSIS_ROUTES = {
-    "deterministic": (
-        "the 'deterministic' route was removed; use 'bypass' for a TraceLens-free analysis that makes no LLM calls"
-    ),
-}
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 # A patch whose correctness was only established against a reference kernel;
@@ -5728,37 +5722,27 @@ async def trace_analyze_handler(
     # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
     # is the explicit route via payload ``analysis_route`` /
     # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
-    explicit_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
-    # Reject an unknown route: warn and fall back to the default ``agent`` route.
-    # A retired route carries its own migration hint, because falling back to
-    # ``agent`` spends an LLM session -- the opposite of what the caller asked
-    # for when they named a no-LLM route.
-    route_health_warnings: list[dict[str, Any]] = []
+    raw_route = payload.get("analysis_route")
+    if raw_route is None or raw_route == "":
+        raw_route = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")
+    explicit_route = str(raw_route).strip().lower()
+    # An explicit unknown route is a configuration error. Falling back to
+    # ``agent`` could turn a no-LLM request into a paid model session.
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
-        detail = _RETIRED_ANALYSIS_ROUTES.get(explicit_route, "")
-        log.warning(
-            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route%s",
-            explicit_route,
-            sorted(_VALID_ANALYSIS_ROUTES),
-            f" -- {detail}" if detail else "",
-        )
+        valid_routes = sorted(_VALID_ANALYSIS_ROUTES)
         message = (
-            f"unknown analysis_route {explicit_route!r} (expected one of "
-            f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
+            f"unknown analysis_route {explicit_route!r} (expected one of {valid_routes}); "
+            "refusing to fall back to 'agent' because that may start an LLM session. "
+            "Use 'bypass' for no-LLM trace analysis."
         )
-        if detail:
-            message += f" Note: {detail}."
-        route_health_warnings.append(
-            {
-                "code": "invalid_analysis_route",
-                "severity": "warning",
-                "message": message,
-                "requested_route": explicit_route,
-            }
-        )
-        explicit_route = ""
+        log.error("trace_analyze: %s", message)
+        return {
+            "status": "failed",
+            "error_class": "invalid_analysis_route",
+            "error": message,
+            "requested_route": explicit_route,
+            "valid_routes": valid_routes,
+        }
     analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
     # Resolve TraceLens root independently of inherited env, self-healing a
@@ -5855,9 +5839,7 @@ async def trace_analyze_handler(
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
         # Prepend handler validation warnings so they reach the LLM.
-        result["trace_health_warnings"] = (
-            framework_warnings + route_health_warnings + list(result.get("trace_health_warnings") or [])
-        )
+        result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")

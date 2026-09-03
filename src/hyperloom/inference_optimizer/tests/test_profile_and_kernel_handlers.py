@@ -2164,9 +2164,8 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session_dir):
-    """A non-string analysis_route (e.g. bool/list from an LLM payload) must not
-    crash cmd construction with AttributeError; it is coerced and ignored."""
+async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_dir):
+    """A non-string route is coerced into a structured validation error."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     for bad_route in (True, ["bypass"], {"route": "agent"}, 1):
@@ -2180,8 +2179,9 @@ async def test_trace_analyze_handler_tolerates_non_string_analysis_route(session
             "analysis_route": bad_route,
         }
         res = await krh.trace_analyze_handler(payload, session_dir=session_dir)
-        # Must return a structured result, never raise AttributeError.
-        assert res["status"] in ("ok", "succeeded", "failed")
+        assert res["status"] == "failed"
+        assert res["error_class"] == "invalid_analysis_route"
+        assert res["requested_route"] == str(bad_route).strip().lower()
 
 
 @pytest.mark.asyncio
@@ -2396,77 +2396,54 @@ async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(sessio
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
 
 
+@pytest.mark.parametrize(
+    ("payload_route", "env_route", "requested_route"),
+    [
+        ("foobar", "bypass", "foobar"),
+        ("deterministic", "bypass", "deterministic"),
+        (False, "bypass", "false"),
+        (0, "bypass", "0"),
+        (None, "deterministic", "deterministic"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_invalid_route_falls_back_to_agent(session_dir, monkeypatch):
-    """An unknown analysis_route (e.g. an LLM typo) must NOT silently mis-route;
-    it falls back to the default TraceLens ``agent`` route and surfaces a warning."""
-    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
-    fake_trace = session_dir / "fake_trace_dir"
-    fake_trace.mkdir()
-    captured: dict = {}
-
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
-
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
-    res = await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "analysis_route": "foobar",
-            "top_k": 5,
-        },
-        session_dir=session_dir,
-    )
-    cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    codes = {w.get("code") for w in res.get("trace_health_warnings", [])}
-    assert "invalid_analysis_route" in codes
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_retired_deterministic_route_names_bypass(session_dir, monkeypatch):
-    """The retired ``deterministic`` route must not degrade in silence.
-
-    Falling back to ``agent`` spends an LLM session, which is the opposite of
-    what a caller naming a no-LLM route asked for, so the warning has to say
-    where that intent now lives.
-    """
-    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
-    monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
+async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
+    session_dir,
+    monkeypatch,
+    payload_route,
+    env_route,
+    requested_route,
+):
+    """An explicit invalid route must fail before resolving TraceLens or spending LLM."""
+    monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", env_route)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
 
-    captured: dict = {}
+    def fail_resolve_tracelens_root():
+        pytest.fail("invalid route must not resolve TraceLens")
 
-    async def fake_run_subprocess(cmd, *, timeout_sec):
-        captured["cmd"] = list(cmd)
-        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
+    async def fail_run_subprocess(cmd, *, timeout_sec):
+        pytest.fail("invalid route must not launch a subprocess")
 
-    monkeypatch.setattr(krh, "_run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(krh, "_resolve_tracelens_root", fail_resolve_tracelens_root)
+    monkeypatch.setattr(krh, "_run_subprocess", fail_run_subprocess)
+    payload = {
+        "trace_input": str(fake_trace),
+        "session_id": session_dir.name,
+        "framework": "sglang",
+    }
+    if payload_route is not None:
+        payload["analysis_route"] = payload_route
+
     res = await krh.trace_analyze_handler(
-        {
-            "trace_input": str(fake_trace),
-            "session_id": session_dir.name,
-            "framework": "sglang",
-            "analysis_route": "deterministic",
-        },
+        payload,
         session_dir=session_dir,
     )
-    warning = next(w for w in res["trace_health_warnings"] if w.get("code") == "invalid_analysis_route")
-    assert warning["requested_route"] == "deterministic"
-    assert "bypass" in warning["message"]
-    # The fallback has to actually land on ``agent``, and the retired value must
-    # not survive into the argv the tool receives.
-    cmd = captured["cmd"]
-    assert any("tracelens_analysis.py" in c for c in cmd)
-    assert not any("bypass_trace_analysis.py" in c for c in cmd)
-    assert "deterministic" not in cmd
+    assert res["status"] == "failed"
+    assert res["error_class"] == "invalid_analysis_route"
+    assert res["requested_route"] == requested_route
+    assert res["valid_routes"] == ["agent", "bypass"]
+    assert "no-LLM" in res["error"]
 
 
 @pytest.mark.asyncio

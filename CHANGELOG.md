@@ -17,10 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   — a second extraction pipeline maintained beside the one `analysis.md` already
   defines, and the only caller of the category-script fan-out. `bypass` serves
   the same no-LLM intent by reading the profiler trace directly and needs no
-  TraceLens checkout to do it. A request still naming `deterministic` falls back
-  to `agent` and carries an `invalid_analysis_route` warning that names
-  `bypass`, because degrading to a route that spends an LLM session is the
-  opposite of what naming a no-LLM route asked for.
+  TraceLens checkout to do it. A request still naming `deterministic` is rejected
+  with `invalid_analysis_route` before TraceLens or an LLM is started, and the
+  error points to `bypass`. Only an omitted route defaults to `agent`; explicit
+  unknown values no longer fall back to a route that may spend an LLM session.
 
 - **Codex sandbox bypass uses a single env var.** Set
   `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
