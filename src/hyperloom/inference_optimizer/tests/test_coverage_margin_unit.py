@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from hyperloom.common.env import env_float
 from hyperloom.inference_optimizer.breakdown.recorder import section_shape
+from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
+from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-    decision_journal,
-    kernel_decision_path,
     roofline,
     source_files,
     workload,
@@ -40,35 +40,20 @@ def test_source_files_renderer_skips_empty_entries():
     assert "a, b, c" in sec.markdown_block
 
 
-def test_decision_journal_standard_caps_rounds():
-    rounds = [
-        {
-            "phase": "explore",
-            "round_id": f"r{i}",
-            "variants": [{"name": f"v{i}", "outcome": "tested", "gain_pct_vs_base": i}],
-            "round_decision": {"outcome": "discarded"},
-        }
-        for i in range(35)
-    ]
-    sec = decision_journal.render({"decision_journal": rounds})
-    assert "Showing last 20 of 35 rounds" in sec.markdown_block
-    assert any(d.kind == "rejected" for d in sec.decisions)
+def test_decision_journal_renderer_is_retired():
+    assert "decision_journal" not in {section_id for section_id, _render in REGISTRY}
 
 
-def test_kernel_decision_path_handles_missing_step_fields():
-    sec = kernel_decision_path.render(
+def test_legacy_dead_section_payloads_do_not_render():
+    report = render_session_report(
         {
-            "kernel_decision_path": [
-                {
-                    "kid": "k1",
-                    "kernel_name": "kernel",
-                    "steps": [{"step": "kernel_opt"}],
-                }
-            ]
+            "session": {"session_id": "legacy"},
+            "decision_journal": [{"round_id": "dead-round"}],
+            "kernel_decision_path": [{"kid": "dead-kernel"}],
         }
-    )
-    assert not sec.skipped
-    assert "kernel_opt" in sec.markdown_block
+    ).markdown
+    assert "dead-round" not in report
+    assert "dead-kernel" not in report
 
 
 def test_roofline_and_workload_render_minimal_inputs():

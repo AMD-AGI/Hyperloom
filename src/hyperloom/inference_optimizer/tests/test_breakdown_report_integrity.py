@@ -477,8 +477,8 @@ def test_skipped_section_without_warnings_still_reports_absence() -> None:
     assert any("roofline" in f for f in flags)
 
 
-def test_section_without_producer_is_not_a_data_quality_flag() -> None:
-    """A section nothing produces says nothing about this session."""
+def test_skipped_sections_have_no_hidden_dead_section_allowlist() -> None:
+    """Every rendered section follows the same missing-data policy."""
     sec = RenderedSection(
         section_id="data_provenance",
         title="Data Provenance",
@@ -488,7 +488,7 @@ def test_section_without_producer_is_not_a_data_quality_flag() -> None:
 
     flags = cross_section._data_quality_flags({}, [sec])
 
-    assert not any("data_provenance" in f for f in flags)
+    assert any("data_provenance" in f for f in flags)
 
 
 def test_every_registered_section_reaches_the_report() -> None:
@@ -508,14 +508,8 @@ def test_every_registered_section_reaches_the_report() -> None:
     assert not (grouped - registered), "SECTION_GROUPS references sections nothing renders"
 
 
-def test_sections_without_producer_list_matches_reality(tmp_path: Path) -> None:
-    """Recompute the dead-section list; the constant must still match.
-
-    Wiring up a producer, or registering another section nothing fills, has to
-    fail here rather than silently drift. The scan reads ``breakdown.get("x")``
-    literals, so a renderer that computes its key at runtime would be missed --
-    none do today.
-    """
+def test_every_registered_section_has_a_producer(tmp_path: Path) -> None:
+    """Reject renderers that no exporter or recorder can ever populate."""
     import re
 
     from hyperloom.inference_optimizer.breakdown import exporter
@@ -534,7 +528,7 @@ def test_sections_without_producer_list_matches_reality(tmp_path: Path) -> None:
         if keys - available:
             without_producer.add(path.stem)
 
-    assert without_producer == set(cross_section._SECTIONS_WITHOUT_PRODUCER)
+    assert without_producer == set()
 
 
 def test_live_section_warnings_are_unchanged() -> None:

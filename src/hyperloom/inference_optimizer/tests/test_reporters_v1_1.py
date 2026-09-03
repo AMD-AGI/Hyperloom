@@ -1,154 +1,67 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the decision_journal, kernel_profiling, invocation and phase-timeline renderers."""
+"""Regression guards for retired V1.1 report sections and live renderers."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import importlib.util
 
 from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
-from hyperloom.inference_optimizer.breakdown.reporters._renderers.decision_journal import render as render_dj
+from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.invocations import render_forge, render_geak
-from hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_profiling import render as render_kp
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.phase_timeline import render as render_phase_timeline
 
 
+_RETIRED = {
+    "data_provenance",
+    "decision_journal",
+    "kernel_decision_path",
+    "kernel_profiling",
+}
+
+
 def _base_breakdown(**overrides):
-    base = {
-        "session": {"session_id": "dj-test", "session_dir": "/tmp/session"},
-        "decision_journal": [],
-        "kernel_profiling": [],
-    }
+    base = {"session": {"session_id": "report-test", "session_dir": "/tmp/session"}}
     base.update(overrides)
     return base
 
 
-def test_decision_journal_skipped_when_empty() -> None:
-    sec = render_dj(_base_breakdown())
-    assert sec.skipped
-    assert sec.section_id == "decision_journal"
+def test_retired_renderer_modules_are_removed() -> None:
+    package = "hyperloom.inference_optimizer.breakdown.reporters._renderers"
+    assert all(importlib.util.find_spec(f"{package}.{name}") is None for name in _RETIRED)
 
 
-def test_decision_journal_renders_round_and_variants() -> None:
-    bd = _base_breakdown(
-        decision_journal=[
-            {
-                "ts": "2026-05-15T10:00:00+00:00",
-                "phase": "params",
-                "round_id": "params-001",
-                "baseline_ref_tput": 1000.0,
-                "variants": [
-                    {
-                        "name": "ncds_16",
-                        "outcome": "round_winner",
-                        "gain_pct_vs_base": 0.56,
-                        "output_throughput": 1005.6,
-                        "status": "succeeded",
-                    },
-                    {
-                        "name": "bad_knob",
-                        "outcome": "rejected",
-                        "gain_pct_vs_base": -2.0,
-                        "reject_reason": "not_keep",
-                        "status": "succeeded",
-                    },
-                ],
-                "round_decision": {
-                    "outcome": "discarded",
-                    "best_variant_name": "ncds_16",
-                    "gain_vs_cb_pct": 0.56,
-                    "promotion_rule": "below_threshold",
-                    "promotion_rule_detail": "gain_vs_cb=0.56% < threshold",
-                    "keep_threshold_pct": 1.0,
-                    "variants_tested_count": 2,
-                },
-            }
-        ]
-    )
-    sec = render_dj(bd)
-    assert not sec.skipped
-    assert "params-001" in sec.markdown_block
-    assert "below_threshold" in sec.markdown_block
-    assert "ncds_16" in sec.markdown_block
-    assert "bad_knob" in sec.markdown_block
-    assert "not_keep" in sec.markdown_block
-    assert any("1 round(s)" in f for f in sec.key_facts)
+def test_retired_renderer_ids_are_not_registered() -> None:
+    registered = {section_id for section_id, _render in REGISTRY}
+    assert registered.isdisjoint(_RETIRED)
 
 
-def test_kernel_profiling_skipped_when_empty() -> None:
-    sec = render_kp(_base_breakdown())
-    assert sec.skipped
+def test_legacy_decision_journal_payload_is_ignored() -> None:
+    md = render_session_report(_base_breakdown(decision_journal=[{"round_id": "dead-round"}])).markdown
+    assert "dead-round" not in md
+    assert "Decision Journal" not in md
 
 
-def test_kernel_profiling_renders_top_kernels(tmp_path: Path) -> None:
-    rel_log = "kernel-agent/runs/sid-1/logs/tracelens_analysis/run-a.log"
-
-    bd = _base_breakdown(
-        session={"session_id": "kp-test", "session_dir": str(tmp_path)},
-        kernel_profiling=[
-            {
-                "run_id": "run-a",
-                "task_id": "sid-1",
-                "ts": "2026-05-15T11:00:00+00:00",
-                "framework": "sglang",
-                "launch": {
-                    "framework_args": "python -m sglang.launch_server --tp 8",
-                    "framework_args_source": "yaml_cmd",
-                },
-                "artifacts": {
-                    "tracelens_status_json": "kernel-agent/runs/sid-1/status/tracelens_analysis/run-a.json",
-                    "tracelens_log": rel_log,
-                    "trace_paths": ["runs/profile/t1/torch_trace/foo.trace.json.gz"],
-                },
-                "outputs": {
-                    "tool": "tracelens_analysis",
-                    "analysis_summary": "3 compute-bound kernels",
-                    "top_kernels": [
-                        {
-                            "kernel_id": "k0",
-                            "name": "gemm_kernel",
-                            "gpu_pct": 12.5,
-                            "duration_us": 90000,
-                            "bottleneck": "compute",
-                        }
-                    ],
-                },
-            }
-        ],
-    )
-    sec = render_kp(bd)
-    assert not sec.skipped
-    assert "run-a" in sec.markdown_block
-    assert "tracelens_analysis" in sec.markdown_block
-    assert "gemm_kernel" in sec.markdown_block
-    assert "3 compute-bound kernels" in sec.markdown_block
-    assert rel_log not in sec.markdown_block
+def test_legacy_kernel_profiling_payload_is_ignored() -> None:
+    md = render_session_report(
+        _base_breakdown(kernel_profiling=[{"run_id": "dead-profile", "outputs": {"tool": "dead-tool"}}])
+    ).markdown
+    assert "dead-profile" not in md
+    assert "dead-tool" not in md
 
 
-def test_kernel_profiling_never_reads_the_logs_it_points_at(tmp_path: Path) -> None:
-    """Artifact locations are data; rendering must not open what they name."""
-    log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-    (log_dir / "run.log").write_text("secret-tail-line\n", encoding="utf-8")
-    outside = tmp_path.parent / "outside-the-session.log"
-    outside.write_text("outside-secret-line\n", encoding="utf-8")
-
-    for pointer in ("logs/run.log", str(outside), "../outside-the-session.log"):
-        bd = _base_breakdown(
-            session={"session_id": "kp-test", "session_dir": str(tmp_path)},
-            kernel_profiling=[
-                {
-                    "run_id": "run-b",
-                    "task_id": "t1",
-                    "artifacts": {"tracelens_log": pointer},
-                    "outputs": {"tool": "tracelens_analysis", "top_kernels": []},
-                }
-            ],
+def test_legacy_artifact_paths_are_never_opened(tmp_path) -> None:
+    outside = tmp_path / "legacy-profile.log"
+    outside.write_text("secret-tail-line\n", encoding="utf-8")
+    md = render_session_report(
+        _base_breakdown(
+            kernel_profiling=[{"artifacts": {"tracelens_log": str(outside)}}],
+            data_provenance=[{"section": "dead-provenance"}],
         )
-        sec = render_kp(bd)
-        assert "secret-tail-line" not in sec.markdown_block
-        assert "outside-secret-line" not in sec.markdown_block
+    ).markdown
+    assert "secret-tail-line" not in md
+    assert "dead-provenance" not in md
 
 
 def test_invocation_renderer_normalizes_and_caps_attempt_rows() -> None:
@@ -213,40 +126,16 @@ def test_phase_timeline_renderer_renders_capped_histogram() -> None:
     assert "RuntimeError" in sec.markdown_block
 
 
-def test_compose_includes_v1_1_sections_in_report() -> None:
-    bd = _base_breakdown(
-        decision_journal=[
-            {
-                "phase": "backends",
-                "round_id": "b-1",
-                "variants": [{"name": "v1", "outcome": "promoted", "gain_pct_vs_base": 5.0}],
-                "round_decision": {"outcome": "promoted", "promotion_rule": "single_shot"},
-            }
-        ],
-        kernel_profiling=[
-            {
-                "run_id": "p1",
-                "task_id": "t1",
-                "outputs": {"tool": "magpie_torch_profiler", "top_kernels": []},
-                "artifacts": {},
-                "launch": {},
-            }
-        ],
-        workload={"model_name": "m", "framework": "sglang", "gpu_type": "MI300X"},
-        baseline={"throughput_tok_s_per_gpu": 100.0},
-        final={"cumulative_gain_pct_validated": 5.0},
-        capability_summary={},
-        param_search={},
-        sweep={},
-        kernel_lifecycle={"detected": []},
-        geak_invocations=[],
-        forge_invocations=[],
-        phase_timeline=[],
-        attribution={"method": "missing"},
-        source_files={},
-    )
-    md = render_session_report(bd).markdown
-    assert "### Decision Journal" in md
-    assert "### Kernel Profiling" in md
-    assert "single_shot" in md
-    assert "magpie_torch_profiler" in md
+def test_compose_omits_retired_v1_1_sections() -> None:
+    md = render_session_report(
+        _base_breakdown(
+            decision_journal=[{"round_id": "b-1"}],
+            kernel_profiling=[{"run_id": "p1"}],
+            kernel_decision_path=[{"kid": "k1"}],
+            data_provenance=[{"section": "source"}],
+        )
+    ).markdown
+    assert "### Decision Journal" not in md
+    assert "### Kernel Profiling" not in md
+    assert "### Kernel Decision Path" not in md
+    assert "### Data Provenance" not in md

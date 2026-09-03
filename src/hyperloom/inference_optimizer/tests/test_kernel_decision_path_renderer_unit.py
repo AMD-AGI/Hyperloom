@@ -1,114 +1,64 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the kernel decision-path breakdown renderer."""
+"""Regression guards for the retired kernel-decision-path renderer."""
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-    kernel_decision_path as kdp,
-)
+import importlib.util
+
+from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
+from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
+from hyperloom.inference_optimizer.breakdown.reporters.compose import SECTION_GROUPS
 
 
-# ---- _fmt_duration ----
+_MODULE = "hyperloom.inference_optimizer.breakdown.reporters._renderers.kernel_decision_path"
+
+
+def _report(payload):
+    return render_session_report({"session": {"session_id": "legacy"}, "kernel_decision_path": payload})
 
 
 def test_fmt_duration_none():
-    assert kdp._fmt_duration(None) == "—"
+    assert importlib.util.find_spec(_MODULE) is None
 
 
 def test_fmt_duration_non_numeric():
-    assert kdp._fmt_duration("abc") == "—"
+    assert "kernel_decision_path" not in {section_id for section_id, _render in REGISTRY}
 
 
 def test_fmt_duration_seconds():
-    assert kdp._fmt_duration(12.34) == "12.3s"
+    grouped = {section_id for _title, section_ids in SECTION_GROUPS for section_id in section_ids}
+    assert "kernel_decision_path" not in grouped
 
 
 def test_fmt_duration_minutes():
-    assert kdp._fmt_duration(120) == "2.0min"
-
-
-# ---- render ----
+    assert "Kernel Decision Path" not in _report([]).markdown
 
 
 def test_render_absent_field_skipped():
-    sec = kdp.render({})
-    assert sec.skipped is True
+    assert all(section.section_id != "kernel_decision_path" for section in _report(None).sections)
 
 
 def test_render_empty_entries_skipped():
-    sec = kdp.render({"kernel_decision_path": []})
-    assert sec.skipped is True
-    assert sec.key_facts
+    assert all(section.section_id != "kernel_decision_path" for section in _report([]).sections)
 
 
 def test_render_with_entries():
-    bd = {
-        "kernel_decision_path": [
-            {
-                "kid": "k1",
-                "kernel_name": "attn",
-                "summary": {
-                    "total_steps": 2,
-                    "backends_attempted": ["forge"],
-                    "final_outcome": "kept",
-                    "total_duration_seconds": 90,
-                },
-                "steps": [
-                    {
-                        "ts": "t0",
-                        "step": "kernel_opt",
-                        "backend": "forge",
-                        "outcome": "ok",
-                        "gain_pct": 5.0,
-                        "duration_seconds": 10,
-                        "decision_note": "good",
-                    },
-                    {
-                        "ts": "t1",
-                        "step": "integrate",
-                        "backend": "forge",
-                        "outcome": "kept",
-                        "gain_pct": 3.0,
-                        "duration_seconds": 20,
-                    },
-                ],
-            },
-        ]
-    }
-    sec = kdp.render(bd)
-    assert sec.skipped is False
-    assert "Tracked 1 kernel" in sec.key_facts[0]
-    assert "kernel_opt=1" in sec.key_facts[1]
-    assert "integrate=1" in sec.key_facts[1]
-    assert "k1" in sec.markdown_block
-    assert "attn" in sec.markdown_block
+    report = _report([{"kid": "dead-kernel", "steps": [{"step": "kernel_opt"}]}]).markdown
+    assert "dead-kernel" not in report
+    assert "kernel_opt" not in report
 
 
 def test_render_truncates_steps_and_kids():
-    entries = []
-    for i in range(10):  # more than _MAX_KIDS (8)
-        entries.append(
-            {
-                "kid": f"k{i}",
-                "steps": [
-                    {"step": "kernel_opt", "ts": f"s{j}"}
-                    for j in range(15)  # > _MAX_STEPS_PER_KID
-                ],
-            }
-        )
-    sec = kdp.render({"kernel_decision_path": entries})
-    assert "Showing first 8 of 10 kernel(s)" in sec.markdown_block
-    assert "Showing first 12 of 15 step(s)" in sec.markdown_block
+    payload = [{"kid": f"dead-{index}", "steps": [{"step": "dead-step"}] * 15} for index in range(10)]
+    report = _report(payload).markdown
+    assert "dead-step" not in report
 
 
 def test_render_ignores_non_dict_entries():
-    sec = kdp.render({"kernel_decision_path": ["bad", 123]})
-    assert sec.skipped is True
+    assert "bad" not in _report(["bad", 123]).markdown
 
 
 def test_render_entry_without_steps():
-    sec = kdp.render({"kernel_decision_path": [{"kid": "k", "steps": []}]})
-    assert sec.skipped is False
-    assert "k" in sec.markdown_block
+    assert "dead-entry" not in _report([{"kid": "dead-entry", "steps": []}]).markdown

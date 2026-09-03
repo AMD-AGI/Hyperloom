@@ -95,8 +95,8 @@ state.json + runs/ + kernel-agent/
 
 ## New sections
 
-> Neither section shipped a collector: `decision_journal` and `kernel_profiling` survive
-> only as renderer section ids with no producer, so both always render empty.
+> Neither section shipped a collector. Their always-empty renderers were later
+> removed; the shapes below describe the abandoned v1.1 proposal only.
 
 ### `decision_journal[]`
 
@@ -170,6 +170,4 @@ Replayed sessions (2026-05-20):
 | `breakdown/collectors/` | package: `collect_decision_trace`, `collect_kernel_lifecycle`, `collect_kernel_optimization_summary`, enrichments |
 | `breakdown/exporter.py` | wire collectors |
 | `orchestrator/loop/writeback.py` | Phase 2 `audit_extras` |
-| `breakdown/reporters/_renderers/decision_journal.py` | markdown section |
-| `breakdown/reporters/_renderers/kernel_profiling.py` | markdown section |
 | `breakdown/reporters/compose.py` | section groups |
