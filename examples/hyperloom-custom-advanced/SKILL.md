@@ -337,17 +337,23 @@ OPT_FLAGS=(
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+# Detach per the rule above: run_in_background=true under Claw, or prefix
+# `setsid nohup` and append ` &` elsewhere. Either way $PID_FILE is reconciled
+# from the launch-info JSON below -- the tool returns a shell_id, and $! is the
+# setsid wrapper.
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   "${OPT_FLAGS[@]}" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  > "$RUN_LOG" 2>&1 < /dev/null
 
 sleep 30
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
 [ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
 [ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
-test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
+# does not reap, so that reports a dead optimizer as alive indefinitely.
+ps -o stat= -p "$REAL_PID" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$REAL_PID"
 
 SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$SESSION_DIR" ]; then
@@ -408,7 +414,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    robustness and critic subprocesses can import `hyperloom.agents` after
    changing cwd.
-3. Run in background with `setsid nohup`.
+3. Run it detached the way the harness understands: under Claw (`$CLAW_SESSION_ID` set) hand the command to the bash tool with `run_in_background=true`; everywhere else use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required workload flags in the
    `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely
    on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`.

@@ -1099,8 +1099,14 @@ fill in the workload block, and `.` it each call.
 **IMPORTANT**: never use a shared filename like `setup_env.sh` — concurrent
 sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
-After `setsid nohup ... &`, locate the optimizer via
+After launching, locate the optimizer via
 `pgrep -af 'hyperloom.inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
+
+**How you launch depends on the harness.** Under Claw (`$CLAW_SESSION_ID` is
+set) the run must be started with the bash tool's `run_in_background=true`, not
+with `setsid nohup ... &`. Everywhere else, `setsid nohup` stays correct. Both
+are detached — the difference is whether anything outside the process knows it
+exists.
 
 ```bash
 cd "$REPO_ROOT"
@@ -1122,19 +1128,60 @@ export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 mkdir -p "$RUN_DIR"
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-`setsid nohup ... &` is required for runs > 5 min — Cursor's background
-shell can die on SSH disconnect.
+**Under Claw**, pass that block to the bash tool with `run_in_background=true`
+and no `setsid nohup` and no trailing `&` — the tool is what detaches it. The
+tool returns a `shell_id`, not a pid, so `$PID_FILE` is written in the health
+check below from the launch-info JSON, which carries the real one. The monitor
+requires that file, so do not skip it.
+
+**Everywhere else**, prefix the block with `setsid nohup`, append ` &`, and
+`echo $! > "$PID_FILE"`. That form is required for runs > 5 min under Cursor,
+whose background shell can die on SSH disconnect. Reconcile the file afterwards
+all the same: `$!` is the setsid wrapper, which exits immediately, and a monitor
+reading a dead wrapper pid fires a spurious resume.
+
+**Why the difference is load-bearing under Claw.** `setsid nohup ... &` detaches
+the run from everything, including the platform. The sandbox is deleted once
+`lastActivity + 15m` passes, `lastActivity` only moves for traffic through the
+Router, and Claw stops pinging the moment the agent turn reaches a terminal
+state — so a hand-detached optimizer is indistinguishable from an abandoned
+sandbox, and the pod is reclaimed out from under it about fifteen minutes after
+the turn ends. That is not hypothetical: on 2026-09-02 four dispatches lost a
+live sandbox exactly this way, the cleanest of them reporting `task.completed`
+at 10:43:14 and losing its pod at 10:57:46, with no error in between and the
+optimiser still working.
+
+`run_in_background=true` detaches the same way but through the door the platform
+can see: Hands registers the shell against the session, which is what lets the
+sandbox be kept alive for as long as the run needs and reclaimed normally once
+it does not. It also gives `bash_output` and `kill_shell`, which are better than
+a pidfile — a `/proc` check answers "alive" for a zombie, and sandbox PID 1 does
+not reap.
+
+Two things have to be true on the Claw side for that to hold, so check them
+before concluding this does not work:
+
+- `BG_SHELL_ENABLED` must be on in the deployment, or the tool refuses
+  `run_in_background` outright and the foreground ceiling is the only route.
+- Claw's keepalive has to consult the shell registry before treating a sandbox
+  as idle (AMD-AGI/PrimusClaw#22). Until that lands the shell is *visible* but
+  the sandbox is still reclaimed on the old timer — this change is necessary for
+  the fix and not by itself sufficient.
+
+One thing it costs: a background shell is registered in Hands' memory and Hands
+takes its shells down with it on SIGTERM, so a Hands restart ends the run where
+`setsid nohup` would have outlived it. A sandbox restart ends it either way, and
+being visible is worth more than surviving a restart nothing would have noticed.
 
 Critic defaults to `--critic-agent`; Robustness defaults to `--robustness-agent`.
 See [Critic Backend Selection](#critic-backend-selection) for `--critic-mock`;
@@ -1146,8 +1193,16 @@ After launching, do a short health check:
 
 ```bash
 sleep 30
-pid="$(cat "$PID_FILE")"
-test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
+# Authoritative pid, from the CLI rather than from whatever launched it: under
+# Claw the tool returned a shell_id, and under setsid `$!` is the wrapper.
+launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
+pid="$(jq -r '.pid // empty' "$launch_info" 2>/dev/null)"
+[ -n "$pid" ] && echo "$pid" > "$PID_FILE"
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry, and sandbox PID 1
+# does not reap, so that check reports a dead optimiser as alive indefinitely.
+# Ask for the state and reject Z.
+ps -o stat= -p "$pid" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$pid"
 # Authoritative session dir from the launch-info JSON (--launch-info-file).
 # Never guess by timestamp: overlapping sessions break any "latest dir" pick.
 launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
@@ -1166,6 +1221,10 @@ test -f "$session_dir/state.json" && echo "state_exists=true" \
 
 Healthy = optimizer process alive + `manifest.json` + `state.json`
 exist + no early `stop_reason`.
+
+Under Claw the launch also returns a `shell_id`; `bash_output` on it is the
+cheaper liveness answer and the one that survives the pid moving, so prefer it
+and keep the `ps` check for the pidfile the monitor reads.
 
 ## Resume Existing Session
 
@@ -1210,7 +1269,7 @@ Three exceptions:
 
 ## Robustness Monitor for Long Runs
 
-For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
+For runs > 5 min, start a monitor in its own detached process. It polls
 `state.json` every 5 min, exits without resuming when the session is terminal
 (any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
 `reports/final.md` present — including failure sentinels like
@@ -1227,10 +1286,16 @@ export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
-setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
+bash "$RUN_DIR/robustness_monitor.sh" \
   > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
-  2>&1 < /dev/null &
+  2>&1 < /dev/null
 ```
+
+Launch it the same way you launched the optimiser: under Claw with the bash
+tool's `run_in_background=true`, everywhere else prefixed with `setsid nohup`
+and suffixed with ` &`. The monitor outlives the turn by design, so under Claw
+it has the same problem the optimiser had — detached by hand, it is invisible,
+and it holds nothing open.
 
 Reads `$PID_FILE` plus (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR` /
 `$LAUNCH_INFO_FILE` / `$MAX_HOURS` / `$TARGET_GAIN`. The session dir comes
@@ -1245,7 +1310,7 @@ Each poll is one fast read of persisted state, and you poll only when you are
 next invoked. **Never block to reach the next poll**: no `sleep`, no wait loop,
 no `tail -f`. The only sanctioned wait is the one-shot `sleep 30` health check
 right after launch. Recurring 5-minute polling is the Robustness Monitor's job
-and already runs in its own `setsid nohup` process (see above) — do not
+and already runs in its own detached process (see above) — do not
 reimplement it here.
 
 **Why this is load-bearing, not style.** A blocking call holds the sandbox
