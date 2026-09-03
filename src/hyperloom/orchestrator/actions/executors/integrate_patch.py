@@ -3072,7 +3072,13 @@ class IntegratePatchExecutor:
                     "enablement": True,
                     "runnable": False,
                     "correctness_verified": correctness_ok is True,
-                    "reason": f"enablement not runnable: {run_reason}",
+                    # The round ran and the boot still did not come up. When the
+                    # specialist's own setup commands were dropped on the way in,
+                    # that is the likeliest reason -- and the one the next round
+                    # needs, since re-authoring the same proposal cannot help.
+                    "reason": _with_skipped_setup_reason(f"enablement not runnable: {run_reason}", setup_result),
+                    "setup_commands_applied": list(setup_result.get("applied") or []),
+                    "setup_commands_skipped": list(setup_result.get("skipped") or []),
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                     **eval_provenance,
