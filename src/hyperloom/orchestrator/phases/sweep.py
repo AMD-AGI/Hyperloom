@@ -131,7 +131,9 @@ class SweepPhase(PhaseHandler):
         self._record_phase_entry_evidence(
             auto_conc_sweep_enqueued=True,
             auto_conc_sweep_task_id=task.task_id,
-            auto_conc_sweep_concs=list(task.params.get("concs") or []),
+            # Verbatim: None records "the workload picks", which is not the
+            # same statement as an empty ladder.
+            auto_conc_sweep_concs=task.params.get("concs"),
         )
 
     async def _enqueue_internal_conc_sweep_task(
@@ -180,7 +182,10 @@ class SweepPhase(PhaseHandler):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
-            "concs": list(state.conc_sweep_concs or []),
+            # None, not [], when the state carries no ladder: the executor reads
+            # [] as a deliberate "no concs" and skips, while None lets it fall
+            # back to the ladder for this workload.
+            "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
             "total_budget_sec": clamped_budget,
         }
