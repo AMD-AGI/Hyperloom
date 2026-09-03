@@ -7,8 +7,9 @@
 
 """Independent, low-memory reader/aggregator for Kineto torch-profiler traces.
 
-Used by the bypass analysis backend (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``).
-It never imports or shells out to TraceLens.
+Consumed by ``trace_selfcert`` to self-certify a captured trace without shelling
+out to TraceLens: it checks whether a trace is analyzable and which steady-state
+mode will work at capture time, and never imports or runs TraceLens.
 
 Design constraints:
 

@@ -268,11 +268,11 @@ def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
 def analysis_detail(result: Any) -> dict[str, Any]:
     """Project one ``trace_analyze`` result into the shared detail block.
 
-    ``route`` and ``tool`` both come from ``_build_analysis_meta`` and are both
-    ``tracelens`` on this branch: the no-LLM deterministic route and the
-    TraceLens-free bypass reader were removed, leaving the single TraceLens
-    agent route. The two fields stay distinct in the envelope so exported events
-    keep their shape. Tool-specific output stays in ``route_ext``.
+    ``route`` and ``tool`` are separate axes: the route is the analysis pipeline,
+    the tool is the analyzer that ran. A single TraceLens route runs today, so
+    both read ``tracelens``. This block copies them by shape without branching on
+    their value, keeping the two fields distinct so the exported event shape stays
+    stable. Tool-specific output stays in ``route_ext``.
 
     Args:
         result: The analysis tool's result dict.

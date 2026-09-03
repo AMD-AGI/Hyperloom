@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared kernel shape provenance contract for bypass analysis and kernel-opt."""
+"""Shared kernel shape provenance contract for trace analysis and kernel-opt."""
 
 from __future__ import annotations
 

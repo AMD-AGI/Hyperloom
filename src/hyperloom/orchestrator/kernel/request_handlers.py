@@ -2168,9 +2168,9 @@ def _resolve_trace_shape_manifest(state, session_dir: Path) -> str:
     """Find the newest TraceShapeManifest this session produced.
 
     Forge calls ``trace_shape_manifest.json`` the preferred dense-shape source.
-    No current tool writes it -- the bypass reader that once did was removed --
-    so this resolves to ``""`` and the caller falls back. Kept as the seam for a
-    future writer. Newest wins: a later trace reflects the resolved server args.
+    No current tool writes it, so this resolves to ``""`` and the caller falls
+    back. Kept as the seam for a future writer. Newest wins: a later trace
+    reflects the resolved server args.
     """
     # Deduplicate: state.session_dir is usually the same path we were handed,
     # and an empty session then paid for two full-tree walks to find nothing.
@@ -5646,25 +5646,22 @@ def _build_trace_analyze_cmd(
 
 
 # TraceLens picks its steady-state window by writing split chunks and selecting
-# one file; the TraceLens-free reader picks a window in memory and never writes
-# chunks. Both answer "is the window this analysis rests on trustworthy", so the
-# event normalizes them onto one shape and keeps the raw form under ``selected``.
+# one file. The event normalizes that selection onto a stable shape: it names how
+# the window was picked and keeps the raw selection under ``selected``, so a
+# consumer never has to know how the window was chosen.
 _STEADY_SOURCE_SPLIT_CHUNK = "split_chunk"
-_STEADY_SOURCE_READER_WINDOW = "in_reader_window"
 
 
 def _analysis_steady_state(
     result: dict[str, Any],
     *,
     requested_mode: str,
-    tool: str,
 ) -> dict[str, Any]:
-    """Normalize the steady-state window across analysis tools.
+    """Normalize the steady-state window selection onto a stable shape.
 
     Args:
         result: The analysis tool's result dict.
         requested_mode: The steady-state mode asked of the tool.
-        tool: Always ``tracelens`` on this branch.
 
     Returns:
         A dict naming the requested mode, how the window was picked, the raw
@@ -5673,20 +5670,12 @@ def _analysis_steady_state(
     """
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     scope = str(result.get("aggregation_scope") or run_meta.get("aggregation_scope") or "")
-    if tool == "bypass":
-        selected = result.get("steady_window") or {}
-        fell_back = bool(result.get("estimated")) or (bool(scope) and scope != "steady_state")
-        source = _STEADY_SOURCE_READER_WINDOW
-    else:
-        selection = run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {}
-        selected = selection or {}
-        fell_back = bool(selection.get("fell_back_to_full_trace"))
-        source = _STEADY_SOURCE_SPLIT_CHUNK
+    selection = run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {}
     return {
         "requested_mode": str(requested_mode or ""),
-        "source": source,
-        "selected": selected if isinstance(selected, dict) else {"value": selected},
-        "fell_back_to_full_trace": fell_back,
+        "source": _STEADY_SOURCE_SPLIT_CHUNK,
+        "selected": selection or {},
+        "fell_back_to_full_trace": bool(selection.get("fell_back_to_full_trace")),
         "aggregation_scope": scope,
     }
 
@@ -5694,23 +5683,20 @@ def _analysis_steady_state(
 def _build_analysis_meta(
     result: dict[str, Any],
     *,
-    route: str,
-    tool: str,
     requested_mode: str,
     trace_input: str,
     duration_sec: float,
 ) -> dict[str, Any]:
     """Assemble the per-run analysis metadata the roofline timeline event carries.
 
-    This branch runs a single TraceLens route, so ``route`` and ``tool`` are
-    both ``tracelens``. The fields are kept distinct in the envelope so exported
-    events stay stable, and tool-specific analysis output lands under
-    ``route_ext`` rather than widening the shared envelope.
+    A single TraceLens route runs, so ``route`` and ``tool`` are both the
+    constant ``tracelens``. They are separate axes in the envelope -- the route is
+    the analysis pipeline, the tool is the analyzer that ran -- and are kept
+    distinct so the exported event shape stays stable. Tool-specific output lands
+    under ``route_ext`` rather than widening the shared envelope.
 
     Args:
         result: The analysis tool's result dict.
-        route: The analysis route (``tracelens``).
-        tool: The tool that actually ran (``tracelens``).
         requested_mode: The steady-state mode asked of the tool.
         trace_input: The trace the run analyzed.
         duration_sec: Wall-clock seconds the subprocess took.
@@ -5721,12 +5707,12 @@ def _build_analysis_meta(
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     steps = run_meta.get("steps")
     return {
-        "route": str(route or ""),
-        "tool": str(tool or ""),
+        "route": "tracelens",
+        "tool": "tracelens",
         "steady_state_mode": str(requested_mode or ""),
         "trace_input": str(trace_input or ""),
         "duration_sec": duration_sec,
-        "steady_state": _analysis_steady_state(result, requested_mode=requested_mode, tool=tool),
+        "steady_state": _analysis_steady_state(result, requested_mode=requested_mode),
         "preflight": run_meta.get("preflight") if isinstance(run_meta.get("preflight"), dict) else {},
         "split": run_meta.get("split") if isinstance(run_meta.get("split"), dict) else {},
         "selection": run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {},
@@ -5806,19 +5792,18 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # An explicit non-``agent`` route (e.g. the removed ``bypass``/``deterministic``
-    # no-LLM routes) hard-fails instead of falling back to the agent: a caller
-    # asking for a no-LLM run must never be silently charged for an LLM session.
+    # An explicit route other than ``agent`` hard-fails instead of silently
+    # falling back to the agent: a caller asking for a no-LLM run must never be
+    # charged for an LLM session.
     route = str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
     if route and route != "agent":
         return {
             "status": "failed",
             "error_class": "invalid_analysis_route",
             "error": (
-                f"analysis_route {route!r} is no longer supported; the bypass and "
-                "deterministic routes were removed. Only 'agent' remains. Refusing "
-                "to fall back to the LLM agent because a caller asking for a no-LLM "
-                "route must not be silently charged for one."
+                f"analysis_route {route!r} is not supported; only 'agent' is "
+                "valid. Refusing to fall back to the LLM agent because a caller "
+                "asking for a no-LLM route must not be silently charged for one."
             ),
             "requested_route": route,
             "valid_routes": ["agent"],
@@ -5926,15 +5911,12 @@ async def trace_analyze_handler(
                 trace_report_path=str(report_path or ""),
             )
 
-        # This branch runs a single route: the TraceLens agent. The no-LLM
-        # deterministic route and the TraceLens-free bypass reader were both
-        # removed, so route and tool are the constant ``tracelens``.
-        # Surfaced for the caller's SBD V6 roofline event, which records the run
-        # as it happens rather than re-deriving it at export time.
+        # Surface the run for the caller's SBD V6 roofline event, which records
+        # the analysis as it happens rather than re-deriving it at export time. A
+        # single TraceLens route runs, so route and tool are the constant
+        # ``tracelens``.
         result["analysis_meta"] = _build_analysis_meta(
             result,
-            route="tracelens",
-            tool="tracelens",
             requested_mode=steady_state_mode,
             trace_input=str(trace_input),
             duration_sec=_disc_duration_sec,

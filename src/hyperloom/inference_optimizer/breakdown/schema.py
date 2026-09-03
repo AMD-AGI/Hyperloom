@@ -3263,12 +3263,11 @@ class V6KernelAnalysisArtifacts(TypedDict, total=False):
 class V6KernelAnalysisDetail(TypedDict, total=False):
     """Trace-analysis metadata shared by the roofline and kernel events.
 
-    ``route`` and ``tool`` are both ``tracelens`` on this branch: the no-LLM
-    deterministic route and the TraceLens-free bypass reader were removed,
-    leaving the single TraceLens agent route. The fields stay distinct in the
-    envelope so exported events keep their shape. Oversized sub-blocks are
-    replaced by an omission marker rather than dropped, so a consumer can tell a
-    bounded block from a missing one.
+    ``route`` and ``tool`` are separate axes: the route is the analysis pipeline,
+    the tool is the analyzer that ran. A single TraceLens route runs today, so
+    both are ``tracelens``. They stay distinct in the envelope so exported events
+    keep their shape. Oversized sub-blocks are replaced by an omission marker
+    rather than dropped, so a consumer can tell a bounded block from a missing one.
 
     Attributes:
         route (str): ``tracelens``.
