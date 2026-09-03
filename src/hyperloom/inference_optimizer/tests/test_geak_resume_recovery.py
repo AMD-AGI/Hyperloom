@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_SKIP_TO_SWEEP
@@ -220,3 +221,82 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     assert handoff["accepted_flags"] == "--no-enable-prefix-caching"
     assert handoff["raw_baseline_tput"] == 100.0
     assert handoff["e2e_metric"] == "output"
+    # No AgentX recipe here, so the launcher hint stays absent and GEAK keeps
+    # deriving the script that actually launched the baseline.
+    assert "launch_server_script" not in handoff
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AgentX baseline must hand GEAK the builtin server script.
+
+    Without it GEAK derives its launcher from the recipe's ``benchmark_script``,
+    which AgentX has pinned to the aiperf client -- so it runs a CLIENT under
+    ``MAGPIE_RUN_PHASE=server``, gets no pid back, and aborts the bench before a
+    single repeat lands in ``bench_runs.jsonl``.
+    """
+    benchmarks = tmp_path / "InferenceX" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "aiperf_client.sh"):
+        (benchmarks / name).write_text("# stub\n", encoding="utf-8")
+    recipe = tmp_path / "baseline_config.with_envs.yaml"
+    recipe.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "runner_type": "mi355x",
+                    "envs": {"FRAMEWORK": "vllm", "AGENTX_DURATION": "3600"},
+                    "benchmark_script": "aiperf_client.sh",
+                    "inferencex_path": str(benchmarks.parent),
+                    "workload_spec": {
+                        "kind": "agentx_trace_replay",
+                        "client": "aiperf",
+                        "scenario": "inferencex-agentx-mvp",
+                        "corpus": "semianalysis_cc_traces_weka_062126",
+                        "duration_s": 3600,
+                        "geak_loop_duration_s": 900,
+                        "concurrency": 8,
+                        "metric_basis": "aggregate_output_tok_s",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=168.99,
+        current_best={"action": "baseline", "tput": 168.99},
+        model_path="/models/Kimi-K3",
+        gpu_type="mi355x",
+        isl=1024,
+        osl=1024,
+        conc=8,
+        baseline_config_path=str(recipe),
+    )
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    monkeypatch.setenv("TP", "8")
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["launch_server_script"] == str(benchmarks / "vllm_mi355x.sh")
+    spec = handoff.get("workload_spec") or {}
+    assert spec.get("kind") == "agentx_trace_replay"
+    assert spec.get("client") == "aiperf"

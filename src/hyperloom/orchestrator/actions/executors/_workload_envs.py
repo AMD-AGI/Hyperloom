@@ -202,6 +202,142 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     return agentx_active(shared_state)
 
 
+# The 1M-context families that replay the unfiltered corpus; everything else
+# gets the 256k-capped variant. Mirrors ``aiperf_client.sh::_default_loader``,
+# which is the side that actually selects the corpus at runtime -- this one only
+# reports it -- so the two are pinned together by
+# ``test_agentx_corpus_rules_consistency``.
+AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "minimaxm3", "kimik3")
+AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
+AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
+
+
+def _agentx_model_family(model: str) -> str:
+    """Normalize a model path/name to the family slug ``aiperf_client.sh`` uses.
+
+    Character-for-character the shell's ``${1##*/}`` + lowercase + ``tr -d '._-'``:
+    basename, folded, separators dropped. Stripping every non-alphanumeric instead
+    would be tidier but would disagree with the client on names carrying anything
+    else, and the client is the one that picks the corpus.
+    """
+    name = str(model or "").rsplit("/", 1)[-1].lower()
+    return name.translate(str.maketrans("", "", "._-"))
+
+
+def _agentx_default_corpus(model: str) -> str:
+    """Return the canonical SemiAnalysis corpus for a model family."""
+    if _agentx_model_family(model).startswith(AGENTX_FULL_CONTEXT_FAMILIES):
+        return AGENTX_CORPUS_FULL
+    return AGENTX_CORPUS_256K
+
+
+def cli_workload_defaults() -> tuple[int, int, int]:
+    """The CLI's ``ISL``/``OSL``/``CONC`` defaults, as one source for fallbacks.
+
+    Every last-resort fallback in this module reads them from here, so a
+    materialized recipe and the workload spec published beside it cannot
+    disagree about what "unset" means.
+
+    Imported function-locally because ``cli.parser`` imports from
+    ``hyperloom.orchestrator``; a module-scope import here would close a cycle.
+    """
+    from hyperloom.inference_optimizer.cli import parser
+
+    return parser.DEFAULT_ISL, parser.DEFAULT_OSL, parser.DEFAULT_CONC
+
+
+def build_agentx_workload_spec(
+    bench: dict[str, Any],
+    envs: dict[str, Any],
+    *,
+    model_path: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Describe the AgentX trace-replay workload for downstream consumers.
+
+    Written into the materialized recipe and forwarded in the GEAK handoff so
+    GEAK can select the aiperf client and refuse to treat the CLI's synthetic
+    ``isl``/``osl`` placeholders as the served load. Omitted entirely on non-AgentX
+    runs, so the fixed-ISL/OSL path stays byte-identical.
+
+    Call only from :func:`apply_agentx_switch`, and only after it has written its
+    derived values into ``envs`` -- the spec must publish the numbers the client
+    will actually run with, not the operator's raw inputs.
+
+    Args:
+        bench: The benchmark mapping being materialized.
+        envs: That mapping's ``envs``, already carrying the switch's overrides.
+        model_path: The model this round serves, when the caller knows it.
+        env: The resolved process environment, carrying this round's ``CONC``
+            (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
+    """
+    proc_env: Mapping[str, str] = os.environ if env is None else env
+
+    def client_knob(key: str, default: Any) -> str:
+        """A knob the client reads from ``envs``, so ``envs`` wins.
+
+        :func:`apply_agentx_switch` forwards the process env into ``envs`` and
+        then overwrites the entries it derives, so ``envs`` holds the value the
+        benchmark subprocess is actually handed.
+        """
+        return str(envs.get(key) or proc_env.get(key) or default)
+
+    def served_knob(key: str, default: Any) -> str:
+        """A serving knob the process env owns, so the process env wins.
+
+        ``CONC``/``ISL``/``OSL`` carry no ``AGENTX_`` prefix, so the forwarding
+        loop skips them and ``materialize_config_with_envs`` projects them into
+        ``envs`` only after this runs. Reading ``envs`` first publishes the base
+        YAML's stale value -- which is how a spec pinned at the parser default 64
+        shipped to GEAK while the recipe served the operator's 8.
+        """
+        return str(proc_env.get(key) or envs.get(key) or default)
+
+    default_isl, default_osl, default_conc = cli_workload_defaults()
+    model = str(model_path or bench.get("model") or envs.get("MODEL") or proc_env.get("MODEL_PATH", "")).strip()
+    canon = client_knob("AGENTX_CANONICAL_DATASET", _agentx_default_corpus(model)).strip()
+    corpus = str(
+        envs.get("AGENTX_DATASET")
+        or envs.get("WEKA_LOADER_OVERRIDE")
+        or proc_env.get("AGENTX_DATASET")
+        or proc_env.get("WEKA_LOADER_OVERRIDE")
+        or canon
+    ).strip()
+    duration = int(client_knob("AGENTX_DURATION", 3600))
+    num_entries = int(client_knob("AGENTX_NUM_ENTRIES", 393))
+    conc = int(served_knob("CONC", default_conc))
+    return {
+        "kind": "agentx_trace_replay",
+        "client": "aiperf",
+        "scenario": "inferencex-agentx-mvp",
+        "corpus": corpus,
+        "canonical_corpus": canon,
+        "num_entries": num_entries,
+        "duration_s": duration,
+        # GEAK's inner A/B loop uses the scenario floor (900s) unless parity/
+        # validation explicitly requests the full canonical window.
+        "geak_loop_duration_s": min(duration, 900),
+        "concurrency": conc,
+        # The basis GEAK measures on and records in ``bench_summary.json``, in
+        # GEAK's own vocabulary so the two sides compare as strings.
+        "metric_basis": "aggregate_output_tok_s",
+        # Hyperloom's analyzer window is the canonical duration plus grace/drain.
+        "metric_window_s": float(duration) + 40.0,
+        "trajectory_start_ratio": [0.25, 0.75],
+        "warmup_requests_per_lane": int(client_knob("AGENTX_WARMUP_REQUESTS_PER_LANE", 10)),
+        # Reads back the CONC-scaled value apply_agentx_switch wrote into envs,
+        # never the operator's raw AGENTX_WARMUP_GRACE_PERIOD: the client is
+        # bounded by the scaled number, so the handoff must publish that one.
+        "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
+        "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+        "isl_osl_placeholder": {
+            "isl": int(served_knob("ISL", default_isl)),
+            "osl": int(served_knob("OSL", default_osl)),
+            "note": "CLI defaults only; trace replay ignores fixed ISL/OSL",
+        },
+    }
+
+
 def apply_agentx_switch(
     bench: dict[str, Any],
     model_path: str | None = None,
@@ -211,9 +347,9 @@ def apply_agentx_switch(
 ) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client.
 
-    ``conc`` is the concurrency this round will run at; the inner benchmark cap
-    and the client's warmup grace are both derived from it (see
-    :func:`agentx_env_for_conc`).
+    ``conc`` is the concurrency this round will run at; the inner benchmark cap,
+    the client's warmup grace and the published ``workload_spec.concurrency`` are
+    all derived from it (see :func:`agentx_env_for_conc`).
     """
     if active is None:
         active = agentx_enabled()
@@ -306,6 +442,14 @@ def apply_agentx_switch(
             _grace,
             _raw_grace or "unset",
         )
+    # Publish LAST, and only now: the spec is what GEAK replays, so every value
+    # in it must be the one this function settled on. ``warmup_grace_period_s``
+    # reads AGENTX_WARMUP_GRACE_PERIOD back off ``envs`` above, so publishing
+    # before the scaling would record the operator's raw value in the handoff
+    # while the client ran with the scaled one. ``_agentx_env`` carries this
+    # round's CONC, so the spec's concurrency is the served concurrency by
+    # construction rather than by later repair.
+    bench["workload_spec"] = build_agentx_workload_spec(bench, envs, model_path=model_path, env=_agentx_env)
 
 
 def prepare_agentx_runtime(
@@ -1096,12 +1240,14 @@ def materialize_config_with_envs(
             )
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
-    # Last-resort fallbacks kept in sync with the CLI workload defaults
-    # (parser.DEFAULT_ISL/OSL/CONC); normally the CLI has already projected the
-    # resolved values into these envs before materialization.
-    isl_val = int(envs.get("ISL") or 1024)
-    osl_val = int(envs.get("OSL") or 1024)
-    conc_val = int(envs.get("CONC") or 64)
+    # Last-resort fallbacks, resolved from the CLI workload defaults so the
+    # recipe and the workload spec published beside it cannot disagree about what
+    # "unset" means; normally the CLI has already projected the resolved values
+    # into these envs before materialization.
+    _default_isl, _default_osl, _default_conc = cli_workload_defaults()
+    isl_val = int(envs.get("ISL") or _default_isl)
+    osl_val = int(envs.get("OSL") or _default_osl)
+    conc_val = int(envs.get("CONC") or _default_conc)
 
     # Steady-state window for profiling configs (detected by YAML
     # ``benchmark.envs.PROFILE`` or ``profiler.torch_profiler.enabled``, not the process env).
