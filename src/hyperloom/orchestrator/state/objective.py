@@ -169,9 +169,8 @@ class TargetGainObjective(_RatioObjective):
 class TargetRooflineObjective(_RatioObjective):
     """Reach ``target_within_pct`` % of the modelled roofline ceiling.
 
-    The live metric is the latest roofline snapshot's ``within_roofline_pct``.
-    It reads 0 until a roofline has been measured, so the objective cannot be
-    met on a session that never profiled one.
+    The live metric reads 0 until a roofline has been measured, so the
+    objective cannot be met on a session that never profiled one.
     """
 
     target_within_pct: float
@@ -220,24 +219,12 @@ class TargetRooflineObjective(_RatioObjective):
 class AnyObjective(Objective):
     """Met when any member is met.
 
-    ``progress`` is the closest member's, because that is the one about to end
-    the run. ``gap_pct`` is that same member's gap rather than the smallest:
-    the members measure different quantities -- gain percentage points against
-    roofline percentage points -- so a numeric minimum across them compares
-    unlike units. ``progress`` is the only normalised quantity the members
-    share.
+    ``progress`` and ``gap_pct`` come from the closest member, the one about to
+    end the run. Not the smallest gap: members count percentage points of
+    different quantities, so ``progress`` is the only comparable one.
     """
 
     objectives: list[Objective]
-
-    def __post_init__(self) -> None:
-        """Validate the member list.
-
-        Raises:
-            ObjectiveError: If fewer than two objectives are supplied.
-        """
-        if len(self.objectives) < 2:
-            raise ObjectiveError(f"AnyObjective: needs at least two objectives, got {len(self.objectives)}")
 
     def kind(self) -> str:
         """Return the members' kinds joined by ``+``."""
@@ -430,17 +417,6 @@ class TimeOnlyObjective(Objective):
         return 0.0
 
 
-def _primary_objective(env: dict[str, Any]) -> Objective | None:
-    """Return the throughput-side objective named by *env*, or None."""
-    if env.get("TARGET_GAIN_PCT") not in (None, ""):
-        return TargetGainObjective(float(env["TARGET_GAIN_PCT"]))
-    if env.get("TARGET_TPUT_PER_GPU") not in (None, ""):
-        return TargetTputObjective(float(env["TARGET_TPUT_PER_GPU"]))
-    if env.get("TARGET_DIR") not in (None, ""):
-        return TargetBaselineObjective(str(env["TARGET_DIR"]))
-    return None
-
-
 def build_objective(env: dict[str, Any]) -> Objective:
     """Factory: requires MAX_HOURS; at most one throughput target, plus an optional roofline one.
 
@@ -475,7 +451,13 @@ def build_objective(env: dict[str, Any]) -> Objective:
     if len(targets) > 1:
         raise ObjectiveError(f"build_objective: at most one TARGET_* allowed, got {targets}")
 
-    primary = _primary_objective(env)
+    primary: Objective | None = None
+    if env.get("TARGET_GAIN_PCT") not in (None, ""):
+        primary = TargetGainObjective(float(env["TARGET_GAIN_PCT"]))
+    elif env.get("TARGET_TPUT_PER_GPU") not in (None, ""):
+        primary = TargetTputObjective(float(env["TARGET_TPUT_PER_GPU"]))
+    elif env.get("TARGET_DIR") not in (None, ""):
+        primary = TargetBaselineObjective(str(env["TARGET_DIR"]))
     if env.get("TARGET_WITHIN_ROOFLINE_PCT") in (None, ""):
         return primary or TimeOnlyObjective()
     roofline = TargetRooflineObjective(float(env["TARGET_WITHIN_ROOFLINE_PCT"]))

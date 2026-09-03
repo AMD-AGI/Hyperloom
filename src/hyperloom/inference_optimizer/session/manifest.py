@@ -243,7 +243,7 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
     if not targets:
         return {"kind": "time_only", "value": None}
     if len(targets) == 1:
-        return dict(targets[0])
+        return targets[0]
     return {**targets[0], "objectives": targets}
 
 

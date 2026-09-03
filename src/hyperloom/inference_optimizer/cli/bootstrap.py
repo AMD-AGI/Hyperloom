@@ -727,7 +727,8 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     Used as the fallback ``target_summary`` when the operator did not pass an
     explicit ``--target-summary``. The phrasing depends on which target flag is
     set: ``--target-gain`` (percentage), ``--target-roofline`` (percentage of
-    the modelled ceiling, additive to either), ``--target-tput`` (tok/s/GPU for
+    the modelled ceiling, which composes with the others), ``--target-tput``
+    (tok/s/GPU for
     serving; for scriptable xDiT the target throughput is img/s and is shown as
     the equivalent per-image latency e2el_mean_ms), or neither (open-ended
     optimization within the time budget).

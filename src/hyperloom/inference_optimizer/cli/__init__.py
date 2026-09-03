@@ -362,9 +362,9 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
         objective's numeric / string target, or ``None`` when none is present.
     """
     kind = objective.kind()
-    value: float | str | None = None
     if isinstance(objective, AnyObjective):
         return kind, objective.describe()
+    value: float | str | None = None
     if hasattr(objective, "target_gain_pct"):
         value = float(getattr(objective, "target_gain_pct"))
     elif hasattr(objective, "target_tput_per_gpu"):

@@ -661,10 +661,6 @@ class TestEitherTargetEndsTheRun:
         assert both.progress(st) == pytest.approx(2 / 3)
         assert both.gap_pct(st) == pytest.approx(100.0)
 
-    def test_a_composite_needs_two_members(self):
-        with pytest.raises(ObjectiveError):
-            AnyObjective([TargetGainObjective(1.0)])
-
 
 class TestBuildObjectiveComposesTheRooflineTarget:
     def test_the_roofline_target_alone(self):

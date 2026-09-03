@@ -181,6 +181,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
+        # Any phase → SWEEP on the way in, then SWEEP → CLOSE on the way out.
         "target_reached",
         "time_exhausted",
         "time_exhausted_during_prelude",
@@ -531,10 +532,10 @@ def should_reloop_to_explore(
     carries the *effective* no-gain streak for the cycle that just completed so
     the Coordinator can persist it on the loopback/close transition.
 
-    Loops back iff below the macro-cycle safety cap AND the run has not globally
-    converged (R7: ``no_gain_cycles`` consecutive no-gain cycles) AND no
-    roofline direction is saturated AND enough session budget remains to use a
-    fresh cycle.
+    Loops back iff the run objective is unmet AND below the macro-cycle safety
+    cap AND the run has not globally converged (R7: ``no_gain_cycles``
+    consecutive no-gain cycles) AND no roofline direction is saturated AND
+    enough session budget remains to use a fresh cycle.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -2806,8 +2807,9 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): global terminal first, then the wall-clock closing
-    phase, then exit_terminal > exit_normal.
+    Priority (Inv-8.2): a met target's forward jump to SWEEP first, then the
+    global terminal, then the wall-clock closing phase, then exit_terminal >
+    exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
@@ -2825,10 +2827,9 @@ def compute_next_phase(
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
 
-    # A met target closes through SWEEP, so the concurrency curve measures the
-    # configuration the target was met on. A forward jump on the monotonic
-    # chain, and deliberately not terminal: marking it so would mirror the
-    # reason onto ``stop_reason``, which routes the next tick to CLOSE.
+    # A met target closes through SWEEP so the concurrency curve measures the
+    # configuration it was met on. Not terminal: that would mirror the reason
+    # onto ``stop_reason``, which routes the next tick to CLOSE instead.
     if target_was_reached(state) and phase_index(current) < phase_index(PHASE_SWEEP):
         return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
@@ -2915,8 +2916,7 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # The target is why the run stopped optimizing, so it names the
-            # exit -- but only a clean one. A sweep that failed still says so:
+            # The target names a clean exit. A failed sweep keeps its own name:
             # its exit code is the signal that the closing curve is missing.
             if exit_reason == "sweep_done" and target_was_reached(state):
                 return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
