@@ -7,12 +7,8 @@
 
 """Shared classifier for CUDA-graph capture sidecars vs workload traces.
 
-Single source of truth for BOTH trace-analysis routes (the TraceLens pipeline
-and the standalone bypass reader), so a capture sidecar is recognised
-identically no matter which backend reads the profile. The two routes used to
-carry their own copy of this rule and the copies drifted -- the bypass one never
-learned about ``graph_capture`` names at all -- which is the drift this module
-exists to prevent.
+Single source of truth for the trace-analysis pipeline, so a capture sidecar is
+recognised identically no matter where in the pipeline the profile is read.
 
 A capture sidecar is recorded while the CUDA/HIP graph is being *built*, so its
 launches go into the graph instead of onto the device. What lands is a host-side
@@ -29,8 +25,8 @@ not been taught, and a missed sidecar is not merely ranked late: it shares the
 default discovery bucket with the workload trace, where the tie-break is
 descending file size, and a capture is the larger file.
 
-Kept dependency-free (stdlib only) so the bypass reader can consume it without
-importing or shelling out to TraceLens.
+Kept dependency-free (stdlib only) so it can be imported anywhere in the
+pipeline without pulling in TraceLens.
 """
 
 from __future__ import annotations

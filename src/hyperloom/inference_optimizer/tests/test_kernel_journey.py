@@ -372,30 +372,6 @@ def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
 
 
-def test_bypass_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
-    # The bypass route runs the same TraceLens toolchain, so version provenance
-    # stays under "tracelens" and mints no versions["bypass"].
-    instrument.record_kernel_discovery(
-        tmp_path,
-        source="bypass",
-        tool="tracelens",
-        status="success",
-        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 12.0}],
-        scan={"analysis_route": "bypass", "candidates_path": str(tmp_path / "c.json")},
-        duration_sec=1.5,
-    )
-    out = assemble_parts(tmp_path)
-    runs = out["kernel_journey"]["discovery_runs"]
-    assert len(runs) == 1
-    assert runs[0]["source"] == "bypass"
-    assert runs[0]["hot_kernel_count"] == 1
-    assert runs[0]["scan"]["analysis_route"] == "bypass"
-    # Version provenance follows the underlying tool, not the route alias.
-    versions = out["versions"]
-    assert "tracelens" in versions
-    assert "bypass" not in versions
-
-
 def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
     # Callers that omit ``tool`` keep version provenance keyed by ``source``.
     instrument.record_kernel_discovery(

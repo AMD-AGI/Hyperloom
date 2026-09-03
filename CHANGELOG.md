@@ -718,10 +718,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   apart. One tool-enabled review session on the agent analysis route replaces
   both: it is handed locations rather than contents and opens what the evidence
   leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
-  **Operators on `--analysis-route deterministic` should note that route now has
-  no model assistance of any kind** — it keeps its no-model guarantee by not
-  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
-  miss stays unresolved instead of being completed by a model.
+
+- **BREAKING — the bypass and deterministic trace-analysis routes are gone**,
+  along with the `HYPERLOOM_TRACE_ANALYSIS_ROUTE` env var and the
+  `analysis_route` payload key that selected them. Only the TraceLens agent
+  route remains. An explicit route other than `agent` now hard-fails with
+  `invalid_analysis_route` rather than silently falling back to the agent, so a
+  caller asking for a no-LLM run is never quietly charged for an LLM session.
 
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and

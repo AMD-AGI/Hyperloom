@@ -2397,7 +2397,7 @@ def _finish_install_event(
         "inferencex_path": inferencex_path,
         "magpie_path": os.environ.get("MAGPIE_PATH") or None,
         "tracelens_required": tracelens_required,
-        "tracelens_route_hint": "agent" if not no_kernel else ("bypass" if enable_roofline else None),
+        "tracelens_route_hint": "agent" if not no_kernel else ("roofline" if enable_roofline else None),
         "provider_mode": _resolved_provider_mode(resolved_urls),
     }
     statuses = {str(step.get("status") or "") for step in event["ext"]["steps"]}

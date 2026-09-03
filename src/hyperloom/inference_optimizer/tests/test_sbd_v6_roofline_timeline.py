@@ -385,37 +385,21 @@ def test_trace_file_summary_stays_bounded_on_multi_rank() -> None:
     assert summary["files_by_rank"]["3"] == 53
 
 
-def test_steady_state_normalizes_across_tools() -> None:
-    bypass = _analysis_steady_state(
-        {
-            "steady_window": {"step_name": "denoise", "step_count": 20},
-            "estimated": False,
-            "aggregation_scope": "steady_state",
-        },
-        requested_mode="decode_only",
-        tool="bypass",
-    )
-    assert bypass["source"] == "in_reader_window"
-    assert bypass["fell_back_to_full_trace"] is False
-    assert bypass["selected"]["step_count"] == 20
-
-    fallback = _analysis_steady_state(
-        {"steady_window": None, "estimated": True, "aggregation_scope": "full_trace"},
-        requested_mode="decode_only",
-        tool="bypass",
-    )
-    assert fallback["fell_back_to_full_trace"] is True
-
+def test_steady_state_normalizes_selection() -> None:
     tracelens = _analysis_steady_state(
         {"run_meta": {"selection": {"selected_chunk": "decode_only_steady_state_0.json.gz"}}},
         requested_mode="decode_only",
-        tool="tracelens",
     )
-    # Same question, different mechanism: one selects a chunk file, the other a
-    # window in memory, and a consumer must not have to branch on which ran.
     assert tracelens["source"] == "split_chunk"
     assert tracelens["selected"]["selected_chunk"].startswith("decode_only")
-    assert set(bypass) == set(tracelens)
+    assert tracelens["fell_back_to_full_trace"] is False
+
+    fallback = _analysis_steady_state(
+        {"run_meta": {"selection": {"fell_back_to_full_trace": True}}},
+        requested_mode="decode_only",
+    )
+    assert fallback["fell_back_to_full_trace"] is True
+    assert set(tracelens) == set(fallback)
 
 
 def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count: int = 1) -> dict[str, Any]:

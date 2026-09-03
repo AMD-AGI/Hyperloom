@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from _bypass_trace_reader import _open_trace_binary, stream_events
+from _trace_reader import _open_trace_binary, stream_events
 
 # Kineto event categories consulted here.
 _CAT_KERNEL = "kernel"

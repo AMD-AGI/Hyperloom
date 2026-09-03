@@ -5,24 +5,26 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the bypass streaming Kineto reader (_bypass_trace_reader).
+"""Unit tests for the analysis reader (_trace_analysis_reader).
 
-Builds a tiny hand-authored Kineto trace so the streaming parser, correlation
-attribution, timeline union math, and annotation-window extraction are all
-covered deterministically.
+Builds tiny hand-authored Kineto traces so correlation attribution, timeline
+union math, annotation-window extraction, multi-rank / capture-shard selection,
+steady-state windowing, and the device-stream duration sanity check are all
+covered deterministically. The pure streaming-I/O primitives (``stream_events``
+and its gzip open path) live in ``_trace_reader`` and are exercised by
+``test_trace_reader.py``; this module covers only the analysis surface.
 """
 
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import _bypass_trace_reader as reader  # noqa: E402
+import _trace_analysis_reader as reader  # noqa: E402
 
 # A minimal but representative trace:
 #  - one attributed GEMM kernel (Cijk, corr 5 -> aten::mm)
@@ -344,7 +346,7 @@ def test_bs_named_fragment_without_subdir_is_deprioritized(tmp_path):
 
 
 def test_unpatched_sglang_capture_dir_is_deprioritized(tmp_path):
-    # Both routes now share one classifier, so the bypass reader also knows the
+    # Both routes now share one classifier, so the analysis reader also knows the
     # SGLang-without-profiler-patch layout: a ``graph_capture_profile/`` holding
     # ``cuda_graph_capture-*``. The reader's own copy of the rule only knew
     # ``bs_<n>_rank<n>`` / ``capture_traces/`` and took the sidecar as a trace.
@@ -612,138 +614,6 @@ def test_truncated_trace_recovers_complete_events(tmp_path):
     assert {k["name"] for k in out["kernels"]} == {"paged_attention_v1"}
     assert len(out["stream_errors"]) == 1
     assert "truncated after 1 event(s)" in out["stream_errors"][0]
-
-
-def test_truncated_gzip_records_eof_error_without_raising():
-    """A gzip EOF must be reported through the stream error channel."""
-    payload = json.dumps(
-        {
-            "traceEvents": [
-                {"cat": "kernel", "name": "first"},
-                {"cat": "kernel", "name": "second-" + "x" * 4096},
-            ]
-        }
-    ).encode("utf-8")
-    compressed = gzip.compress(payload)
-    errors: list[str] = []
-    with gzip.GzipFile(fileobj=io.BytesIO(compressed[:-32]), mode="rb") as fh:
-        list(reader.stream_events(fh, bufsize=32, errors=errors))
-    assert any("EOFError" in error for error in errors)
-
-
-def test_bad_gzip_records_error_without_raising():
-    """An invalid gzip header must fail soft like a truncated stream."""
-    errors: list[str] = []
-    with gzip.GzipFile(fileobj=io.BytesIO(b"not-a-gzip-stream"), mode="rb") as fh:
-        assert list(reader.stream_events(fh, bufsize=8, errors=errors)) == []
-    assert any("BadGzipFile" in error for error in errors)
-
-
-def test_trace_events_null_does_not_capture_a_later_array():
-    """A non-array traceEvents value must not redirect parsing elsewhere."""
-    payload = b'{"traceEvents": null, "other": [{"cat": "kernel", "name": "wrong-array"}]}'
-    errors: list[str] = []
-    assert list(reader.stream_events(io.BytesIO(payload), bufsize=16, errors=errors)) == []
-    assert errors == ["traceEvents value is not an array"]
-
-
-def test_trace_events_text_value_before_key_is_ignored():
-    """A string value named traceEvents must not shadow the real member."""
-    good = {"cat": "kernel", "name": "real-array"}
-    payload = json.dumps({"label": "traceEvents", "traceEvents": [good]}).encode("utf-8")
-    errors: list[str] = []
-    assert list(reader.stream_events(io.BytesIO(payload), bufsize=9, errors=errors)) == [good]
-    assert errors == []
-
-
-def test_utf8_character_split_across_chunks_is_preserved():
-    """Incremental decoding must preserve a split multibyte code point."""
-    marker = chr(0x20AC)
-    expected = "kernel-" + marker + "-suffix"
-    payload = json.dumps(
-        {"traceEvents": [{"cat": "kernel", "name": expected}]},
-        ensure_ascii=False,
-    ).encode("utf-8")
-    marker_start = payload.index(marker.encode("utf-8"))
-    errors: list[str] = []
-    events = list(
-        reader.stream_events(
-            io.BytesIO(payload),
-            bufsize=marker_start + 1,
-            errors=errors,
-        )
-    )
-    assert events[0]["name"] == expected
-    assert errors == []
-
-
-def test_complete_malformed_object_resyncs_to_later_event():
-    """A balanced bad object must not hide a later valid event."""
-    good = {"cat": "kernel", "name": "recovered"}
-    payload = b'{"traceEvents": [{"cat": "kernel", "name": invalid},' + json.dumps(good).encode("utf-8") + b"]}"
-    errors: list[str] = []
-    events = list(reader.stream_events(io.BytesIO(payload), bufsize=11, errors=errors))
-    assert events == [good]
-    assert len(errors) == 1
-    assert "malformed after 0 event(s)" in errors[0]
-
-
-def test_brace_inside_a_string_split_across_chunks_is_not_an_object_end():
-    """A refill must resume mid-string rather than close on a quoted brace.
-
-    The decoder reports this partial object as an error positioned at the
-    opening quote, well before the buffer end, so "the failure is not at the
-    end" cannot be used to conclude the input is corrupt.
-    """
-    good = {"cat": "kernel", "name": "a}b", "ts": 1}
-    payload = json.dumps({"traceEvents": [good]}).encode("utf-8")
-    errors: list[str] = []
-    assert list(reader.stream_events(io.BytesIO(payload), bufsize=payload.index(b"a}b") + 1, errors=errors)) == [good]
-    assert errors == []
-
-
-def test_unterminated_string_at_eof_reports_truncation_not_corruption():
-    """An object cut off inside a string is truncated, not malformed."""
-    payload = b'{"traceEvents": [{"cat": "kernel", "name": "abc'
-    errors: list[str] = []
-    assert list(reader.stream_events(io.BytesIO(payload), bufsize=8, errors=errors)) == []
-    assert len(errors) == 1
-    assert "truncated after 0 event(s)" in errors[0]
-
-
-def test_trace_prefix_growth_is_bounded(monkeypatch):
-    """A missing late traceEvents key must not grow the prefix indefinitely."""
-    monkeypatch.setattr(reader, "_MAX_TRACE_PREFIX_CHARS", 32)
-    payload = b'{"padding":"' + b"x" * 64 + b'","traceEvents":[]}'
-    errors: list[str] = []
-    assert list(reader.stream_events(io.BytesIO(payload), bufsize=8, errors=errors)) == []
-    assert len(errors) == 1
-    assert "prefix exceeds" in errors[0]
-
-
-def test_single_event_growth_is_bounded(monkeypatch):
-    """An unclosed oversized object must stop at the per-event limit."""
-    monkeypatch.setattr(reader, "_MAX_EVENT_CHARS", 64)
-    payload = b'{"traceEvents":[{"cat":"kernel","name":"' + b"x" * 128
-    errors: list[str] = []
-    assert list(reader.stream_events(io.BytesIO(payload), bufsize=8, errors=errors)) == []
-    assert len(errors) == 1
-    assert "object exceeds" in errors[0]
-
-
-def test_trace_events_opener_may_cross_a_read_boundary():
-    """A chunk ending after the key must refill instead of raising ValueError."""
-    payload = b'{"traceEvents"  : [{"cat": "kernel"}]}'
-    errors: list[str] = []
-    events = list(
-        reader.stream_events(
-            io.BytesIO(payload),
-            bufsize=len('{"traceEvents"'),
-            errors=errors,
-        )
-    )
-    assert events == [{"cat": "kernel"}]
-    assert errors == []
 
 
 def test_single_event_trace(tmp_path):

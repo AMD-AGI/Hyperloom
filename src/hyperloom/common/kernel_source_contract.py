@@ -45,7 +45,7 @@ SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 #: kernel symbol and looks it up in the currently-installed framework source
 #: tree, so it self-heals across file moves/renames and version drift. The
 #: curated map remains the fallback when the symbol is absent from the live
-#: index. ``symbol_index`` is the same resolution surfaced by the bypass route.
+#: index.
 METHOD_ACTIVE_FINDER = "active_finder"
 METHOD_SYMBOL_INDEX = "symbol_index"
 METHOD_CURATED = "op_to_source"

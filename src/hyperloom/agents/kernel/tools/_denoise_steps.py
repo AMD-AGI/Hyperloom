@@ -3,16 +3,11 @@
 The workload-level ``diffusion_roofline.json`` reports per-denoise-step timings
 as ``workload_totals / num_denoise_steps``. An operator-declared
 ``--num-denoise-steps`` is authoritative for that divisor: Hyperloom cannot know
-what a user's ``prof.step()`` brackets, so a count inferred from the trace is
-only a fallback for when nothing was declared. Both the bypass and TraceLens
-routes apply that same precedence, so the per-step figure depends on the
-workload rather than on which route ran.
+what a user's ``prof.step()`` brackets, so a count inferred from the trace (the
+deduplicated ``ProfilerStep#N`` count) is only a fallback for when nothing was
+declared.
 
-Note the fallbacks themselves still differ -- bypass uses its steady-state
-window's step count, TraceLens the deduplicated ``ProfilerStep#N`` count -- so
-route independence holds only while a count was requested.
-
-Kept dependency-free (stdlib only) so both routes can import it freely.
+Kept dependency-free (stdlib only).
 """
 
 from __future__ import annotations
@@ -33,9 +28,8 @@ def resolve_perstep_divisor(requested_steps: int | None, inferred_steps: int | N
 
     Prefers an explicitly requested count over the one inferred from the trace:
     Hyperloom cannot know what an operator's ``prof.step()`` brackets, so a
-    declared ``--num-denoise-steps`` is authoritative. Both analysis routes use
-    this same precedence, so a per-step figure depends on the workload rather
-    than on which route ran. The bypass route warns when the two disagree.
+    declared ``--num-denoise-steps`` is authoritative, and a per-step figure
+    depends on the workload rather than on the trace's own step detection.
 
     Args:
         requested_steps: The operator-declared denoise-step count.
@@ -59,8 +53,8 @@ def count_profiler_steps(trace_path: str) -> int:
     stays cheap on large traces. Streams in bounded chunks (with a small overlap
     so a marker split across a chunk boundary still matches) rather than reading
     the whole decompressed trace into memory. Used as the per-step divisor source
-    for the TraceLens deterministic route, which (unlike bypass) does not run its
-    own steady-window step detection. Accepts a file or a directory (first trace).
+    when no ``--num-denoise-steps`` was declared. Accepts a file or a directory
+    (first trace).
 
     Args:
         trace_path: Path to a ``.json`` / ``.json.gz`` trace file or a directory.

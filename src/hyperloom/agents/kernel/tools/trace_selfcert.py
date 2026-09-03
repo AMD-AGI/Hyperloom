@@ -13,7 +13,7 @@ independently and never merged into one verdict, because a trace that analyses
 cleanly can still yield a false decode conclusion -- an under-recorded CUDA-graph
 capture produces hot kernels drawn entirely from prefill and nothing complains.
 
-Groups 1-5 reuse ``_bypass_trace_reader.analyze_trace()`` so the certificate and
+Groups 1-5 reuse ``_trace_analysis_reader.analyze_trace()`` so the certificate and
 the shipping consumer see identical numbers from identical code. Groups 6-8 --
 step structure, split forecast and the idle gate -- are new, and are the reason
 this exists: they answer "which ``--steady-state-mode`` will work" at capture
@@ -38,11 +38,14 @@ from statistics import median
 from typing import Any, Iterable, Sequence
 
 try:  # in-package import
-    from hyperloom.agents.kernel.tools._bypass_trace_reader import (
-        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
+    from hyperloom.agents.kernel.tools._trace_reader import (
         _MAX_EVENT_CHARS,
         _MAX_TRACE_PREFIX_CHARS,
         _open_trace_binary,
+        stream_events,
+    )
+    from hyperloom.agents.kernel.tools._trace_analysis_reader import (
+        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
         _rank_of,
         _select_trace_file,
         _trace_candidates,
@@ -50,15 +53,17 @@ try:  # in-package import
         analyze_trace,
         resolve_trace_file,
         select_steady_window,
-        stream_events,
     )
     from hyperloom.agents.kernel.tools._capture_shapes import is_capture_fragment
 except ImportError:  # sys.path import
-    from _bypass_trace_reader import (
-        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
+    from _trace_reader import (
         _MAX_EVENT_CHARS,
         _MAX_TRACE_PREFIX_CHARS,
         _open_trace_binary,
+        stream_events,
+    )
+    from _trace_analysis_reader import (
+        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
         _rank_of,
         _select_trace_file,
         _trace_candidates,
@@ -66,7 +71,6 @@ except ImportError:  # sys.path import
         analyze_trace,
         resolve_trace_file,
         select_steady_window,
-        stream_events,
     )
     from _capture_shapes import is_capture_fragment
 

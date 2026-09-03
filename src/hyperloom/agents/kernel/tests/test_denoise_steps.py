@@ -38,11 +38,11 @@ def test_divisor_none_when_nothing_known():
 
 
 class TestCallSiteBinding:
-    """Pin what each route BINDS to each parameter, not just the helper.
+    """Pin what the TraceLens call site BINDS to each parameter, not just the helper.
 
-    Asserting the helper alone proves only that it is deterministic. These
-    recorders fail if either call site's arguments are swapped, which is the
-    regression that made the divisor route-dependent in the first place.
+    Asserting the helper alone proves only that it is deterministic. This
+    recorder fails if the call site's arguments are swapped, which is the
+    regression that made the divisor bind the wrong count in the first place.
     """
 
     _TRACE = {
@@ -61,44 +61,6 @@ class TestCallSiteBinding:
         f = tmp_path / "trace.json"
         f.write_text(json.dumps(self._TRACE), encoding="utf-8")
         return f
-
-    def test_bypass_binds_requested_and_inferred_correctly(self, tmp_path, monkeypatch, capsys):
-        import bypass_trace_analysis as bta
-
-        seen: dict = {}
-
-        def _recorder(*, requested_steps=None, inferred_steps=None):
-            seen.update(requested_steps=requested_steps, inferred_steps=inferred_steps)
-            return ds.resolve_perstep_divisor(requested_steps=requested_steps, inferred_steps=inferred_steps)
-
-        monkeypatch.setattr(bta, "resolve_perstep_divisor", _recorder)
-        trace = self._trace(tmp_path)
-        # xdit so the diffusion sidecar (and therefore the helper) is reached.
-        rc = bta.main(
-            [
-                "--trace-input",
-                str(trace),
-                "--session-id",
-                "binding",
-                "--workspace-path",
-                str(tmp_path / "ws"),
-                "--framework",
-                "xdit",
-                "--target-platform",
-                "MI300X",
-                "--model-name",
-                "m",
-                "--top-k",
-                "4",
-                "--num-denoise-steps",
-                "9",
-            ]
-        )
-        capsys.readouterr()
-        assert rc == 0
-        assert seen, "the bypass route never reached resolve_perstep_divisor"
-        assert seen["requested_steps"] == 9, "the declared count must bind to requested_steps"
-        assert seen["inferred_steps"] == 3, "the trace-derived count must bind to inferred_steps"
 
     def test_tracelens_binds_requested_and_inferred_correctly(self, tmp_path, monkeypatch):
         import diffusion_roofline as dr
@@ -140,30 +102,6 @@ class TestCallSiteBinding:
         assert seen, "the TraceLens route never reached resolve_perstep_divisor"
         assert seen["requested_steps"] == 9, "the declared count must bind to requested_steps"
         assert seen["inferred_steps"] == 3, "the trace-derived count must bind to inferred_steps"
-
-
-def test_bypass_cli_default_honours_the_shared_env_var(monkeypatch):
-    """Both CLIs must derive the default from the same place.
-
-    The TraceLens CLI has always read ``HYPERLOOM_NUM_DENOISE_STEPS`` for this
-    default while bypass hardcoded 0. That was harmless while the inferred count
-    always won, but once the requested count takes precedence the env var would
-    change the divisor on one route only.
-    """
-    import importlib
-
-    import bypass_trace_analysis as bta
-
-    monkeypatch.setenv("HYPERLOOM_NUM_DENOISE_STEPS", "9")
-    importlib.reload(bta)
-    argv = ["--trace-input", "x", "--session-id", "s", "--workspace-path", "w"]
-    assert bta._build_arg_parser().parse_args(argv).num_denoise_steps == 9
-    # An explicit flag still wins over the env.
-    assert bta._build_arg_parser().parse_args(argv + ["--num-denoise-steps", "4"]).num_denoise_steps == 4
-
-    monkeypatch.delenv("HYPERLOOM_NUM_DENOISE_STEPS", raising=False)
-    importlib.reload(bta)
-    assert bta._build_arg_parser().parse_args(argv).num_denoise_steps == 0
 
 
 def _write_trace(path: Path, names: list[str], gz: bool):

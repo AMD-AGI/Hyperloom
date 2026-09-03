@@ -4,7 +4,7 @@
 """Consume a TraceShapeManifest (Hyperloom WP-1) as a weighted GEMM-shape source.
 
 The manifest is the model-agnostic, variant-discriminating, replay-weighted
-artifact produced by Hyperloom's bypass trace analysis. This module turns it
+artifact produced by Hyperloom's trace analysis. This module turns it
 into the ``M,N,K`` (+ optional ``q_dtype_w``) untuned CSV the aiter dense tuners
 already consume, selecting the tuner-addressable (``is_target_gemm``) rows and
 ordering them by steady-state GPU-time weight so the highest-impact shapes are

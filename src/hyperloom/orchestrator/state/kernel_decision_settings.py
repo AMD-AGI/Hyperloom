@@ -91,7 +91,7 @@ def effective_hot_kernel_gpu_pct(candidate: dict) -> float:
 
     Namespaced field name deliberately: bare ``aggregate_gpu_pct`` is
     already an existing task_group-level concept (see
-    ``tracelens_skill_runner.py`` / ``_bypass_report.py``); reading that name
+    ``tracelens_skill_runner.py``); reading that name
     off a candidate row here would silently change every ordinary group's
     gating behavior if a future change ever flattened it onto candidate rows
     (PR #1191 review finding #7).

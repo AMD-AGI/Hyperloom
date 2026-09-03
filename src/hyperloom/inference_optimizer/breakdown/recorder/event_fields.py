@@ -146,9 +146,9 @@ def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
 def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
     """Normalize trace-health warnings into queryable rows.
 
-    ``code`` already carries its own namespace (``bypass_*`` for the TraceLens-free
-    reader, bare names for TraceLens), so one flat list serves every route; the
-    remaining keys are parked under ``detail`` instead of widening the row.
+    ``code`` already carries its own namespace (bare names for TraceLens), so one
+    flat list serves the route; the remaining keys are parked under ``detail``
+    instead of widening the row.
 
     Args:
         rows: The tool's ``trace_health_warnings`` list.
@@ -268,11 +268,11 @@ def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
 def analysis_detail(result: Any) -> dict[str, Any]:
     """Project one ``trace_analyze`` result into the shared detail block.
 
-    ``route`` and ``tool`` both come from ``_build_analysis_meta`` and are both
-    kept: the no-LLM TraceLens route reports ``deterministic`` / ``tracelens``
-    while the TraceLens-free reader reports ``bypass`` / ``bypass``, so
-    collapsing them would erase the difference between "TraceLens ran without an
-    LLM" and "TraceLens never ran". Tool-specific output stays in ``route_ext``.
+    ``route`` and ``tool`` are separate axes: the route is the analysis pipeline,
+    the tool is the analyzer that ran. A single TraceLens route runs today, so
+    both read ``tracelens``. This block copies them by shape without branching on
+    their value, keeping the two fields distinct so the exported event shape stays
+    stable. Tool-specific output stays in ``route_ext``.
 
     Args:
         result: The analysis tool's result dict.

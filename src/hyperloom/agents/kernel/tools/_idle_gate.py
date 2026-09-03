@@ -1,34 +1,24 @@
 """Shared GPU work-share gates: threshold resolution + trace-health warnings.
 
-Single source of truth for the trace-health gates applied by BOTH trace-analysis
-routes (the TraceLens agent/deterministic pipeline and the standalone bypass
-reader), so the thresholds, gate semantics, and warning shapes stay identical
-regardless of which backend produced the trace analysis.
+Single source of truth for the trace-health gates applied on the TraceLens agent
+route, so the thresholds, gate semantics, and warning shapes stay unified across
+call sites.
 
 Two complementary gates live here, both answering "can rewriting a kernel move
 end-to-end latency on this trace?":
 
 * **High idle** -- ``idle_pct`` is the GPU idle fraction of the analyzed trace's
-  wall span (``idle_time / total_time * 100``). TraceLens reads it from
-  ``gpu_timeline.csv`` (or the Executive Summary); bypass computes
-  ``idle_ms / total_ms * 100`` from the profiler timeline.
+  wall span (``idle_time / total_time * 100``), read from ``gpu_timeline.csv``
+  (or the Executive Summary).
 * **Low compute** -- ``compute_pct`` is the fraction of that same span spent in
   compute kernels. Idle alone cannot catch a window dominated by *exposed
   communication*, because a spin-waiting collective (e.g. a custom all-reduce
   that polls peer-rank signals from inside the kernel) is charged as GPU-busy
   time. Such a window reports a near-zero idle share while carrying almost no
   usable work, so it slips through the idle gate. Gating on the compute share
-  restores the original intent for both regimes.
+  restores the original intent.
 
-The high-idle gate runs on both routes. The low-compute gate currently runs on
-the TraceLens route only, because the bypass reader does not model exposed
-communication (``_bypass_report`` reports ``exposed_comm_pct: None``) and so
-cannot separate compute from collective time. Wiring bypass in requires teaching
-it to classify collectives first; until then it keeps the idle gate alone rather
-than gating on a compute share it cannot measure.
-
-Kept dependency-free (stdlib only) so the bypass reader can consume it without
-importing or shelling out to TraceLens.
+Kept dependency-free (stdlib only).
 """
 
 from __future__ import annotations
@@ -183,36 +173,3 @@ def build_low_compute_warning(
         "Coordinator can route to comm/params instead."
     )
     return entry
-
-
-def build_graph_under_recorded_warning(
-    *,
-    graph_launch_count: int,
-    idle_pct: float | None = None,
-) -> dict[str, Any]:
-    """Build the ``trace_health_warnings[]`` entry for a graph under-recorded trace.
-
-    Under continuous CUDA/HIP graph replay the profiler activity buffer overflows
-    and captures only ~1 of ``graph_launch_count`` replays, so idle% is unreliable
-    and must not gate candidates; ranking by recorded-kernel GPU share stays valid.
-
-    Args:
-        graph_launch_count: Number of graph-launch runtime events in the trace.
-        idle_pct: The (unreliable) measured GPU idle percentage, for context.
-
-    Returns:
-        The structured ``bypass_graph_under_recorded`` warning entry.
-    """
-    idle_note = f" (computed idle% {idle_pct:.2f}% is unreliable here)" if isinstance(idle_pct, (int, float)) else ""
-    return {
-        "code": "bypass_graph_under_recorded",
-        "severity": "warning",
-        "graph_launch_count": graph_launch_count,
-        "message": (
-            f"graph-mode trace under-recorded: only ~1 of {graph_launch_count} graph "
-            f"replays captured (profiler activity-buffer overflow under continuous GPU "
-            f"saturation){idle_note}; idle% is unreliable and the idle gate is skipped. "
-            "Hot-kernel candidates are still ranked by recorded-kernel GPU share, which "
-            "is a representative sample of one replay."
-        ),
-    }
