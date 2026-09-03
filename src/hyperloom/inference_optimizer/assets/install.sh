@@ -512,6 +512,15 @@ EOF
 }
 
 preflight_validate_credentials() {
+  # --only-aiperf installs one pinned pip package. It needs no LLM provider, and
+  # the runtime repair that invokes it is handed the BENCHMARK child env, which
+  # has had ANTHROPIC_API_KEY and every sibling scrubbed by
+  # scrub_benchmark_process_env. Gating the aiperf install on credentials that
+  # were deliberately removed would fail the repair on every deployment that
+  # supplies them by env var rather than $REPO_ROOT/.env.
+  if [ "$ONLY_AIPERF" -eq 1 ]; then
+    return 0
+  fi
   preflight_load_dotenv
   normalize_legacy_deepseek_env
   local missing=()
@@ -645,6 +654,12 @@ export PATH
 #      -- the chained RAG-index step auto-detects device=cuda and crashes
 #      at torch._C._cuda_init() with "Found no NVIDIA driver".
 ensure_torch_compatible_with_gpu() {
+  # Same reasoning as the credential preflight: aiperf is a benchmark client
+  # that imports no torch, so a targeted install must not die on a $PYTHON whose
+  # torch is missing or CUDA-built. A full install still gates on it.
+  if [ "$ONLY_AIPERF" -eq 1 ]; then
+    return 0
+  fi
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
@@ -1789,9 +1804,15 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
       # Asked for by name => a failed install is fatal, not a warning.
       AIPERF_REQUIRED=1
       ensure_aiperf ;;
+    0:*|false:*|no:*|off:*|*:0|*:false|*:no|*:off)
+      # Declined by name. Before the pre-warm existed, a falsy INSTALL_AIPERF
+      # landed in the skip branch simply because nothing matched the truthy
+      # patterns; with the pre-warm as the default it would have started
+      # installing instead, taking away the only way to say no.
+      log "aiperf (AgentX) skipped: declined by INSTALL_AIPERF / HYPERLOOM_AGENTX." ;;
     *)
-      # Nobody asked. Install anyway when this build carries the client, so the
-      # box is ready for a mode that gets chosen after provisioning ends.
+      # Nobody asked either way. Install when this build carries the client, so
+      # the box is ready for a mode that gets chosen after provisioning ends.
       if [ -d "${AGENTX_ASSET_DIR}" ]; then
         log "aiperf (AgentX): pre-warming the pinned client because this build ships ${AGENTX_ASSET_DIR}; a failure here only warns"
         ensure_aiperf

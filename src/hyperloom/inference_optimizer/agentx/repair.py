@@ -122,7 +122,12 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
     # dir. The benchmark child env this inherits does not always carry HOME, and
     # the resulting "HOME: unbound variable" reads like a packaging bug rather
     # than a missing variable, so supply this process's own.
-    child_env.setdefault("HOME", os.path.expanduser("~"))
+    if not child_env.get("HOME"):
+        # setdefault would leave an empty-string HOME in place, and the
+        # installer expands ${HOME}/.hyperloom into an unwritable
+        # /.hyperloom -- the stamp write then fails and every later
+        # provision redoes the install this one was supposed to record.
+        child_env["HOME"] = os.path.expanduser("~")
 
     log.warning(
         "AgentX: aiperf is missing or is not the pinned build; installing it via "
@@ -169,7 +174,10 @@ def _output_tail(stdout: Optional[str], stderr: Optional[str]) -> str:
     """
     from hyperloom.common.env_safety import redact_secret_values
 
-    combined = ((stdout or "") + (stderr or "")).strip()
+    # Joined rather than concatenated: a stdout tail without a trailing newline
+    # would otherwise fuse into the first stderr line, and that first stderr line
+    # is usually the pip error this summary exists to carry.
+    combined = "\n".join(part for part in ((stdout or "").strip(), (stderr or "").strip()) if part)
     if not combined:
         return "(no output)"
     lines = [line.strip() for line in combined.splitlines() if line.strip()]

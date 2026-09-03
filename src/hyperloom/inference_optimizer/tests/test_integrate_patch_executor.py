@@ -1190,6 +1190,13 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "bin/pip install foo",
         "/tmp/pip install foo",
         "workspace/uv pip install foo",
+        # Traversal defeats the prefix check unless the segments are guarded:
+        # the string STARTS with a trusted prefix and still resolves to the
+        # workspace-writable path that "/tmp/pip install foo" is rejected for.
+        "/usr/bin/../../tmp/pip install foo",
+        "/opt/venv/../../tmp/pip install foo",
+        "/usr/local/./../../tmp/pip install foo",
+        "/bin/../tmp/pip install foo",
         # Basename matching must not turn the allowlist into "anything with a
         # path": what the gate decides is the KIND of operation, and these are
         # still not installs.
@@ -1310,8 +1317,8 @@ def test_skipped_setup_commands_are_redacted_and_bounded(monkeypatch):
 
     assert "ghp_notarealtoken" not in out
     assert "boot failed" in out
-    assert "(+18 more)" in out, "the command count was not bounded"
     assert len(out) < 4000, f"one rejection list grew to {len(out)} chars"
+    assert "(+18 more)" in out, "the command count was not bounded"
 
 
 def test_reason_is_untouched_when_nothing_was_rejected():

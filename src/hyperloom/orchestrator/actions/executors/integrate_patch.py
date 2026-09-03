@@ -139,7 +139,15 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
 #: relative ``./pip``, a path under its own workspace -- must not be able to
 #: borrow an allowlisted name. ``/opt/venv`` is the canonical ROCm stack this
 #: repository installs into; the rest are the standard system bindirs.
-_TRUSTED_BIN_PREFIX_RE = re.compile(r"^(?:/opt/[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)(?:/[A-Za-z0-9._-]+)*/")
+#: ``..`` is excluded from the segment class on purpose. With a plain
+#: ``[A-Za-z0-9._-]+`` the traversal form ``/usr/bin/../../tmp/x/pip install foo``
+#: matches, normalises to an allowlisted ``pip install foo``, and then
+#: ``_run_setup_commands`` executes the ORIGINAL string -- running /tmp/x/pip,
+#: which is exactly the workspace-owned binary the prefix list exists to keep out.
+_TRUSTED_BIN_PREFIX_RE = re.compile(
+    r"^(?:/opt/(?!\.\.?/)[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)"
+    r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*/"
+)
 
 #: Per-command clip in the rejection summary. Long enough to recognise the
 #: command, short enough that twelve of them cannot bury the round's own reason.
