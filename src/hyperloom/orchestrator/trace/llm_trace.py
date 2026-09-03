@@ -68,7 +68,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "proposal_scorer",
         "geak",
         "forge",
-        "kernel_rewrite_controller",
         "tracelens",
         "breakdown",
         # Framework-side reasoning (agent ranker, audit refinement, KB synthesis)

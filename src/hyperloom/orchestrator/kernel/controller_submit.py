@@ -55,7 +55,7 @@ def _controller_environment() -> dict[str, str]:
     env.setdefault("PYTHONUNBUFFERED", "1")
     inject_env(
         env,
-        component="kernel_rewrite_controller",
+        component="forge",
         operation="analyze_and_optimize_kernels",
     )
     return env
