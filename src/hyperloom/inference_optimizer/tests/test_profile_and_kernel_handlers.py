@@ -2181,11 +2181,17 @@ async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_pat
     output_dir.mkdir()
 
     async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_failed"
+        stale_trace_dir = workspace / "torch_trace"
+        stale_trace_dir.mkdir(parents=True)
+        stale_trace = stale_trace_dir / "rank-0.trace.json.gz"
+        stale_trace.write_bytes(b"stale")
+        os.utime(stale_trace, (1, 1))
         return {
             "status": "failed",
             "error_class": "cuda_graph_capture_failed",
             "error": "CUDA graph capture failed before AgentX capture started",
-            "workspace": str(output_dir / "benchmark_sglang_failed"),
+            "workspace": str(workspace),
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
@@ -2203,6 +2209,7 @@ async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_pat
     assert res.result["measurement_status"] == "failed"
     assert res.result["trace_capture_status"] == "not_reached"
     assert res.result["trace_input_ready"] is False
+    assert "main_trace_path" not in res.result
     db.close()
 
 

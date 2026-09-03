@@ -1294,10 +1294,15 @@ class ProfileExecutor(BaselineExecutor):
             selected_trace_files: list[Path] = []
             existing_empty_dirs: list[Path] = []
             capture_only = False
-            for trace_dir in _candidate_trace_dirs(workspace):
+            candidate_trace_dirs = _candidate_trace_dirs(workspace)
+            for trace_dir in candidate_trace_dirs:
                 if not trace_dir.is_dir():
                     continue
-                trace_files = _trace_files_for_dir(trace_dir)
+                trace_files = [
+                    path
+                    for path in _trace_files_for_dir(trace_dir)
+                    if not agentx_profile or safe_mtime(path) >= int(task_started_unix)
+                ]
                 if trace_files:
                     selected_trace_dir = trace_dir
                     selected_trace_files = trace_files
@@ -1308,10 +1313,14 @@ class ProfileExecutor(BaselineExecutor):
             # *.trace.json.gz; fall back to those so roofline analyzes the
             # available trace instead of failing with no_trace_files.
             if selected_trace_dir is None:
-                for trace_dir in _candidate_trace_dirs(workspace):
+                for trace_dir in candidate_trace_dirs:
                     if not trace_dir.is_dir():
                         continue
-                    sidecars = _capture_sidecar_traces_for_dir(trace_dir)
+                    sidecars = [
+                        path
+                        for path in _capture_sidecar_traces_for_dir(trace_dir)
+                        if not agentx_profile or safe_mtime(path) >= int(task_started_unix)
+                    ]
                     if sidecars:
                         selected_trace_dir = trace_dir
                         selected_trace_files = sidecars
@@ -1386,7 +1395,7 @@ class ProfileExecutor(BaselineExecutor):
                 result["trace_files"] = []
                 result["status"] = "failed"
                 result["error_class"] = "no_trace_files"
-                probed = ", ".join(str(p) for p in _candidate_trace_dirs(workspace))
+                probed = ", ".join(str(p) for p in candidate_trace_dirs)
                 result["error"] = f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
                 if existing_empty_dirs:
                     log.warning(
@@ -1398,12 +1407,16 @@ class ProfileExecutor(BaselineExecutor):
                     log.warning(
                         "profile_executor: workspace=%s has no trace dir (checked: %s)",
                         workspace_str,
-                        ", ".join(str(p) for p in _candidate_trace_dirs(workspace)),
+                        ", ".join(str(p) for p in candidate_trace_dirs),
                     )
-        if result.get("main_trace_path"):
+        capture_succeeded = str((capture_status or {}).get("status") or "") == "succeeded"
+        if agentx_profile:
+            result["trace_input_ready"] = bool(
+                measurement_status == "succeeded" and capture_succeeded and result.get("main_trace_path")
+            )
+        elif result.get("main_trace_path"):
             result["trace_input_ready"] = True
         if capture_status is not None and str(capture_status.get("status") or "") != "succeeded":
-            result["trace_input_ready"] = False
             if measurement_status == "succeeded":
                 result["status"] = "failed"
                 result["error_class"] = "profile_capture_failed"
@@ -1412,6 +1425,8 @@ class ProfileExecutor(BaselineExecutor):
                 )
         elif (
             agentx_profile
+            and measurement_status == "succeeded"
+            and capture_succeeded
             and result.get("trace_files")
             and not result.get("main_trace_path")
             and result.get("error_class") != "profile_capture_only"
