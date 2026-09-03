@@ -1182,6 +1182,7 @@ class ProfileExecutor(BaselineExecutor):
         measurement_status = str(result.get("status") or "")
         if agentx_profile:
             result["measurement_status"] = measurement_status
+        skip_trace_discovery = agentx_profile and measurement_status != "succeeded"
         if agentx_profile and not round_trace_root and capture_status is None:
             if measurement_status == "succeeded":
                 capture_status = {
@@ -1287,7 +1288,7 @@ class ProfileExecutor(BaselineExecutor):
                     "torch profiler errors",
                     round_trace_root,
                 )
-        elif workspace_str:
+        elif workspace_str and not skip_trace_discovery:
             # Single-node branch: multi-candidate trace discovery.
             workspace = Path(workspace_str)
             selected_trace_dir: Path | None = None

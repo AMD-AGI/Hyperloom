@@ -5046,7 +5046,7 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
         ("dp1_pp0_tp0_dcp0_ep0_rank8.1787293265008841647.pt.trace.json.gz", 8),
         ("dp1_pp0_tp3_dcp0_ep3_rank11.1787293275126074931.pt.trace.json.gz", 11),
         ("rank_5/trace.pt.trace.json.gz", 5),
-        ("rank_5/worker-tp3.pt.trace.json.gz", 3),
+        ("rank_5/worker-TP-3.pt.trace.json.gz", 3),
         ("model-tp8.trace.json.gz", None),
         ("benchmark_sglang_tp_8/torch_trace/trace.pt.trace.json.gz", None),
         ("merged-177.trace.json.gz", None),
