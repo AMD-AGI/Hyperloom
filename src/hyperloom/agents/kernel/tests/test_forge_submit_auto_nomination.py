@@ -799,3 +799,204 @@ def test_a_source_named_through_a_symlink_is_still_staged(tmp_path, monkeypatch)
     nominated = Path(row["source_file"])
     assert nominated.is_relative_to(staged_workspace)
     assert nominated.is_file()
+
+
+def _forge_echoing_the_staged_target(patch_dir: Path):
+    """A forge child that answers with the staged path it was handed.
+
+    This is what the real producer does: the entry's ``target_file`` is the
+    nominated candidate's ``source_file``, which staging rewrote into the copy.
+    """
+
+    def fake_popen(command, **kwargs):
+        workspace = Path(command[command.index("--workspace") + 1])
+        envelope = {
+            "status": "ok",
+            "patches": [
+                {
+                    "kernel_name": "paged_attention_v1",
+                    "patch_path": str(patch_dir / "attention.patch"),
+                    "target_file": str(workspace / "pkg" / "attention.py"),
+                    "kernel_repo": str(workspace),
+                    "micro_speedup": 1.4,
+                }
+            ],
+            "nomination": {"candidates_seen": 1, "resolved": 1, "selected": 1},
+        }
+        return _FakeProcess(returncode=0, stdout="__FORGE_RESULT__" + json.dumps(envelope))
+
+    return fake_popen
+
+
+def test_a_nominated_patch_names_the_live_tree_not_the_staged_copy(tmp_path, monkeypatch):
+    """The re-baselined server imports the install, so a patch must name it.
+
+    Queued with the staged paths, integrate applies into the retained copy and
+    the measured server never sees the rewrite, so a real gain reads as none.
+    """
+    repo, source = _kernel_repo(tmp_path)
+    request = _write_request(
+        tmp_path,
+        rows=[
+            {
+                "kernel_name": "paged_attention_v1",
+                "gpu_pct": 30.0,
+                "source_file": str(source),
+                "kernel_repo": str(repo),
+                "reason_class": "resolved",
+                "attempts": 0,
+                "rejected": False,
+            }
+        ],
+    )
+    _patch_forge_launch(monkeypatch, _forge_echoing_the_staged_target(tmp_path))
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    (patch,) = result["patches"]
+    assert patch["target_file"] == str(source.resolve())
+    assert patch["kernel_repo"] == str(repo.resolve())
+
+
+def test_the_patch_artifact_is_left_where_forge_wrote_it(tmp_path, monkeypatch):
+    """Only targets are re-anchored; the diff itself is not a tree path."""
+    repo, source = _kernel_repo(tmp_path)
+    request = _write_request(
+        tmp_path,
+        rows=[
+            {
+                "kernel_name": "paged_attention_v1",
+                "gpu_pct": 30.0,
+                "source_file": str(source),
+                "kernel_repo": str(repo),
+                "reason_class": "resolved",
+                "attempts": 0,
+                "rejected": False,
+            }
+        ],
+    )
+    _patch_forge_launch(monkeypatch, _forge_echoing_the_staged_target(tmp_path))
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    (patch,) = result["patches"]
+    assert patch["patch_path"] == str(tmp_path / "attention.patch")
+    assert patch["micro_speedup"] == 1.4
+    assert result["nomination"] == {"candidates_seen": 1, "resolved": 1, "selected": 1}
+
+
+def test_a_path_outside_the_workspace_travels_untouched(tmp_path, monkeypatch):
+    """Re-anchoring is scoped to the copy, so an unrelated path is not rewritten."""
+    repo, source = _kernel_repo(tmp_path)
+    request = _write_request(
+        tmp_path,
+        rows=[
+            {
+                "kernel_name": "paged_attention_v1",
+                "gpu_pct": 30.0,
+                "source_file": str(source),
+                "kernel_repo": str(repo),
+                "reason_class": "resolved",
+                "attempts": 0,
+                "rejected": False,
+            }
+        ],
+    )
+    elsewhere = tmp_path / "vendor" / "other.py"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("x = 1\n", encoding="utf-8")
+
+    def fake_popen(command, **kwargs):
+        envelope = {
+            "status": "ok",
+            "patches": [
+                {
+                    "kernel_name": "elsewhere",
+                    "patch_path": str(tmp_path / "e.patch"),
+                    "target_file": str(elsewhere),
+                    "micro_speedup": 1.1,
+                }
+            ],
+        }
+        return _FakeProcess(returncode=0, stdout="__FORGE_RESULT__" + json.dumps(envelope))
+
+    _patch_forge_launch(monkeypatch, fake_popen)
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    (patch,) = result["patches"]
+    assert patch["target_file"] == str(elsewhere)
+    assert "kernel_repo" not in patch
+
+
+def test_a_multi_file_patch_moves_every_write_path(tmp_path, monkeypatch):
+    """A snapshot lands several files, so each one has to name the live tree."""
+    repo, source = _kernel_repo(tmp_path)
+    request = _write_request(
+        tmp_path,
+        rows=[
+            {
+                "kernel_name": "paged_attention_v1",
+                "gpu_pct": 30.0,
+                "source_file": str(source),
+                "kernel_repo": str(repo),
+                "reason_class": "resolved",
+                "attempts": 0,
+                "rejected": False,
+            }
+        ],
+    )
+
+    def fake_popen(command, **kwargs):
+        workspace = Path(command[command.index("--workspace") + 1])
+        envelope = {
+            "status": "ok",
+            "patches": [
+                {
+                    "kernel_name": "paged_attention_v1",
+                    "patch_path": str(tmp_path / "attempt" / "forge_experiments" / "a.patch"),
+                    "target_file": str(workspace / "pkg" / "attention.py"),
+                    "kernel_repo": str(workspace),
+                    "snapshot_dir": str(tmp_path / "attempt" / "forge_experiments" / "snap"),
+                    "write_paths": [
+                        str(workspace / "pkg" / "attention.py"),
+                        str(workspace / "pkg" / "helper.py"),
+                    ],
+                    "micro_speedup": 1.4,
+                }
+            ],
+        }
+        return _FakeProcess(returncode=0, stdout="__FORGE_RESULT__" + json.dumps(envelope))
+
+    _patch_forge_launch(monkeypatch, fake_popen)
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    (patch,) = result["patches"]
+    assert patch["write_paths"] == [
+        str(repo.resolve() / "pkg" / "attention.py"),
+        str(repo.resolve() / "pkg" / "helper.py"),
+    ]
+    # The producer's artifacts are not tree paths and must not be moved.
+    assert patch["patch_path"] == str(tmp_path / "attempt" / "forge_experiments" / "a.patch")
+    assert patch["snapshot_dir"] == str(tmp_path / "attempt" / "forge_experiments" / "snap")

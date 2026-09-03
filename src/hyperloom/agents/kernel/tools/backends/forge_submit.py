@@ -5031,7 +5031,7 @@ def _stage_nomination_brief(
     nomination_input: str,
     output_dir: Path,
     branch: str,
-) -> tuple[str, str, str, int]:
+) -> tuple[str, str, str, str, int]:
     """Stage a workspace the nominator can pick inside, and re-point the brief.
 
     forge resolves the nominated kernel against ``--workspace`` and refuses
@@ -5051,7 +5051,9 @@ def _stage_nomination_brief(
         branch: Branch name for the staged worktree.
 
     Returns:
-        ``(workspace, staged_request, base_commit, dropped_offtree_rows)``.
+        ``(workspace, live_repo, staged_request, base_commit, dropped_offtree_rows)``.
+        ``live_repo`` is the tree the workspace copies, which is the only tree the
+        re-baselined server imports, so patch targets must be mapped back onto it.
 
     Raises:
         _NominationStagingError: When no eligible row resolves into a stageable
@@ -5111,7 +5113,59 @@ def _stage_nomination_brief(
     staged_manifest.write_text(json.dumps({**manifest, "hot_kernels": kept}), encoding="utf-8")
     staged_request = output_dir / "forge_nomination_input.staged.json"
     staged_request.write_text(json.dumps({**request, "candidates_path": str(staged_manifest)}), encoding="utf-8")
-    return workspace, str(staged_request), base_commit, dropped
+    return workspace, str(repo_root), str(staged_request), base_commit, dropped
+
+
+def _reanchor_patch_targets(envelope: Any, *, workspace: str, live_repo: str) -> Any:
+    """Map a patch's targets from the staged workspace onto the live tree.
+
+    Staging rewrites candidate paths into a worktree, so the producer answers
+    with worktree paths. Applied as given they land in the copy, which nothing
+    imports: the re-baselined server measures unmodified code and a real gain
+    reads as none. Paths outside the workspace travel untouched.
+
+    Only the fields naming a file the patch is applied to move. The diff and the
+    snapshot are producer artifacts and must stay where they were written.
+
+    Args:
+        envelope: The raw ``--auto`` result envelope.
+        workspace: The staged workspace the producer worked in.
+        live_repo: The tree the workspace was copied from.
+
+    Returns:
+        The envelope with every patch target and repo root named in the live tree.
+    """
+    if not isinstance(envelope, dict):
+        return envelope
+    rows = envelope.get("patches")
+    if not isinstance(rows, list):
+        return envelope
+    staged = Path(workspace).resolve()
+    live = Path(live_repo).resolve()
+
+    def _mapped(raw: str) -> str:
+        try:
+            relative = Path(raw).resolve().relative_to(staged)
+        except (ValueError, OSError):
+            return raw
+        return str(live / relative)
+
+    remapped: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            remapped.append(row)
+            continue
+        updated = dict(row)
+        target = str(updated.get("target_file") or "").strip()
+        if target:
+            updated["target_file"] = _mapped(target)
+        paths = updated.get("write_paths")
+        if isinstance(paths, list):
+            updated["write_paths"] = [_mapped(str(p)) if str(p).strip() else p for p in paths]
+        if str(updated.get("kernel_repo") or "").strip():
+            updated["kernel_repo"] = str(live)
+        remapped.append(updated)
+    return {**envelope, "patches": remapped}
 
 
 def submit_auto(
@@ -5181,7 +5235,7 @@ def submit_auto(
     try:
         # forge reports the commit each patch is diffed against on the envelope,
         # so the staged base is not needed again here.
-        workspace, nomination_input, _base_commit, offtree = _stage_nomination_brief(
+        workspace, live_repo, nomination_input, _base_commit, offtree = _stage_nomination_brief(
             nomination_input=nomination_input,
             output_dir=output_dir,
             branch=branch,
@@ -5325,8 +5379,9 @@ def submit_auto(
                 envelope["nomination"] = summary
         return envelope
     if isinstance(parsed, dict):
-        # The raw envelope is what the handler lands; forge owns its shape.
-        return parsed
+        # forge owns the envelope's shape; only the staged paths are rewritten,
+        # since the tree it worked in is not the tree the server imports.
+        return _reanchor_patch_targets(parsed, workspace=workspace, live_repo=live_repo)
     return {
         "status": "failed",
         "patches": [],
