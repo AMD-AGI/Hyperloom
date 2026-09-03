@@ -1180,6 +1180,16 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "pip install foo | tee /etc/x",
         "echo `whoami`",
         "pip install x $(malicious)",
+        # The allowlist is matched against the NORMALISED text, but the replay
+        # executes the ORIGINAL string under shell=True. A blanket basename
+        # strip would let a specialist drop its own `pip` into the workspace and
+        # borrow the allowlisted name, so only absolute system prefixes may be
+        # reduced to a basename.
+        "./pip install foo",
+        "../pip install foo",
+        "bin/pip install foo",
+        "/tmp/pip install foo",
+        "workspace/uv pip install foo",
         # Basename matching must not turn the allowlist into "anything with a
         # path": what the gate decides is the KIND of operation, and these are
         # still not installs.
@@ -1236,6 +1246,23 @@ def test_skipped_setup_commands_are_named_in_the_round_reason():
     assert "authored patch produced no gain" in reason
     assert "REJECTED" in reason
     assert "ln -sf a b" in reason
+
+
+def test_skipped_setup_commands_are_redacted_and_bounded(monkeypatch):
+    """Rejected commands are LLM-written text that lands in durable results.
+
+    They reach the journal, the report and the KB, and are read back into the
+    next round's mandate -- so a credential in one must not survive, and twelve
+    long ones must not bury the reason they are appended to.
+    """
+    monkeypatch.setenv("HYPERLOOM_TEST_TOKEN_FOR_REDACTION", "sk-supersecretvalue")
+    skipped = [f"curl -H 'Authorization: Bearer sk-supersecretvalue' http://x/{i} " + "y" * 400 for i in range(30)]
+    out = _with_skipped_setup_reason("boot failed", {"applied": [], "skipped": skipped, "failed": []})
+
+    assert "sk-supersecretvalue" not in out
+    assert "boot failed" in out
+    assert "(+18 more)" in out, "the command count was not bounded"
+    assert len(out) < 4000, f"one rejection list grew to {len(out)} chars"
 
 
 def test_reason_is_untouched_when_nothing_was_rejected():

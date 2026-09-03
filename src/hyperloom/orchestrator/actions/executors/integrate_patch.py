@@ -20,7 +20,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_variant_env_key,
+    redact_secret_values,
+)
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
@@ -129,6 +133,18 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"conda\s+install\b",
     r"mamba\s+install\b",
 )
+#: Directory prefixes whose basename may stand in for the whole path when the
+#: allowlist is matched. Absolute and system-owned on purpose: the replay runs
+#: the ORIGINAL command string, so anything a specialist can write to -- a
+#: relative ``./pip``, a path under its own workspace -- must not be able to
+#: borrow an allowlisted name. ``/opt/venv`` is the canonical ROCm stack this
+#: repository installs into; the rest are the standard system bindirs.
+_TRUSTED_BIN_PREFIX_RE = re.compile(r"^(?:/opt/[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)(?:/[A-Za-z0-9._-]+)*/")
+
+#: Per-command clip in the rejection summary. Long enough to recognise the
+#: command, short enough that twelve of them cannot bury the round's own reason.
+_SKIPPED_CMD_CHARS = 160
+
 _SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 _SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 # Two-sided band, in percent of the pre-patch base, that a switch-off parity leg
@@ -229,9 +245,24 @@ def _with_skipped_setup_reason(reason: str, setup_result: dict[str, Any]) -> str
     skipped = [str(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
     if not skipped:
         return reason
-    listed = "; ".join(skipped[:_SETUP_CMD_MAX])
-    note = f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
+    # These are commands an LLM wrote. They land in the journal, the report and
+    # the KB, and are read back into the next round's mandate -- so redact them
+    # the way every other path that writes a command into a durable result does,
+    # and bound the length, so one rejected install listing a hundred packages
+    # cannot crowd out the reason it is appended to.
+    listed = "; ".join(_ellipsize(c, _SKIPPED_CMD_CHARS) for c in skipped[:_SETUP_CMD_MAX])
+    if len(skipped) > _SETUP_CMD_MAX:
+        listed += f"; (+{len(skipped) - _SETUP_CMD_MAX} more)"
+    note = redact_secret_values(
+        f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
+    )
     return f"{reason} ({note})" if reason else note
+
+
+def _ellipsize(text: str, limit: int) -> str:
+    """``text`` clipped to ``limit`` characters, marked when it was clipped."""
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "..."
 
 
 def _is_allowlisted_setup_command(cmd: str) -> bool:
@@ -268,18 +299,22 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     # Strip a leading sudo and leading KEY=VALUE env assignments.
     text = re.sub(r"^\s*sudo\s+", "", text)
     text = re.sub(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", text)
-    # Match on the executable's basename. The patterns below are anchored, so
-    # without this ``/opt/venv/bin/uv pip install X`` was REJECTED while
+    # Match on the executable's basename, but ONLY for an absolute path under a
+    # system prefix. The patterns below are anchored, so without any
+    # normalisation ``/opt/venv/bin/uv pip install X`` was REJECTED while
     # ``uv pip install X`` -- the same operation -- was allowed. Measured: two
     # sessions hit one missing dependency and got opposite outcomes, decided by
     # nothing but how the specialist happened to spell the path.
     #
-    # This does not weaken the gate. What it enforces is which KIND of operation
-    # may replay, not which path a binary was found at -- and the env-assignment
-    # strip above already lets ``PATH=/x pip install`` through, so any argument
-    # that a path prefix was providing protection does not survive contact with
-    # the code as it stands.
-    text = re.sub(r"^\S*/", "", text, count=1)
+    # The allowlist is checked against this normalised text, but
+    # ``_run_setup_commands`` executes the ORIGINAL string under ``shell=True``.
+    # So a blanket basename strip would let any binary in: ``./pip install foo``
+    # normalises to an allowlisted ``pip install foo`` while running a script
+    # the specialist just wrote into its own workspace. Restricting the strip to
+    # absolute system prefixes keeps "which KIND of operation may replay" intact
+    # -- the property line 105 promises -- while still treating a venv's own
+    # interpreter as the interpreter it is.
+    text = _TRUSTED_BIN_PREFIX_RE.sub("", text, count=1)
     return any(re.match(pat, text) for pat in _SETUP_CMD_ALLOWLIST)
 
 
