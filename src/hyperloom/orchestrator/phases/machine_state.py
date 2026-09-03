@@ -20,7 +20,7 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
-    FULL_ENABLED_ACTIONS,
+    ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 
 
@@ -110,16 +110,16 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
 }
 
-# Internal in every run mode, so never LLM-proposable. Subtracting the enabled
-# set keeps the dual-dispatched ones (``roofline``).
-COORDINATOR_ONLY_ACTIONS: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS - frozenset(FULL_ENABLED_ACTIONS)
+# Not the LLM's to propose: the Coordinator dispatches its own, and Robustness
+# owns its ladder.
+_NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic).
 
-    Both callers render this into the prompt, so a Coordinator-only action is
-    excluded: naming it advertises a lever the LLM does not have.
+    Both callers render this into the prompt, so naming an action the LLM cannot
+    propose would advertise a lever it does not have.
 
     Args:
         phase (str): Phase name; stripped and upper-cased before lookup.
@@ -129,7 +129,7 @@ def allowed_actions_for(phase: str) -> tuple[str, ...]:
         an empty tuple for an unknown phase.
     """
     actions = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())
-    return tuple(sorted(actions - COORDINATOR_ONLY_ACTIONS))
+    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE))
 
 
 def render_phase_action_bullets(
@@ -3326,7 +3326,6 @@ def record_lifecycle_event(
 
 
 __all__ = [
-    "COORDINATOR_ONLY_ACTIONS",
     "DEFAULT_PHASE_BUDGET_PCT",
     "OPTIMIZATION_RESERVE_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",

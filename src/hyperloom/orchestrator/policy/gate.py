@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
+    LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from ..specialists.domains import (
@@ -861,6 +862,8 @@ class PolicyGate:
             self._validate_integrate_patch_critic_gate(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
         if check_source:
+            self._validate_coordinator_managed_action(action_name, intent_kind="delegate")
+            self._validate_baseline_not_mid_authoring(action_name)
             # Robustness delegates nothing beyond its own declared action set.
             if role.name in ROBUSTNESS_ONLY_SOURCE_ALLOWLIST and action_name not in ROBUSTNESS_DELEGATE_ONLY_ACTIONS:
                 raise PolicyDenied(
@@ -924,6 +927,8 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
+        self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
+        self._validate_baseline_not_mid_authoring(action_name)
         # Per-action source allowlist (e.g. ``recover`` is robustness-only); mirrors the delegate-path guard.
         allowed_sources = DELEGATE_ACTION_SOURCE_ALLOWLIST.get(action_name)
         if allowed_sources is not None and role.name not in allowed_sources:
@@ -942,6 +947,58 @@ class PolicyGate:
             role.name,
             action_name,
             intent_kind="propose_action",
+        )
+
+    def _validate_coordinator_managed_action(self, action_name: str, *, intent_kind: str) -> None:
+        """Deny an LLM proposal of an action the Coordinator dispatches for itself.
+
+        These actions carry their own entry conditions and SharedState
+        accounting, which an agent-initiated copy would skip. Phase-independent:
+        the action is never the LLM's to run, in any phase.
+
+        Args:
+            action_name: The proposed/delegated action name.
+            intent_kind: The channel it arrived on, for the message.
+
+        Raises:
+            PolicyDenied: when ``action_name`` is Coordinator-managed.
+        """
+        if action_name not in COORDINATOR_INTERNAL_ACTIONS:
+            return
+        raise PolicyDenied(
+            f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
+            rule="coordinator_managed_action",
+            hint=(
+                "the Coordinator dispatches this on its own schedule and records "
+                "the outcome in SharedState; read the result there rather than "
+                "ordering a second run."
+            ),
+        )
+
+    def _validate_baseline_not_mid_authoring(self, action_name: str) -> None:
+        """Deny an LLM ``baseline`` while an enablement authoring round is in flight.
+
+        A specialist rewriting the framework underneath a baseline would leave
+        the round measuring a stack that changes as it runs, so the anchor it
+        writes describes neither the old stack nor the new one. The Coordinator's
+        own revalidation dispatch is trusted and does not reach this guard.
+
+        Args:
+            action_name: The proposed/delegated action name.
+
+        Raises:
+            PolicyDenied: when a baseline is proposed mid-authoring-round.
+        """
+        if action_name != "baseline":
+            return
+        enablement = getattr(getattr(self, "shared_state", None), "enablement", None)
+        inflight = str(getattr(enablement, "inflight_task_id", "") or "")
+        if not inflight:
+            return
+        raise PolicyDenied(
+            f"baseline: an enablement authoring round is in flight (task={inflight})",
+            rule="enablement_round_in_flight",
+            hint="wait for the enablement specialist to finish and rearm before re-running baseline.",
         )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -1003,10 +1060,9 @@ class PolicyGate:
 
         Checks that the role may emit a REQUEST at all (per
         :data:`REQUEST_ROUTING`), that ``target_agent`` is in the role's
-        allowed-target set, and that ``kind`` is present. For
-        orchestration→kernel requests the ``kind`` is treated as the action
-        name, so the internal-only, phase, GEMM-tuning ownership and external-tool
-        collision guards are applied to it as defense in depth.
+        allowed-target set, that ``kind`` is present and — for a kernel
+        target — LLM-requestable. GEMM-tuning ownership and external-tool
+        collision guards are applied to the kind as defense in depth.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -1038,6 +1094,20 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
+        if target == "kernel_agent" and kind not in LLM_REQUESTABLE_KERNEL_REQUEST_KINDS:
+            raise PolicyDenied(
+                f"request kind {kind!r} is not LLM-requestable "
+                f"(allowed: {sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS)!r})",
+                rule="request_kind",
+                hint=(
+                    "run_collective is a Coordinator-dispatched lane: it runs at "
+                    "KERNEL entry once its own comm-share gate passes, and its "
+                    "outcome arrives as a run_collective_done response. Requesting "
+                    "it directly skips that gate, the lane's SharedState accounting "
+                    "and its integrate step. Request run_optimization for a "
+                    "source-level kernel instead."
+                ),
+            )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(

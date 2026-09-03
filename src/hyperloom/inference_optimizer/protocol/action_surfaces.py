@@ -47,6 +47,15 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
+# Request kinds an LLM may address to the kernel agent. Every other registered
+# handler (``run_collective``) is a Coordinator-dispatched lane whose own gate a
+# direct request would skip, so the set is an allowlist rather than a denylist.
+LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(KERNEL_ACTION_REQUEST_KINDS.values()) | {
+    "trace_analyze",
+    "apply_patch",
+}
+
+
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
@@ -388,6 +397,7 @@ __all__ = [
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
+    "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

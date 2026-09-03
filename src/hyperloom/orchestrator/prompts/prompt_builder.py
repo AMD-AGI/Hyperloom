@@ -21,6 +21,7 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ActionMetadata,
+    COORDINATOR_INTERNAL_ACTIONS,
     FULL_ENABLED_ACTIONS,
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -177,7 +178,7 @@ def _section_phase_semantics(
     Returns:
         Markdown lines for the phase-contract section.
     """
-    from ..phases.machine_state import COORDINATOR_ONLY_ACTIONS, render_phase_action_bullets
+    from ..phases.machine_state import render_phase_action_bullets
 
     # phase name -> the flag that disabled it (None => always enabled).
     disabled_suffix: dict[str, str] = {}
@@ -206,9 +207,10 @@ def _section_phase_semantics(
     lines.extend(
         [
             "",
-            f"{', '.join(sorted(COORDINATOR_ONLY_ACTIONS))} are absent from the sets",
-            "above: the Coordinator dispatches them. Denial of any action lands",
-            "in your inbox as a `policy_denied` event.",
+            f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
+            "sets above: the Coordinator dispatches them and PolicyGate denies",
+            "any attempt to propose them (`coordinator_managed_action`). Denial",
+            "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
