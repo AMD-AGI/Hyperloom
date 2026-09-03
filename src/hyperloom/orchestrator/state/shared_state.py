@@ -432,14 +432,8 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-#: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
+#: top-level state.json schema version, stamped on every save.
 LATEST_STATE_SCHEMA_VERSION: int = 6
-
-#: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
-#: name. A state written before that rename spells them the old way, and the
-#: unknown-key filter in ``from_dict`` drops anything not in this table, which
-#: is why an un-migrated resume silently restarted the phase from scratch.
-#: ``framework_pr_max_candidates`` and ``framework_pr_critic_decisions`` are
 
 
 def effective_closing_grace_sec(
@@ -1512,18 +1506,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "SharedState":
-        """Construct a :class:`SharedState` from a raw mapping, migrating it.
+        """Construct a :class:`SharedState` from a raw mapping.
 
-        Acts as the unified migration entry point: an absent
-        ``schema_version`` is treated as 1 and unknown keys are dropped. The
-        operation is idempotent and short-circuits when already at the latest
-        schema.
+        Unknown keys are dropped and missing keys take their field defaults;
+        the result is stamped with :data:`LATEST_STATE_SCHEMA_VERSION`.
 
         Args:
             raw: Decoded state mapping (e.g. from JSON on disk).
 
         Returns:
-            A fully-populated, migrated :class:`SharedState` instance.
+            A fully-populated :class:`SharedState` instance.
         """
         # Filter to known fields; unknown keys dropped, missing keys default.
         # ``fields()`` rather than ``__dataclass_fields__``: the latter also

@@ -634,26 +634,6 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
     gate.validate_intent("orchestration", intent)  # no exception
 
 
-def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
-    """A new handler kind cannot arrive silently ungated."""
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-        REQUEST_KIND_TO_OWNED_ACTION,
-    )
-    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
-
-    # trace_analyze has no owning action and no phase membership, so there is
-    # nothing to gate it against; it is refreshed on demand from any phase.
-    exempt = {"trace_analyze"}
-    ungated = (
-        set(KERNEL_REQUEST_HANDLERS)
-        - set(REQUEST_KIND_TO_OWNED_ACTION)
-        - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-        - exempt
-    )
-    assert ungated == set(), f"request kinds reach no phase gate: {sorted(ungated)}"
-
-
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (

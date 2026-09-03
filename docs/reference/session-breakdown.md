@@ -439,11 +439,8 @@ downstream consumers:
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
 
 > **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
-> The key name is a misnomer held fixed by this contract. Both the baseline and the final
-> producer write the benchmark's own output throughput verbatim, and no code path divides it
-> by a GPU count — so do not divide it by one either, and do not multiply it by one. On a TP=8
-> server, treating it as per-GPU misreads the headline number by 8x.
-> `cumulative_gain_pct_validated` is a ratio of two whole-server numbers and is unaffected.
+> The key name is a misnomer held fixed by this contract; do not divide it by a GPU count.
+> `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
 
 > Consumer best practice: index on
 > `(session.session_id, final.throughput_tok_s_per_gpu,

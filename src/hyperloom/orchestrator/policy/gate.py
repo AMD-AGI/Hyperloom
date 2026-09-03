@@ -672,7 +672,7 @@ class PolicyGate:
     shared_state: Any | None = None
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
-        """Apply environment overrides for strict-mode flags."""
+        """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
         import os as _os
 
         if not self.strict_paths and _os.environ.get("INFERENCE_OPTIMIZER_STRICT_PATHS", "").strip() in (
@@ -734,23 +734,17 @@ class PolicyGate:
         self,
         action_name: str,
         params: dict[str, Any] | None,
-        *,
-        task_id: str = "",
     ) -> None:
         """Re-validate a persisted queued task before executor dispatch.
 
         Defense-in-depth for forged ``coordinator.db`` rows: replays path
-        containment and structural delegate action gates. Coordinator-managed
-        internal actions receive path checks only. Phase compatibility is
-        skipped so legitimately queued work is not rejected after a phase
-        transition, and source rules are skipped because the task row does not
-        persist the originating role; both are enforced at intent ingress.
+        containment and structural delegate action gates. Source rules are
+        skipped because the task row does not persist the originating role;
+        they are enforced at intent ingress.
 
         Args:
             action_name: The task ``kind`` / delegate action name.
             params: Task params deserialized from the DB row.
-            task_id: Persisted task id, used to admit the tracked enablement
-                revalidation baseline.
 
         Raises:
             PolicyDenied: When the task fails path-containment or structural
@@ -773,9 +767,7 @@ class PolicyGate:
             payload,
             trusted_framework_targets=trusted_framework_targets,
         )
-        # Coordinator-managed internal actions (roofline / profile /
-        # replay_warm_recipe / conc_sweep) are dispatched by
-        # the Coordinator itself, never LLM-delegated, so they receive path
+        # Coordinator-dispatched internal actions get path checks only.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
         self._validate_delegate_body(
@@ -912,9 +904,8 @@ class PolicyGate:
     def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
-        Requires ``action_name``, then hard-rejects kernel_agent-owned
-        actions (REQUEST-only). Mirrors the delegate channel's per-action
-        source, GEMM-tuning ownership, phase, and external-tool collision
+        Requires ``action_name``, then mirrors the delegate channel's
+        per-action source, GEMM-tuning ownership and external-tool collision
         gates so an LLM cannot sidestep them by proposing instead of
         delegating.
 
@@ -1149,7 +1140,6 @@ class PolicyGate:
                     hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
                 )
 
-    # R1 phase_incompatible
     # GEMM tuning ownership
     def _validate_gemm_tuning_action(
         self,
@@ -1216,7 +1206,6 @@ class PolicyGate:
             ),
         )
 
-    # ``sweep_phase_singleton``
     def _validate_integrate_patch_critic_gate(
         self,
         payload: dict[str, Any],

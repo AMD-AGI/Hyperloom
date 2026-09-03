@@ -165,21 +165,10 @@ class TargetTputObjective(_RatioObjective):
     """Reach an absolute throughput number (progress against best-so-far tput, not baseline).
 
     The unit is framework-dependent: tok/s for serving frameworks, img/s for
-    scriptable xDiT (surfaced elsewhere as the equivalent e2el_mean_ms).
-
-    Scope is **whole-server total**, not per-GPU, because that is what
-    ``resolve_grading_anchor_tput`` returns: ``current_best.tput`` and
-    ``baseline_tput`` are the benchmark's own output throughput, which no code
-    path divides by a GPU count. The field name says ``per_gpu`` and is kept
-    for compatibility -- reading it as per-GPU is what made a TP=8 server
-    report ``target_reached`` at an eighth of the intended number.
-
-    Per-GPU normalization is deliberately not done here: there is no single
-    authority for "how many GPUs is this run using". ``SharedState.tp``
-    defaults to ``0`` (unknown) and is not the GPU count under EP or
-    multi-node, so dividing would need a fallback, and a permissive fallback
-    on a stop condition is exactly the failure this docstring exists to
-    prevent. Callers that want a per-GPU target convert on the way in.
+    scriptable xDiT (surfaced elsewhere as the equivalent e2el_mean_ms). Scope
+    is whole-server total, not per-GPU; the ``per_gpu`` field name is a
+    misnomer kept for compatibility. Callers wanting a per-GPU target convert
+    on the way in.
     """
 
     target_tput_per_gpu: float

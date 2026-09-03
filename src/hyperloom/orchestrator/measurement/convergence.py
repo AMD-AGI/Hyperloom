@@ -31,10 +31,7 @@ A and B legs, and it lives in its own module.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
-
-log = logging.getLogger(__name__)
 
 # Same order of magnitude as the KEEP threshold: a measurement that cannot
 # resolve the decision it feeds is not converged.

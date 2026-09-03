@@ -47,38 +47,6 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
-# Request-kind aliases that route to a kernel-owned handler. apply_patch is
-# an alias of integrate (both dispatch to integrate_handler); PolicyGate
-# resolves the alias to its canonical owned action so the phase-action gate
-# applies identically.
-KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
-    "apply_patch": "integrate",
-}
-
-
-# Request ``kind`` -> the kernel-owned action it gates as, derived from the two
-# tables above so a new kind cannot fall out of sync with the catalogue.
-# ``trace_analyze`` is absent by design: it owns no action and no phase, and
-# mapping it onto one would deny it everywhere.
-REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
-    {
-        **{kind: action for action, kind in KERNEL_ACTION_REQUEST_KINDS.items()},
-        **KERNEL_REQUEST_KIND_ALIASES,
-    }
-)
-
-
-# Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
-# rejects them from an LLM, which would bypass the lane's gate and accounting.
-# Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
-# they have no executor and no prompt entry.
-COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
-    {
-        "run_collective",
-    }
-)
-
-
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
@@ -416,13 +384,10 @@ __all__ = [
     "ACTION_CATALOGUE",
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
-    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
-    "KERNEL_REQUEST_KIND_ALIASES",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
-    "REQUEST_KIND_TO_OWNED_ACTION",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

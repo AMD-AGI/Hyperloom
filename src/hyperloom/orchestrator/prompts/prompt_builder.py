@@ -474,17 +474,15 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
-def _section_action_catalogue(actions: list[ActionMetadata], *, phase: str = "") -> list[str]:
+def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
 
-    Every enabled action keeps its description and cost/gain/risk line in every
-    phase, so a ``skip_to_*`` decision can still compare what later phases do.
-    Only the payload contracts (``EMIT:`` template and grid schema) are scoped.
+    Every enabled action keeps its description, cost/gain/risk line and payload
+    contract in every phase, so a ``skip_to_*`` decision can still compare what
+    later phases do.
 
     Args:
         actions (list[ActionMetadata]): The actions enabled for this run.
-        phase (str): Normalised current pipeline phase; ``""`` renders every
-            payload contract.
 
     Returns:
         list[str]: Markdown lines for the action catalogue.
@@ -1067,7 +1065,7 @@ def build_orchestration_prompt(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
-        _section_action_catalogue(actions, phase=phase_norm),
+        _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
     ]

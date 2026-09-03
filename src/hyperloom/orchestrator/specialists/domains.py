@@ -36,7 +36,6 @@ class SpecialistDomain:
         layer (str): Human-readable description of the source/runtime layer it
             focuses on.
         kb_anchor (str): Knowledge-base anchor the domain is associated with.
-            (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
         description (str): Free-form description of the domain's responsibilities.
             Defaults to an empty string.
         default_mode (str): Default dispatch mode for this domain, either

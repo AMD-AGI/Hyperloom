@@ -247,7 +247,6 @@ class SubAgentRunner:
                     self.policy.validate_dispatched_task(
                         task.kind,
                         dict(task.params or {}),
-                        task_id=task.task_id,
                     )
                 except PolicyDenied as denied:
                     await self._write_terminal(

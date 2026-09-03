@@ -272,11 +272,8 @@ class Baseline(TypedDict, total=False):
 
     Attributes:
         throughput_tok_s_per_gpu (float): Baseline throughput, whole-server
-            total in ``throughput_unit`` -- NOT divided by GPU count. The key
-            name is a misnomer kept for wire compatibility; the producer
-            (``collectors/sessions.py``) writes ``state.baseline_tput``
-            verbatim, and no path divides it by a GPU count, so on a TP>1
-            server dividing it again over-reports by that factor.
+            total in ``throughput_unit``. The key name is a misnomer kept for
+            wire compatibility; do not divide it by a GPU count.
         accuracy (float): Baseline accuracy score.
         ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
         e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
@@ -319,9 +316,8 @@ class Final(TypedDict, total=False):
 
     Attributes:
         throughput_tok_s_per_gpu (float | None): Final throughput, whole-server
-            total in ``throughput_unit`` -- NOT divided by GPU count (same
-            misnomer as ``BaselineSummary``; the producer writes
-            ``current_best.tput`` verbatim), or None.
+            total in ``throughput_unit`` (same misnomer as
+            ``BaselineSummary``), or None.
         cumulative_gain_pct_validated (float): Validated cumulative gain percent.
         validated_at_stack_len (int): Stack depth at which validation occurred.
         validated_ts (str): ISO UTC timestamp of the validation.

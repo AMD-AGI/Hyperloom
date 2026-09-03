@@ -148,11 +148,6 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
-def _warm_kernel_keep_threshold_pct(state: Any) -> float:
-    """Gain a replayed champion set must clear (decaying curve based on macro_cycle)."""
-    return _phase_state.resolve_keep_threshold(state)
-
-
 class PreludePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
@@ -1581,7 +1576,7 @@ class PreludePhase(PhaseHandler):
             "warm_kernel_apply_results": kernel_applied,
             "warm_kernel_snapshots": kernel_snapshots,
             "combined_current_contract": bool(current_remote or kernel_pending),
-            "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(self.shared_state),
+            "combined_keep_threshold_pct": _phase_state.resolve_keep_threshold(self.shared_state),
             "workload_compatibility": workload_compatibility,
         }
         try:
@@ -2091,16 +2086,13 @@ class PreludePhase(PhaseHandler):
         keep_threshold = 0.0
         if combined_current_contract:
             raw_threshold = decision_params.get("combined_keep_threshold_pct")
+            default_threshold = _phase_state.resolve_keep_threshold(self.shared_state)
             try:
-                keep_threshold = (
-                    float(raw_threshold)
-                    if raw_threshold is not None
-                    else _warm_kernel_keep_threshold_pct(self.shared_state)
-                )
+                keep_threshold = float(raw_threshold) if raw_threshold is not None else default_threshold
             except (TypeError, ValueError):
-                keep_threshold = _warm_kernel_keep_threshold_pct(self.shared_state)
+                keep_threshold = default_threshold
             if not math.isfinite(keep_threshold):
-                keep_threshold = _warm_kernel_keep_threshold_pct(self.shared_state)
+                keep_threshold = default_threshold
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
