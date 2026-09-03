@@ -991,6 +991,26 @@ class ProfileExecutor(BaselineExecutor):
         # could not be installed.
         self._host_probe_status: str = ""
 
+    def _resolve_sink(self, ctx) -> Any:
+        """Decline the baseline event a profile run must never open.
+
+        This class runs the base executor's body through ``super().__call__``,
+        and that body now opens a BASELINE event for whatever it measures. A
+        profile is not a baseline: the roofline recorder already stores each
+        profile attempt on its own action, so opening one here would invent a
+        BASELINE event for every roofline, and ``open_event`` is idempotent --
+        so in a phase and cycle that also ran a real measurement the profile
+        pass would be merged into that event's actions and read as one of its
+        measurements.
+
+        Args:
+            ctx: Action context, unused.
+
+        Returns:
+            Always ``None``.
+        """
+        return None
+
     def _resolve_default_config(self) -> Path:
         """Override BaselineExecutor's resolver to pick the profile yaml.
 

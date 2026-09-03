@@ -538,3 +538,27 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
     assert action["failure"]["error_class"] == "FileNotFoundError"
     # The pass that raised is closed too, rather than left reading "running".
     assert action["runs"][0]["status"] == "failed"
+
+
+def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
+    """A profile borrows this executor's body but is not a measurement.
+
+    ``ProfileExecutor`` subclasses ``BaselineExecutor`` and runs its body via
+    ``super().__call__``, so without this the roofline's profile sub-step would
+    mint a BASELINE event per roofline -- and because ``open_event`` is
+    idempotent, in a cycle that also measured for real the profile pass would
+    land inside that event's actions and read as one of its measurements.
+    """
+    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+
+    executor = object.__new__(ProfileExecutor)
+    executor.shared_state = SimpleNamespace(phase="PRELUDE", macro_cycle=0)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="rf-1-profile", kind="profile", params={"reason": "roofline"}),
+        lease=None,
+        extra={"session_dir": str(tmp_path)},
+    )
+
+    assert executor._resolve_sink(ctx) is None
+    assert make_baseline_recorder(executor._resolve_sink(ctx), task_id="rf-1-profile") is None
+    assert _events(tmp_path) == []
