@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )
+from ..actions.executors._workload_envs import geak_metric_axis
 from ..kernel import collective_recovery as _collective_recovery
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..kernel._recorder_trace import trace_recording_skipped
@@ -1042,6 +1043,11 @@ class KernelPhase(PhaseHandler):
             state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
         )
 
+        # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
+        # decision, so they resolve through one helper: a handoff that named a
+        # different axis than the one KEEP is decided on would have GEAK searching
+        # against a reference it was never measured against.
+        e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
         handoff = {
             # v2 adds ``baseline_env_spec`` (the full layered env of current_best);
             # v1-only consumers ignore it and degrade to the flags/env-only baseline.
@@ -1086,7 +1092,7 @@ class KernelPhase(PhaseHandler):
             # Align GEAK's bench CLIENT to Hyperloom's exact one so final/sweep
             # numbers are cross-harness comparable.
             "bench_client": "auto",
-            "e2e_metric": "output",
+            "e2e_metric": e2e_metric,
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # Pin the serving GPU set: explicit visibility mask, else 0..tp-1.
             "gpu_ids": (
@@ -1453,9 +1459,17 @@ class KernelPhase(PhaseHandler):
         # SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
+        # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
+        # graded on total token throughput, so leaving this pinned to output aims
+        # GEAK's search at a number the session does not score -- on the AgentX
+        # corpus the two run ~140x apart, and a kernel that helps the decode-side
+        # output figure need not help the prefill-dominated total by the same
+        # margin. Synthetic runs resolve to "output" and are unaffected.
+        _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+
         def _run() -> subprocess.CompletedProcess:
             runner_env = dict(os.environ)
-            runner_env["E2E_METRIC"] = "output"
+            runner_env["E2E_METRIC"] = _geak_e2e_metric
             # Only injection point needed for the whole GEAK chain: geak_runner
             # and run_e2e both hand their full environment to the child, so the
             # tag reaches the Claude CLI that actually spends.

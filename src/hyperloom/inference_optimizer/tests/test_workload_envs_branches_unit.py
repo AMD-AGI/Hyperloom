@@ -774,16 +774,22 @@ def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch
     assert bench["workload_spec"]["warmup_grace_period_s"] == scaled
 
 
-def test_agentx_workload_spec_names_the_basis_geak_records(monkeypatch, tmp_path):
-    """metric_basis is spelled in GEAK's vocabulary, not Hyperloom's curve names.
+def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatch, tmp_path):
+    """metric_basis must follow the grader, in GEAK's own vocabulary.
 
-    ``bench_e2e.sh`` records ``aggregate_output_tok_s``/
-    ``aggregate_total_token_tok_s``, and ``run_e2e`` compares bases as strings,
-    so a Hyperloom-side name here would never match.
+    An agentic replay is graded on total token throughput, which runs ~140x its
+    output figure on this corpus, so a handoff naming the output axis would aim
+    GEAK's search at a number the session never scores.
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     src = _write(tmp_path / "cfg.yaml", envs={})
     bench = _materialize(src, tmp_path / "out")
+    assert bench["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
+
+    # An explicit override wins in both directions, and the basis follows it.
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    bench = _materialize(src, tmp_path / "out2")
     assert bench["workload_spec"]["metric_basis"] == "aggregate_output_tok_s"

@@ -4510,6 +4510,10 @@ async def _run_geak_gemm_tuning(
     if baseline_tput is None:
         baseline_tput = state.baseline_tput
 
+    from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
+
+    _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
         "cwd": str(workspace),
@@ -4523,7 +4527,11 @@ async def _run_geak_gemm_tuning(
         "isl": isl,
         "osl": osl,
         "baseline_tput": float(baseline_tput or 0.0),
-        "env": {"E2E_METRIC": "output"},
+        # Same axis Hyperloom grades this session on; ``baseline_tput`` above is
+        # read on that axis too, so a pinned "output" here would price every
+        # tuned GEMM against a reference measured differently. Synthetic runs
+        # resolve to "output" and are unaffected.
+        "env": {"E2E_METRIC": _geak_e2e_metric},
     }
     if geak_config:
         input_payload["config"] = geak_config
@@ -4550,7 +4558,7 @@ async def _run_geak_gemm_tuning(
 
     cmd = [
         "env",
-        "E2E_METRIC=output",
+        f"E2E_METRIC={_geak_e2e_metric}",
         "python3",
         str(_kernel_agent_tool_path("gemm_tuning.py")),
         "--input-json",

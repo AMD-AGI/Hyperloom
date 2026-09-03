@@ -31,7 +31,11 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_int
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import (
+    is_agentx_mode,
+    parse_intvty_noise_pct,
+    total_tput_grading_enabled,
+)
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -231,6 +235,36 @@ def _agentx_default_corpus(model: str) -> str:
     return AGENTX_CORPUS_256K
 
 
+# GEAK's own names for the two throughput axes it can measure: ``E2E_METRIC``
+# selects one and ``bench_summary.json`` records the matching ``metric_basis``.
+# Spelled in GEAK's vocabulary, not Hyperloom's curve-row names, so the handoff
+# and GEAK's summary can be compared as strings on both sides.
+GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
+GEAK_METRIC_TOTAL = ("total", "aggregate_total_token_tok_s")
+
+
+def geak_metric_axis(*, benchmark_mode: str = "") -> tuple[str, str]:
+    """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's graded axis.
+
+    The handoff must name the axis Hyperloom takes its KEEP decisions on. An
+    agentic replay is graded on total token throughput, so publishing the output
+    axis would aim GEAK's search at the ~0.7% of the token budget this session
+    does not score -- and a candidate GEAK measured on one axis cannot be
+    compared against a reference read on the other, which run ~140x apart.
+
+    Args:
+        benchmark_mode: The session's persisted mode, when the caller holds one.
+            Passing it matters for a round driven from a subprocess that did not
+            inherit ``HYPERLOOM_AGENTX``.
+
+    Returns:
+        The ``E2E_METRIC`` value and the ``metric_basis`` name that goes with it.
+    """
+    if total_tput_grading_enabled(benchmark_mode=benchmark_mode):
+        return GEAK_METRIC_TOTAL
+    return GEAK_METRIC_OUTPUT
+
+
 def cli_workload_defaults() -> tuple[int, int, int]:
     """The CLI's ``ISL``/``OSL``/``CONC`` defaults, as one source for fallbacks.
 
@@ -318,9 +352,11 @@ def build_agentx_workload_spec(
         # validation explicitly requests the full canonical window.
         "geak_loop_duration_s": min(duration, 900),
         "concurrency": conc,
-        # The basis GEAK measures on and records in ``bench_summary.json``, in
-        # GEAK's own vocabulary so the two sides compare as strings.
-        "metric_basis": "aggregate_output_tok_s",
+        # ``benchmark_mode`` is "agentx" because the caller returned early
+        # otherwise; the resolver still honours an explicit HYPERLOOM_PERF_METRIC
+        # in both directions.
+        "metric_basis": geak_metric_axis(benchmark_mode="agentx")[1],
+        "intvty_p90_veto_pct": parse_intvty_noise_pct(),
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
