@@ -139,6 +139,13 @@ is the wrapper, which exits immediately; under Claw the tool returns a
 `shell_id` and never a pid. The robustness monitor reads `$PID_FILE` and would
 misfire a spurious resume on a dead wrapper pid.
 
+When no authoritative pid can be had — no `.pid` in the launch-info JSON and a
+`pgrep` that is empty or ambiguous — **delete** `$PID_FILE` instead of leaving
+the wrapper pid in it. A missing pidfile reads as "unknown" to the monitor,
+which then relies on the owner pid, heartbeat, and lease signals; a stale one
+reads as "dead optimizer" and triggers a resume of a session that is still
+running.
+
 Health-check after 30 seconds (the launch-info JSON carries the authoritative
 `.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
 a tiny `python3` reader):
@@ -170,7 +177,18 @@ if [ -z "$REAL_PID" ]; then
          "HYPERLOOM_LAUNCH line and $RUN_LOG." >&2
   fi
 fi
-[ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
+if [ -n "$REAL_PID" ]; then
+  echo "$REAL_PID" > "$PID_FILE"
+else
+  # Never leave the setsid `$!` wrapper pid sitting in the file: it exited at
+  # launch, and the monitor would read a dead pid and fire a spurious resume.
+  # Remove it instead -- the monitor guards its read with `[ -f "$PID_FILE" ]`,
+  # so an absent file means "unknown" and it falls through to the authoritative
+  # signals (optimizer.lock owner pid, state.json freshness, live leases).
+  rm -f "$PID_FILE"
+  echo "WARN: removed $PID_FILE (no authoritative pid); the monitor will use" \
+       "the lock/heartbeat/lease signals instead of a stale wrapper pid." >&2
+fi
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
 # does not reap, so that check reports a dead optimizer as alive indefinitely.
 # Ask for the process state and reject Z.
