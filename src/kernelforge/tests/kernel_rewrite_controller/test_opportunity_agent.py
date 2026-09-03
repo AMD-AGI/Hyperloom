@@ -224,6 +224,12 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert "never return no_opportunity solely" in prompt
     assert "<measured|corroborated|inferred>" in prompt
     assert "Never invent a GPU-time percentage" in prompt
+    assert "current end-to-end inference workload" in prompt
+    assert "available only as a binary" in prompt
+    assert "largest measured end-to-end GPU-time share" in prompt
+    assert "Derive driver cases from the current workload" in prompt
+    assert "correctness and performance must invoke the same operator" in prompt
+    assert "CUDA/HIP graph replays over preallocated inputs" in prompt
     assert "Do not place identity fields at the top level" in prompt
     assert '"gpu": "mi355x"' in prompt
     assert "registered backend" in prompt

@@ -163,6 +163,28 @@ Follow this evidence workflow:
    Never invent a GPU-time percentage for inferred evidence, and rank measured
    candidates ahead of otherwise comparable inferred candidates.
 
+Apply these non-negotiable opportunity rules:
+1. Publish only operators that the current end-to-end inference workload
+   actually executes under the supplied serving arguments and environment.
+   Establish the active runtime path from trace/log evidence or by evaluating
+   the deterministic dispatch conditions against the current serving state.
+   Skip code that merely exists in the repository but is inactive here.
+2. Publish only operators with editable implementation source in one supplied
+   Git repository. If the active implementation is available only as a binary,
+   shared library, HSACO, or other generated artifact without a tracked editable
+   generator source, skip it.
+3. Prefer the largest measured end-to-end GPU-time share. Assign lower numeric
+   priority values to higher-share operators. When exact percentages are
+   unavailable, rank only from clearly labeled corroborated evidence and never
+   fabricate a percentage.
+4. Derive driver cases from the current workload and serving state, including
+   its prefill/decode phases, TP/EP partitioning, concurrency, sequence lengths,
+   active backend, tensor shapes, dtypes, layouts, and dispatch boundaries.
+5. For every case, correctness and performance must invoke the same operator
+   with the same shapes, dtypes, layouts, and semantic inputs. Performance must
+   time CUDA/HIP graph replays over preallocated inputs; do not use eager timing
+   or silently fall back to eager execution.
+
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under
 the supplied staging directory.
@@ -190,7 +212,12 @@ task.json must use this exact top-level structure:
   "driver_path": "driver.py",
   "source_files": ["<repo-relative path>"],
   "target_functions": ["<function>"],
-  "shape_cases": [{"name": "<case>"}],
+  "shape_cases": [{
+    "name": "<workload-derived case>",
+    "phase": "<prefill|decode>",
+    "shape": {"<dimension>": 1},
+    "dtype": "<runtime dtype>"
+  }],
   "priority": 0,
   "reason": "<why this measured workload may improve>",
   "evidence": [{
