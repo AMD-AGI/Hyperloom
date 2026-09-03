@@ -5055,7 +5055,8 @@ def _stage_nomination_brief(
 
     Raises:
         _NominationStagingError: When no eligible row resolves into a stageable
-            tree, so no workspace could make any nomination runnable.
+            tree, so no workspace could make any nomination runnable, or when the
+            tree is an editable install no staged copy can stand in for.
     """
     request_path = Path(nomination_input).resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -5071,6 +5072,14 @@ def _stage_nomination_brief(
     repo = str(hottest.get("kernel_repo") or "").strip() or _git_toplevel(source_file)
     if not repo:
         raise _NominationStagingError(f"could not resolve a source tree to stage from {source_file}")
+    # An editable-finder install imports the live tree through a meta_path finder
+    # PYTHONPATH cannot override, so a staged copy is never what forge measures.
+    if _needs_inplace(repo):
+        raise _NominationStagingError(
+            f"{repo} is an editable install, whose finder imports the live tree: a staged copy "
+            "would never be the tree forge measures, so self-nomination cannot run here; use the "
+            "named-kernel path"
+        )
 
     staged = _prepare_worktree(source_file, repo, output_dir, branch)
     if staged is None:

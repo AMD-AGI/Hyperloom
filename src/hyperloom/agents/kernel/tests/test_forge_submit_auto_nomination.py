@@ -92,6 +92,29 @@ def _kernel_repo(tmp_path: Path, *, name: str = "framework") -> tuple[Path, Path
     return repo, source
 
 
+def _mark_editable_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path) -> None:
+    """Make ``repo`` look like a PEP 660 editable install.
+
+    ``_editable_roots`` scans ``sys.path`` for ``__editable__*.pth``, so a fake
+    site-packages on the path drives the real detector instead of stubbing it.
+    """
+    site_packages = tmp_path / "fake-site-packages"
+    site_packages.mkdir(exist_ok=True)
+    (site_packages / "__editable__.framework-1.0.pth").write_text(f"{repo.resolve()}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+
+def _branches(repo: Path) -> list[str]:
+    """Every local branch in ``repo``, so staging side effects are visible."""
+    listed = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return sorted(listed.stdout.split())
+
+
 def _write_request(tmp_path: Path, *, rows: list[dict] | None = None) -> Path:
     """A nomination request plus the manifest it points at.
 
@@ -624,6 +647,60 @@ def test_a_brief_with_no_resolved_source_is_refused_before_launch(tmp_path, monk
     assert result["patches"] == []
     assert "staging failed" in result["error"]
     assert "no candidate with a resolved source file" in result["error"]
+
+
+def test_an_editable_install_is_refused_instead_of_staged_into_a_copy(tmp_path, monkeypatch):
+    """An editable tree cannot be staged, so the run must fail by name.
+
+    The editable finder imports the live path and PYTHONPATH cannot override it,
+    so forge would benchmark an unpatched server while writing patches into a copy
+    nothing imports -- "no gain" recorded for work that was never applied.
+    """
+    _neutralize_env_probes(monkeypatch)
+    repo, source = _kernel_repo(tmp_path, name="editable_framework")
+    request = _write_request(
+        tmp_path,
+        rows=[
+            {
+                "kernel_name": "paged_attention_v1",
+                "gpu_pct": 40.0,
+                "source_file": str(source),
+                "kernel_repo": str(repo),
+                "rejected": False,
+            }
+        ],
+    )
+    _mark_editable_install(monkeypatch, tmp_path, repo)
+    assert forge_submit._needs_inplace(str(repo)) is True
+    before = _branches(repo)
+    assert len(before) == 1
+
+    def _boom(_command, **_kwargs):
+        raise AssertionError("forge must not launch against an editable install")
+
+    _patch_forge_launch(monkeypatch, _boom)
+
+    output_dir = tmp_path / "attempt"
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        output_dir=output_dir,
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    assert result == {
+        "status": "failed",
+        "patches": [],
+        "error": (
+            f"forge --auto workspace staging failed: {repo} is an editable install, whose "
+            "finder imports the live tree: a staged copy would never be the tree forge "
+            "measures, so self-nomination cannot run here; use the named-kernel path"
+        ),
+    }
+    # Nothing was staged for a run that could not have been correct: no forge
+    # branch in the live repo, and no workspace beside the campaign directory.
+    assert _branches(repo) == before
+    assert sorted(child.name for child in output_dir.iterdir()) == ["forge_experiments"]
 
 
 def test_a_rejected_row_cannot_decide_the_staged_tree(tmp_path, monkeypatch):
