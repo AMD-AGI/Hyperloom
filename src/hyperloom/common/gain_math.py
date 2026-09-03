@@ -41,8 +41,10 @@ def conc_pair_comparison(
     """Pair curve points by CONC (outer join), compute per-conc speedup, and aggregate.
 
     Shared by the conc-sweep post-hook and the breakdown collector, which must
-    produce byte-identical rows/summary from the same curves. Stdlib-only so
-    the collector never drags in Magpie/torch at report time.
+    produce byte-identical rows/summary from the same curves on the same
+    ``metric_key`` -- the collector reads its key off the report it recovers
+    for. Stdlib-only so the collector never drags in Magpie/torch at report
+    time.
 
     Args:
         baseline_points: Curve rows for the baseline arm.
