@@ -603,9 +603,6 @@ def build(
     # before the timeline is read: their fragments are on disk, and an event
     # left open would otherwise be read back as still running.
     _safe_collect("timeline_finalize", lambda: finalize_events(sd), v6_warnings, default=[])
-    # GEAK is collected only for V6: the V5 payload has no ``geak`` key, and
-    # adding one would change the V5 surface, which V6 must not do.
-    v6_geak = _safe_collect("geak", lambda: collectors.collect_geak(sd, state, v6_warnings), v6_warnings, default={})
     timeline = _safe_collect(
         "timeline",
         lambda: collectors.collect_v6_timeline(
@@ -620,10 +617,6 @@ def build(
             sweep=sweep,
             conc_sweep_summary=conc_sweep_summary,
             phase_timeline=phase_timeline,
-            optimizations=optimizations,
-            kernel_journey=kernel_journey,
-            collective=collective,
-            geak=v6_geak,
         ),
         v6_warnings,
         default=[],

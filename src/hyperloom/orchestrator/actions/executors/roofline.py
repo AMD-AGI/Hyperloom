@@ -273,11 +273,13 @@ class RooflineExecutor:
         dangling ``status="running"`` event is then unambiguous: the session was
         killed mid-roofline, rather than the executor having raised.
 
-        The session is bound for the duration of the run when the caller has
-        not bound one. The Coordinator binds at startup, so this covers the
-        callers that reach the executor without going through it -- a directly
-        dispatched action, a test driving the executor on its own -- rather
-        than letting them record nothing.
+        The session the context names is bound for the duration of the run
+        whenever it is not the one already bound. The Coordinator binds its own
+        session at startup and every action it dispatches agrees with it, so
+        this normally changes nothing; it is what keeps a caller that reached
+        the executor another way -- a directly dispatched action, a test
+        driving the executor on its own -- from recording into whichever
+        session was bound last instead of its own.
 
         Args:
             ctx: Runner context carrying the task and session metadata.
@@ -285,12 +287,18 @@ class RooflineExecutor:
         Returns:
             A result dict describing the roofline outcome and artifacts.
         """
-        from hyperloom.inference_optimizer.session.session_binding import session_is_bound, session_scope
+        from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
 
+        # Only a context that names its session binds one. The bare
+        # ``_resolve_session_dir`` fallback is the working directory, and
+        # writing a session's timeline into whatever directory the process
+        # happens to be in is worse than not recording.
+        named = (ctx.extra or {}).get("session_dir")
         with ExitStack() as stack:
-            if not session_is_bound():
-                with suppress(Exception):
-                    stack.enter_context(session_scope(self._resolve_session_dir(ctx)))
+            with suppress(Exception):
+                session = Path(named).resolve() if named else None
+                if session is not None and bound_session_or_none() != session:
+                    stack.enter_context(session_scope(session))
             return await self._run_recorded(ctx)
 
     async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:

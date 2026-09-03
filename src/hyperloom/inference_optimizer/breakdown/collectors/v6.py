@@ -14,7 +14,6 @@ from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
     _AUTHORING_TASK_KINDS,
     _FRAMEWORK_PHASES,
-    _KERNEL_PHASES,
     _dict_rows,
     _first,
     _mapping,
@@ -29,7 +28,6 @@ from ._common import (
 from .v6_stages import (
     project_baseline_event,
     project_conc_sweep_event,
-    project_kernel_events,
     project_sweep_event,
 )
 
@@ -1983,18 +1981,17 @@ def collect_v6_timeline(
     sweep: Any = None,
     conc_sweep_summary: Any = None,
     phase_timeline: Any = None,
-    optimizations: Any = None,
-    kernel_journey: Any = None,
-    collective: Any = None,
-    geak: Any = None,
 ) -> list[dict[str, Any]]:
     """Load durable events and project stage work without mutating V5 state.
 
-    ``install`` and ``model_gate`` are read back from the durable event
-    directory because they run before the Coordinator exists. Everything else
-    is projected here from V5 sections the exporter has already built, so the
-    keyword arguments are all optional: a caller that passes none still gets
-    the durable events plus the framework projection.
+    ``install``, ``model_gate``, ``kernel`` and ``roofline`` are read back from
+    the durable event directory: the first two run before the Coordinator
+    exists, and the last two are recorded by the phase and the action that
+    produce them, which know things no projection over ``state.json`` can
+    recover. The measurement stages are projected here from V5 sections the
+    exporter has already built, so the keyword arguments are all optional: a
+    caller that passes none still gets the durable events plus the framework
+    projection.
 
     Every projection is isolated (see :func:`_projected`). The durable events
     are read first and are never discarded by a later stage's failure.
@@ -2011,19 +2008,6 @@ def collect_v6_timeline(
             for window in windows
         ]
 
-    def _kernel_events() -> list[dict[str, Any]]:
-        return project_kernel_events(
-            state,
-            _phase_windows(state, _KERNEL_PHASES),
-            warnings,
-            optimizations=optimizations,
-            kernel_journey=kernel_journey,
-            collective=collective,
-            geak=geak,
-            baseline=baseline,
-            recorded_operations=operations,
-        )
-
     timeline.extend(_projected("framework_agent", _framework_events, warnings))
     timeline.extend(
         _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
@@ -2038,7 +2022,6 @@ def collect_v6_timeline(
             warnings,
         )
     )
-    timeline.extend(_projected("kernel", _kernel_events, warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
