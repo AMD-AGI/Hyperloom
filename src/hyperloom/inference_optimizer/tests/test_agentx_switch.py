@@ -89,6 +89,7 @@ def test_switch_on_authoritative_overwrite(tmp_path, monkeypatch):
     # gpu_type pre-pins vllm_mi300x.sh; the switch must overwrite it.
     bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
     assert bench["benchmark_script"] == "aiperf_client.sh"
+    assert bench["envs"]["AGENTX_PHASE_WAIT_TIMEOUT_S"] == str(bench["timeout_seconds"])
 
 
 def test_persisted_agentx_mode_switches_without_ambient_env(tmp_path, monkeypatch):

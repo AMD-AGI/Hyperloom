@@ -5962,6 +5962,7 @@ class TestBuildTraceAnalyzeCmd:
     def test_agentx_bypass_requires_single_rank(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.benchmark_mode = "agentx"
+        state.tp = 8
         cmd, _steady = krh._build_trace_analyze_cmd(
             {"trace_input": "/t/trace-dir"},
             session_dir=session_dir,
@@ -5979,6 +5980,7 @@ class TestBuildTraceAnalyzeCmd:
             analysis_route="bypass",
         )
         assert "--require-single-rank" in cmd
+        assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
 
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)

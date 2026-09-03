@@ -296,6 +296,7 @@ def apply_agentx_switch(
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
+    envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
     if _raw_grace != str(_grace):
         log.info(
             "AgentX: exporting the CONC-scaled warmup grace %ds to the client "

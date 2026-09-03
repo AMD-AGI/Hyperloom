@@ -50,7 +50,6 @@ _NON_RETRYABLE_CAPTURE_REASONS = frozenset(
         "api_port_allocation_failed",
         "capture_status_missing",
         "capture_status_unreadable",
-        "phase_gate_missing",
         "profiler_output_unconfigured",
     }
 )

@@ -37,6 +37,7 @@ from typing import Any, Iterator
 # Stdlib-only sibling; keeps this reader independent of TraceLens while sharing
 # one capture-vs-workload rule with the TraceLens route.
 from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+from _trace_rank import select_primary_trace, trace_rank as _rank_of
 
 # GPU device-side event categories (Kineto ``cat`` values).
 _GPU_KERNEL_CAT = "kernel"
@@ -61,12 +62,6 @@ _DECODER = json.JSONDecoder()
 # events a few KiB, so these retain generous headroom for embedded metadata.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
-
-# Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
-_RANK_RES = (
-    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
-    re.compile(r"(?:^|[-_.])tp[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
-)
 
 
 def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
@@ -123,18 +118,6 @@ def _file_size(fp: Path) -> int:
         return 0
 
 
-def _rank_of(path: str | Path) -> int | None:
-    """Parse the rank index from a trace filename (``None`` if not rank-tagged)."""
-    trace_path = Path(path)
-    for pattern in _RANK_RES:
-        if match := pattern.search(trace_path.name):
-            return int(match.group(1))
-    for pattern in _RANK_RES:
-        if match := pattern.fullmatch(trace_path.parent.name):
-            return int(match.group(1))
-    return None
-
-
 def _trace_candidates(root: Path) -> list[Path]:
     """Return all trace-shaped files under ``root`` (recursive)."""
     out: list[Path] = []
@@ -173,6 +156,7 @@ def _select_trace_file(
     *,
     require_single_rank: bool = False,
     preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
 ) -> Path | None:
     """Deterministically pick one trace file from candidates.
 
@@ -184,15 +168,12 @@ def _select_trace_file(
     """
     candidates = _main_trace_candidates(candidates, root)
     if require_single_rank:
-        preferred = [candidate for candidate in candidates if _rank_of(candidate) == preferred_rank]
-        if preferred:
-            return max(preferred, key=lambda candidate: (_file_size(candidate), candidate.name))
-        unranked = [
-            candidate
-            for candidate in candidates
-            if _rank_of(candidate) is None and not candidate.name.startswith("merged-")
-        ]
-        return unranked[0] if len(unranked) == 1 else None
+        return select_primary_trace(
+            candidates,
+            file_size=_file_size,
+            preferred_rank=preferred_rank,
+            tensor_parallel_size=tensor_parallel_size,
+        )
     merged = [c for c in candidates if c.name.startswith("merged-")]
     if merged:
         return max(merged, key=lambda c: (_file_size(c), c.name))
@@ -207,6 +188,7 @@ def resolve_trace_file(
     *,
     require_single_rank: bool = False,
     preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
 ) -> Path | None:
     """Resolve a trace input (file or directory) to a single trace file.
 
@@ -223,6 +205,13 @@ def resolve_trace_file(
     """
     p = Path(trace_input)
     if p.is_file():
+        if require_single_rank:
+            return select_primary_trace(
+                [p],
+                file_size=_file_size,
+                preferred_rank=preferred_rank,
+                tensor_parallel_size=tensor_parallel_size,
+            )
         return p
     if not p.is_dir():
         return None
@@ -234,6 +223,7 @@ def resolve_trace_file(
         p,
         require_single_rank=require_single_rank,
         preferred_rank=preferred_rank,
+        tensor_parallel_size=tensor_parallel_size,
     )
 
 
@@ -991,6 +981,7 @@ def analyze_trace(
     framework: str = "",
     emit_launches: bool = False,
     require_single_rank: bool = False,
+    tensor_parallel_size: int | None = None,
 ) -> dict[str, Any]:
     """Stream a Kineto trace and return timeline + op/kernel aggregates.
 
@@ -1020,7 +1011,11 @@ def analyze_trace(
           ``event_total`` (events scanned).
         On resolution failure, ``status='failed'`` with an ``error`` string.
     """
-    tf = resolve_trace_file(trace_input, require_single_rank=require_single_rank)
+    tf = resolve_trace_file(
+        trace_input,
+        require_single_rank=require_single_rank,
+        tensor_parallel_size=tensor_parallel_size,
+    )
     if tf is None:
         return {
             "status": "failed",

@@ -517,10 +517,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
   : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
   : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
   PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
-  # AIPerf owns the AgentX warmup lifecycle, whose duration is not bounded by
-  # the flat drain grace on very large models. Process liveness and Magpie's
-  # outer profile deadline provide the hard bound.
-  PHASE_WAIT_TIMEOUT=0
+  PHASE_WAIT_TIMEOUT="${AGENTX_PHASE_WAIT_TIMEOUT_S:-$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))}"
+  _require_uint AGENTX_PHASE_WAIT_TIMEOUT_S "$PHASE_WAIT_TIMEOUT"
   CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
   rm -f "$CAPTURE_STATUS_FILE"
   AIPERF_PROGRESS_PORT=""
@@ -556,7 +554,6 @@ if [ "${PROFILE:-0}" = "1" ]; then
       log "WARN failed to allocate an AIPerf progress API port; the measurement will run without trace capture"
     fi
   else
-    PHASE_GATE_FAILURE_REASON="phase_gate_missing"
     log "WARN missing AIPerf phase gate ${PHASE_GATE}; the measurement will run without trace capture"
   fi
   # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the

@@ -37,7 +37,6 @@ import gzip
 import json
 import logging
 import os
-import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -47,6 +46,10 @@ import yaml
 
 from hyperloom.agents.kernel.tools._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
+)
+from hyperloom.agents.kernel.tools._trace_rank import (
+    select_primary_trace,
+    trace_rank as _trace_rank,
 )
 from hyperloom.common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
@@ -503,25 +506,6 @@ def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p, trace_dir))
 
 
-_TRACE_RANK_RES = (
-    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
-    re.compile(r"(?:^|[-_.])tp[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
-)
-
-
-def _trace_rank(path: Path) -> int | None:
-    """Return the rank encoded in a framework trace path, when present."""
-    for pattern in _TRACE_RANK_RES:
-        match = pattern.search(path.name)
-        if match:
-            return int(match.group(1))
-    for pattern in _TRACE_RANK_RES:
-        parent_match = pattern.fullmatch(path.parent.name)
-        if parent_match:
-            return int(parent_match.group(1))
-    return None
-
-
 def _record_trace_topology(result: dict[str, Any], trace_files: list[Path]) -> None:
     """Attach per-rank and merged trace paths to a profile result."""
     rank_paths: dict[str, list[str]] = {}
@@ -557,22 +541,12 @@ def _preferred_main_trace_path(
         or ``None`` when AgentX requires a rank trace that is unavailable.
     """
     if require_single_rank:
-        preferred = [path for path in trace_files if _trace_rank(path) == preferred_rank]
-        if preferred:
-            return max(preferred, key=_trace_size_bytes)
-
-        non_merged = [path for path in trace_files if not path.name.startswith("merged-")]
-        if len(non_merged) == 1 and _trace_rank(non_merged[0]) is None and tensor_parallel_size in (None, 1):
-            return non_merged[0]
-        if tensor_parallel_size == 1 and non_merged:
-            unranked = [path for path in non_merged if _trace_rank(path) is None]
-            if unranked:
-                return max(unranked, key=_trace_size_bytes)
-        if tensor_parallel_size == 1 and not non_merged:
-            merged = [path for path in trace_files if path.name.startswith("merged-")]
-            if len(merged) == 1:
-                return merged[0]
-        return None
+        return select_primary_trace(
+            trace_files,
+            file_size=_trace_size_bytes,
+            preferred_rank=preferred_rank,
+            tensor_parallel_size=tensor_parallel_size,
+        )
 
     merged = sorted(p for p in trace_files if p.name.startswith("merged-"))
     return merged[0] if merged else trace_dir

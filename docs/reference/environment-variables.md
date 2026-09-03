@@ -910,7 +910,8 @@ degrade is never silent and never one-sided.
 
 AgentX profiling starts when AIPerf reports its measured phase. The legacy
 `AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
-the capture window and defaults to 20 seconds. Capture lifecycle status is
+the capture window and defaults to 20 seconds; phase waiting is bounded by the
+materialized benchmark timeout. Capture lifecycle status is
 written to a per-invocation `capture-status.json`; the adjacent
 `trace-manifest.json` records the selected primary and per-rank traces.
 Benchmark measurement success and trace-capture success are reported

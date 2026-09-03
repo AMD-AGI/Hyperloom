@@ -352,7 +352,6 @@ async def test_primary_rank_missing_is_not_retried(tmp_path):
     [
         "api_port_allocation_failed",
         "capture_status_missing",
-        "phase_gate_missing",
         "profiler_output_unconfigured",
     ],
 )

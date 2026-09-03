@@ -249,6 +249,11 @@ def test_agentx_directory_refuses_merged_only_input(tmp_path):
     assert reader.resolve_trace_file(d, require_single_rank=True) is None
 
 
+def test_agentx_explicit_merged_file_is_rejected(tmp_path):
+    merged = _write_trace(tmp_path / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(merged, require_single_rank=True) is None
+
+
 def test_analyze_reports_rank_provenance(tmp_path):
     d = tmp_path / "torch_trace"
     _write_ranked(d, 0)
