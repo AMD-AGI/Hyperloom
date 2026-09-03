@@ -212,9 +212,14 @@ echo "prior_pid_live=${PRIOR_PID_LIVE}"
 echo "prior_launch_info=${LATEST_LAUNCH_INFO:-none}"
 echo "prior_session=${PRIOR_SESSION:-none}"
 
-# Foreign processes — host-level pgrep (patterns match preflight_optimizer.py)
+# Foreign processes — host-level pgrep (patterns match preflight_optimizer.py).
+# Both framework spellings are needed: Magpie launches `vllm serve`, and vLLM
+# then renames its own processes to VLLM::APIServer / VLLM::EngineCore /
+# VLLM::Worker_TP<n>, which no `vllm\.entrypoints` scan can see. An orphan that
+# is still loading weights also holds no VRAM yet, so the VRAM check below does
+# not cover for a missed process match.
 pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
-pgrep -af 'sglang\.launch_server|vllm\.entrypoints|Magpie' || true
+pgrep -af 'sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::|Magpie' || true
 
 # VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
 python3 - <<'PY'

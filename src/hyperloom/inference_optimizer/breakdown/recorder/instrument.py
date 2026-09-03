@@ -99,9 +99,9 @@ def _recorder(session_dir: Path | str, producer: str):
     Returns:
         The process-cached recorder for the ``(session_dir, producer)`` pair.
     """
-    from .recorder import get_recorder
+    from .recorder import recorder_for
 
-    return get_recorder(session_dir, producer=producer)
+    return recorder_for(session_dir, producer=producer)
 
 
 def _rel(path: Path, session_dir: Path | str) -> str:
@@ -199,7 +199,6 @@ _AGENT_BY_ACTION = {
     "sweep": "coordinator",
     "conc_sweep": "coordinator",
     "validate": "coordinator",
-    "validate_stack": "coordinator",
     "trace_analyze": "coordinator",
     "critic": "critic",
     "robustness": "robustness",

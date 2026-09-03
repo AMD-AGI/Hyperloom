@@ -555,29 +555,6 @@ def test_lane_is_not_exposed_to_the_llm():
     assert "run_collective" not in PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]
 
 
-def test_policy_gate_rejects_an_llm_issued_lane_request():
-    """Absence from the allowlists is not a gate; PolicyGate must deny outright.
-
-    A registered handler with no owning action set would otherwise skip every
-    phase check, letting the LLM bypass the comm_pct gate, ``record_collective``
-    accounting, and ``_integrate_collective``.
-    """
-    from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-    registry = default_role_registry()
-    gate = PolicyGate(role_registry=registry, session_dir=None)
-
-    for kind in ("run_collective", "run_fusion"):
-        with pytest.raises(PolicyDenied) as exc:
-            gate._validate_request(
-                registry["orchestration"],
-                {"target_agent": "kernel_agent", "kind": kind},
-            )
-        assert exc.value.rule == "phase_incompatible"
-        assert kind in str(exc.value)
-
-
 def test_resume_compat_old_integration_status_accepted(tmp_path):
     """A state.json written before the patch_cleanup_status migration must load cleanly.
 

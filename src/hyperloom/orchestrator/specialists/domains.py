@@ -12,7 +12,6 @@ Field reference:
 * ``key`` — canonical id used in ``delegate{params.domain}``.
 * ``layer`` — short human label (analysis layer covered).
 * ``kb_anchor`` — knowledge-domain label for prompt grouping.
-* ``available_in`` — ``"M5"`` / ``"M6"``; both are dispatchable.
 * ``llm_selectable`` — False for a domain only the Coordinator dispatches.
 
 All specialists share the global :data:`PR_QUERY_REPOS` allowlist and query
@@ -37,8 +36,6 @@ class SpecialistDomain:
         layer (str): Human-readable description of the source/runtime layer it
             focuses on.
         kb_anchor (str): Knowledge-base anchor the domain is associated with.
-        available_in (str): Milestone in which the domain becomes available
-            (e.g. ``M5`` or ``M6``). Defaults to ``"M6"``.
         description (str): Free-form description of the domain's responsibilities.
             Defaults to an empty string.
         default_mode (str): Default dispatch mode for this domain, either
@@ -51,7 +48,6 @@ class SpecialistDomain:
     key: str
     layer: str
     kb_anchor: str
-    available_in: str = "M6"
     description: str = ""
     default_mode: str = "patch"
     #: Whether Orchestration may name this domain in a ``delegate``. False for
@@ -86,7 +82,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="serving_specialist",
         layer="sglang / vllm scheduler / cuda_graph / kv_cache",
         kb_anchor="framework",
-        available_in="M5",
         description=(
             "Reads sglang/vllm source, focuses on scheduler, cuda graph, "
             "kv cache, batching, chunked prefill, max-num-seqs."
@@ -96,7 +91,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="kernel_switch_specialist",
         layer="aiter / sglang kernels / triton",
         kb_anchor="kernel_agent",
-        available_in="M6",
         description=(
             "Reads aiter / sglang kernels / triton source; focuses on attention, MoE, GEMM, fused attention paths."
         ),
@@ -105,21 +99,18 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="comm_specialist",
         layer="RCCL / NCCL / QuickReduce / AllReduce",
         kb_anchor="communication",
-        available_in="M6",
         description=("Focuses on collective communication, allreduce algorithms, QuickReduce, topology."),
     ),
     SpecialistDomain(
         key="compiler_specialist",
         layer="torch.compile / inductor / triton",
         kb_anchor="compiler",
-        available_in="M6",
         description=("Focuses on torch.compile, inductor, triton codegen, AMDGCN, register pressure."),
     ),
     SpecialistDomain(
         key="system_specialist",
         layer="KFD / driver / memory / dispatch overhead",
         kb_anchor="systems",
-        available_in="M6",
         description=(
             "Fixes launch latency, dispatch overhead, device "
             "synchronization and host-blocking calls; tunes KFD/driver "
@@ -130,7 +121,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="candidate_discovery_specialist",
         layer="upstream candidate discovery / ranking / audit",
         kb_anchor="pr_intelligence",
-        available_in="M6",
         default_mode="research",
         description=(
             "Finds upstream work worth landing. Surveys PRs across the "
@@ -146,7 +136,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="research_scout_specialist",
         layer="proven-prior research / reference scripts / arch features",
         kb_anchor="research_scout",
-        available_in="M5",
         default_mode="research",
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
@@ -162,7 +151,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="static_recon_specialist",
         layer="framework source static reconnaissance / un-bridged switches",
         kb_anchor="static_recon",
-        available_in="M6",
         default_mode="research",
         description=(
             "Read-only static-source reconnaissance dispatched at PRELUDE. "
@@ -181,7 +169,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         llm_selectable=False,
         layer="non-runnable or eval-failing (model, backend) enablement / framework + ROCm/HIP bridging",
         kb_anchor="framework",
-        available_in="M6",
         description=(
             "Authoring specialist for the ENABLEMENT objective: makes a "
             "(model, backend) combo that is non-runnable, or that boots but fails "
@@ -202,7 +189,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         key="framework_rewrite_specialist",
         layer="iterative-model pipeline source rewrites (diffusion / autoregressive video)",
         kb_anchor="framework",
-        available_in="M6",
         description=(
             "Authoring specialist for framework-level source rewrites on an "
             "ITERATIVE model pipeline — a diffusion or autoregressive rollout "
@@ -397,7 +383,6 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
     key="freeform_specialist",
     layer="(free-form — not bound to the domain catalogue)",
     kb_anchor="framework",
-    available_in="M6",
     description=(
         "Free-form specialist: not bound to the domain catalogue. The "
         "Orchestration task_description is the whole mandate."

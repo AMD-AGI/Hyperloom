@@ -67,6 +67,55 @@ def test_preflight_memoized_per_bin(tmp_path, monkeypatch):
     assert n["p"] == 1  # second call reuses the memoized capability result
 
 
+def test_profile_config_requires_progress_api(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: seen.append(k))
+    cfg = tmp_path / "profile.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "benchmark_script": "aiperf_client.sh",
+                    "envs": {"PROFILE": "1"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg)
+
+    assert seen == [{"require_progress_api": True}]
+
+
+def test_stronger_progress_api_preflight_satisfies_later_basic_check(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: seen.append(k))
+    profile_cfg = tmp_path / "profile.yaml"
+    profile_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "benchmark_script": "aiperf_client.sh",
+                    "envs": {"PROFILE": "1"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_cfg = _cfg(tmp_path, "aiperf_client.sh")
+
+    runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=profile_cfg)
+    runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=baseline_cfg)
+
+    assert seen == [{"require_progress_api": True}]
+
+
 def test_incapable_bin_not_memoized(tmp_path, monkeypatch):
     n = {"p": 0}
 
@@ -102,9 +151,41 @@ def test_prepare_runtime_off_noop(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     calls = {"d": 0}
     monkeypatch.setattr(_DEPLOY, lambda d: calls.__setitem__("d", calls["d"] + 1))
-    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    cfg = _cfg(tmp_path, "vllm_mi300x.sh")
     assert prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), config_path=cfg) is None
     assert calls["d"] == 0
+
+
+def test_prepare_runtime_uses_explicit_persisted_agentx_decision(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    order = []
+    monkeypatch.setattr(_DEPLOY, lambda d: order.append("deploy"))
+    monkeypatch.setattr(_RESOLVE, lambda env: "/venv/bin/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: order.append("preflight"))
+    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    assert (
+        prepare_agentx_runtime(
+            env={},
+            inferencex_path=str(tmp_path),
+            config_path=cfg,
+            active=True,
+        )
+        is None
+    )
+    assert order == ["deploy", "preflight"]
+
+
+def test_prepare_runtime_uses_materialized_agentx_script_without_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    order = []
+    monkeypatch.setattr(_DEPLOY, lambda d: order.append("deploy"))
+    monkeypatch.setattr(_RESOLVE, lambda env: "/venv/bin/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: order.append("preflight"))
+    cfg = _cfg(tmp_path, "aiperf_client.sh")
+    assert prepare_agentx_runtime(env={}, inferencex_path=str(tmp_path), config_path=cfg) is None
+    assert order == ["deploy", "preflight"]
 
 
 def test_prepare_runtime_on_deploys_returns_none(tmp_path, monkeypatch):

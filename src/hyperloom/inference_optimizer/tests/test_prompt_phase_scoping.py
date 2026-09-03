@@ -189,20 +189,12 @@ def test_roofline_targeting_drops_out_of_sweep_and_close(registry):
             assert ROOFLINE_BLOCK not in text, f"{ROOFLINE_BLOCK} leaked into {phase}"
 
 
-def test_payload_contracts_are_scoped_to_the_proposable_set(registry):
-    """A phase gets payload templates only for the actions it can propose."""
+def test_payload_contracts_render_in_every_phase(registry):
+    """Payload templates are no longer phase-scoped, so every phase carries them."""
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
-        proposable = set(_ps.llm_proposable_actions_for(phase))
-        if "explore" in proposable:
-            assert "GRID INPUT (REQUIRED)" in text
-        else:
-            assert "GRID INPUT (REQUIRED)" not in text, f"explore grid schema leaked into {phase}"
-        if "specialist" in proposable:
-            assert "EMIT: delegate{action_name='specialist'" in text
-        else:
-            assert "EMIT: delegate{action_name='specialist'" not in text, f"specialist payload leaked into {phase}"
-        # Descriptions survive so a skip_to_* decision can still compare phases.
+        assert "GRID INPUT (REQUIRED)" in text
+        assert "EMIT: delegate{action_name='specialist'" in text
         assert "- **explore** —" in text
         assert "- **specialist** —" in text
 

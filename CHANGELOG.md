@@ -12,6 +12,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
   Hyperloom and KernelForge.
 
+- **AgentX profiling now follows AIPerf's measured phase.** Trace capture opens
+  from the pinned client's progress API instead of a fixed warmup delay, records
+  an independent capture status, and keeps single-rank TraceLens analysis off
+  merged multi-rank traces. `AGENTX_PROFILE_WARMUP_S` is now ignored;
+  `AGENTX_PROFILE_WINDOW_S` remains the capture bound. Each invocation gets an
+  explicit capture ID and writes `capture-status.json` plus
+  `trace-manifest.json` under its task-owned artifact directory. Capture failure
+  fails the profile action while preserving benchmark measurement status.
+  Multi-node AgentX profiling fails explicitly until it can use the same
+  phase-gated lifecycle.
+
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP
   `${KB_STORE_URL}/pr-monitor/mcp/` URLs for Framework discovery,
@@ -185,17 +196,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
   measured at one concurrency under-budgets every higher one (measured on
   Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
-  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
-  lives in one function that both consumers call: this process derives the
-  subprocess cap from it, and `apply_agentx_switch` exports its result into the
-  benchmark env so the client's `--warmup-grace-period` — the thing that
+  The grace can now be scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the
+  scaling lives in one function that both consumers call: this process derives
+  the subprocess cap from it, and `apply_agentx_switch` exports its result into
+  the benchmark env so the client's `--warmup-grace-period` — the thing that
   actually stops the warmup — cannot disagree with the cap.<br/>
-  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
-  grace was measured at and defaults to 8, so every existing configuration
-  derives exactly what it derived before. Declare it when you measured
-  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
-  passed in without the anchor is read as an 8-anchored number and doubled.
-  The floor only ever raises a bound.
+  **Operator note**: the scaling is **opt-in**. `AGENTX_WARMUP_GRACE_CONC`
+  declares the concurrency the grace was measured at, and with no anchor
+  declared the grace is used flat — a ratio needs two numbers, and assuming the
+  second one made the same value mean different things depending on whether it
+  was typed (an explicit `AGENTX_WARMUP_GRACE_PERIOD=1800` yielded a 23400s cap
+  at CONC=64 while leaving it unset yielded 10800s, and the conc sweep then
+  priced every rung against the inflated number). So declare the anchor whenever
+  you run above the concurrency you measured at: without it, a 3600s grace
+  measured at conc=8 stays 3600s at CONC=32, where the warmup needs roughly
+  three times that — and the round does not fail, it reports a prefix-reuse
+  figure taken before the cache filled. When the anchor is declared the scaling
+  only ever raises the bound, and stays identity at or below the anchor.<br/>
+  A conc sweep bounds each rung by **its own** concurrency, not the session's:
+  the grace, the inner Magpie cap and the variant subprocess cap all derive from
+  the rung's `CONC`, and the budget gates that admit a rung price it at the same
+  number, so admission and grant cannot disagree. Raising only the client's
+  grace would be strictly worse than leaving all three alone — the round would
+  wait inside a bound its own caps do not cover and be killed mid-warmup.
 
 - **Budget admission prices a variant at the cap it will actually be granted.**
   Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the
@@ -617,10 +640,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   apart. One tool-enabled review session on the agent analysis route replaces
   both: it is handed locations rather than contents and opens what the evidence
   leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
-  **Operators on `--analysis-route deterministic` should note that route now has
-  no model assistance of any kind** — it keeps its no-model guarantee by not
-  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
-  miss stays unresolved instead of being completed by a model.
+
+- **BREAKING — the bypass and deterministic trace-analysis routes are gone**,
+  along with the `HYPERLOOM_TRACE_ANALYSIS_ROUTE` env var and the
+  `analysis_route` payload key that selected them. Only the TraceLens agent
+  route remains. An explicit route other than `agent` now hard-fails with
+  `invalid_analysis_route` rather than silently falling back to the agent, so a
+  caller asking for a no-LLM run is never quietly charged for an LLM session.
 
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and

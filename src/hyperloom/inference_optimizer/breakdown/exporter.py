@@ -22,7 +22,8 @@ from typing import Any
 from hyperloom.common.jsonio import read_json
 
 from . import collectors
-from .schema import SCHEMA_VERSION_V5
+from .recorder.event_finalize import finalize_events
+from .schema import SCHEMA_VERSION_V6
 from ..session.session_paths import manifest_path, state_path
 
 log = logging.getLogger(__name__)
@@ -252,9 +253,9 @@ def build(
     # the source of truth for their section; when absent the collectors are used
     # as fallback.
     assembled = _load_assembled(sd, warnings)
-    # V5 is the hard-cutover wire shape regardless of whether recorder
+    # V6 is the hard-cutover wire shape regardless of whether recorder
     # fragments or collector fallbacks supplied the underlying evidence.
-    schema_version = SCHEMA_VERSION_V5
+    schema_version = SCHEMA_VERSION_V6
 
     def _pick(section: str, collector_value: Any) -> Any:
         """Fragment value if recorded and non-empty, else the collector value.
@@ -580,9 +581,10 @@ def build(
         default={},
     )
     v6_warnings = list(warnings)
-    # GEAK is collected only for V6: the V5 payload has no ``geak`` key, and
-    # adding one would change the V5 surface, which V6 must not do.
-    v6_geak = _safe_collect("geak", lambda: collectors.collect_geak(sd, state, v6_warnings), v6_warnings, default={})
+    # Events whose phase was killed before it could close them are closed here,
+    # before the timeline is read: their fragments are on disk, and an event
+    # left open would otherwise be read back as still running.
+    _safe_collect("timeline_finalize", lambda: finalize_events(sd), v6_warnings, default=[])
     timeline = _safe_collect(
         "timeline",
         lambda: collectors.collect_v6_timeline(
@@ -593,13 +595,8 @@ def build(
             critic_iterations=(
                 critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
             ),
-            baseline=baseline,
             conc_sweep_summary=conc_sweep_summary,
             phase_timeline=phase_timeline,
-            optimizations=optimizations,
-            kernel_journey=kernel_journey,
-            collective=collective,
-            geak=v6_geak,
         ),
         v6_warnings,
         default=[],

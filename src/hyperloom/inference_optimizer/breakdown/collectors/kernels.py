@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.gain_math import conc_pair_comparison
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.io import safe_mtime
 
 from ._common import (
@@ -1040,8 +1041,15 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
 def _recover_conc_sweep_summary_from_runs(
     session_dir: Path,
     warnings: list[str],
+    *,
+    metric_key: str = GRADED_OUTPUT,
 ) -> dict[str, Any]:
-    """Recover a conc_sweep summary from raw run workspaces when the report is stale."""
+    """Recover a conc_sweep summary from raw run workspaces when the report is stale.
+
+    ``metric_key`` is the axis the recovered speedups are taken on. A recovery
+    that supersedes a report has to reuse that report's own axis, or the
+    section silently swaps one quantity for another.
+    """
     runs_dir = session_dir / "runs" / "conc_sweep"
     if not runs_dir.exists():
         return {}
@@ -1072,7 +1080,7 @@ def _recover_conc_sweep_summary_from_runs(
             continue
         baseline_points.sort(key=lambda p: p["conc"])
         optimized_points.sort(key=lambda p: p["conc"])
-        comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
+        comparison, summary = conc_pair_comparison(baseline_points, optimized_points, metric_key=metric_key)
         pairs = int(summary.get("successful_pairs") or 0)
         payload = {
             "schema_version": "recovered-v1",
@@ -1103,7 +1111,9 @@ def collect_conc_sweep_summary(
     ``comparison`` shape-guarded) + ``report_path``, except that a mirrored
     report with zero successful pairs is superseded by the recovered payload
     (``source="recovered_from_runs"``, ``schema_version="recovered-v1"``, the
-    mirrored path kept as ``original_report_path``) when recovery finds pairs.
+    mirrored path kept as ``original_report_path``) when recovery finds pairs,
+    taken on the axis that report named. A recovery standing in for an absent
+    report has no axis to read and takes the default.
     Do not synthesize the optional blocks the producer omits when
     ``status="skipped"``.
 
@@ -1143,7 +1153,10 @@ def collect_conc_sweep_summary(
     # Fall back to run-workspace recovery only when the authoritative report
     # has no successful pairs (also skips the full runs/ scan on the healthy path).
     if _conc_sweep_successful_pairs(out) == 0:
-        recovered = _recover_conc_sweep_summary_from_runs(session_dir, warnings)
+        reported_metric = str((out.get("summary") or {}).get("metric") or "").strip()
+        recovered = _recover_conc_sweep_summary_from_runs(
+            session_dir, warnings, metric_key=reported_metric or GRADED_OUTPUT
+        )
         if _conc_sweep_successful_pairs(recovered) > 0:
             recovered["original_report_path"] = out["report_path"]
             warnings.append("conc_sweep_summary: recovered successful conc_sweep data from runs/conc_sweep")

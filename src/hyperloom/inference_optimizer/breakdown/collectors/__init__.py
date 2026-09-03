@@ -66,7 +66,6 @@ from .sessions import (
     collect_final as collect_final,
     collect_enablement as collect_enablement,
     _runtime_summary as _runtime_summary,
-    _find_latest_validate_stack_report as _find_latest_validate_stack_report,
     _find_current_best_report as _find_current_best_report,
     _find_stack_top_report as _find_stack_top_report,
     _find_matching_action_report as _find_matching_action_report,
@@ -186,11 +185,7 @@ from .v6 import (
     collect_v6_timeline as collect_v6_timeline,
 )
 from .v6_close import collect_v6_close as collect_v6_close
-from .v6_stages import (
-    project_baseline_event as project_baseline_event,
-    project_conc_sweep_event as project_conc_sweep_event,
-    project_kernel_events as project_kernel_events,
-)
+from .v6_stages import project_conc_sweep_event as project_conc_sweep_event
 
 __all__ = [
     "collect_attribution",
@@ -216,9 +211,7 @@ __all__ = [
     "collect_v6_metadata",
     "collect_v6_outcome",
     "collect_v6_timeline",
-    "project_baseline_event",
     "project_conc_sweep_event",
-    "project_kernel_events",
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",

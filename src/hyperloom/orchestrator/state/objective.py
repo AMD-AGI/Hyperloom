@@ -9,17 +9,22 @@ TimeOnly. `build_objective(env)` takes at most one TARGET_* var.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.io import safe_mtime
 from hyperloom.common.jsonio import read_json as _read_json
 
 from .shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:  # pragma: no cover
     from .shared_state import SharedState
+
+
+log = logging.getLogger(__name__)
 
 
 class ObjectiveError(ValueError):
@@ -162,10 +167,13 @@ class TargetGainObjective(_RatioObjective):
 
 @dataclass
 class TargetTputObjective(_RatioObjective):
-    """Reach an absolute per-GPU throughput number (progress against best-so-far tput, not baseline).
+    """Reach an absolute throughput number (progress against best-so-far tput, not baseline).
 
-    The unit is framework-dependent: tok/s/GPU for serving frameworks, img/s
-    for scriptable xDiT (surfaced elsewhere as the equivalent e2el_mean_ms).
+    The unit is framework-dependent: tok/s for serving frameworks, img/s for
+    scriptable xDiT (surfaced elsewhere as the equivalent e2el_mean_ms). Scope
+    is whole-server total, not per-GPU; the ``per_gpu`` field name is a
+    misnomer kept for compatibility. Callers wanting a per-GPU target convert
+    on the way in.
     """
 
     target_tput_per_gpu: float
@@ -190,11 +198,11 @@ class TargetTputObjective(_RatioObjective):
         return "tput"
 
     def _current(self, state: "SharedState") -> float:
-        """Resolve current throughput (best-so-far, else baseline)."""
+        """Resolve current whole-server throughput (best-so-far, else baseline)."""
         return resolve_grading_anchor_tput(state)
 
     def _target(self) -> float:
-        """Return the configured per-GPU throughput target."""
+        """Return the configured whole-server throughput target."""
         return self.target_tput_per_gpu
 
     def describe(self) -> str:
@@ -214,11 +222,11 @@ class TargetBaselineObjective(_RatioObjective):
     _ref_tput: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
-        """Load the reference throughput from the baseline directory.
+        """Load the reference throughput from the newest report in the baseline directory.
 
-        Recursively searches ``baseline_dir`` for ``benchmark_report.json`` files,
-        reads the most recent one (by sorted path), and extracts
-        ``throughput.output_throughput`` into ``_ref_tput``.
+        Prefers a measured round. A budget-dropped measure round leaves the
+        warmup as the only report, which is a usable reference and is reported
+        as such rather than refused.
 
         Raises:
             ObjectiveError: If the directory is missing, no report is found, or the
@@ -227,7 +235,11 @@ class TargetBaselineObjective(_RatioObjective):
         path = Path(self.baseline_dir)
         if not path.exists():
             raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
-        candidates = sorted(path.rglob("benchmark_report.json"))
+        reports = list(path.rglob("benchmark_report.json"))
+        measured = [p for p in reports if "warmup_round" not in p.parts]
+        if reports and not measured:
+            log.warning("TargetBaselineObjective: reference throughput comes from a warmup round under %s", path)
+        candidates = sorted(measured or reports, key=safe_mtime)
         if not candidates:
             raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")
         ref = _read_json(candidates[-1], default={}, require_dict=True)

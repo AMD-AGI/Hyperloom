@@ -112,6 +112,7 @@ def assemble_parts(
     session_dir: Path | str,
     *,
     warnings: list[str] | None = None,
+    keep_event_rows: bool = False,
 ) -> dict[str, Any]:
     """Return ``{section: list | dict}`` assembled from the spool directory.
 
@@ -121,6 +122,9 @@ def assemble_parts(
         session_dir: The session root directory.
         warnings: Optional list to append parse/validation warnings to; a
             fresh list is used when not provided.
+        keep_event_rows: Retain the :data:`EVENT_SECTIONS` substreams instead
+            of dropping them. Only :func:`event_parts` sets this; the breakdown
+            envelope never wants them.
 
     Returns:
         A ``{section: list | dict}`` mapping assembled from the spool
@@ -194,6 +198,8 @@ def assemble_parts(
     _normalize_kernel_route_operations(out)
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
+    if not keep_event_rows:
+        _drop_event_rows(out)
     _compose_versions(out)
     return out
 
@@ -459,6 +465,124 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
         "robustness_signals": rob_signals,
         "kb_writes_summary": _kb_writes_summary(critic_iters),
     }
+
+
+#: The KERNEL substreams, in the order a reader follows them.
+KERNEL_EVENT_SECTIONS: tuple[str, ...] = (
+    "kernel_event",
+    "kernel_lane_run",
+    "kernel_rebench_attempt",
+    "kernel_trace_analyze",
+    "kernel_geak_attempt",
+    "kernel_geak_discovery",
+    "kernel_geak_acceptance",
+)
+
+#: The roofline substreams. They belong to whichever event their rows are
+#: tagged with, which is the roofline's own event when it was dispatched and
+#: the enclosing phase's event when it was called inline.
+ROOFLINE_EVENT_SECTIONS: tuple[str, ...] = (
+    "roofline_event",
+    "roofline_action",
+    "roofline_profile_run",
+    "roofline_analysis_run",
+)
+
+#: The baseline substreams, in the order a reader follows them: the event, the
+#: measurements dispatched into it, each measurement's passes, and each pass's
+#: benchmark rounds.
+BASELINE_EVENT_SECTIONS: tuple[str, ...] = (
+    "baseline_event",
+    "baseline_action",
+    "baseline_run",
+    "baseline_round",
+)
+
+#: Every section holding v6 event rows. They are consumed by the timeline
+#: rather than by the breakdown envelope, so assembly pops them here to keep
+#: them from leaking into the wire shape.
+EVENT_SECTIONS: tuple[str, ...] = KERNEL_EVENT_SECTIONS + ROOFLINE_EVENT_SECTIONS + BASELINE_EVENT_SECTIONS
+
+
+def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
+    """Read back the event rows of the bound session, keyed by section.
+
+    Assembly pops these sections, so a caller that wants them -- the phase
+    closing an event, or finalize recovering one that never closed -- reads
+    them through here instead.
+
+    Args:
+        sections: The sections to read, e.g. :data:`KERNEL_EVENT_SECTIONS`.
+
+    Returns:
+        A ``{section: [payload, ...]}`` mapping holding those sections, each
+        defaulting to an empty list.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+    """
+    from ...session.session_binding import bound_session  # local: avoid import cycle
+
+    assembled = assemble_parts(bound_session(), warnings=[], keep_event_rows=True)
+    parts: dict[str, list[dict[str, Any]]] = {}
+    for section in sections:
+        rows = assembled.get(section)
+        parts[section] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return parts
+
+
+def kernel_event_parts() -> dict[str, list[dict[str, Any]]]:
+    """Return the KERNEL substreams of the bound session, keyed by section.
+
+    Returns:
+        A ``{section: [payload, ...]}`` mapping over
+        :data:`KERNEL_EVENT_SECTIONS`.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+    """
+    return event_parts(KERNEL_EVENT_SECTIONS)
+
+
+def roofline_event_parts() -> dict[str, list[dict[str, Any]]]:
+    """Return the roofline substreams of the bound session, keyed by section.
+
+    Returns:
+        A ``{section: [payload, ...]}`` mapping over
+        :data:`ROOFLINE_EVENT_SECTIONS`.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+    """
+    return event_parts(ROOFLINE_EVENT_SECTIONS)
+
+
+def baseline_event_parts() -> dict[str, list[dict[str, Any]]]:
+    """Return the baseline substreams of the bound session, keyed by section.
+
+    Returns:
+        A ``{section: [payload, ...]}`` mapping over
+        :data:`BASELINE_EVENT_SECTIONS`.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+    """
+    return event_parts(BASELINE_EVENT_SECTIONS)
+
+
+def _drop_event_rows(out: dict[str, Any]) -> None:
+    """Drop the v6 event substreams from the breakdown envelope.
+
+    These are recorded for the v6 timeline, which assembles them into events
+    when the phase or action that produced them ends. They carry no meaning of
+    their own in ``session_breakdown.json``, and leaving them in would publish
+    ten undocumented sections alongside the events built from them.
+
+    Args:
+        out: The assembled section mapping mutated in place.
+    """
+    for section in EVENT_SECTIONS:
+        out.pop(section, None)
 
 
 def _compose_kernel_journey(out: dict[str, Any]) -> None:

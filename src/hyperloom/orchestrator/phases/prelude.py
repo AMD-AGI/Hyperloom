@@ -10,7 +10,6 @@ patch timeline, and enqueues the baseline/roofline internal-analysis tasks.
 from __future__ import annotations
 import logging as _logging
 import math
-import os
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -147,36 +146,6 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
         "incomplete": sum(1 for row in rows if row.get("complete") is False),
         "artifacts_outside_root": sum(_count(row.get("artifacts_outside_root")) for row in rows),
     }
-
-
-def _warm_kernel_keep_threshold_pct(state: Any) -> float:
-    """Gain a replayed champion set must clear.
-
-    Follows the shared decaying curve so the bar tracks the session's
-    macro-cycle; ``HYPERLOOM_WARM_KERNEL_KEEP_PCT`` overrides it.
-
-    Args:
-        state: The SharedState the curve reads ``macro_cycle`` from.
-
-    Returns:
-        The KEEP threshold percentage for the warm-kernel replay.
-    """
-    default = _phase_state.resolve_keep_threshold(state)
-    raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        value = math.nan
-    if math.isfinite(value):
-        return value
-    log.warning(
-        "warm replay: unusable HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
-        raw,
-        default,
-    )
-    return default
 
 
 class PreludePhase(PhaseHandler):
@@ -1607,7 +1576,7 @@ class PreludePhase(PhaseHandler):
             "warm_kernel_apply_results": kernel_applied,
             "warm_kernel_snapshots": kernel_snapshots,
             "combined_current_contract": bool(current_remote or kernel_pending),
-            "combined_keep_threshold_pct": _warm_kernel_keep_threshold_pct(self.shared_state),
+            "combined_keep_threshold_pct": _phase_state.resolve_keep_threshold(self.shared_state),
             "workload_compatibility": workload_compatibility,
         }
         try:
@@ -2117,16 +2086,13 @@ class PreludePhase(PhaseHandler):
         keep_threshold = 0.0
         if combined_current_contract:
             raw_threshold = decision_params.get("combined_keep_threshold_pct")
+            default_threshold = _phase_state.resolve_keep_threshold(self.shared_state)
             try:
-                keep_threshold = (
-                    float(raw_threshold)
-                    if raw_threshold is not None
-                    else _warm_kernel_keep_threshold_pct(self.shared_state)
-                )
+                keep_threshold = float(raw_threshold) if raw_threshold is not None else default_threshold
             except (TypeError, ValueError):
-                keep_threshold = _warm_kernel_keep_threshold_pct(self.shared_state)
+                keep_threshold = default_threshold
             if not math.isfinite(keep_threshold):
-                keep_threshold = _warm_kernel_keep_threshold_pct(self.shared_state)
+                keep_threshold = default_threshold
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
@@ -2437,22 +2403,32 @@ class PreludePhase(PhaseHandler):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
+    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> Task:
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>.
 
         Args:
             reason: Tag distinguishing the enqueue site; used in the
                 idempotency key and to select baseline vs current-best args.
+            inline_event: The timeline event this analysis belongs to, passed
+                by a phase that owns one. It travels on the params rather than
+                being looked up by the executor because the phase is the only
+                party that knows whether the run is its own sub-step or an
+                action in its own right, and it stays out of the idempotency
+                key so an event id can never split a reuse.
 
         Returns:
             The created (or existing idempotent) analysis :class:`Task`.
         """
+        from ..actions.executors.roofline import INLINE_EVENT_PARAM
+
         state = self.shared_state
         kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
         }
+        if inline_event:
+            params[INLINE_EVENT_PARAM] = str(inline_event)
         if reason != "prelude_initial":
             inject_stack_base_params(params, state)
         else:

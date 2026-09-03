@@ -375,8 +375,8 @@ on the next tick.
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
-  per-phase proposable set; any proposal/delegate is denied by R1
-  `phase_incompatible`.
+  per-phase proposable set; any proposal/delegate is denied as
+  `coordinator_managed_action`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
   and the CSV/JSON they resolve to, or online tuning during a benchmark
@@ -392,12 +392,11 @@ on the next tick.
   use it as a request kind. Use `trace_analyze` for candidate analysis.
   `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
   and it is valid only for FP8 SGLang workloads.
-* `run_fusion` and `run_collective` ALSO have programmatic handlers but are
-  NOT yours to request: they are Coordinator-owned deterministic lanes,
-  dispatched at KERNEL entry once their own gate passes. PolicyGate REJECTS
-  either kind from you (`phase_incompatible`) because a direct request
-  bypasses that gate, the lane's SharedState accounting and its integrate
-  step. You only OBSERVE them — outcomes land in your inbox as
+* `run_fusion` and `run_collective` are NOT yours to request: they are
+  Coordinator-owned deterministic lanes, dispatched at KERNEL entry once
+  their own gate passes. PolicyGate REJECTS either kind from you
+  (`request_kind`) because a direct request bypasses that gate, the lane's
+  SharedState accounting and its integrate step. You only OBSERVE them — outcomes land in your inbox as
   `run_fusion_done` / `run_collective_done`, followed by
   `fusion_integrate_done` / `collective_integrate_done` once a KEEP is
   integrated, at which point `optimization_stack` carries a
