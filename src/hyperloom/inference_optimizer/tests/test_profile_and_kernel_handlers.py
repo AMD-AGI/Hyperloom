@@ -2043,6 +2043,67 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
+def _capture_trace_dir(tmp_path, *, cpu_ops: int, with_input_dims: int) -> object:
+    """Write a capture file carrying a chosen number of cpu_op events."""
+    import gzip
+    import json as _json
+
+    capture = tmp_path / "capture_traces"
+    capture.mkdir()
+    events = [{"name": "cpu_op", "cat": "cpu_op"} for _ in range(cpu_ops)]
+    for index in range(with_input_dims):
+        events[index]["args"] = {"Input Dims": [[1, 2]]}
+    if not cpu_ops:
+        # ROCm/SGLang logs the same work under its own event names.
+        events = [{"name": "sglang_profiler::forward", "cat": "cpu_instant_event"}]
+    with gzip.open(capture / "rank0.pt.trace.json.gz", "wt", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"traceEvents": events}))
+    return capture
+
+
+def _check_row(health: dict, check_id: str) -> dict:
+    return next(row for row in health["checks"] if row["check_id"] == check_id)
+
+
+def test_zero_cpu_op_is_not_a_failed_input_dims_check(tmp_path):
+    """The structured check must not contradict the advisory beside it.
+
+    The prose branch says zero ``cpu_op`` on ROCm/SGLang is an event-naming
+    difference rather than a capture regression, while the check row called it
+    ``failed`` -- and the row is the copy consumers query by id.
+    """
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _capture_trace_dir(tmp_path, cpu_ops=0, with_input_dims=0)
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    row = _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)
+    assert row["status"] == "skipped"
+    assert row["skip_reason"]
+    assert row["detail"]["input_dims_fraction"] is None
+    assert row["detail"]["cpu_op_count"] == 0
+    # The advisory still fires, so the condition is not silently dropped.
+    assert any("no literal" in issue and "cpu_op" in issue for issue in health["issues"])
+
+
+def test_a_thin_input_dims_fraction_still_fails_the_check(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _capture_trace_dir(tmp_path, cpu_ops=10, with_input_dims=1)
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "failed"
+
+
+def test_a_healthy_input_dims_fraction_passes_the_check(tmp_path):
+    from hyperloom.orchestrator.actions.executors import profile as pf
+
+    _capture_trace_dir(tmp_path, cpu_ops=10, with_input_dims=10)
+    health = pf._validate_trace_structure(tmp_path, "sglang")
+
+    assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "passed"
+
+
 # kernel_request_handlers — direct unit
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_dry_run_returns_structured_result(session_dir):

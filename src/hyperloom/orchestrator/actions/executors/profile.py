@@ -548,19 +548,32 @@ def _validate_trace_structure(
             cpu_op_count = _count_substring_occurrences(text, '"name": "cpu_op"')
             input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
             _input_dims_fraction = input_dims_count / cpu_op_count if cpu_op_count else None
-            _note_check(
-                CHECK_CAPTURE_INPUT_DIMS,
-                status=(
-                    "failed"
-                    if cpu_op_count == 0 or (_input_dims_fraction or 0.0) < _INPUT_DIMS_FRACTION_FLOOR
-                    else "passed"
-                ),
-                sampled_file=target.name,
-                cpu_op_count=cpu_op_count,
-                input_dims_count=input_dims_count,
-                input_dims_fraction=_input_dims_fraction,
-                floor=_INPUT_DIMS_FRACTION_FLOOR,
-            )
+            if _input_dims_fraction is None:
+                # Zero cpu_op leaves no fraction to judge, and on ROCm/SGLang it
+                # is an event-naming difference rather than a capture failure --
+                # which is what the advisory below says. Calling it "failed" put
+                # the structured copy, the one consumers query by id, at odds
+                # with the prose sitting next to it.
+                _note_check(
+                    CHECK_CAPTURE_INPUT_DIMS,
+                    status="skipped",
+                    skip_reason="no literal cpu_op events to measure the Input Dims fraction against",
+                    sampled_file=target.name,
+                    cpu_op_count=cpu_op_count,
+                    input_dims_count=input_dims_count,
+                    input_dims_fraction=None,
+                    floor=_INPUT_DIMS_FRACTION_FLOOR,
+                )
+            else:
+                _note_check(
+                    CHECK_CAPTURE_INPUT_DIMS,
+                    status="passed" if _input_dims_fraction >= _INPUT_DIMS_FRACTION_FLOOR else "failed",
+                    sampled_file=target.name,
+                    cpu_op_count=cpu_op_count,
+                    input_dims_count=input_dims_count,
+                    input_dims_fraction=_input_dims_fraction,
+                    floor=_INPUT_DIMS_FRACTION_FLOOR,
+                )
             if cpu_op_count == 0:
                 # ROCm/SGLang often log graph-capture kernels under other names,
                 # so zero cpu_op isn't itself a capture failure (cross-check [5]).
