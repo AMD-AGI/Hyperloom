@@ -1819,9 +1819,7 @@ def _gemm_router_targets(
     except Exception:  # noqa: BLE001 - an unavailable router must not fail the run
         log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
         return ()
-    return tuple(
-        (str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run
-    )
+    return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
 
 
 def _gemm_capped_tuner(payload: dict, *, max_targets: int, target_names: tuple[str, ...]) -> str:

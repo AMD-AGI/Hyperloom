@@ -1554,9 +1554,7 @@ def _run_fusion_autoloop(
             vr.kernel_speedup = None
             if disposition == "serving_crash":
                 vr.correctness_passed = False
-            log.warning(
-                "dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition
-            )
+            log.warning("dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition)
             return None
         return RecipePatch(
             kernel_name=recipe.pattern_id,

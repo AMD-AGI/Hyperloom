@@ -68,9 +68,7 @@ def test_manifest_keeps_the_unroutable_row_and_merges_history(tmp_path: Path) ->
         # the ordinal ``current_kernel_id`` each entry currently occupies.
         kernel_opt_task_attempts={"task-a": {"current_kernel_id": "k001", "attempts": 2}},
     )
-    manifest_path = krh._write_forge_candidate_manifest(
-        {"candidates_path": str(candidates)}, session_dir=tmp_path
-    )
+    manifest_path = krh._write_forge_candidate_manifest({"candidates_path": str(candidates)}, session_dir=tmp_path)
     assert manifest_path is not None
     assert manifest_path.name == "forge_candidate_manifest.json"
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -87,9 +85,7 @@ def test_manifest_is_readable_by_the_forge_consumer(tmp_path: Path) -> None:
 
     candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
     _state(tmp_path)
-    manifest_path = krh._write_forge_candidate_manifest(
-        {"candidates_path": str(candidates)}, session_dir=tmp_path
-    )
+    manifest_path = krh._write_forge_candidate_manifest({"candidates_path": str(candidates)}, session_dir=tmp_path)
     parsed = nom.read_candidates(manifest_path)
     assert [candidate.kernel_name for candidate in parsed] == ["k001_kernel"]
 
@@ -136,10 +132,7 @@ class _FixedClockState:
 def test_every_lane_draws_its_share_from_one_probe() -> None:
     """600 min less the 5 min reserve = 35700s, split 50/30/20 and floored."""
     state = _FixedClockState(600.0)
-    lanes = {
-        lane: krh._nomination_lane_budget(state, lane)
-        for lane in (lb.LANE_REWRITE, lb.LANE_FUSION, lb.LANE_GEMM)
-    }
+    lanes = {lane: krh._nomination_lane_budget(state, lane) for lane in (lb.LANE_REWRITE, lb.LANE_FUSION, lb.LANE_GEMM)}
     assert {lane: alloc.budget_sec for lane, alloc in lanes.items()} == {
         lb.LANE_REWRITE: 17850,
         lb.LANE_FUSION: 10710,
@@ -175,9 +168,7 @@ def test_request_points_candidates_path_at_the_manifest(tmp_path: Path) -> None:
     trace.write_text("{}", encoding="utf-8")
     candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
     state = _state(tmp_path, last_profile_trace=str(trace))
-    manifest_path = krh._write_forge_candidate_manifest(
-        {"candidates_path": str(candidates)}, session_dir=tmp_path
-    )
+    manifest_path = krh._write_forge_candidate_manifest({"candidates_path": str(candidates)}, session_dir=tmp_path)
     allocation = krh._nomination_lane_budget(state)
     request_path = krh._write_nomination_request(
         {},
@@ -199,11 +190,7 @@ def test_request_points_candidates_path_at_the_manifest(tmp_path: Path) -> None:
 def test_request_rejects_a_missing_trace(tmp_path: Path) -> None:
     candidates = _candidates(tmp_path, [_row("k001")])
     state = _state(tmp_path)  # no last_profile_trace → trace resolves to ""
-    manifest_path = krh._write_forge_candidate_manifest(
-        {"candidates_path": str(candidates)}, session_dir=tmp_path
-    )
+    manifest_path = krh._write_forge_candidate_manifest({"candidates_path": str(candidates)}, session_dir=tmp_path)
     allocation = krh._nomination_lane_budget(state)
     with pytest.raises(nr.NominationRequestError, match="trace_path"):
-        krh._write_nomination_request(
-            {}, session_dir=tmp_path, manifest_path=manifest_path, allocation=allocation
-        )
+        krh._write_nomination_request({}, session_dir=tmp_path, manifest_path=manifest_path, allocation=allocation)

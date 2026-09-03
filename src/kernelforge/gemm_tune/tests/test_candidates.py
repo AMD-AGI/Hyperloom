@@ -111,9 +111,7 @@ def test_a_candidate_with_only_an_artifact_still_lands() -> None:
 
 
 def test_non_tuneresult_entries_are_skipped() -> None:
-    assert per_tuner_candidates([{"tuner": "x"}, None, _ok("a8w8")]) == [
-        c for c in per_tuner_candidates([_ok("a8w8")])
-    ]
+    assert per_tuner_candidates([{"tuner": "x"}, None, _ok("a8w8")]) == [c for c in per_tuner_candidates([_ok("a8w8")])]
 
 
 def test_candidate_serializes_to_a_dict() -> None:

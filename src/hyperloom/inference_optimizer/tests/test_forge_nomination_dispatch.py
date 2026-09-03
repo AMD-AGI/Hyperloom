@@ -103,9 +103,7 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
 
     monkeypatch.setattr(forge_submit, "submit_auto", _fake_submit_auto)
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
 
     # The handler reports the auto outcome, not a single-kernel result.
     assert result["status"] == "complete"
@@ -159,9 +157,7 @@ def test_auto_true_empty_nomination_queues_nothing(tmp_path, monkeypatch):
 
     monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "complete"
     assert result["queued"] == 0
     state = SharedState.load_or_init(tmp_path)
@@ -184,9 +180,7 @@ def test_auto_true_forge_timeout_is_surfaced_not_reported_complete(tmp_path, mon
         lambda **_: {"status": "timeout", "patches": [], "error": "deadline exceeded"},
     )
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     # The forge status and its error ride through; NOT collapsed to complete.
     assert result["status"] == "timeout"
     assert result["auto"] is True
@@ -219,9 +213,7 @@ def test_auto_true_missing_trace_fails_cleanly_without_leaking_request(tmp_path,
         lambda **_: (_ for _ in ()).throw(AssertionError("must not reach forge without a trace")),
     )
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "failed"
     assert result["auto"] is True
     assert "trace" in result["error"].lower()
@@ -247,9 +239,7 @@ def test_auto_true_unbounded_session_skips_without_calling_forge(tmp_path, monke
 
     monkeypatch.setattr(forge_submit, "submit_auto", _boom)
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "skipped"
     assert result["reason"] == "no_budget"
     assert called["n"] == 0
@@ -308,9 +298,7 @@ def test_auto_true_all_candidates_outside_workspace_fails_before_writing_anythin
         lambda **_: (_ for _ in ()).throw(AssertionError("no candidate is stageable; forge must not run")),
     )
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "failed"
     assert result["auto"] is True
     assert result["error_class"] == "forge_workspace_staging_unavailable"
@@ -337,9 +325,7 @@ def test_auto_true_one_candidate_inside_workspace_lets_the_run_proceed(tmp_path,
 
     monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result == {
         "status": "complete",
         "auto": True,
@@ -373,9 +359,7 @@ def test_auto_true_rejected_candidate_inside_workspace_does_not_rescue_the_run(t
         lambda **_: (_ for _ in ()).throw(AssertionError("the only inside row is rejected; forge must not run")),
     )
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     assert result["status"] == "failed"
     assert result["error_class"] == "forge_workspace_staging_unavailable"
     assert not (tmp_path / "forge_candidate_manifest.json").exists()
@@ -443,9 +427,7 @@ def test_auto_false_never_touches_the_nomination_path(tmp_path, monkeypatch):
 
     monkeypatch.setattr(krh, "_batch_kernel_candidates", _fake_selector)
 
-    result = asyncio.run(
-        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
-    )
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
     # The selector ran; no manifest / request / auto result was produced.
     assert selector_calls["n"] == 1
     assert result.get("auto") is not True
