@@ -554,7 +554,13 @@ async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
 async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
-    """Wrapper fallback then a native retry of the same intent both land."""
+    """A wrapper block and a native block are two tool_use events.
+
+    The coordinator executes every intent with no merge. After the MCP
+    handler acks the wrapper, the model should not retry; if both still
+    appear in one query they are kept rather than dropping a real second
+    emit.
+    """
     raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
     wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
     native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}

@@ -199,8 +199,17 @@ EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
                 f"{constraints_sentence(IntentType)}"
             ),
         },
+        "__unparsedToolInput": {
+            "type": "object",
+            "description": (
+                "Internal fallback produced by the Claude Code streaming parser. Never emit this deliberately."
+            ),
+        },
     },
-    "required": ["intent_type", "payload"],
+    "anyOf": [
+        {"required": ["intent_type", "payload"]},
+        {"required": ["__unparsedToolInput"]},
+    ],
     "additionalProperties": False,
 }
 
@@ -218,7 +227,7 @@ EMIT_INTENT_TOOL_DESCRIPTION = (
 _UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
 
 
-def _is_unparsed_tool_wrapper(raw_input: Any) -> bool:
+def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
     """Whether ``input`` is Claude Code's wrapped unparsed tool JSON object."""
     if not isinstance(raw_input, dict):
         return False
@@ -228,7 +237,7 @@ def _is_unparsed_tool_wrapper(raw_input: Any) -> bool:
     return isinstance(wrapped, dict) and isinstance(wrapped.get("raw"), str)
 
 
-def _coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
+def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
     """Return native emit_intent input, decoding the wrapper only as fallback.
 
     Canonical ``{intent_type, payload}`` is returned unchanged. The
@@ -272,7 +281,7 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
     """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
-    coerced = _coerce_emit_intent_input(payload)
+    coerced = coerce_emit_intent_input(payload)
     extra = set(coerced.keys()) - {"intent_type", "payload"}
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
@@ -372,6 +381,8 @@ __all__ = [
     "MCP_SERVER_NAME",
     "build_emit_intent_server",
     "build_intent_envelope_schema",
+    "coerce_emit_intent_input",
+    "is_unparsed_tool_wrapper",
     "payload_contract",
     "validate_emit_intent_input",
 ]

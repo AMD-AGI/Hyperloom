@@ -52,10 +52,10 @@ from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_QUALIFIED,
     EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
-    _coerce_emit_intent_input,
-    _is_unparsed_tool_wrapper,
     build_emit_intent_server,
+    coerce_emit_intent_input,
     constraints_sentence,
+    is_unparsed_tool_wrapper,
     payload_contract,
 )
 
@@ -898,8 +898,8 @@ class ClaudeBackend:
         text_chunks: list[str] = []
         result_chunks: list[str] = []
         tool_block_count = 0
-        # Claude Code may retry the same wrapped tool JSON many times in one
-        # query; keep the first decoded fallback envelope only.
+        # Defense in depth: identical wrapper envelopes in one query are the
+        # parser retry storm. Native duplicates still count separately.
         seen_fallback_intents: set[str] = set()
         # Every usage dict the stream reports, in order: the last is cumulative
         # over the call, the ones before it describe single requests.
@@ -931,7 +931,7 @@ class ClaudeBackend:
                         tool_block_count += 1
                         intent = self._parse_tool_use_block(block)
                         if intent is not None:
-                            if _is_unparsed_tool_wrapper(getattr(block, "input", None)):
+                            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
                                 fingerprint = _intent_fingerprint(intent)
                                 if fingerprint in seen_fallback_intents:
                                     continue
@@ -1049,7 +1049,7 @@ class ClaudeBackend:
             Intent | None: The validated intent, or ``None`` if validation
             fails (the failure is logged, not raised).
         """
-        raw_input = _coerce_emit_intent_input(getattr(block, "input", None) or {})
+        raw_input = coerce_emit_intent_input(getattr(block, "input", None) or {})
         try:
             envelope = {
                 "intents": [
@@ -1094,7 +1094,7 @@ class ClaudeBackend:
         raw_input = getattr(block, "input", None)
         if isinstance(raw_input, dict):
             summary["input_keys"] = sorted(str(key) for key in raw_input)
-            coerced = _coerce_emit_intent_input(raw_input)
+            coerced = coerce_emit_intent_input(raw_input)
             intent_type = coerced.get("intent_type")
             if isinstance(intent_type, str):
                 summary["intent_type"] = intent_type
