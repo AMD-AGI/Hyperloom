@@ -17,19 +17,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   but that sentence is written for an operator and on that path there is no
   operator — so a supply gap was handed to an LLM specialist as if it were a
   framework bug, and the run's budget went to re-deriving an install this
-  repository already had.<br/>
-  The runtime now runs that install itself, once per process, when the
-  preflight finds aiperf missing or off the pinned `AIPERF_REF`; a failed repair
+  repository already had. Measured on that cluster: 11 of 13 provisioning runs
+  logged `aiperf (AgentX) skipped` and left a box that could not run AgentX.<br/>
+  **Install time** now keys on something it can actually know. A build that
+  ships `assets/agentx/` is a build whose boxes may be asked to run AgentX, so
+  the client is installed on that signal rather than on a runtime mode flag
+  nobody sets while provisioning. A failure there only warns: the pre-warm must
+  not block a provision that was never going to use it.<br/>
+  **Run time** repairs what is still missing — once per process, when the
+  preflight finds aiperf absent or off the pinned `AIPERF_REF`. A failed repair
   is folded into the preflight error alongside the original diagnosis, never
   swallowed. An operator config error (a corpus pin the scenario does not admit)
   does not trigger an install — reinstalling the same build cannot change that
   verdict.<br/>
-  **Operator note**: `install.sh` gains `--only-aiperf`, which installs just the
-  pinned client and exits — use it to add AgentX support to a box provisioned
-  without it. And when AgentX is asked for by name (`INSTALL_AIPERF`,
-  `HYPERLOOM_AGENTX` or `--only-aiperf`), a failed aiperf install is now FATAL
-  rather than a warning. A default install never reaches that path, so the
-  synthetic route still grows no AgentX-only dependency it can be blocked by.
+  **Operator note**: a default install now pays one pinned aiperf install
+  (measured ~30s; `ensure_aiperf` records the ref and skips on every later run).
+  Set `AIPERF_BIN` to an existing build to skip it, or `AGENTX_ASSET_DIR` to
+  point the check elsewhere. `install.sh` also gains `--only-aiperf`, which
+  installs just the client and exits — use it to add AgentX support to a box
+  provisioned without it. And when AgentX is asked for **by name**
+  (`INSTALL_AIPERF`, `HYPERLOOM_AGENTX` or `--only-aiperf`), a failed install is
+  FATAL rather than a warning: the caller named the dependency, so leaving it
+  absent with a warning in a log nobody reads is what produced the incident.
 
 - **A missing AgentX client stops the run instead of opening an enablement
   round.** The enablement lane diagnoses things nobody knew about in advance;

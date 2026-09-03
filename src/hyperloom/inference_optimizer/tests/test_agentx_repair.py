@@ -88,6 +88,41 @@ def test_install_script_marks_an_explicitly_requested_aiperf_as_required():
     assert "AIPERF_REQUIRED" in text
 
 
+def test_install_script_prewarms_aiperf_when_the_build_ships_the_client():
+    """A default provision must install aiperf, not skip it.
+
+    The gate used to read INSTALL_AIPERF / HYPERLOOM_AGENTX -- runtime mode
+    flags -- to decide an install-time question. Nobody sets them while
+    provisioning, because the mode is chosen later, per session. Measured on the
+    incident cluster: 11 of 13 provisioning runs logged "aiperf (AgentX)
+    skipped" and left a box that could not run AgentX at all.
+
+    The presence of the shipped client is the install-time-knowable signal, so
+    the default branch installs on it. Asserted against the packaged installer
+    because this is the one behaviour the incident turned on.
+    """
+    text = repair.install_script_path().read_text(encoding="utf-8")
+    assert "AGENTX_ASSET_DIR" in text
+    # The default branch must reach ensure_aiperf, not just log a skip.
+    default_branch = text.split('case "${_agx_want}:${_agx_sw}" in', 1)[1].split("esac", 1)[0]
+    assert "pre-warming" in default_branch
+    assert default_branch.count("ensure_aiperf") >= 2, "the no-flag branch never installs"
+
+
+def test_agentx_assets_exist_so_a_source_checkout_prewarms():
+    """The signal the installer keys on must actually be present in-tree.
+
+    A rename of ``assets/agentx`` would silently turn the pre-warm back into a
+    skip -- the same silent regression, one directory along.
+    """
+    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
+
+    assets = agentx_asset_dir()
+    assert assets.is_dir(), f"AgentX assets missing at {assets}"
+    # install.sh derives the same directory from its own location.
+    assert assets == repair.install_script_path().parent / "agentx"
+
+
 # ── repair mechanics ─────────────────────────────────────────────────────────
 def test_repair_invokes_the_packaged_installer_with_only_aiperf(monkeypatch):
     seen = {}
