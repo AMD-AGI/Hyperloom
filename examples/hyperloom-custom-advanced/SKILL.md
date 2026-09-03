@@ -282,6 +282,13 @@ export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
+# $RUN_TAG is timestamped and cannot be recomputed, and under Claw the launch
+# and the health check are separate tool calls with separate shells. Persist the
+# run-scoped vars so the health-check block can source them. Session-scoped
+# filename, for the same WekaFS reason setup_env.sh must never be shared.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
 
 export FRAMEWORK="${FRAMEWORK:-sglang}"
 export TP="${TP:-1}"
@@ -339,16 +346,40 @@ OPT_FLAGS=(
 
 # Detach per the rule above: run_in_background=true under Claw, or prefix
 # `setsid nohup` and append ` &` elsewhere. Either way $PID_FILE is reconciled
-# from the launch-info JSON below -- the tool returns a shell_id, and $! is the
-# setsid wrapper.
+# from the launch-info JSON in the health-check block below -- the tool returns
+# a shell_id, and $! is the setsid wrapper.
 python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   "${OPT_FLAGS[@]}" \
   > "$RUN_LOG" 2>&1 < /dev/null
+```
 
+The health check is a **separate** block on purpose, and under Claw it must be a
+separate foreground tool call. Appending it to the launch block would put the
+`sleep 30` and every line it prints into the background too, where you would not
+see them without polling `bash_output`. The harness branch above therefore
+applies to the launch command only:
+
+```bash
 sleep 30
+# Separate shell under Claw, so re-source what the launch block exported.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:?USER_DATA_PATH missing}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
-[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
+if [ -z "$REAL_PID" ]; then
+  # Best-effort only, and UNSAFE with concurrent sessions on this host: the
+  # pattern matches every optimizer running here and nothing ties a hit to this
+  # run. Take it only when unambiguous rather than `head -1`-ing a list, which
+  # would adopt another session's pid.
+  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+  if [ "$N_MATCHES" = "1" ]; then
+    REAL_PID="$MATCHES"
+  else
+    echo "ERROR: no .pid in $LAUNCH_INFO_FILE and pgrep is ambiguous" \
+         "($N_MATCHES matches); refusing to guess. Inspect $RUN_LOG." >&2
+  fi
+fi
 [ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
 # does not reap, so that reports a dead optimizer as alive indefinitely.

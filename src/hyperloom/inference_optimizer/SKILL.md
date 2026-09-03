@@ -104,7 +104,9 @@ the mirrors by hand.
 ``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
 **session dir**. For monitoring after launch, learn the session dir from
 the **launch-info JSON** written by ``--launch-info-file`` (``jq -r
-.session_dir <file>``) or, equivalently, from the single
+.session_dir <file>``, or the ``read_json`` python3 one-liner used in the
+health check below — ``jq`` is not installed on every node) or,
+equivalently, from the single
 ``HYPERLOOM_LAUNCH key=value …`` sentinel line the CLI prints to stdout
 (``session_dir=…``). Those are the authoritative, machine-readable
 sources. Never guess by walking ``$USER_DATA_PATH/<model_basename>/`` for
@@ -1126,7 +1128,18 @@ export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
+export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
+
+# $RUN_TAG carries a timestamp, so it cannot be recomputed later. Persist the
+# run-scoped vars where the health check can source them: under Claw the launch
+# is its own background tool call, so the health check necessarily runs in a
+# DIFFERENT shell and inherits none of these exports. Session-scoped name, for
+# the same WekaFS reason setup_env.sh must never be a shared filename. Outside
+# Claw, set $RUN_ENV yourself before launching if two runs share a host.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
 
 python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
@@ -1134,7 +1147,7 @@ python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
-  --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
+  --launch-info-file "$LAUNCH_INFO_FILE" \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
@@ -1143,6 +1156,13 @@ and no `setsid nohup` and no trailing `&` — the tool is what detaches it. The
 tool returns a `shell_id`, not a pid, so `$PID_FILE` is written in the health
 check below from the launch-info JSON, which carries the real one. The monitor
 requires that file, so do not skip it.
+
+Because that launch is its own background tool call, the health check has to be
+a **separate foreground** call — it cannot be appended to the same block, or the
+`sleep 30` and every line it prints would run in the background too, invisible
+until you poll `bash_output`. A separate call means a separate shell with none of
+the launch block's `export`s, which is what `$RUN_ENV` above is for: the health
+check and the monitor both source it instead of assuming carried-over state.
 
 **Everywhere else**, prefix the block with `setsid nohup`, append ` &`, and
 `echo $! > "$PID_FILE"`. That form is required for runs > 5 min under Cursor,
@@ -1193,10 +1213,18 @@ After launching, do a short health check:
 
 ```bash
 sleep 30
+# Re-enter the launch shell's environment. Required under Claw, where this is a
+# separate foreground tool call and the `export`s from the launch block are gone;
+# harmless when it is the same shell.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+
+# `jq` is not on every node, so read the launch-info JSON with python3.
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+
 # Authoritative pid, from the CLI rather than from whatever launched it: under
 # Claw the tool returned a shell_id, and under setsid `$!` is the wrapper.
-launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
-pid="$(jq -r '.pid // empty' "$launch_info" 2>/dev/null)"
+pid="$(read_json "$LAUNCH_INFO_FILE" pid)"
 [ -n "$pid" ] && echo "$pid" > "$PID_FILE"
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry, and sandbox PID 1
 # does not reap, so that check reports a dead optimizer as alive indefinitely.
@@ -1205,9 +1233,9 @@ ps -o stat= -p "$pid" 2>/dev/null | grep -qv '^Z' \
   && echo "optimizer_alive=true pid=$pid"
 # Authoritative session dir from the launch-info JSON (--launch-info-file).
 # Never guess by timestamp: overlapping sessions break any "latest dir" pick.
-session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
+session_dir="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$session_dir" ]; then
-  echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
+  echo "ERROR: no .session_dir in $LAUNCH_INFO_FILE (launch-info JSON missing or" \
        "malformed). The optimizer likely died before emitting launch info;" \
        "inspect the HYPERLOOM_LAUNCH line and errors in $RUN_LOG." \
        "Refusing to guess the session dir from timestamps." >&2
@@ -1276,12 +1304,14 @@ For runs > 5 min, start a monitor in its own detached process. It polls
 dies without those markers (unexpected crash).
 
 ```bash
-export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
+# Same separate-shell problem as the health check: source the run-scoped env the
+# launch block wrote rather than assuming $RUN_DIR/$RUN_TAG/$PID_FILE survived.
+# It sets $LAUNCH_INFO_FILE, which points the monitor at the authoritative
+# session dir ($INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from
+# that JSON) and $PID_FILE, which is the pid it watches.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 mkdir -p "$RUN_DIR"
-# Point the monitor at the authoritative session dir: it reads
-# $INFERENCE_OPTIMIZER_SESSION_DIR first, else .session_dir from the
-# launch-info JSON in $LAUNCH_INFO_FILE (written by --launch-info-file).
-export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"

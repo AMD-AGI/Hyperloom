@@ -104,6 +104,16 @@ export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
+# $RUN_TAG is timestamped and cannot be recomputed. Persist the run-scoped vars
+# so later blocks can source them: under Claw the launch is its own background
+# tool call and the health check is a separate foreground call, which inherits
+# none of these exports. Session-scoped filename for the same WekaFS reason
+# setup_env.sh must never be shared; set $RUN_ENV yourself if two non-Claw runs
+# share a host.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
+
 python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
@@ -135,12 +145,31 @@ a tiny `python3` reader):
 
 ```bash
 sleep 30
+# Separate shell from the launch under Claw, so re-source the run-scoped env
+# instead of assuming $RUN_DIR/$PID_FILE/$LAUNCH_INFO_FILE carried over.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 
 # Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
 # and rewrite $PID_FILE so the monitor watches the right process.
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
-[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
+if [ -z "$REAL_PID" ]; then
+  # Best-effort only, and UNSAFE when several sessions optimize on this host:
+  # the pattern matches all of them and nothing in it ties a hit to this run.
+  # Accept it only when unambiguous; never `head -1` a multi-hit list, which
+  # silently adopts another session's pid and points the monitor -- and its
+  # resume -- at the wrong process.
+  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+  if [ "$N_MATCHES" = "1" ]; then
+    REAL_PID="$MATCHES"
+  else
+    echo "ERROR: no .pid in $LAUNCH_INFO_FILE and pgrep is ambiguous" \
+         "($N_MATCHES matches); refusing to guess. Inspect the" \
+         "HYPERLOOM_LAUNCH line and $RUN_LOG." >&2
+  fi
+fi
 [ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
 # does not reap, so that check reports a dead optimizer as alive indefinitely.
@@ -183,9 +212,11 @@ optimizer process disappears without a terminal marker; it must not start a
 fresh run.
 
 ```bash
-export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
+# Source the run-scoped env for $RUN_DIR / $PID_FILE / $LAUNCH_INFO_FILE: under
+# Claw this is another separate tool call and inherits no exports.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 mkdir -p "$RUN_DIR"
-export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
@@ -199,7 +230,10 @@ bash "$RUN_DIR/robustness_monitor.sh" \
 Poll every 300s unless debugging startup failure.
 
 ```bash
-export SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE")"
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+export SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 test -n "$SESSION_DIR"
 "$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION_DIR"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION_DIR"
