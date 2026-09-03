@@ -3,11 +3,10 @@
 
 """Profile self-certification: can this trace be analysed, and would the answer be true?
 
-Landed as an operator script rather than a library because it has no driver yet:
-``certify_trace_dir`` is the entry point and the caller supplies ``chunk_files``
-and the workload parameters. The intended destination is the profile executor,
-which already holds both -- see the handover note for why that also retires the
-cluster-push path this currently feeds.
+``certify_trace_dir`` is the entry point; the caller supplies ``chunk_files`` and
+the workload parameters. The profile executor calls it once the capture lands,
+which is why there is no driver here: the executor already holds the session
+identity and the attempt context a standalone driver would have had to rebuild.
 
 Implements ``trace-selfcert-checklist.md``. The two questions are answered
 independently and never merged into one verdict, because a trace that analyses
