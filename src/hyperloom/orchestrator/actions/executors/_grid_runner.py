@@ -43,6 +43,7 @@ from ..stop_attribution import (
 )
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
@@ -2742,20 +2743,42 @@ async def run_grid(
             )
         if workspace is None:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
-                redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
-            )
+            # An AgentX preflight abort never reaches Magpie, so of course no
+            # workspace exists -- but calling it ``no_benchmark_workspace`` erases
+            # the one fact that decides what to do next. Measured: with the cause
+            # gone, a missing pinned dependency read as a generic launch failure
+            # and opened an enablement round, where an LLM specialist re-derived
+            # an install this repository already owns. Given its own block, the
+            # way EVAL_PROBE_UNPATCHABLE_RETURNCODE is handled, so one sentinel
+            # is not classified three different ways in the same function.
+            agentx_preflight_abort = rc == AGENTX_PREFLIGHT_RETURNCODE
+            if agentx_preflight_abort:
+                # Same class the baseline path uses for the same abort, so both
+                # routes classify it identically. ``_run_magpie`` returns the
+                # diagnosis as stderr and there is no server log to excerpt --
+                # no server was ever started -- but keep the tail bound and the
+                # non-empty fallback the sibling branch has.
+                no_ws_error_class = AGENTX_PREFLIGHT_ERROR_CLASS
+                no_ws_error_summary = (
+                    redact_secret_values((stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round"
+                )
+            else:
+                no_ws_error_class = "no_benchmark_workspace"
+                no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
+                    redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
+                )
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: no_benchmark_workspace (rc=%s)",
+                "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s)",
                 i + 1,
                 len(grid),
                 variant.name,
+                no_ws_error_class,
                 rc,
             )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
-                error_class="no_benchmark_workspace",
+                error_class=no_ws_error_class,
                 error_summary=no_ws_error_summary,
                 extra_args=variant.extra_server_args,
             )
@@ -2767,13 +2790,48 @@ async def run_grid(
                     status="failed",
                     returncode=rc,
                     error=no_ws_error_summary,
-                    error_class="no_benchmark_workspace",
+                    error_class=no_ws_error_class,
                     server_log_path=_existing_log_path(server_log),
                     nonfatal_warnings=harvest_tags,
                     note=variant.note,
                 )
             )
             await _report_finished_variant(i)
+            if agentx_preflight_abort:
+                # Environment, not variant. The client is missing for the whole
+                # grid, the runtime repair has already been tried and memoized,
+                # so every remaining point fails identically -- and
+                # ``keep_going_on_failure`` would walk all of them to find that
+                # out. Nothing downstream stops the grid on this class either:
+                # the writeback gate that halts a run is baseline-scoped.
+                log.error(
+                    "grid_runner: variant %d/%d name=%s aborted on the AgentX preflight; "
+                    "abandoning the remaining %d point(s) -- the client is missing for the "
+                    "whole grid, not for this variant: %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    len(grid) - (i + 1),
+                    no_ws_error_summary,
+                )
+                # Recorded rather than dropped: a grid that just returns fewer
+                # points than it declared reads as a grid that was that size.
+                # The whole claim of this path is that a missing client is
+                # visible as a missing client, and silence about the points it
+                # cost is the same disappearance in a different place.
+                results.extend(
+                    VariantResult(
+                        name=rest.name,
+                        extra_server_args=rest.extra_server_args,
+                        extra_envs=dict(rest.extra_envs),
+                        status="skipped",
+                        error="AgentX preflight aborted the grid before this variant ran",
+                        error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
+                        note=rest.note,
+                    )
+                    for rest in grid[i + 1 :]
+                )
+                break
             if rc != 0 and not keep_going_on_failure:
                 break
             continue

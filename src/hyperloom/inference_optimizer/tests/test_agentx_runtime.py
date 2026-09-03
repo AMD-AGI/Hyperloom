@@ -88,7 +88,7 @@ def test_profile_config_requires_progress_api(tmp_path, monkeypatch):
 
     runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg)
 
-    assert seen == [{"require_progress_api": True}]
+    assert seen == [{"env": {}, "require_progress_api": True}]
 
 
 def test_stronger_progress_api_preflight_satisfies_later_basic_check(tmp_path, monkeypatch):
@@ -113,7 +113,7 @@ def test_stronger_progress_api_preflight_satisfies_later_basic_check(tmp_path, m
     runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=profile_cfg)
     runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=baseline_cfg)
 
-    assert seen == [{"require_progress_api": True}]
+    assert seen == [{"env": {}, "require_progress_api": True}]
 
 
 def test_incapable_bin_not_memoized(tmp_path, monkeypatch):

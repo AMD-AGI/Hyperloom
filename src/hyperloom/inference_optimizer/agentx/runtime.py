@@ -47,7 +47,8 @@ def maybe_prepare_agentx(
         the AgentX client.
 
     Raises:
-        AgentXPreflightError: If aiperf is missing or not AgentX-capable.
+        AgentXPreflightError: If aiperf is missing or not AgentX-capable and the
+            packaged installer could not supply it.
     """
     try:
         bench = (yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}).get("benchmark", {}) or {}
@@ -57,7 +58,7 @@ def maybe_prepare_agentx(
         return False
 
     from .deploy import deploy_agentx_assets
-    from .preflight import check_aiperf_capability, resolve_aiperf_bin
+    from .preflight import resolve_aiperf_bin
 
     # Deploy BEFORE preflight so the client is in place regardless of preflight
     # memoization state.
@@ -70,9 +71,92 @@ def maybe_prepare_agentx(
     preflight_key = aiperf_bin or ""
     previous_check = _PREFLIGHTED_BINS.get(preflight_key)
     if previous_check is None or (require_progress_api and not previous_check):
-        check_aiperf_capability(
-            aiperf_bin,
-            require_progress_api=require_progress_api,
-        )  # raises if missing/incapable
-        _PREFLIGHTED_BINS[preflight_key] = require_progress_api or bool(previous_check)
+        # A missing or stale client is installed here rather than reported, so
+        # the memoized key is the binary that actually passed -- which the repair
+        # may have only just put on PATH.
+        aiperf_bin = _preflight_or_repair(aiperf_bin, env=env, require_progress_api=require_progress_api)
+        _PREFLIGHTED_BINS[aiperf_bin or ""] = require_progress_api or bool(previous_check)
     return True
+
+
+def _preflight_or_repair(
+    aiperf_bin: str | None,
+    *,
+    env: Mapping[str, str],
+    require_progress_api: bool = False,
+) -> str | None:
+    """Capability-check aiperf, installing the pinned build once if it is absent.
+
+    aiperf is a dependency AgentX declares for itself and whose install this
+    repository already owns (``install.sh::ensure_aiperf``, pinned by
+    ``AIPERF_REF``). The preflight was the first place that knew it was missing,
+    and it only said so -- to an operator who is not on this path. Downstream
+    that read as an ordinary benchmark failure and opened an enablement round, so
+    a supply problem was handed to a specialist as if it were a framework bug.
+
+    Repairing here keeps the runtime flag as the single source of truth for "this
+    box needs aiperf". Only a ``repairable`` verdict triggers an install: an
+    operator pinning a corpus the scenario does not admit is not fixed by
+    reinstalling the same build, and spending minutes on pip before saying so
+    would only delay the diagnosis.
+
+    Args:
+        aiperf_bin: The binary resolved from ``env`` (None/empty means absent).
+        env: Environment the benchmark subprocess will run with.
+
+    Returns:
+        The binary that passed the check -- re-resolved after a repair, since the
+        install is what puts it on ``PATH``.
+
+    Raises:
+        AgentXPreflightError: If the build is unusable and could not be repaired.
+            A post-repair failure is marked non-repairable so no caller retries
+            an install that has already been tried and did not help.
+    """
+    from .preflight import AgentXPreflightError, check_aiperf_capability, resolve_aiperf_bin
+
+    try:
+        check_aiperf_capability(aiperf_bin, env=env, require_progress_api=require_progress_api)
+        return aiperf_bin
+    except AgentXPreflightError as exc:
+        if not getattr(exc, "repairable", False):
+            raise
+        # An operator override is not a supply gap, and installing cannot close
+        # it: ``ensure_aiperf`` returns 0 without doing anything when AIPERF_BIN
+        # is set, and ``resolve_aiperf_bin`` would hand back that same binary
+        # afterwards. Repairing here would report a successful install that
+        # never happened and steer the reader away from the one thing that
+        # fixes it.
+        override = (env.get("AIPERF_BIN") or "").strip()
+        if override:
+            raise AgentXPreflightError(
+                f"{exc} AIPERF_BIN is set to {override!r}, so this is the build being "
+                f"checked and no install can replace it. Point AIPERF_BIN at a pinned "
+                f"build, or unset it and let install.sh supply one.",
+                repairable=False,
+            ) from exc
+        from .repair import ensure_aiperf_installed
+
+        repair_error = ensure_aiperf_installed(env=env)
+        if repair_error is not None:
+            raise AgentXPreflightError(
+                f"{exc} Automatic repair was attempted and failed: {repair_error}",
+                repairable=False,
+            ) from exc
+
+    # Re-resolve: the install is what put aiperf on PATH, so the pre-repair
+    # lookup (possibly None) says nothing about what is there now.
+    repaired_bin = resolve_aiperf_bin(env)
+    try:
+        check_aiperf_capability(repaired_bin, env=env, require_progress_api=require_progress_api)
+    except AgentXPreflightError as exc:
+        # The install reported success and the build is still unusable, so this
+        # is no longer a supply gap this process can close. Re-raise it as
+        # non-repairable: the repair result is memoized as a success, so a later
+        # round that trusted ``repairable`` would re-enter this branch, get that
+        # memoized success back, and arrive here again having done nothing.
+        raise AgentXPreflightError(
+            f"{exc} The pinned build was installed during this run and the check still fails.",
+            repairable=False,
+        ) from exc
+    return repaired_bin

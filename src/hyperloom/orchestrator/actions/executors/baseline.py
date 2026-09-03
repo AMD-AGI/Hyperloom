@@ -81,6 +81,7 @@ from ._grid_runner import (
     stopped_by_the_run,
 )
 from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
@@ -3573,7 +3574,15 @@ class BaselineExecutor:
         # Baseline/profile shell out here (not via _run_magpie), so without this the
         # materialize-time swap to aiperf_client.sh would point at a script that was
         # never deployed. No-op when HYPERLOOM_AGENTX is off.
-        _agx_err = prepare_agentx_runtime(
+        #
+        # Off-loop: this call can shell out to the installer (the runtime aiperf
+        # repair, bounded at REPAIR_TIMEOUT_SEC) and that installer waits on a
+        # cross-process ``flock`` with no timeout of its own. Run inline it would
+        # freeze the whole orchestrator for as long as that takes -- heartbeats,
+        # cancellation, the wall-clock budget and every bus write stop with it.
+        # ``_grid_runner`` already runs its copy of this through ``to_thread``.
+        _agx_err = await asyncio.to_thread(
+            prepare_agentx_runtime,
             env=os.environ,
             inferencex_path=effective_inferencex_path,
             config_path=config_path,
@@ -3582,7 +3591,7 @@ class BaselineExecutor:
         if _agx_err:
             return {
                 "status": "failed",
-                "error_class": "agentx_preflight",
+                "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
                 "error": _agx_err,
                 "output_dir": str(output_dir),
             }
