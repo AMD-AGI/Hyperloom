@@ -160,7 +160,11 @@ def test_reused_kernel_id_resets_stale_group_ledger_and_rejection():
             "proposal": {"decision": "REVERT"},
         }
     )
-    assert "k002" in state.rejected_kernel_ids
+    # A grouped REVERT is terminal on the ledger row, not on the shared id set:
+    # the synthetic member ids would tombstone the siblings by association.
+    assert state.kernel_opt_attempts["k002"]["rejected_reason"] == "revert_decision"
+    assert state.kernel_opt_task_attempts["old-task"]["rejected_reason"] == "revert_decision"
+    assert state.rejected_kernel_ids == []
 
     state.record_kernel_opt(
         {
@@ -175,8 +179,28 @@ def test_reused_kernel_id_resets_stale_group_ledger_and_rejection():
     assert entry["task_group_key"] == "new-task"
     assert entry["attempts"] == 1
     assert len(entry["history"]) == 1
-    assert "k002" not in state.rejected_kernel_ids
+    assert entry.get("rejected_reason", "") == ""
+    assert state.rejected_kernel_ids == []
     assert state.pending_keep_kernel_ids() == ["k002"]
+
+
+def test_ungrouped_revert_still_tombstones_the_kernel_id():
+    """Without a task group there is no sibling to protect, so the id set is terminal."""
+    state = SharedState()
+    state.record_kernel_opt(
+        {
+            "status": "ok",
+            "kernel_id": "k002",
+            "source_file": "/repo/shared.py",
+            "task_group_key": "",
+            "proposal": {"decision": "REVERT"},
+            "verification": {"micro_speedup": 0.0},
+            "attempts": [],
+        }
+    )
+
+    assert state.rejected_kernel_ids == ["k002"]
+    assert state.kernel_opt_attempts["k002"]["rejected_reason"] == "revert_decision"
 
 
 def test_reused_kernel_id_ignores_stale_integration_history():

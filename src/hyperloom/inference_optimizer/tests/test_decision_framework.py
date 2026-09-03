@@ -3,10 +3,10 @@
 
 """Decision-framework regression tests.
 
-Covers ``_handle_request`` mirroring ``run_optimization`` / ``run_gemm_tuning``
-results into ``shared_state``, the native-source guards and batch selection in
-the run_optimization handler, and ``record_kernel_opt`` retiring kernels stuck
-in PARTIAL.
+Covers the Coordinator-owned kernel and gemm lanes mirroring their results into
+``shared_state``, the native-source guards and batch selection in the
+run_optimization handler, and ``record_kernel_opt`` retiring kernels stuck in
+PARTIAL.
 """
 
 from __future__ import annotations
@@ -64,6 +64,10 @@ async def test_run_optimization_response_records_to_shared_state(
     session_dir,
     monkeypatch,
 ):
+    """``run_optimization`` is a Coordinator-owned lane the model can no longer
+    REQUEST (the intent path denies it), so the recording is exercised on the
+    live entrypoint: KERNEL entry's ``_run_kernel_opt_nomination`` calls the
+    handler once from a nomination, then records and persists the result."""
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
@@ -71,6 +75,7 @@ async def test_run_optimization_response_records_to_shared_state(
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
+            "candidates_path": "/tmp/candidates.json",
             "reusable_native_kernel_ids": ["k006"],
         }
         c.shared_state.save(session_dir)
@@ -90,16 +95,8 @@ async def test_run_optimization_response_records_to_shared_state(
                 },
             }
 
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "run_optimization",
-            fake,
-        )
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_optimization", "params": {"kernel_id": "k006"}},
-        )
-        await c._handle_intent("orchestration", intent)
+        monkeypatch.setattr(kernel_request_handlers, "run_optimization_handler", fake)
+        await c.phase_kernel._run_kernel_opt_nomination()
         # SharedState gained a last_kernel_opt entry.
         ko = c.shared_state.last_kernel_opt
         assert ko["kernel_id"] == "k006"
@@ -148,9 +145,11 @@ async def test_trace_analyze_does_not_record_kernel_opt(
 @pytest.mark.asyncio
 async def test_run_gemm_tuning_response_records_to_shared_state(
     session_dir,
-    monkeypatch,
 ):
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    """``run_gemm_tuning`` is a Coordinator-owned lane the model can no longer
+    REQUEST (the intent path denies it), so the recording is exercised on the
+    live entrypoint every dispatch converges on: ``_handle_gemm_tuning_result``
+    records the result and persists the state."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.kernel_optimizer = "native"
@@ -164,34 +163,26 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
         }
         c.shared_state.save(session_dir)
 
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        async def fake(payload, *, session_dir):
-            return {
+        await c.phase_kernel._handle_gemm_tuning_result(
+            {
                 "status": "ok",
                 "decision": "KEEP",
                 "best_speedup": 1.2,
                 "tuned_file": "/tmp/a8w8_blockscale_tuned_gemm.csv",
             }
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "run_gemm_tuning",
-            fake,
-        )
-        await c._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-            ),
         )
 
-        # The E2E validator rewrites the stored result to its measured outcome.
-        assert c.shared_state.last_gemm_tuning["status"] == "complete"
-        assert c.shared_state.last_gemm_tuning["best_speedup"] == 1.2
-        assert c.shared_state.gemm_tuning_attempts
+        # The E2E validator rewrites the stored result to its measured outcome,
+        # and the history keeps exactly one row for the one dispatch.
+        last = c.shared_state.last_gemm_tuning
+        assert last["status"] == "complete"
+        assert last["best_speedup"] == 1.2
+        assert last["e2e_validated"] is True
+        assert c.shared_state.gemm_tuning_attempts == [last]
         assert "last_gemm_tuning=" in c.shared_state.to_prompt_summary()
+        # State persisted across reload.
+        reloaded = SharedState.load_or_init(session_dir)
+        assert reloaded.last_gemm_tuning["status"] == "complete"
     finally:
         await c.stop()
 
