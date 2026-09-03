@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.kernel import lane_budget as lb
 from hyperloom.orchestrator.kernel import nomination_request as nr
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -117,6 +118,53 @@ def test_unbounded_session_is_not_fundable(tmp_path: Path) -> None:
     assert allocation.budget_sec == 0
     assert allocation.max_targets == 0
     assert not allocation.is_fundable
+
+
+# --------------------------------------------------------------------------- #
+# 12b(ii) — the gemm and fusion lanes draw from the same split
+# --------------------------------------------------------------------------- #
+class _FixedClockState:
+    """A session whose remaining time does not tick while the split is inspected."""
+
+    def __init__(self, minutes: float | None) -> None:
+        self._minutes = minutes
+
+    def remaining_minutes(self) -> float | None:
+        return self._minutes
+
+
+def test_every_lane_draws_its_share_from_one_probe() -> None:
+    """600 min less the 5 min reserve = 35700s, split 50/30/20 and floored."""
+    state = _FixedClockState(600.0)
+    lanes = {
+        lane: krh._nomination_lane_budget(state, lane)
+        for lane in (lb.LANE_REWRITE, lb.LANE_FUSION, lb.LANE_GEMM)
+    }
+    assert {lane: alloc.budget_sec for lane, alloc in lanes.items()} == {
+        lb.LANE_REWRITE: 17850,
+        lb.LANE_FUSION: 10710,
+        lb.LANE_GEMM: 7140,
+    }
+    assert {lane: alloc.max_targets for lane, alloc in lanes.items()} == {
+        lb.LANE_REWRITE: 3,
+        lb.LANE_FUSION: 3,
+        lb.LANE_GEMM: 5,
+    }
+
+
+def test_router_estimates_tighten_the_gemm_ceiling() -> None:
+    """Two 60-minute tuners do not both fit in the gemm lane's 7140s share."""
+    state = _FixedClockState(600.0)
+    allocation = krh._nomination_lane_budget(state, lb.LANE_GEMM, gemm_target_costs_sec=(3600, 3600))
+    assert allocation.budget_sec == 7140
+    assert allocation.max_targets == 1
+
+
+def test_an_unbounded_session_funds_no_lane() -> None:
+    state = _FixedClockState(None)
+    for lane in (lb.LANE_REWRITE, lb.LANE_FUSION, lb.LANE_GEMM):
+        allocation = krh._nomination_lane_budget(state, lane)
+        assert (allocation.budget_sec, allocation.max_targets) == (0, 0)
 
 
 # --------------------------------------------------------------------------- #

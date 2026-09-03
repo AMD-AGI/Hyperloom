@@ -1117,6 +1117,40 @@ class TestForgeGemmHelperCoverage:
         assert input_payload["timeout"] == 7200
 
     @pytest.mark.asyncio
+    async def test_run_forge_fusion_takes_the_lane_share_of_a_bounded_phase(self, tmp_path, monkeypatch):
+        """600 min less the 5 min reserve = 35700s; fusion's 30% is 10710s."""
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+        monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
+        # Pinned: a live clock would tick between the split and the assertion.
+        monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 600.0)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n" + json.dumps(result) + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
+        )
+        assert input_payload["timeout"] == 10710
+
+    @pytest.mark.asyncio
     async def test_run_forge_fusion_unconfigured_provider_fails_before_subprocess(
         self,
         tmp_path,
@@ -6037,3 +6071,101 @@ def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
     generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
 
     assert rh._cold_start_rebaseline_timeout(generous) == generous
+
+
+class TestTheGemmLaneBudgetReachesTheInputJson:
+    """The gemm lane's share of the phase, as the wrapper actually receives it.
+
+    The wrapper exposes no "run at most N tuners" input, so a ceiling of one is
+    expressed by pinning ``tuner``; the wall-clock half travels as ``timeout`` and
+    ``global_timeout``.
+    """
+
+    @staticmethod
+    def _sentinel() -> str:
+        return (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+    def _prepare(self, tmp_path, monkeypatch, *, remaining_minutes, targets):
+        from hyperloom.orchestrator.state.shared_state import SharedState
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir(exist_ok=True)
+        SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path=str(model_dir),
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+        ).save(tmp_path)
+        # Pinned: a live clock would tick between the split and the assertion.
+        monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: remaining_minutes)
+
+        monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_gemm_router_targets", lambda **_kwargs: targets)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+    async def _written(self, tmp_path, payload):
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_a_share_that_funds_one_tuner_pins_that_tuner(self, tmp_path, monkeypatch):
+        # 600 min - 5 min reserve = 35700s; gemm gets 20% = 7140s, which pays for
+        # the first 60-minute tuner and not the second.
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-one"})
+        assert written["tuner"] == "fmoe_ck"
+        assert written["global_timeout"] == 7140
+        assert written["timeout"] == krh.gemm_per_tuner_timeout_sec(7140)
+
+    @pytest.mark.asyncio
+    async def test_a_share_that_funds_every_tuner_pins_none(self, tmp_path, monkeypatch):
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 600), ("a8w8", 600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-none"})
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 7140
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_session_keeps_the_module_default_and_no_pin(self, tmp_path, monkeypatch):
+        """No allocation must degrade to the default session, never to zero."""
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=None,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-unbounded"})
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 18000
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_tuner_survives_the_ceiling(self, tmp_path, monkeypatch):
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-explicit", "tuner": "a8w8"})
+        assert written["tuner"] == "a8w8"

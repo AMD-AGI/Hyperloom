@@ -40,7 +40,8 @@ REWRITE_MIN_TARGET_SEC = 4500
 GEMM_DEFAULT_TARGET_SEC = 20 * 60
 
 #: fusion: no admission floor and no per-recipe estimate exist, so its ceiling is
-#: a count rather than a division. Matches the recipe cap the lane already uses.
+#: a count rather than a division. Mirrors ``LoopConfig.max_recipes``' own default,
+#: which the forge-fuse path overrides with the full discovered recipe count.
 FUSION_MAX_TARGETS = 3
 
 #: Held back from the phase share so the lanes cannot consume the time the phase

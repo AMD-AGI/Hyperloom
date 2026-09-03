@@ -47,7 +47,13 @@ from hyperloom.orchestrator.roles.agent_role import (
 
 from ..actions.stop_attribution import stopped_by_the_run_class
 from . import candidate_manifest, nomination_request
-from .lane_budget import LANE_REWRITE, allocate as _allocate_lane_budgets, gemm_per_tuner_timeout_sec
+from .lane_budget import (
+    LANE_FUSION,
+    LANE_GEMM,
+    LANE_REWRITE,
+    allocate as _allocate_lane_budgets,
+    gemm_per_tuner_timeout_sec,
+)
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
@@ -1734,15 +1740,19 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _gemm_tuning_timeout_sec(payload: dict) -> int:
+def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the GEMM-tuning subprocess timeout in seconds.
 
     Reads ``payload['timeout_sec']`` then the
-    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var, falling back to the module
+    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- both operator inputs, so both
+    outrank a derived budget -- then the lane's share of the phase, then the module
     default; the result is floored at 60 seconds.
 
     Args:
         payload (dict): Request payload that may carry ``timeout_sec``.
+        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means no
+            allocation could be derived, which keeps the module default rather
+            than collapsing an unattended lane to a zero-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 60).
@@ -1754,12 +1764,105 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
     try:
         value = int(float(raw))
     except (TypeError, ValueError):
-        value = _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
+        value = lane_budget_sec if lane_budget_sec > 0 else _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
     return max(60, value)
 
 
-def _forge_fusion_timeout_sec(payload: dict) -> int:
-    """Resolve the forge-fusion subprocess timeout in seconds."""
+def _gemm_router_targets(
+    *,
+    model_path: str,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    gpu_type: str,
+    kernel_signature_log: str,
+    has_untuned_csv: bool,
+    has_shapes_json: bool,
+    has_tunableop_input: bool,
+) -> tuple[tuple[str, int], ...]:
+    """Ask the forge router which tuners it would run and what each costs.
+
+    The router is the only place a per-tuner runtime estimate exists, and it
+    returns them already in the execution order the gemm lane ceiling assumes.
+
+    Args:
+        model_path (str): Local model directory the router profiles.
+        framework (str): Routed forge framework (``sglang``/``vllm``/``vllm-aiter``).
+        precision (str): Resolved precision label.
+        quant_type (str): Resolved quantisation type.
+        gpu_type (str): Target GPU identifier.
+        kernel_signature_log (str): Server log used to detect 1-stage ASM.
+        has_untuned_csv (bool): Whether an untuned CSV shape source was resolved.
+        has_shapes_json (bool): Whether any JSON shape source was resolved.
+        has_tunableop_input (bool): Whether TunableOp rows were resolved.
+
+    Returns:
+        tuple[tuple[str, int], ...]: ``(tuner name, seconds)`` per runnable tuner in
+            priority order, or an empty tuple when the router cannot be consulted,
+            which leaves the lane ceiling on its own per-target default.
+    """
+    try:
+        from kernelforge.gemm_tune.model_analyzer import analyze_model  # noqa: PLC0415
+        from kernelforge.gemm_tune.router import select_tuners  # noqa: PLC0415
+
+        specs = select_tuners(
+            analyze_model(model_path),
+            framework=framework,
+            precision=precision,
+            quant_type=quant_type,
+            gpu_type=gpu_type,
+            kernel_signature_log=kernel_signature_log or None,
+            has_untuned_csv=has_untuned_csv,
+            has_shapes_json=has_shapes_json,
+            has_tunableop_input=has_tunableop_input,
+        )
+    except Exception:  # noqa: BLE001 - an unavailable router must not fail the run
+        log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
+        return ()
+    return tuple(
+        (str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run
+    )
+
+
+def _gemm_capped_tuner(payload: dict, *, max_targets: int, target_names: tuple[str, ...]) -> str:
+    """Resolve the ``tuner`` input-JSON value under the lane's target ceiling.
+
+    The gemm wrapper exposes no "run at most N tuners" input, only ``tuner``, which
+    names exactly one. A ceiling of one is therefore pinned to the router's
+    highest-priority tuner so the lane never starts a second one it cannot finish;
+    a wider ceiling is left to the session's ``global_timeout``, which the producer
+    already honours by skipping tuners once the deadline passes.
+
+    Args:
+        payload (dict): Request payload whose explicit ``tuner`` outranks the ceiling.
+        max_targets (int): The gemm lane's target ceiling. ``0`` means no allocation
+            could be derived and the routed tuner set is left untouched.
+        target_names (tuple[str, ...]): Runnable tuner names in the router's
+            priority order.
+
+    Returns:
+        str: The tuner name to force, or ``""`` to leave routing to the producer.
+    """
+    explicit = str(payload.get("tuner") or "").strip()
+    if explicit:
+        return explicit
+    if max_targets == 1 and len(target_names) > 1:
+        return target_names[0]
+    return ""
+
+
+def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
+    """Resolve the forge-fusion subprocess timeout in seconds.
+
+    Args:
+        payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
+        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means no
+            allocation could be derived, which keeps the module default rather
+            than collapsing an unattended lane to a one-second timeout.
+
+    Returns:
+        int: The resolved timeout in seconds (>= 1).
+    """
     raw = (
         payload.get("timeout")
         or payload.get("timeout_sec")
@@ -1771,7 +1874,7 @@ def _forge_fusion_timeout_sec(payload: dict) -> int:
     try:
         value = int(float(raw))
     except (OverflowError, TypeError, ValueError):
-        value = 7200
+        value = lane_budget_sec if lane_budget_sec > 0 else 7200
     return max(1, value)
 
 
@@ -4236,7 +4339,30 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    timeout = _gemm_tuning_timeout_sec(payload)
+    # The lane's share of the phase, sized against what the router says its own
+    # tuners cost. A share that cannot fund the first of them is no budget at all,
+    # so it degrades to the module default rather than to a doomed short session.
+    gemm_targets = await asyncio.to_thread(
+        _gemm_router_targets,
+        model_path=resolved_model_path,
+        framework=forge_framework,
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=gpu_type,
+        kernel_signature_log=kernel_sig_log,
+        has_untuned_csv=bool(untuned_csv),
+        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
+        has_tunableop_input=bool(tunableop_input),
+    )
+    gemm_lane = _nomination_lane_budget(
+        state,
+        LANE_GEMM,
+        gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets),
+    )
+    timeout = _gemm_tuning_timeout_sec(
+        payload,
+        lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
+    )
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
     if shapes_json:
@@ -4274,7 +4400,11 @@ async def _run_forge_gemm_tuning(
         "demand_json": demand_json,
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
-        "tuner": str(payload.get("tuner") or ""),
+        "tuner": _gemm_capped_tuner(
+            payload,
+            max_targets=gemm_lane.max_targets,
+            target_names=tuple(name for name, _ in gemm_targets),
+        ),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
@@ -4978,7 +5108,10 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    timeout = _forge_fusion_timeout_sec(payload)
+    # The lane's share of the phase; a zero share means none could be derived, and
+    # the module default is safer for an unattended lane than a one-second session.
+    fusion_lane = _nomination_lane_budget(state, LANE_FUSION)
+    timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)

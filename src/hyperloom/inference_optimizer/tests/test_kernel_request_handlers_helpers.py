@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 
+from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 
@@ -41,6 +42,92 @@ def test_gemm_tuning_timeout_env_and_invalid(monkeypatch) -> None:
     assert krh._gemm_tuning_timeout_sec({}) == 300
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "bad")
     assert krh._gemm_tuning_timeout_sec({}) == max(60, krh._DEFAULT_GEMM_TUNING_TIMEOUT_SEC)
+
+
+def test_gemm_tuning_timeout_takes_the_lane_share(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
+    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 7140
+
+
+def test_gemm_tuning_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
+    """An unbounded phase must not collapse the lane to a zero-second session."""
+    monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
+    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=0) == 18000
+
+
+def test_an_explicit_gemm_timeout_outranks_the_lane_share(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
+    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 900}, lane_budget_sec=7140) == 900
+
+
+def test_the_gemm_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "300")
+    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 300
+
+
+# -- _forge_fusion_timeout_sec --------------------------------------------
+def test_fusion_timeout_takes_the_lane_share(monkeypatch) -> None:
+    monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
+    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 10710
+
+
+def test_fusion_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
+    """An unbounded phase must not collapse the lane to a one-second session."""
+    monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
+    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=0) == 7200
+
+
+def test_an_explicit_fusion_timeout_outranks_the_lane_share(monkeypatch) -> None:
+    monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
+    assert krh._forge_fusion_timeout_sec({"timeout": 900}, lane_budget_sec=10710) == 900
+
+
+def test_the_fusion_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "300")
+    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 300
+
+
+# -- _gemm_router_targets / _gemm_capped_tuner ----------------------------
+_ROUTER_PROBE = {
+    "model_path": "/nonexistent-model-dir",
+    "framework": "sglang",
+    "precision": "bf16",
+    "quant_type": "auto",
+    "gpu_type": "auto",
+    "kernel_signature_log": "",
+    "has_untuned_csv": False,
+    "has_shapes_json": False,
+    "has_tunableop_input": False,
+}
+
+
+def test_an_unconsultable_router_yields_no_estimates() -> None:
+    assert krh._gemm_router_targets(**_ROUTER_PROBE) == ()
+
+
+def test_without_estimates_the_gemm_ceiling_divides_by_its_default_cost() -> None:
+    """7140s of lane share buys five 20-minute targets when nothing is estimated."""
+    costs = tuple(cost for _, cost in krh._gemm_router_targets(**_ROUTER_PROBE))
+    assert lane_budget.max_targets(lane_budget.LANE_GEMM, 7140, target_costs_sec=costs) == 5
+    assert 7140 // lane_budget.GEMM_DEFAULT_TARGET_SEC == 5
+
+
+def test_a_ceiling_of_one_pins_the_highest_priority_tuner() -> None:
+    assert krh._gemm_capped_tuner({}, max_targets=1, target_names=("fmoe_ck", "a8w8")) == "fmoe_ck"
+
+
+def test_a_ceiling_that_fits_every_tuner_forces_none() -> None:
+    assert krh._gemm_capped_tuner({}, max_targets=1, target_names=("fmoe_ck",)) == ""
+    assert krh._gemm_capped_tuner({}, max_targets=5, target_names=("fmoe_ck", "a8w8")) == ""
+
+
+def test_no_allocation_leaves_the_routed_tuner_set_untouched() -> None:
+    """A zero ceiling means none could be derived, not "run nothing"."""
+    assert krh._gemm_capped_tuner({}, max_targets=0, target_names=("fmoe_ck", "a8w8")) == ""
+
+
+def test_an_explicit_tuner_outranks_the_lane_ceiling() -> None:
+    assert krh._gemm_capped_tuner({"tuner": "a8w8"}, max_targets=1, target_names=("fmoe_ck",)) == "a8w8"
 
 
 # -- _gemm_tuning_workspace -----------------------------------------------
