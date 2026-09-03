@@ -536,6 +536,12 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     "``--model`` is accepted as an alias (Hyperloom forge-fuse spelling).",
 )
 @click.option("--max-turns", default=100, type=int, help="Max authoring turns.")
+@click.option(
+    "--max-recipes",
+    default=0,
+    type=int,
+    help="Cap how many ranked recipes to try. 0 means uncapped: every discovered recipe is considered.",
+)
 @click.option("--ab-isl", default=512, type=int, help="A/B input length.")
 @click.option("--ab-osl", default=128, type=int, help="A/B output length.")
 @click.option(
@@ -601,6 +607,7 @@ def run(
     agent_sandbox_mode: str,
     llm_model: Optional[str],
     max_turns: int,
+    max_recipes: int,
     ab_isl: int,
     ab_osl: int,
     bench_extra: str,
@@ -837,6 +844,7 @@ def run(
                 ab_isl=ab_isl,
                 ab_osl=ab_osl,
                 max_turns=max_turns,
+                max_recipes=max_recipes,
                 pristine_dir=pristine_dir,
                 tp=tp,
                 block_size=block_size,
@@ -1223,6 +1231,7 @@ def _run_multi_patch_nomination(
     ab_isl: int,
     ab_osl: int,
     max_turns: int,
+    max_recipes: int,
     pristine_dir: str,
     tp: int,
     block_size: int,
@@ -1267,6 +1276,7 @@ def _run_multi_patch_nomination(
             ab_isl=ab_isl,
             ab_osl=ab_osl,
             max_turns=max_turns,
+            max_recipes=max_recipes,
             agent_factory=agent_factory,
             pristine_dir=pristine_dir,
             tp=tp,
@@ -1323,6 +1333,15 @@ def _run_multi_patch_nomination(
     return patches, reported_outcome, loop_result
 
 
+def _recipe_ceiling(discovered: int, max_recipes: int) -> int:
+    """How many ranked recipes to try out of ``discovered``.
+
+    A non-positive ``max_recipes`` means no ceiling was supplied, which leaves
+    every discovered recipe eligible rather than capping the run to nothing.
+    """
+    return min(discovered, max_recipes) if max_recipes > 0 else discovered
+
+
 def _combined_recipe(recipes: list[Recipe]) -> Recipe:
     """Fold several confirmed recipes into ONE unit for the loop.
 
@@ -1370,6 +1389,7 @@ def _run_fusion_autoloop(
     ab_osl: int,
     max_turns: int,
     agent_factory,
+    max_recipes: int = 0,
     pristine_dir: str = "",
     tp: int = 1,
     block_size: int = 0,
@@ -1569,7 +1589,7 @@ def _run_fusion_autoloop(
         )
 
     cfg = LoopConfig(
-        max_recipes=len(loop_recipes),
+        max_recipes=_recipe_ceiling(len(loop_recipes), max_recipes),
         target_speedup=keep_bar,
         output_dir=str(out),
     )

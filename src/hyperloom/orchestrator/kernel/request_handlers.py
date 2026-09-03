@@ -5110,6 +5110,12 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     # the module default is safer for an unattended lane than a one-second session.
     fusion_lane = _nomination_lane_budget(state, LANE_FUSION)
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
+    try:
+        requested_recipes = int(payload.get("max_recipes") or 0)
+    except (TypeError, ValueError):
+        requested_recipes = 0
+    # An explicit payload value stays an operator/test escape hatch.
+    fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -5129,6 +5135,10 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         # Multi-patch (one independent sibling per recipe) is the default; the
         # combine escape hatch (a single merged patch) must be requested explicitly.
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
+        # How many recipes the lane's share pays for. Omitted when no ceiling
+        # could be derived, which leaves forge-fuse on every discovered recipe
+        # rather than capping an unattended lane to zero.
+        **({"max_recipes": fusion_recipe_ceiling} if fusion_recipe_ceiling > 0 else {}),
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
     }

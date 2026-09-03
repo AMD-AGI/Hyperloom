@@ -1448,3 +1448,22 @@ def test_run_with_tree_timeout_clears_output_when_reap_times_out(monkeypatch):
         forge_fusion._run_with_tree_timeout(["echo"], timeout_sec=30)
 
     assert excinfo.value.output == ""
+
+
+def test_build_cmd_forwards_the_recipe_ceiling(tmp_path):
+    """The lane's target count reaches forge-fuse as --max-recipes."""
+    payload = _payload(tmp_path)
+    payload["max_recipes"] = 3
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert cmd[cmd.index("--max-recipes") + 1] == "3"
+
+
+def test_build_cmd_omits_the_recipe_ceiling_when_none_was_derived(tmp_path):
+    """An absent key leaves forge-fuse on every discovered recipe."""
+    cmd = forge_fusion._build_cmd(_payload(tmp_path))
+
+    assert "--max-recipes" not in cmd
+    # The rest of the brief still travels, so the omission is not a broken build.
+    assert cmd[cmd.index("--framework") + 1] == "sglang"

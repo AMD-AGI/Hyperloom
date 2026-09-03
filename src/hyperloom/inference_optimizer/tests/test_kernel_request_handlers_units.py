@@ -22,6 +22,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -1072,6 +1073,60 @@ class TestForgeGemmHelperCoverage:
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "not-an-int")
 
         assert krh._forge_fusion_timeout_sec({}) == 7200
+
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the fusion lane against a faked subprocess and return its input JSON."""
+        trace_dir = tmp_path / "trace"
+        trace_dir.mkdir()
+        (trace_dir / "decode.trace.json.gz").write_text("{}", encoding="utf-8")
+        state = SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace_dir),
+            max_minutes=max_minutes,
+        )
+        state.save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"})
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: tmp_path / "tools" / name)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            body = json.dumps({"status": "ok", "decision": "REVERT", "kept": False})
+            return (0, f"FORGE_FUSION_RESULT_BEGIN\n{body}\nFORGE_FUSION_RESULT_END\n", "")
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        await krh._run_forge_fusion({"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path)
+        return json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
+        )
+
+    async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
+        """A bounded session funds the lane, so its target count is handed down."""
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+
+        assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
+
+    async def test_an_unbounded_session_sends_no_recipe_ceiling(self, tmp_path, monkeypatch):
+        """No share can be derived, and a zero ceiling would silence the lane.
+
+        The key is omitted rather than sent as 0, so forge-fuse keeps every
+        discovered recipe eligible; the rest of the brief is unaffected.
+        """
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert "max_recipes" not in payload
+        assert payload["timeout"] == krh._forge_fusion_timeout_sec({})
+
+    async def test_an_explicit_recipe_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
+        """An operator/test value stays an escape hatch over the derived share."""
+        payload = await self._fusion_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=120,
+            payload={"max_recipes": 1},
+        )
+
+        assert payload["max_recipes"] == 1
 
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")

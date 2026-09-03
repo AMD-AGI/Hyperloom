@@ -157,6 +157,9 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "llm_model", "--model", required=True)
     cmd.extend(["--agent-sandbox-mode", agent_sandbox_mode])
     _add_opt(cmd, args, "max_turns", "--max-turns")
+    # Omitted by the caller when no lane ceiling was derived; forge-fuse reads
+    # both an absent flag and an explicit 0 as "try every discovered recipe".
+    _add_opt(cmd, args, "max_recipes", "--max-recipes")
     _add_opt(cmd, args, "gpu", "--gpu")
     _add_opt(cmd, args, "decode_batch", "--decode-batch")
     _add_opt(cmd, args, "ab_isl", "--ab-isl")
