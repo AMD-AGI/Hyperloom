@@ -5,8 +5,12 @@
 
 ``install`` and ``model_gate`` need the durable on-disk event stream because
 they run before ``session_dir`` exists or before the state machine starts. So
-does ``kernel``: KERNEL records its own event through the recorder as it runs,
-which is why nothing here projects one.
+do ``kernel``, ``roofline`` and ``baseline``: each records its own event
+through the recorder as it runs, which is why nothing here projects them.
+``baseline`` was the last to move, and why is worth keeping: V5 stamps its
+action row and its attempt summary when the measurement *completes* and
+nothing recorded when it began, so the projected window collapsed onto its own
+end and the event sorted onto the timeline at the moment it finished.
 Everything projected here happens inside the Coordinator, so its evidence is
 already in ``state.json``, the recorder fragments and ``reports/``: these are
 pure projections over V5 sections the exporter has already built, and add no
@@ -180,89 +184,6 @@ def _unique_paths(values: list[Any]) -> list[str]:
         if text and text not in seen:
             seen.append(text)
     return seen
-
-
-# ---------------------------------------------------------------------------
-# baseline
-# ---------------------------------------------------------------------------
-def project_baseline_event(
-    baseline: Any,
-    phase_timeline: Any,
-    warnings: list[str],
-) -> dict[str, Any] | None:
-    """Project the pre-optimization reference measurement into a V6 event.
-
-    ``baseline`` is close to 1:1 with the V6 ``ext``; the phase timeline
-    supplies what the section drops — the task id the measurement ran under
-    and the wall-clock window it occupied.
-
-    ``degraded`` is never emitted. Baseline either produced a usable
-    throughput or it did not; a run that only succeeded after retries is
-    reported as ``succeeded`` with its retries visible in
-    ``baseline.attempts_history``, which is where a reader can weigh them.
-
-    Args:
-        baseline (Any): The V5 ``baseline`` section.
-        phase_timeline (Any): The V5 ``phase_timeline`` rows.
-        warnings (list[str]): V6 warning sink (mutated in place).
-
-    Returns:
-        dict[str, Any] | None: The timeline event, or ``None`` when the
-        session holds no baseline evidence at all.
-    """
-    section = _mapping(baseline)
-    rows = _action_rows(phase_timeline, frozenset({"baseline"}))
-    attempts = _dict_rows(section.get("attempts_history"))
-    throughput = _to_float(section.get("throughput_tok_s_per_gpu"))
-    # ``collect_baseline`` returns 0.0, not ``None``, for a session that never
-    # measured, so a positive number is the only proof a baseline exists.
-    measured = throughput is not None and throughput > 0
-    if not rows and not attempts and not measured:
-        return None
-
-    failed_rows = [row for row in rows + attempts if _lower(row.get("status")) in _FAILED_STATUSES]
-    if measured:
-        status = "succeeded"
-    elif failed_rows:
-        status = "failed"
-    else:
-        # Attempts exist but none failed and none produced a number: the
-        # measurement was cut short rather than attempted and lost.
-        status = "skipped"
-
-    last_failure = failed_rows[-1] if failed_rows else {}
-    # Only ``BaselineAttemptSummary`` carries failure prose; ``PhaseEvent``
-    # stops at the class, so the text is looked up on the attempt side.
-    last_failed_attempt = next(
-        (row for row in reversed(attempts) if _lower(row.get("status")) in _FAILED_STATUSES),
-        {},
-    )
-    start_time, end_time = _time_window(rows, attempts)
-    if not start_time:
-        warnings.append("v6.timeline.baseline: no timestamped baseline evidence; the event carries no time window")
-    return {
-        "type": "baseline",
-        "kind": "baseline",
-        "status": status,
-        "start_time": start_time,
-        "end_time": end_time,
-        "ext": {
-            "task_id": _text(
-                _first(
-                    *(row.get("task_id") for row in reversed(rows)),
-                    *(row.get("task_id") for row in reversed(attempts)),
-                )
-            ),
-            "throughput_tok_s_per_gpu": throughput if measured else None,
-            "ttft_mean_ms": _to_float(section.get("ttft_mean_ms")),
-            "e2el_mean_ms": _to_float(section.get("e2el_mean_ms")),
-            "benchmark_report_path": _text(section.get("benchmark_report_path")),
-            "failure": _failure(
-                _first(last_failure.get("error_class"), last_failed_attempt.get("error_class")),
-                _first(last_failed_attempt.get("error_excerpt"), last_failed_attempt.get("stderr_tail")),
-            ),
-        },
-    }
 
 
 # ---------------------------------------------------------------------------

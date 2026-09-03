@@ -168,9 +168,10 @@ def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
-    # ``baseline`` rides along because ``state.baseline_tput`` is a real
-    # measurement; it sorts last since nothing timestamps it here.
-    assert [event["type"] for event in after["timeline"]] == ["install", "model_gate", "baseline"]
+    # Only the durable events. ``state.baseline_tput`` is a real measurement,
+    # but baseline is recorded by the action that runs it rather than projected
+    # from the section, and this session recorded none.
+    assert [event["type"] for event in after["timeline"]] == ["install", "model_gate"]
     # No CLOSE step was ever recorded, so the close-out has no evidence.
     assert after["close"]["status"] == "failed"
     assert after["close"]["steps"] == []

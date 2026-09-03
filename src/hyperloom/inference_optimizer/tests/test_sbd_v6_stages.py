@@ -41,76 +41,6 @@ def _events(timeline: list[dict], event_type: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# baseline
-# ---------------------------------------------------------------------------
-def test_baseline_projects_measurement_and_its_phase_window(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={},
-        baseline={
-            "throughput_tok_s_per_gpu": 102.5,
-            "ttft_mean_ms": 41.0,
-            "e2el_mean_ms": 980.0,
-            "benchmark_report_path": "runs/baseline/benchmark_report.json",
-            "attempts_history": [{"status": "ok", "ts": "2026-08-27T01:05:00+00:00"}],
-        },
-        phase_timeline=[
-            {"action": "baseline", "ts": "2026-08-27T01:00:00+00:00", "task_id": "t-base-1", "status": "failed"},
-            {"action": "baseline", "ts": "2026-08-27T01:05:00+00:00", "task_id": "t-base-2", "status": "ok"},
-            {"action": "sweep", "ts": "2026-08-27T02:00:00+00:00", "task_id": "t-sweep"},
-        ],
-    )
-
-    event = _event(timeline, "baseline")
-    assert event["kind"] == "baseline"
-    assert event["status"] == "succeeded"
-    assert event["start_time"] == "2026-08-27T01:00:00+00:00"
-    assert event["end_time"] == "2026-08-27T01:05:00+00:00"
-    assert event["ext"]["task_id"] == "t-base-2"
-    assert event["ext"]["throughput_tok_s_per_gpu"] == 102.5
-    assert event["ext"]["benchmark_report_path"] == "runs/baseline/benchmark_report.json"
-
-
-def test_baseline_reports_failure_when_no_attempt_produced_throughput(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={},
-        baseline={
-            "throughput_tok_s_per_gpu": 0.0,
-            "attempts_history": [
-                {
-                    "status": "failed",
-                    "ts": "2026-08-27T01:00:00+00:00",
-                    "error_class": "ServerLaunchError",
-                    "error_excerpt": "port already bound",
-                },
-            ],
-        },
-        phase_timeline=[{"action": "baseline", "ts": "2026-08-27T01:00:00+00:00", "status": "failed"}],
-    )
-
-    event = _event(timeline, "baseline")
-    assert event["status"] == "failed"
-    # 0.0 is the V5 "never measured" sentinel and must not read as a measurement.
-    assert event["ext"]["throughput_tok_s_per_gpu"] is None
-    assert event["ext"]["failure"] == {"error_class": "ServerLaunchError", "error": "port already bound"}
-
-
-def test_baseline_without_any_evidence_produces_no_event(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={},
-        baseline={"throughput_tok_s_per_gpu": 0.0, "attempts_history": []},
-        phase_timeline=[],
-    )
-
-    assert _event(timeline, "baseline") is None
-
-
-# ---------------------------------------------------------------------------
 # sweep
 # ---------------------------------------------------------------------------
 def _sweep_section() -> dict:
@@ -820,21 +750,20 @@ def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
         tmp_path,
         [],
         state={"phase": "CLOSE"},
-        baseline={
-            "throughput_tok_s_per_gpu": 100.0,
-            "attempts_history": [{"status": "ok", "ts": "2026-08-27T00:30:00+00:00"}],
-        },
+        sweep=_sweep_section(),
+        baseline={"throughput_tok_s_per_gpu": 100.0},
+        phase_timeline=[{"action": "sweep", "ts": "2026-08-27T00:30:00+00:00"}],
         conc_sweep_summary=_conc_sweep_section(),
     )
 
     # The conc sweep has no recorded time at all, so it sorts last rather than
     # to the epoch.
-    assert [event["type"] for event in timeline] == ["baseline", "install", "conc_sweep"]
+    assert [event["type"] for event in timeline] == ["sweep", "install", "conc_sweep"]
 
 
 @pytest.mark.parametrize(
     "projector",
-    ["project_baseline_event", "project_sweep_event", "project_conc_sweep_event"],
+    ["project_sweep_event", "project_conc_sweep_event"],
 )
 def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatch, projector):
     """One stage blowing up must not take the durable events or its peers down.
@@ -855,7 +784,6 @@ def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatc
     )
     before = exporter.build(tmp_path)
     stage = {
-        "project_baseline_event": "baseline",
         "project_sweep_event": "sweep",
         "project_conc_sweep_event": "conc_sweep",
     }[projector]

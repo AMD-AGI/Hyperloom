@@ -193,7 +193,6 @@ from .v6 import (
 )
 from .v6_close import collect_v6_close as collect_v6_close
 from .v6_stages import (
-    project_baseline_event as project_baseline_event,
     project_conc_sweep_event as project_conc_sweep_event,
     project_sweep_event as project_sweep_event,
 )
@@ -224,7 +223,6 @@ __all__ = [
     "collect_v6_metadata",
     "collect_v6_outcome",
     "collect_v6_timeline",
-    "project_baseline_event",
     "project_conc_sweep_event",
     "project_sweep_event",
     "collect_workload",

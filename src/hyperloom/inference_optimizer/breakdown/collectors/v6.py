@@ -26,7 +26,6 @@ from ._common import (
     _to_int as _optional_int,
 )
 from .v6_stages import (
-    project_baseline_event,
     project_conc_sweep_event,
     project_sweep_event,
 )
@@ -1984,14 +1983,16 @@ def collect_v6_timeline(
 ) -> list[dict[str, Any]]:
     """Load durable events and project stage work without mutating V5 state.
 
-    ``install``, ``model_gate``, ``kernel`` and ``roofline`` are read back from
-    the durable event directory: the first two run before the Coordinator
-    exists, and the last two are recorded by the phase and the action that
-    produce them, which know things no projection over ``state.json`` can
-    recover. The measurement stages are projected here from V5 sections the
-    exporter has already built, so the keyword arguments are all optional: a
-    caller that passes none still gets the durable events plus the framework
-    projection.
+    ``install``, ``model_gate``, ``kernel``, ``roofline`` and ``baseline`` are
+    read back from the durable event directory: the first two run before the
+    Coordinator exists, and the rest are recorded by the phase or the action
+    that produces them, which knows things no projection over ``state.json``
+    can recover -- when the work started, most plainly. The remaining
+    measurement stages are projected here from V5 sections the exporter has
+    already built, so the keyword arguments are all optional: a caller that
+    passes none still gets the durable events plus the framework projection.
+    ``baseline`` stays in the signature because the sweep projection reads it
+    to name what its points were measured against.
 
     Every projection is isolated (see :func:`_projected`). The durable events
     are read first and are never discarded by a later stage's failure.
@@ -2009,9 +2010,6 @@ def collect_v6_timeline(
         ]
 
     timeline.extend(_projected("framework_agent", _framework_events, warnings))
-    timeline.extend(
-        _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
-    )
     timeline.extend(
         _projected("sweep", lambda: project_sweep_event(sweep, state, baseline, phase_timeline, warnings), warnings)
     )
