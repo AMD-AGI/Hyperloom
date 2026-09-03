@@ -328,7 +328,7 @@ class Final(TypedDict, total=False):
         ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
         e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
         ttft_e2el_source (str): Provenance of the latency metrics (``current_best`` /
-            ``validate_stack_disk`` / ``stack_top_disk`` / ``unavailable``).
+            ``current_best_disk`` / ``stack_top_disk`` / ``unavailable``).
         invocation (BenchmarkInvocation): Replayable launch record for the final state.
         closing_phase_entered (bool): Whether the closing phase was entered.
         closing_started_unix (float): Unix time the closing phase started.
@@ -346,7 +346,7 @@ class Final(TypedDict, total=False):
     action_path: list[str]  # ordered list of action:variant labels from optimization_stack
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
-    ttft_e2el_source: str  # current_best / validate_stack_disk / stack_top_disk / unavailable
+    ttft_e2el_source: str  # current_best / current_best_disk / stack_top_disk / unavailable
     invocation: BenchmarkInvocation
     closing_phase_entered: bool
     closing_started_unix: float
