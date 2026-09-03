@@ -91,6 +91,19 @@ def test_switch_on_authoritative_overwrite(tmp_path, monkeypatch):
     assert bench["benchmark_script"] == "aiperf_client.sh"
 
 
+def test_persisted_agentx_mode_switches_without_ambient_env(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        gpu_type="mi300x",
+        model_path="/m",
+        agentx_mode=True,
+    )
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+
+
 def test_switch_on_injects_model_and_run_eval(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "true")
@@ -184,6 +197,17 @@ def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
     bench = {"framework": "vllm"}
     apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi300x")
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
+
+
+def test_runtime_overrides_preserve_materialized_agentx_without_env(monkeypatch):
+    _clear_env(monkeypatch)
+    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+        apply_runtime_benchmark_overrides,
+    )
+
+    bench = {"framework": "vllm", "benchmark_script": "aiperf_client.sh"}
+    apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi300x")
+    assert bench["benchmark_script"] == "aiperf_client.sh"
 
 
 # ── A2: OFF path never imports the agentx package (lazy-import guarantee) ─────

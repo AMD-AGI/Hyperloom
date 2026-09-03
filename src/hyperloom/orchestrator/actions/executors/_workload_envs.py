@@ -202,14 +202,22 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     return agentx_active(shared_state)
 
 
-def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None, *, conc: Any = None) -> None:
+def apply_agentx_switch(
+    bench: dict[str, Any],
+    model_path: str | None = None,
+    *,
+    conc: Any = None,
+    active: bool | None = None,
+) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client.
 
     ``conc`` is the concurrency this round will run at; the inner benchmark cap
     and the client's warmup grace are both derived from it (see
     :func:`agentx_env_for_conc`).
     """
-    if not agentx_enabled():
+    if active is None:
+        active = agentx_enabled()
+    if not active:
         return
     from hyperloom.inference_optimizer import framework_registry
 
@@ -900,6 +908,7 @@ def materialize_config_with_envs(
     establish_quality_ref: bool = False,
     drop_moe_runner_backend: bool = False,
     flydsl_source_dirs: bool = False,
+    agentx_mode: bool | None = None,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -947,6 +956,8 @@ def materialize_config_with_envs(
         flydsl_source_dirs: When True, name the FlyDSL source roots in
             ``$FLYDSL_EXTRA_SOURCE_DIRS`` so a patched helper invalidates the JIT
             cache key. Off by default: only a run that applied such a patch needs it.
+        agentx_mode: Explicit session-level AgentX decision. ``None`` preserves
+            the legacy environment-based fallback.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -989,7 +1000,7 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    apply_agentx_switch(bench, model_path)
+    apply_agentx_switch(bench, model_path, active=agentx_mode)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.
