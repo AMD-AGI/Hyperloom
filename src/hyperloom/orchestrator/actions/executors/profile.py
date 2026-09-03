@@ -560,10 +560,12 @@ def _preferred_main_trace_path(
             return max(preferred, key=_trace_size_bytes)
 
         non_merged = [path for path in trace_files if not path.name.startswith("merged-")]
-        if len(non_merged) == 1:
+        if len(non_merged) == 1 and _trace_rank(non_merged[0]) is None and tensor_parallel_size in (None, 1):
             return non_merged[0]
         if tensor_parallel_size == 1 and non_merged:
-            return max(non_merged, key=_trace_size_bytes)
+            unranked = [path for path in non_merged if _trace_rank(path) is None]
+            if unranked:
+                return max(unranked, key=_trace_size_bytes)
         if tensor_parallel_size == 1 and not non_merged:
             merged = [path for path in trace_files if path.name.startswith("merged-")]
             if len(merged) == 1:
