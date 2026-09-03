@@ -134,14 +134,22 @@ async def _sdk_tools_call(arguments: dict[str, Any]) -> Any:
     cfg = build_emit_intent_server()
     if cfg is None:
         pytest.skip("in-process MCP helpers unavailable")
-    handler = cfg["instance"].request_handlers[CallToolRequest]
+    # mcp.Server renamed the public dict to `_request_handlers` in some
+    # versions; both spellings reach the same jsonschema-then-handler path.
+    server = cfg["instance"]
+    handlers = getattr(server, "request_handlers", None) or getattr(
+        server, "_request_handlers", None
+    )
+    if not handlers:
+        pytest.skip("MCP server has no CallToolRequest handler map")
+    handler = handlers[CallToolRequest]
     result = await handler(
         CallToolRequest(
             method="tools/call",
             params=CallToolRequestParams(name=EMIT_INTENT_TOOL_NAME, arguments=arguments),
         )
     )
-    return result.root
+    return getattr(result, "root", result)
 
 
 @pytest.mark.asyncio
