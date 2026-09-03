@@ -25,6 +25,8 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.io import safe_mtime
+
 log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
@@ -677,7 +679,7 @@ def parse_eval_results(
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 
-    latest = max(result_files, key=lambda p: p.stat().st_mtime)
+    latest = max(result_files, key=safe_mtime)
     try:
         data = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:

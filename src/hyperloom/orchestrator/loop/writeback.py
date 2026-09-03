@@ -725,7 +725,9 @@ class WritebackCollaborator:
         """
         from hyperloom.common.perf_metric import graded_axes_of
 
-        new_tput = result.get("output_throughput") or result.get("new_tput")
+        new_tput = result.get("output_throughput")
+        if new_tput is None:
+            new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
         lifted = self._lift_to_current_best(

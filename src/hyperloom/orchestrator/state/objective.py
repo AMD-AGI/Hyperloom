@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.io import safe_mtime
 from hyperloom.common.jsonio import read_json as _read_json
 
 from .shared_state import resolve_grading_anchor_tput
@@ -219,9 +220,11 @@ class TargetBaselineObjective(_RatioObjective):
     def __post_init__(self) -> None:
         """Load the reference throughput from the baseline directory.
 
-        Recursively searches ``baseline_dir`` for ``benchmark_report.json`` files,
-        reads the most recent one (by sorted path), and extracts
-        ``throughput.output_throughput`` into ``_ref_tput``.
+        Recursively searches ``baseline_dir`` for ``benchmark_report.json``,
+        prefers the newest measured round, and extracts
+        ``throughput.output_throughput`` into ``_ref_tput``. A budget-dropped
+        measure round leaves the warmup as the only report, so the warmup is a
+        fallback rather than a discard.
 
         Raises:
             ObjectiveError: If the directory is missing, no report is found, or the
@@ -230,10 +233,9 @@ class TargetBaselineObjective(_RatioObjective):
         path = Path(self.baseline_dir)
         if not path.exists():
             raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
-        candidates = sorted(
-            (p for p in path.rglob("benchmark_report.json") if "warmup_round" not in p.parts),
-            key=lambda p: p.stat().st_mtime,
-        )
+        reports = list(path.rglob("benchmark_report.json"))
+        measured = [p for p in reports if "warmup_round" not in p.parts]
+        candidates = sorted(measured or reports, key=safe_mtime)
         if not candidates:
             raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")
         ref = _read_json(candidates[-1], default={}, require_dict=True)
