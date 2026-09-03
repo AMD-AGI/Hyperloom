@@ -144,6 +144,25 @@ Analyze the supplied workload, serving context, trace evidence, and source trees
 TraceLens conclusions and kernel_candidates.json are hints, not authority. Inspect
 the available evidence and correct them when necessary.
 
+Follow this evidence workflow:
+1. When analysis.md is referenced and readable, inspect it first and extract its
+   hot-operator, time-share, shape, dtype, and source conclusions.
+2. When kernel_candidates.json is referenced and readable, inspect every
+   candidate before searching the wider source tree.
+3. Cross-check both files against the current workload and serving context, raw
+   trace, profiler/server logs, kernel_source_resolution.json, model config,
+   runtime dispatch code, and editable source. Drop, merge, correct, or reorder
+   candidates when those sources disagree.
+4. Treat either file as uninformative when it is missing, unreadable, empty,
+   stale for the current serving configuration, or contains no actionable
+   operator attribution. In that case, continue investigating the other handoff
+   evidence and source trees for hot kernels; never return no_opportunity solely
+   because TraceLens artifacts are absent or weak.
+5. Label each candidate's evidence as measured (trace timing), corroborated
+   (runtime dispatch/log hit), or inferred (workload and source reasoning only).
+   Never invent a GPU-time percentage for inferred evidence, and rank measured
+   candidates ahead of otherwise comparable inferred candidates.
+
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under
 the supplied staging directory.
@@ -174,7 +193,11 @@ task.json must use this exact top-level structure:
   "shape_cases": [{"name": "<case>"}],
   "priority": 0,
   "reason": "<why this measured workload may improve>",
-  "evidence": [{"kind": "<evidence kind>", "path": "<path or source reference>"}]
+  "evidence": [{
+    "level": "<measured|corroborated|inferred>",
+    "kind": "<evidence kind>",
+    "path": "<path or source reference>"
+  }]
 }
 Do not place identity fields at the top level. evidence must be a JSON list,
 even when one detailed evidence object is sufficient. The host pins base_commit
