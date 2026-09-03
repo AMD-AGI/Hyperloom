@@ -24,8 +24,8 @@ from ..bus.gpu_pool import (
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
-    LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from ..specialists.domains import (
@@ -1052,8 +1052,8 @@ class PolicyGate:
 
         Checks that the role may emit a REQUEST at all (per
         :data:`REQUEST_ROUTING`), that ``target_agent`` is in the role's
-        allowed-target set, that ``kind`` is present and — for a kernel
-        target — LLM-requestable. GEMM-tuning ownership and external-tool
+        allowed-target set, that ``kind`` is present and is not a
+        Coordinator-owned lane. GEMM-tuning ownership and external-tool
         collision guards are applied to the kind as defense in depth.
 
         Args:
@@ -1086,15 +1086,14 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        if target == "kernel_agent" and kind not in LLM_REQUESTABLE_KERNEL_REQUEST_KINDS:
+        if kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
             raise PolicyDenied(
-                f"request kind {kind!r} is not LLM-requestable "
-                f"(allowed: {sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS)!r})",
+                f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable",
                 rule="request_kind",
                 hint=(
-                    "run_collective is dispatched at KERNEL entry once its own "
-                    "comm-share gate passes and reports as run_collective_done; "
-                    "request run_optimization for a source-level kernel instead."
+                    "the lane runs at KERNEL entry once its own gate passes and "
+                    "reports as run_collective_done / run_fusion_done; request "
+                    "run_optimization for a source-level kernel instead."
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")

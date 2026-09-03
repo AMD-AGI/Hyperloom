@@ -47,13 +47,22 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
-# Request kinds an LLM may address to the kernel agent. Every other registered
-# handler (``run_collective``) is a Coordinator-dispatched lane whose own gate a
-# direct request would skip, so the set is an allowlist rather than a denylist.
+# Request kinds an LLM may address to the kernel agent.
 LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(KERNEL_ACTION_REQUEST_KINDS.values()) | {
     "trace_analyze",
     "apply_patch",
 }
+
+# Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and
+# once their own gate passes. A direct request would skip that gate. An
+# unregistered kind is not listed here: the handler lookup auto-rejects it with
+# the valid-kind vocabulary, which is the better answer for a typo.
+COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
+    {
+        "run_collective",
+        "run_fusion",
+    }
+)
 
 
 # Coordinator-managed actions that agents should not directly propose.
@@ -396,6 +405,7 @@ __all__ = [
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
+    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",

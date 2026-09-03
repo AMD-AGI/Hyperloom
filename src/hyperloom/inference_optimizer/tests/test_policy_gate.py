@@ -228,7 +228,7 @@ def _propose_channels():
     return [IntentType.DELEGATE, IntentType.PROPOSE_ACTION]
 
 
-@pytest.mark.parametrize("kind", ["run_collective", "run_fusion", "no_such_kind"])
+@pytest.mark.parametrize("kind", ["run_collective", "run_fusion"])
 def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     """A direct request skips the lane's own entry gate and accounting."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
@@ -243,6 +243,27 @@ def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentType
 
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
+
+
+def test_an_unregistered_kind_reaches_the_auto_reject() -> None:
+    """The handler lookup answers a typo with the valid-kind vocabulary."""
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
+    _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": "no_such_kind"})
+
+
+def test_every_registered_kernel_lane_is_requestable_or_owned() -> None:
+    """A new handler is refused by default until it is declared LLM-requestable."""
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
+        LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
+    )
+    from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
+
+    unclassified = (
+        set(KERNEL_REQUEST_HANDLERS) - LLM_REQUESTABLE_KERNEL_REQUEST_KINDS - (COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
+    )
+    assert not unclassified, f"kernel request kinds neither requestable nor Coordinator-owned: {sorted(unclassified)}"
 
 
 def test_a_coordinator_managed_action_is_not_proposable() -> None:
