@@ -24,8 +24,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import kernel_event, roofline_event
-from .assembler import KERNEL_EVENT_SECTIONS, ROOFLINE_EVENT_SECTIONS, event_parts
+from . import baseline_event, kernel_event, roofline_event
+from .assembler import BASELINE_EVENT_SECTIONS, KERNEL_EVENT_SECTIONS, ROOFLINE_EVENT_SECTIONS, event_parts
 from .event_timeline import EVENT_STATUS_INTERRUPTED, finish_event, residual_events
 
 __all__ = ["finalize_events"]
@@ -68,6 +68,13 @@ _EVENT_TYPES: tuple[_EventType, ...] = (
         event_section=roofline_event.SECTION_EVENT,
         sections=ROOFLINE_EVENT_SECTIONS,
         assemble=roofline_event.assemble_roofline_ext,
+    ),
+    _EventType(
+        event_type=baseline_event.EVENT_TYPE,
+        kind=baseline_event.EVENT_KIND,
+        event_section=baseline_event.SECTION_EVENT,
+        sections=BASELINE_EVENT_SECTIONS,
+        assemble=baseline_event.assemble_baseline_ext,
     ),
 )
 

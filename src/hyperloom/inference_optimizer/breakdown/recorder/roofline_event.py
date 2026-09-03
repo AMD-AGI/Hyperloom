@@ -45,6 +45,7 @@ from .event_fields import (
     failure_row as _failure_row,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
+    worst_status as _worst_status,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
@@ -820,29 +821,6 @@ def assemble_roofline_ext(
     """
     actions = assemble_roofline_actions(parts, event=event)
     return {"actions": actions}, _worst_status([str(action.get("status") or "") for action in actions])
-
-
-#: Action statuses from worst to best. An event's status is the worst of the
-#: actions it holds, so a reader scanning statuses cannot miss a failure that a
-#: later action recovered from.
-_STATUS_ORDER: tuple[str, ...] = ("failed", "degraded", "running", "succeeded")
-
-
-def _worst_status(statuses: list[str]) -> str:
-    """Reduce several action statuses to the one the event reports.
-
-    Args:
-        statuses (list[str]): The statuses of the event's actions.
-
-    Returns:
-        str: The worst of them, or ``"skipped"`` when there are none -- an event
-            with no action recorded nothing to judge.
-    """
-    present = [status for status in statuses if status]
-    for status in _STATUS_ORDER:
-        if status in present:
-            return status
-    return present[0] if present else "skipped"
 
 
 def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> list[dict[str, Any]]:

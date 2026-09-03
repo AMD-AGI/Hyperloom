@@ -488,10 +488,20 @@ ROOFLINE_EVENT_SECTIONS: tuple[str, ...] = (
     "roofline_analysis_run",
 )
 
+#: The baseline substreams, in the order a reader follows them: the event, the
+#: measurements dispatched into it, each measurement's passes, and each pass's
+#: benchmark rounds.
+BASELINE_EVENT_SECTIONS: tuple[str, ...] = (
+    "baseline_event",
+    "baseline_action",
+    "baseline_run",
+    "baseline_round",
+)
+
 #: Every section holding v6 event rows. They are consumed by the timeline
 #: rather than by the breakdown envelope, so assembly pops them here to keep
 #: them from leaking into the wire shape.
-EVENT_SECTIONS: tuple[str, ...] = KERNEL_EVENT_SECTIONS + ROOFLINE_EVENT_SECTIONS
+EVENT_SECTIONS: tuple[str, ...] = KERNEL_EVENT_SECTIONS + ROOFLINE_EVENT_SECTIONS + BASELINE_EVENT_SECTIONS
 
 
 def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
@@ -545,6 +555,19 @@ def roofline_event_parts() -> dict[str, list[dict[str, Any]]]:
         SessionNotBoundError: If no session is bound.
     """
     return event_parts(ROOFLINE_EVENT_SECTIONS)
+
+
+def baseline_event_parts() -> dict[str, list[dict[str, Any]]]:
+    """Return the baseline substreams of the bound session, keyed by section.
+
+    Returns:
+        A ``{section: [payload, ...]}`` mapping over
+        :data:`BASELINE_EVENT_SECTIONS`.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+    """
+    return event_parts(BASELINE_EVENT_SECTIONS)
 
 
 def _drop_event_rows(out: dict[str, Any]) -> None:

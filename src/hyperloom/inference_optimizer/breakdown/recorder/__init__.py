@@ -45,10 +45,12 @@ from __future__ import annotations
 
 from . import instrument
 from .assembler import (
+    BASELINE_EVENT_SECTIONS,
     EVENT_SECTIONS,
     KERNEL_EVENT_SECTIONS,
     ROOFLINE_EVENT_SECTIONS,
     assemble_parts,
+    baseline_event_parts,
     event_parts,
     has_parts,
     kernel_event_parts,
@@ -121,6 +123,7 @@ from .recorder import (
 )
 
 __all__ = [
+    "BASELINE_EVENT_SECTIONS",
     "DERIVED_SECTIONS",
     "EVENT_ID_FIELD",
     "EVENT_ID_SEPARATOR",
@@ -144,6 +147,7 @@ __all__ = [
     "TRACE",
     "TRACE_ENV",
     "assemble_parts",
+    "baseline_event_parts",
     "build_envelope",
     "enable_trace",
     "event_id",

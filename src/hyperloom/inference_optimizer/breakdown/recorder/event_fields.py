@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
@@ -28,6 +29,7 @@ __all__ = [
     "MAX_EXT_BLOCK_BYTES",
     "MAX_HOT_KERNELS",
     "MAX_WARNING_MESSAGE_CHARS",
+    "STATUS_ORDER",
     "analysis_artifacts",
     "analysis_detail",
     "as_dict",
@@ -41,6 +43,7 @@ __all__ = [
     "summarize_hot_kernels",
     "summarize_warnings",
     "text_or_none",
+    "worst_status",
 ]
 
 now_iso_seconds = functools.partial(now_iso, "seconds")
@@ -206,6 +209,32 @@ def bounded_block(value: Any, *, label: str, limit_bytes: int = MAX_EXT_BLOCK_BY
     else:
         shape["length"] = len(value)
     return shape
+
+
+#: Action statuses from worst to best, for the event types whose event holds an
+#: array of actions. A failure ranks above everything so a later action that
+#: recovered from it cannot hide it, and a success ranks above ``skipped`` for
+#: the mirror-image reason: an action that was refused before it ran does not
+#: unmake the anchor a sibling action established.
+STATUS_ORDER: tuple[str, ...] = ("failed", "degraded", "running", "succeeded", "skipped")
+
+
+def worst_status(statuses: Iterable[Any]) -> str:
+    """Reduce the statuses of an event's actions to the one the event reports.
+
+    Args:
+        statuses (Iterable[Any]): The statuses of the actions the event holds.
+
+    Returns:
+        str: The worst of them per :data:`STATUS_ORDER`, an unranked status as
+            given when that is all there is, or ``"skipped"`` when there are
+            none -- an event holding no action recorded nothing to judge.
+    """
+    present = [str(status) for status in statuses if str(status or "")]
+    for status in STATUS_ORDER:
+        if status in present:
+            return status
+    return present[0] if present else "skipped"
 
 
 def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict[str, Any]:

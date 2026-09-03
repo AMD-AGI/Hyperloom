@@ -3632,12 +3632,17 @@ async def _capture_vllm_tunableop_shapes(
             if benchmark_script:
                 task_params["benchmark_script"] = benchmark_script
     else:
+        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM
+
         task_params.update(
             {
                 "config_path": config_path,
                 "timeout_sec": timeout_sec,
                 "disable_run_eval": True,
                 "baseline_double_run": False,
+                # Shape capture is a sub-step of the KERNEL phase's own event,
+                # not a dispatched measurement, so it leaves no baseline event.
+                SBD_INNER_STEP_PARAM: True,
             }
         )
     task = Task(
@@ -7925,7 +7930,7 @@ async def integrate_handler(
         ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
         ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
     """
-    from ..actions.executors.baseline import BaselineExecutor
+    from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
@@ -8083,6 +8088,9 @@ async def integrate_handler(
             # already-anchored reference. It runs eval for the kernel accuracy
             # gate but never establishes a replacement quality reference.
             "quality_ref_exempt": True,
+            # A sub-step of the KERNEL phase's own event, not a dispatched
+            # measurement, so it leaves no baseline event.
+            SBD_INNER_STEP_PARAM: True,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )

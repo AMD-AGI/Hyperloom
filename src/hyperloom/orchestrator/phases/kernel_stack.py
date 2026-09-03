@@ -411,7 +411,7 @@ class KernelStackPhase(PhaseHandler):
             A result dict with the KEEP/REVERT decision, measured throughput,
             incremental gain, apply/revert sub-results and stack metadata.
         """
-        from ..actions.executors.baseline import BaselineExecutor
+        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
@@ -467,6 +467,9 @@ class KernelStackPhase(PhaseHandler):
                     # missing accuracy here would stamp an eval-failure contract
                     # and drag a healthy run back into enablement.
                     "quality_ref_exempt": True,
+                    # A sub-step of the KERNEL phase's own event, not a
+                    # dispatched measurement, so it leaves no baseline event.
+                    SBD_INNER_STEP_PARAM: True,
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )

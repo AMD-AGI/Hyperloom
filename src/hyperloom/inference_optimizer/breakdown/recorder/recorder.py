@@ -141,6 +141,15 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "roofline_action": "item",  # one per roofline action, keyed by its task id
     "roofline_profile_run": "item",  # one per profile attempt within an action
     "roofline_analysis_run": "item",  # one per trace-analysis attempt within an action
+    # SBD v6 baseline substreams. The executor retries at two levels -- a pass
+    # through its core, and a Magpie round within a pass -- so runs and rounds
+    # are separate sections rather than one flat list: a pass the budget
+    # refused before it booted anything has a run and no round, and a flat
+    # model would drop it.
+    "baseline_event": "item",  # one per baseline event, holding its timeline sequence
+    "baseline_action": "item",  # one per measurement dispatched, keyed by its task id
+    "baseline_run": "item",  # one per pass through the executor's core
+    "baseline_round": "item",  # one per Magpie round within a pass
 }
 
 # Sections computed at finalize from in-memory state, never written as

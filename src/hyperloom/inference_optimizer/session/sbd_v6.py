@@ -22,12 +22,13 @@ from .session_paths import (
 SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
-# ``roofline`` and ``kernel`` both recur within one session -- one event per
-# dispatched roofline action, one per KERNEL_AGENT entry. Their sub-steps are
+# ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
+# event per phase and macro cycle that dispatched the work. Their sub-steps are
 # nested in ``ext`` rather than emitted as sibling events, because none of them
 # is dispatchable on its own: roofline's profile / analysis are atomic halves of
-# one action, and a kernel event's lanes only exist inside a phase entry.
-_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel")
+# one action, a kernel event's lanes only exist inside a phase entry, and a
+# baseline's rounds only exist inside a measurement.
+_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline")
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 
