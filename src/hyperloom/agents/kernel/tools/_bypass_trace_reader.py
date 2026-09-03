@@ -37,6 +37,7 @@ from typing import Any, Iterator
 # Stdlib-only sibling; keeps this reader independent of TraceLens while sharing
 # one capture-vs-workload rule with the TraceLens route.
 from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
+from _trace_rank import select_primary_trace, trace_rank as _rank_of
 
 # GPU device-side event categories (Kineto ``cat`` values).
 _GPU_KERNEL_CAT = "kernel"
@@ -61,9 +62,6 @@ _DECODER = json.JSONDecoder()
 # events a few KiB, so these retain generous headroom for embedded metadata.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
-
-# Per-rank trace filename pattern (e.g. ``rank_0.trace.json.gz``).
-_RANK_RE = re.compile(r"rank[_-]?(\d+)", re.IGNORECASE)
 
 
 def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
@@ -120,12 +118,6 @@ def _file_size(fp: Path) -> int:
         return 0
 
 
-def _rank_of(path: str | Path) -> int | None:
-    """Parse the rank index from a trace filename (``None`` if not rank-tagged)."""
-    m = _RANK_RE.search(Path(path).name)
-    return int(m.group(1)) if m else None
-
-
 def _trace_candidates(root: Path) -> list[Path]:
     """Return all trace-shaped files under ``root`` (recursive)."""
     out: list[Path] = []
@@ -158,7 +150,14 @@ def _main_trace_candidates(candidates: list[Path], root: str | Path | None = Non
     return main or candidates
 
 
-def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -> Path:
+def _select_trace_file(
+    candidates: list[Path],
+    root: str | Path | None = None,
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
+) -> Path | None:
     """Deterministically pick one trace file from candidates.
 
     Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
@@ -168,6 +167,13 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     largest file. Ties always break by name so selection is reproducible.
     """
     candidates = _main_trace_candidates(candidates, root)
+    if require_single_rank:
+        return select_primary_trace(
+            candidates,
+            file_size=_file_size,
+            preferred_rank=preferred_rank,
+            tensor_parallel_size=tensor_parallel_size,
+        )
     merged = [c for c in candidates if c.name.startswith("merged-")]
     if merged:
         return max(merged, key=lambda c: (_file_size(c), c.name))
@@ -177,7 +183,13 @@ def _select_trace_file(candidates: list[Path], root: str | Path | None = None) -
     return max(candidates, key=lambda c: (_file_size(c), c.name))
 
 
-def resolve_trace_file(trace_input: str | Path) -> Path | None:
+def resolve_trace_file(
+    trace_input: str | Path,
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
+) -> Path | None:
     """Resolve a trace input (file or directory) to a single trace file.
 
     For a directory (e.g. a ``torch_trace/`` capture dir), selection is
@@ -193,13 +205,26 @@ def resolve_trace_file(trace_input: str | Path) -> Path | None:
     """
     p = Path(trace_input)
     if p.is_file():
+        if require_single_rank:
+            return select_primary_trace(
+                [p],
+                file_size=_file_size,
+                preferred_rank=preferred_rank,
+                tensor_parallel_size=tensor_parallel_size,
+            )
         return p
     if not p.is_dir():
         return None
     candidates = _trace_candidates(p)
     if not candidates:
         return None
-    return _select_trace_file(candidates, p)
+    return _select_trace_file(
+        candidates,
+        p,
+        require_single_rank=require_single_rank,
+        preferred_rank=preferred_rank,
+        tensor_parallel_size=tensor_parallel_size,
+    )
 
 
 def _trace_rank_count(trace_input: str | Path) -> int:
@@ -955,6 +980,8 @@ def analyze_trace(
     steady_state: bool = False,
     framework: str = "",
     emit_launches: bool = False,
+    require_single_rank: bool = False,
+    tensor_parallel_size: int | None = None,
 ) -> dict[str, Any]:
     """Stream a Kineto trace and return timeline + op/kernel aggregates.
 
@@ -984,7 +1011,11 @@ def analyze_trace(
           ``event_total`` (events scanned).
         On resolution failure, ``status='failed'`` with an ``error`` string.
     """
-    tf = resolve_trace_file(trace_input)
+    tf = resolve_trace_file(
+        trace_input,
+        require_single_rank=require_single_rank,
+        tensor_parallel_size=tensor_parallel_size,
+    )
     if tf is None:
         return {
             "status": "failed",

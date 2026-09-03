@@ -84,6 +84,7 @@ from ._accuracy_gate import (
 from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
+    agentx_active,
     agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
@@ -3330,6 +3331,7 @@ class BaselineExecutor:
                 establish_quality_ref=is_genuine_baseline,
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
+                agentx_mode=agentx_active(live_shared_state),
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.
@@ -3367,6 +3369,7 @@ class BaselineExecutor:
             env=os.environ,
             inferencex_path=effective_inferencex_path,
             config_path=config_path,
+            active=agentx_active(live_shared_state),
         )
         if _agx_err:
             return {

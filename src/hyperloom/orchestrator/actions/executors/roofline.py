@@ -39,6 +39,20 @@ from ._multi_node_env import is_multi_node
 log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
+_NON_RETRYABLE_PROFILE_ERRORS = frozenset(
+    {
+        "agentx_multi_node_profile_unsupported",
+        "primary_rank_trace_missing",
+    }
+)
+_NON_RETRYABLE_CAPTURE_REASONS = frozenset(
+    {
+        "api_port_allocation_failed",
+        "capture_status_missing",
+        "capture_status_unreadable",
+        "profiler_output_unconfigured",
+    }
+)
 
 # Settle time after reclaiming GPUs before the next profile attempt. A SIGKILLed
 # server's VRAM is not returned by the KFD the instant the process dies, so an
@@ -208,7 +222,7 @@ def _extract_steady_state_retry_mode(
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     """Pick the trace path like Coordinator's ``_promote_to_shared_state``:
-    prefer ``main_trace_path`` (merged), else ``trace_files[0]``.
+    prefer ``main_trace_path``, else ``trace_files[0]`` for legacy results.
 
     Args:
         profile_result: The profile sub-step result to read the trace from.
@@ -217,6 +231,8 @@ def _extract_trace_path(profile_result: dict[str, Any]) -> str:
         The resolved trace path, or an empty string if none is present.
     """
     if not isinstance(profile_result, dict):
+        return ""
+    if profile_result.get("trace_input_ready") is False:
         return ""
     direct = profile_result.get("main_trace_path")
     if direct:
@@ -524,6 +540,12 @@ class RooflineExecutor:
                     break
                 last_phase = "profile"
                 last_error = str(profile_result.get("error") or "profile sub-step failed")
+                capture_reason = str((profile_result.get("trace_capture") or {}).get("reason") or "")
+                if (
+                    profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS
+                    or capture_reason in _NON_RETRYABLE_CAPTURE_REASONS
+                ):
+                    return _failed("profile", last_error, sub_result=profile_result)
                 log.warning(
                     "roofline profile attempt %d/%d failed: %s",
                     attempt,

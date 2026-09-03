@@ -787,6 +787,9 @@ class WritebackCollaborator:
                 return False
             return is_valid_measurement(result)
         if task_kind == "profile":
+            measurement_status = result.get("measurement_status")
+            if measurement_status is not None and str(measurement_status) != "succeeded":
+                return False
             return is_valid_measurement(result)
         # replay_warm_recipe always routes through _promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":
@@ -3591,8 +3594,16 @@ class WritebackCollaborator:
                 "output_throughput": result.get("output_throughput"),
             }
         # Surface the trace path so Orch passes a real path to trace_analyze.
-        trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        trace_path = (
+            None
+            if result.get("trace_input_ready") is False
+            else result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        )
         profile_status = str(result.get("status") or "")
+        measurement_status = str(result.get("measurement_status") or profile_status)
+        audit_extras["measurement_status"] = measurement_status
+        audit_extras["trace_capture_status"] = result.get("trace_capture_status")
+        audit_extras["trace_capture_reason"] = (result.get("trace_capture") or {}).get("reason")
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             self.shared_state.last_profile_status = "failed"
             self.shared_state.last_profile_workload = {}
@@ -3639,7 +3650,7 @@ class WritebackCollaborator:
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
             changed = True
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
-        if profile_status == "succeeded":
+        if measurement_status == "succeeded":
             anchor_tput = self._current_tput_from_validated_gain()
             if anchor_tput > 0:
                 self.shared_state.last_roofline_tput = float(anchor_tput)

@@ -5575,6 +5575,14 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
+    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+        cmd += ["--require-single-rank"]
+        try:
+            state_tp = int(getattr(state, "tp", 0) or 0)
+        except (TypeError, ValueError):
+            state_tp = 0
+        if state_tp > 0:
+            cmd += ["--tensor-parallel-size", str(state_tp)]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
