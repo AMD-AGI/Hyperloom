@@ -538,6 +538,55 @@ async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, monkeypatch):
+    """The client is missing for the whole grid, not for one variant.
+
+    The runtime repair has already run and memoized its outcome, so every
+    remaining point fails identically -- and `keep_going_on_failure` would walk
+    all of them to find that out. Nothing downstream stops it either: the
+    writeback gate that halts a run is baseline-scoped.
+    """
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_RETURNCODE,
+    )
+
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", "aiperf was not found"))
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA"), GridVariant("vB"), GridVariant("vC")],
+        output_root=tmp_path / "out",
+        variant_timeout_sec=5,
+        keep_going_on_failure=True,  # would otherwise walk every point
+    )
+    assert len(results) == 1, "the grid kept going after an environment abort"
+
+
+@pytest.mark.asyncio
+async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, monkeypatch):
+    """A blank stderr must not become a blank `error`, the way the sibling
+    branch's non-empty fallback already prevents."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_RETURNCODE,
+    )
+
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", "   "))
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA")],
+        output_root=tmp_path / "out",
+        variant_timeout_sec=5,
+        keep_going_on_failure=False,
+    )
+    assert (results[0].error or "").strip(), "an empty diagnosis reached the result"
+
+
+@pytest.mark.asyncio
 async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)

@@ -225,7 +225,13 @@ def check_aiperf_capability(
     try:
         help_text = probe(aiperf_bin)
     except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
-        raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
+        # Repairable like its siblings: a half-installed aiperf whose ``--help``
+        # cannot even be read is exactly what reinstalling the pin fixes, and
+        # ``ensure_aiperf`` force-reinstalls when the recorded ref does not match.
+        raise AgentXPreflightError(
+            f"aiperf capability probe failed for {aiperf_bin!r}: {exc}",
+            repairable=True,
+        ) from exc
     missing = [flag for flag in ("weka-trace", "--scenario", "--benchmark-duration") if flag not in (help_text or "")]
     if missing:
         raise AgentXPreflightError(
