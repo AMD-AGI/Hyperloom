@@ -189,9 +189,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"parsed        : {prediction.parsed}")
         if prediction.error:
             print(f"error         : {prediction.error}")
-        print(f"server_args   : {prediction.server_args}")
-        print(f"envs          : {prediction.envs}")
-        print(f"source_change : {prediction.source_change or '(none)'}")
+        samples = prediction.meta.get("samples")
+        if samples and int(samples) > 1:
+            # The spread is the measurement when the service samples: the flag
+            # that mattered most in the observed sessions was a minority
+            # sample, so a report showing only the head would have hidden it.
+            print(f"samples       : {samples}, {len(prediction.actions)} distinct proposals")
+            for index, action in enumerate(prediction.actions):
+                print(f"  [{index}] server_args   : {action.server_args}")
+                print(f"      envs          : {action.envs}")
+                if action.has_source_change:
+                    print(f"      source_change : {action.source_change[:120]}")
+        else:
+            print(f"server_args   : {prediction.server_args}")
+            print(f"envs          : {prediction.envs}")
+            print(f"source_change : {prediction.source_change or '(none)'}")
         for key in ("model", "phase_rendered", "prompt_chars", "finish_reason", "dropped_flags"):
             if key in prediction.meta:
                 print(f"{key:14}: {prediction.meta[key]}")

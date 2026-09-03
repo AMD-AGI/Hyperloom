@@ -607,10 +607,13 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "gain_at_cycle_start",
         "no_gain_cycle_streak",
         # First-pass predictor chain accounting; Coordinator-only writers. The
-        # step count is the chain's own budget guard, so an LLM that could reset
-        # it would be handing itself unlimited predictor rounds.
+        # streak is what decides when the paid specialists are let back in, so
+        # an LLM that could reset it would be handing itself unlimited predictor
+        # rounds -- or, by advancing it, an early exemption from the hold. The
+        # round marker keeps two rounds off the benchmark lane at once.
         "predictor_chain_steps",
         "predictor_chain_cycle",
+        "predictor_round_task_id",
         "pending_bottleneck_switch",
         "last_cycle_bottleneck",
         "saturated_directions",
@@ -1699,6 +1702,8 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
+        self._deny_specialist_while_predictor_leads()
+
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
         scope_raw = str(params.get("scope") or "").strip().lower()
@@ -1756,6 +1761,48 @@ class PolicyGate:
         validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
+
+    def _deny_specialist_while_predictor_leads(self) -> None:
+        """Refuse a paid specialist while the free predictor still leads FRAMEWORK.
+
+        The predictor is a local model: seconds of GPU on its own host and no API
+        spend. An LLM specialist is the opposite -- over one measured session
+        they were 83 of 87 LLM calls and 97% of the output tokens, and the two
+        most expensive of them produced candidates that all benchmarked
+        negative. So the loop asks the free proposer first and admits these only
+        once it has gone ``HYPERLOOM_PREDICTOR_MAX_CHAIN`` rounds without a KEEP.
+
+        Scoped to FRAMEWORK_AGENT, and a no-op when the predictor could not
+        answer anyway. The PRELUDE research scout and static recon are
+        unaffected twice over: they run in a different phase, and the
+        Coordinator dispatches them without passing through the gate at all.
+
+        Raises:
+            PolicyDenied: while the hold is on.
+        """
+        state = self.shared_state
+        if state is None:
+            return
+        from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
+        from hyperloom.orchestrator.predictor import config as predictor_config
+        from hyperloom.orchestrator.predictor import pump as predictor_pump
+
+        if str(getattr(state, "phase", "") or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
+            return
+        if not predictor_pump.predictor_holds_specialists(state):
+            return
+        cap = predictor_config.load().max_chain
+        spent = predictor_pump.attempts_without_keep(state)
+        raise PolicyDenied(
+            f"the first-pass predictor still leads this phase "
+            f"({spent}/{cap} rounds without a KEEP)",
+            rule="specialist_deferred_to_predictor",
+            hint=(
+                "The predictor costs no API spend and re-fires after every KEEP. "
+                "Specialists are admitted once it has spent its rounds without "
+                "landing one, so there is nothing to retry here."
+            ),
+        )
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
         """Validate a specialist's optional GPU request against the GPU

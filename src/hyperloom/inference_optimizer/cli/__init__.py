@@ -1648,10 +1648,11 @@ def _export_predictor_settings(args: argparse.Namespace) -> None:
 
     conf = predictor_config.load()
     if conf.enabled:
+        held = "; LLM specialists held until then" if conf.enqueues else ""
         print(
             f"  predictor          : {conf.mode} at {conf.endpoint} "
-            f"(chain<={conf.max_chain}, <={conf.budget_pct:.0f}% of FRAMEWORK budget, "
-            f"phase label {conf.phase_label})"
+            f"(up to {conf.max_chain} rounds without a KEEP, "
+            f"{conf.max_variants} variants each, phase label {conf.phase_label}{held})"
         )
 
 

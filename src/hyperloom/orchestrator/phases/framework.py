@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..predictor import config as _predictor_config
+from ..predictor import pump as _predictor_pump
 from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
@@ -141,6 +143,19 @@ class FrameworkPhase(CoordinatorCollaborator):
                 and getattr(state, "framework_agent_authoring_enabled", False)
                 and await self._framework_agent_authoring_inflight()
             ):
+                return
+            # The free proposer owns the phase until it stops landing KEEPs.
+            # Returning rather than falling through is the point: falling
+            # through reaches _record_framework_agent_phase_done below, which
+            # would close FRAMEWORK while a prediction is still being
+            # benchmarked. The phase stays open and the next tick re-asks.
+            if _predictor_pump.predictor_holds_specialists(state):
+                log.info(
+                    "FRAMEWORK: holding LLM specialists, predictor has %d/%d "
+                    "attempts left before fallback",
+                    _predictor_pump.attempts_without_keep(state),
+                    _predictor_config.load().max_chain,
+                )
                 return
             # Minimum supply: with the pool empty and no discovery in flight,
             # ask for one. Orchestration may dispatch the same specialist

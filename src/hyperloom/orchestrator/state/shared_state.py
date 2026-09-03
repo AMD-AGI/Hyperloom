@@ -1093,11 +1093,23 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle's start, and the consecutive no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
-    # First-pass predictor chain: steps taken, and the macro-cycle they belong
-    # to. The cycle stamp is what resets the count on a cycle_reloop without a
-    # separate clear. Coordinator-only writers.
+    # First-pass predictor chain: consecutive rounds that landed no KEEP, and
+    # the macro-cycle they belong to. A losing streak rather than a total --
+    # writeback clears it whenever a variant is promoted -- so it answers two
+    # questions at once: whether the free proposer still leads the phase
+    # (``predictor_holds_specialists``), and which attempt number goes in the
+    # idempotency key so a sampling predictor can take a second look at an
+    # unchanged stack depth. The cycle stamp is what resets the count on a
+    # cycle_reloop without a separate clear. Coordinator-only writers.
     predictor_chain_steps: int = 0
     predictor_chain_cycle: int = -1
+    # The predictor's explore round currently on the benchmark lane, or "".
+    # Gates the chain to one round at a time: the attempt number bumps on
+    # dispatch, so without this the next tick would see a changed idempotency
+    # key and buy a duplicate round while the first was still being measured.
+    # ``pump`` releases it by asking the registry, so a task that reported
+    # nothing cannot leave a gate behind. Coordinator-only writer.
+    predictor_round_task_id: str = ""
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the
     # cycle down; the next macro-cycle's prompt surfaces a redirect advisory off
     # ``last_cycle_bottleneck``. Cleared once the live top bottleneck drifts off it.

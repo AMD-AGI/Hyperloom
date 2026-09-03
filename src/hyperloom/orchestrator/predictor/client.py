@@ -34,20 +34,12 @@ _PREDICT_PATH = "/v1/predict"
 
 
 @dataclass(frozen=True)
-class Prediction:
-    """One predictor answer, already parsed and flag-repaired by the service.
+class Action:
+    """One proposed change: launch configuration, prose, or both."""
 
-    ``parsed=False`` is the single failure representation: it covers a declined
-    answer, a transport error and a malformed body alike, because the pump does
-    the same thing in all three cases.
-    """
-
-    parsed: bool = False
     server_args: dict[str, Any] = field(default_factory=dict)
     envs: dict[str, Any] = field(default_factory=dict)
     source_change: str = ""
-    meta: dict[str, Any] = field(default_factory=dict)
-    error: str = ""
 
     @property
     def has_config(self) -> bool:
@@ -58,6 +50,78 @@ class Prediction:
     def has_source_change(self) -> bool:
         """Whether there is prose describing a source edit."""
         return bool(self.source_change.strip())
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether this action carries no actionable content at all."""
+        return not (self.has_config or self.has_source_change)
+
+
+@dataclass(frozen=True)
+class Prediction:
+    """One predictor answer, already parsed and flag-repaired by the service.
+
+    ``parsed=False`` is the single failure representation: it covers a declined
+    answer, a transport error and a malformed body alike, because the pump does
+    the same thing in all three cases.
+
+    The service may sample more than once and return every distinct proposal.
+    ``actions`` is that list, best-first; the single-action accessors below read
+    its head, which is what keeps a caller that wants one answer -- and every
+    caller written before sampling existed -- unchanged.
+    """
+
+    parsed: bool = False
+    actions: tuple[Action, ...] = ()
+    meta: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    @property
+    def first(self) -> Action:
+        """The best proposal, or an empty one when there is none."""
+        return self.actions[0] if self.actions else Action()
+
+    @property
+    def config_actions(self) -> tuple[Action, ...]:
+        """Every proposal with a launch-configuration change to benchmark."""
+        return tuple(a for a in self.actions if a.has_config)
+
+    @property
+    def source_actions(self) -> tuple[Action, ...]:
+        """Every proposal that describes a source edit."""
+        return tuple(a for a in self.actions if a.has_source_change)
+
+    # Each single-action accessor below reads the first action carrying the
+    # content its predicate reports, not the head of the list. Reading the head
+    # instead would let ``has_source_change`` be true while ``source_change``
+    # came back empty -- the head being a config-only sample -- and the pump
+    # would dispatch a specialist with an empty mandate. With one sample every
+    # one of these is that sample.
+
+    @property
+    def server_args(self) -> dict[str, Any]:
+        """The best configuration proposal's launch flags."""
+        return (self.config_actions or (Action(),))[0].server_args
+
+    @property
+    def envs(self) -> dict[str, Any]:
+        """The best configuration proposal's environment variables."""
+        return (self.config_actions or (Action(),))[0].envs
+
+    @property
+    def source_change(self) -> str:
+        """The best source proposal's prose."""
+        return (self.source_actions or (Action(),))[0].source_change
+
+    @property
+    def has_config(self) -> bool:
+        """Whether any proposal has a launch-configuration change."""
+        return bool(self.config_actions)
+
+    @property
+    def has_source_change(self) -> bool:
+        """Whether any proposal describes a source edit."""
+        return bool(self.source_actions)
 
     @property
     def is_empty(self) -> bool:
@@ -75,6 +139,32 @@ def _as_str_map(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {str(k): v for k, v in value.items() if str(k).strip()}
+
+
+def _as_action(value: Any) -> Action:
+    """Read one action object, tolerating missing or mistyped members."""
+    raw = value if isinstance(value, dict) else {}
+    return Action(
+        server_args=_as_str_map(raw.get("server_args")),
+        envs=_as_str_map(raw.get("envs")),
+        source_change=str(raw.get("source_change") or "").strip(),
+    )
+
+
+def _actions_of(payload: dict[str, Any]) -> tuple[Action, ...]:
+    """Every proposal in a response body, best-first.
+
+    ``actions`` is what a sampling service sends and ``action`` is what every
+    service sends, so reading the list and falling back to the single field
+    covers both without a schema version to branch on. Empty actions are
+    dropped: the service already reports how many samples produced nothing, and
+    an empty one here would become a variant with no flags to benchmark.
+    """
+    rows = payload.get("actions")
+    if isinstance(rows, list) and rows:
+        return tuple(a for a in (_as_action(row) for row in rows) if not a.is_empty)
+    single = _as_action(payload.get("action"))
+    return () if single.is_empty else (single,)
 
 
 def predict(request: dict[str, Any], *, endpoint: str, timeout_sec: float) -> Prediction:
@@ -136,12 +226,8 @@ def predict(request: dict[str, Any], *, endpoint: str, timeout_sec: float) -> Pr
     if not payload.get("parsed"):
         return Prediction(parsed=False, meta=_as_str_map(payload.get("meta")), error="predictor declined")
 
-    action = payload.get("action")
-    action = action if isinstance(action, dict) else {}
     return Prediction(
         parsed=True,
-        server_args=_as_str_map(action.get("server_args")),
-        envs=_as_str_map(action.get("envs")),
-        source_change=str(action.get("source_change") or "").strip(),
+        actions=_actions_of(payload),
         meta=_as_str_map(payload.get("meta")),
     )

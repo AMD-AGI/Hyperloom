@@ -211,12 +211,22 @@ Do not coerce one into the other.
     "envs": {"VLLM_ROCM_USE_AITER": "1"},
     "source_change": null
   },
+  "actions": [
+    {
+      "server_args": {"--max-num-batched-tokens": "16384"},
+      "envs": {"VLLM_ROCM_USE_AITER": "1"},
+      "source_change": null
+    },
+    {"server_args": {"--kv-cache-dtype": "fp8"}, "envs": {}, "source_change": null}
+  ],
   "meta": {
     "model": "primatune-dpo-star-r3",
     "phase_rendered": "EXPLORE",
     "prompt_chars": 4339,
     "finish_reason": "stop",
-    "dropped_flags": ["--not-a-real-flag"]
+    "dropped_flags": ["--not-a-real-flag"],
+    "samples": 8,
+    "chosen_index": 0
   }
 }
 ```
@@ -228,9 +238,24 @@ Do not coerce one into the other.
   `extra_args` / `extra_envs` without re-checking spelling.
 - `action.source_change` — prose describing a source edit, or `null`. This is
   **not** a diff; see [The patch channel](#the-patch-channel).
+- `actions` — optional, and present when the service samples more than once
+  per request. Every distinct proposal, best-first, deduplicated by the service;
+  `actions[0]` is `action`. A service without sampling omits it, and Hyperloom
+  reads `action` instead, so neither side needs a schema version to branch on.
+  Each entry becomes one variant of the same explore round, capped by
+  `HYPERLOOM_PREDICTOR_MAX_VARIANTS` — a variant is a benchmark round, so the
+  cap is a budget decision rather than a formatting one. The entries are graded
+  in order with each KEEP folded onto the stack before the next is graded, so
+  they are a greedy stacking attempt rather than a set of alternatives.
 - `meta` — advisory. Logged for the shadow-mode comparison and ignored by
   control flow. `dropped_flags` is the useful one: a high rate means the
   consumer's catalogue disagrees with the framework actually installed.
+  `samples` reports how many completions the answer was drawn from.
+
+Sampling is worth the extra variants because the head of the distribution is
+not where the value was. Replayed against a real session's FRAMEWORK entry at
+40 samples, the flag that carried +30% in that session appeared in 11 of them
+while greedy decoding proposed no launch flags at all.
 
 Any non-200, a body that fails to parse, or a timeout is treated exactly like
 `parsed: false`. The predictor is never allowed to fail a session.
@@ -245,49 +270,88 @@ state, and one the model is equally equipped to answer. So the pump re-fires
 after each accepted variant:
 
 ```text
-FRAMEWORK entry -> reprofile -> predict -> explore task -> KEEP
-      ^                                                     |
-      |________________ stack depth + 1 ____________________|
+FRAMEWORK entry -> predict -> explore task -> KEEP -> watermark roofline
+      ^                                                          |
+      |______________ fresh snapshot, stack depth + 1 ____________|
 ```
 
-Termination is a property of the idempotency key rather than a counter. The key
-is `primatune-c{macro_cycle}-s{stack_depth}`, and the task registry returns an
-existing row for a known key without regard to its state. No KEEP means the
-stack depth is unchanged, which means the key repeats, which means nothing is
-enqueued and the chain stops. Because `coordinator.db` is durable, a resumed
+The chain is re-fired from three places: FRAMEWORK entry and every tick
+(`phases/framework.py`), the moment a variant is promoted, and the moment a
+fresh roofline lands (both in `loop/writeback.py`). The last two matter because
+one tick spans a whole explore round — a chain that only advanced between ticks
+got exactly one prediction per session, which is what an earlier version did.
+
+Termination is a losing streak. `predictor_chain_steps` counts *consecutive*
+rounds that produced no KEEP within one macro-cycle: it is bumped when a round
+is enqueued and cleared by `note_keep` from writeback when one of its variants
+lands. A chain that keeps winning is therefore never cut off, and one that stops
+winning hands over after `HYPERLOOM_PREDICTOR_MAX_CHAIN` attempts.
+
+That count is also the attempt number in the idempotency key,
+`primatune-c{macro_cycle}-s{stack_depth}-a{attempt}`. The attempt is what lets
+the predictor re-sample at an unchanged stack depth: with sampling on, a second
+look at the same decision point is a fresh draw rather than a repeat, and the
+flag that carried +30% in a real session was a minority sample. While a round is
+in flight the key is unchanged, so the registry returns the existing row and
+nothing is enqueued twice. Because `coordinator.db` is durable, a resumed
 session does not re-benchmark a prediction it already tried.
 
-Two caps bound the chain independently, whichever comes first: a step count and
-a fraction of the FRAMEWORK budget.
-
-### Going first is free
+### Going first, and going first cheaply
 
 `_on_enter_framework` runs synchronously at phase entry, while an
 orchestration-proposed `explore` has to wait for the next tick's reactor pass.
-The entry prediction therefore takes the serving lane's lease first without any
-suppression of existing logic. Nothing about the LLM's proposal path changes.
+The entry prediction therefore takes the serving lane's lease first.
 
-### Budget must be checked, not assumed
+It also goes first by design, not just by timing. The predictor is a local
+model: one request is seconds of GPU on its own host and no API spend. An LLM
+specialist is the opposite — measured over a real session, specialists were 83
+of 87 LLM calls and 97% of the output tokens, and the two most expensive of them
+returned candidates that all measured negative. So while the predictor is still
+inside its streak allowance, the FRAMEWORK phase holds back its paid proposers;
+see [Holding the specialists](#holding-the-specialists).
 
-Phase budgets are cumulative across entries, so a `cycle_reloop` does not hand
-out a fresh 40% and can re-enter a phase with nothing left. The chain re-fires
-whenever `macro_cycle` changes, so the idempotency key alone will not hold it
-back: the pump reads the remaining budget first and declines when the phase has
-already spent more than `HYPERLOOM_PREDICTOR_BUDGET_PCT` of it.
+### Waiting for fresh evidence
 
-That default of 25% also encodes the intent. This is a *first-pass* tuner: it
-should spend its predictions early, while the cheap wins are unclaimed, and
-leave the rest of the phase to the search.
+A KEEP large enough to cross the roofline watermark (a 10% step) leaves a
+re-profile in flight, and `auto_roofline_pending_task_id` names it. The pump
+declines while that is set: asking again would answer over the snapshot the KEEP
+just invalidated, since the request carries `roofline_snapshots[-1]`.
+
+A KEEP too small to cross the watermark is deliberately **not** waited for.
+There would be nothing to wait for, and a chain that waited anyway would stall
+for the rest of the phase.
+
+### Holding the specialists
+
+`predictor_holds_specialists` in `orchestrator/predictor/pump.py` is the single
+predicate, read from two places:
+
+- `phases/framework.py` before `_maybe_enqueue_candidate_discovery` and
+  `_maybe_dispatch_local_explore`
+- `policy/gate.py` `_validate_specialist_dispatch`, which refuses a free-form
+  `delegate` while the hold is on
+
+It returns false whenever the predictor could not answer anyway — no endpoint,
+shadow mode, a framework with no flag catalogue. Getting that wrong would
+suppress every proposer at once and leave the phase with nothing to benchmark.
+
+The PRELUDE research scout and static recon are **not** held. They run once per
+session before the predictor has any stack to reason about, and the scout is the
+cheapest of the specialists: in the session measured it was 18% of specialist
+output tokens and produced the one candidate that stacked a further +2.33% on
+top of the predictor's own KEEP.
 
 ### Gating
 
 The pump returns immediately, before any HTTP call, when:
 
 - the endpoint is unset, or the mode is `off`
+- the session is not in `FRAMEWORK_AGENT`
 - `framework` is not one of `sglang` / `vllm`. Flag catalogues exist only for
   those two; the consumer cannot validate an answer for the others
-- FRAMEWORK budget is exhausted
-- the chain has hit its step or budget cap
+- the streak has reached `HYPERLOOM_PREDICTOR_MAX_CHAIN` rounds without a KEEP
+- a watermark roofline is in flight, so the evidence it would answer over is
+  known to be stale
 
 `mode=shadow` is the default and goes one step further: it renders, calls, parses
 and logs, then enqueues nothing. Shadow mode costs no GPU time and is the only
@@ -353,11 +417,26 @@ that free exploration underperformed.
 |---|---|---|---|
 | `--primatune-endpoint URL` | `HYPERLOOM_PREDICTOR_ENDPOINT` | unset | Service base URL. Unset disables the pump. |
 | `--primatune-mode MODE` | `HYPERLOOM_PREDICTOR_MODE` | `shadow` | `off`, `shadow` (predict + log), `active` (enqueue). |
-| `--primatune-max-chain N` | `HYPERLOOM_PREDICTOR_MAX_CHAIN` | `3` | Step cap for the greedy chain. |
+| `--primatune-max-chain N` | `HYPERLOOM_PREDICTOR_MAX_CHAIN` | `3` | Consecutive rounds without a KEEP before the LLM specialists are let back in. A KEEP resets it. |
 | `--no-primatune` | — | — | Force `off` regardless of the other two. |
-| — | `HYPERLOOM_PREDICTOR_BUDGET_PCT` | `25` | The chain stops proposing once the phase has spent more than this share of its budget. |
 | — | `HYPERLOOM_PREDICTOR_TIMEOUT_SEC` | `120` | Per-request timeout. Exceeding it ends the chain. |
 | — | `HYPERLOOM_PREDICTOR_PHASE_LABEL` | `EXPLORE` | Value sent as `phase.phase`. See below. |
+| — | `HYPERLOOM_PREDICTOR_MAX_VARIANTS` | `3` | Variants one answer may contribute to a round. See below. |
+
+### Why the variant cap is not the sampling switch
+
+Whether the service samples is the service's own setting; this caps what
+Hyperloom will pay to measure. Eight samples deduplicate to roughly six distinct
+proposals, and a variant is about seven minutes of benchmark, so an uncapped
+answer spends ~42 minutes of a ~96-minute FRAMEWORK budget at one decision
+point — and the three-step chain would need more than the whole phase. At `3`
+the full chain costs about 63 minutes.
+
+Truncation keeps the head of the list and is deliberately not a ranking.
+Ordering the proposals by value here would duplicate the judgement the model was
+asked to make, and in the sessions measured the most valuable flag was a
+minority sample rather than the modal one. Set the cap to `1` to reproduce
+single-answer behaviour exactly.
 
 ### Why the phase label is configurable
 

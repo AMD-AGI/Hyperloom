@@ -3685,12 +3685,41 @@ class WritebackCollaborator:
                 result.get("error_class"),
             )
         # Clear the pending pointer (matched by task id).
+        released_roofline_gate = False
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
             changed = True
+            released_roofline_gate = True
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
+        if released_roofline_gate:
+            # The predictor stood down while this was in flight rather than
+            # answer over the snapshot the last KEEP invalidated. It is the
+            # evidence it was waiting for, so it gets the first look at it.
+            # Fired even on a failed roofline: the gate is open either way, and
+            # the alternative is a chain that stalls on a degraded profile.
+            await self._refire_predictor(reason="roofline")
+
+    async def _refire_predictor(self, *, reason: str) -> None:
+        """Hand the next decision point to the predictor before any paid proposer.
+
+        One tick spans a whole explore round, so a chain that only advanced
+        between ticks got a single prediction per session however many KEEPs it
+        earned -- which is what an earlier version did.
+
+        ``pump`` never raises, so the guard here is for resolving the phase
+        collaborator, which is a lazy import.
+
+        Args:
+            reason (str): Caller label for the pump's log ("keep" / "roofline").
+        """
+        try:
+            from hyperloom.orchestrator.predictor.pump import pump as predictor_pump
+
+            await predictor_pump(self.phase_framework, caller=reason)
+        except Exception:  # noqa: BLE001 — advisory work must not fail a writeback
+            log.exception("predictor refire (%s) failed", reason)
 
     async def _promote_explore(
         self,
@@ -4115,6 +4144,17 @@ class WritebackCollaborator:
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
                 )
+            if not is_revalidation_task:
+                from hyperloom.orchestrator.predictor import pump as _predictor
+
+                # Any KEEP is a new decision point, whoever earned it, and the
+                # free proposer gets first look. Clearing the streak re-opens
+                # the predictor's allowance, which is what alternates the two:
+                # it tries again, and the paid specialists come back only once
+                # it has stopped landing. A revalidation is excluded because it
+                # re-measures the stack it already has rather than deepening it.
+                _predictor.note_keep(self.shared_state)
+                await self._refire_predictor(reason="keep")
         else:
             changed = True
         if promoted:

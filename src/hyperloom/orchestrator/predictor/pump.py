@@ -1,19 +1,45 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Drive the predictor at FRAMEWORK entry and after each accepted step.
+"""Drive the predictor at FRAMEWORK entry, after each accepted step, and after
+each fresh roofline.
 
 The predictor answers once per decision point, so a single call would only ever
 use the empty-stack part of what it knows. A KEEP changes ``current_best``, the
 stack and the cumulative gain -- a new decision point, and one it is equally
 equipped to answer. The pump therefore re-fires as the stack deepens, forming a
-greedy chain that stops on its own when a step fails to land.
+greedy chain.
 
-Termination is a property of the idempotency key rather than a counter. The key
-carries the macro-cycle and the stack depth, and the task registry returns an
-existing row for a known key whatever its state. No KEEP means the depth is
-unchanged, the key repeats, nothing is enqueued, and the chain ends. A durable
-``coordinator.db`` extends that across a resume.
+Why this runs ahead of the specialists
+--------------------------------------
+The predictor is a local model: one request is seconds of GPU on its own host
+and no API spend at all. An LLM specialist is the opposite -- measured over a
+real session, specialists were 83 of 87 LLM calls and 97% of the output tokens.
+So the loop asks the free proposer first and only falls back to the paid ones
+once the free one has stopped landing KEEPs; see
+``predictor_holds_specialists`` in ``phases/framework.py``.
+
+Termination
+-----------
+``predictor_chain_steps`` counts *consecutive* attempts that have not produced a
+KEEP, within one macro-cycle. It is bumped when a round is enqueued and reset to
+zero when one of that round's variants lands, so it measures a losing streak
+rather than total work: a chain that keeps winning is never cut off, and one
+that stops winning hands over after ``max_chain`` attempts.
+
+The count is also the attempt number in the idempotency key, which is what lets
+the predictor re-sample at an unchanged stack depth. Sampling makes every call a
+fresh draw -- the flag that carried +30% in one session was a minority sample --
+so a second look at the same decision point is a genuinely different answer, not
+a repeat. Without the attempt in the key the registry would return the existing
+row and the chain would get exactly one shot per depth.
+
+Evidence freshness
+------------------
+A KEEP big enough to cross the roofline watermark leaves a re-profile in flight.
+The pump stands down until it lands rather than asking again over evidence it
+already knows is stale. A KEEP too small to trigger one is not waited for --
+there would be nothing to wait for, and the chain would stall forever.
 
 Nothing here evaluates a proposal. Config answers become ordinary ``explore``
 variants and patch answers become free-form specialist mandates, so both are
@@ -27,11 +53,7 @@ import logging
 from typing import Any
 
 from hyperloom.common.prompt_safety import flatten_for_prompt
-from hyperloom.orchestrator.phases.machine_state import (
-    PHASE_FRAMEWORK_AGENT,
-    phase_budget_remaining_seconds,
-    phase_elapsed_seconds,
-)
+from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 from hyperloom.orchestrator.predictor import config as predictor_config
 from hyperloom.orchestrator.predictor.client import Prediction, predict
 from hyperloom.orchestrator.predictor.payload import build_request
@@ -53,15 +75,27 @@ TASK_SOURCE = "coordinator_internal_primatune"
 MAX_MANDATE_CHARS = 4000
 
 
-def _chain_depth(state: Any) -> int:
-    """Steps the chain has taken in the current macro-cycle."""
+def attempts_without_keep(state: Any) -> int:
+    """Consecutive predictor rounds in this macro-cycle that landed no KEEP.
+
+    A counter from an earlier macro-cycle does not apply: ``cycle_reloop``
+    re-enters the phase against a different stack, which is a decision point the
+    predictor has not answered yet.
+
+    Args:
+        state (Any): The ``SharedState``.
+
+    Returns:
+        int: The losing streak, zero when the recorded cycle is not the current
+            one.
+    """
     if int(getattr(state, "predictor_chain_cycle", -1)) != int(getattr(state, "macro_cycle", 0) or 0):
         return 0
     return int(getattr(state, "predictor_chain_steps", 0) or 0)
 
 
-def _note_step(state: Any) -> None:
-    """Record one chain step against the current macro-cycle."""
+def note_attempt(state: Any) -> None:
+    """Count one attempt against the streak, re-basing on a new macro-cycle."""
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     if int(getattr(state, "predictor_chain_cycle", -1)) != cycle:
         state.predictor_chain_cycle = cycle
@@ -69,24 +103,83 @@ def _note_step(state: Any) -> None:
     state.predictor_chain_steps = int(getattr(state, "predictor_chain_steps", 0) or 0) + 1
 
 
-def _budget_spent_pct(state: Any) -> float | None:
-    """Share of this phase entry's budget already spent, or ``None`` if unlimited.
+def note_keep(state: Any) -> None:
+    """Clear the streak because a predictor variant landed.
 
-    ``phase_budget_remaining_seconds`` charges ``phase_elapsed_seconds`` against
-    the entry's allotment, so the two together recover the allotment itself.
+    Called from writeback rather than here: whether a round produced a KEEP is
+    only known once it has been benchmarked, which is long after the pump
+    returned.
+
+    Args:
+        state (Any): The ``SharedState``.
     """
-    remaining = phase_budget_remaining_seconds(state)
-    if remaining is None:
-        return None
-    elapsed = phase_elapsed_seconds(state)
-    total = elapsed + remaining
-    if total <= 0:
-        return 100.0
-    return 100.0 * elapsed / total
+    state.predictor_chain_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    state.predictor_chain_steps = 0
+
+
+def predictor_holds_specialists(state: Any) -> bool:
+    """Whether the free proposer still owns this phase, so paid ones stand down.
+
+    Read by the FRAMEWORK phase before it spends an LLM specialist and by the
+    PolicyGate before it admits a free-form delegate. Specialists were 97% of a
+    real session's LLM output tokens, so deferring them until the predictor has
+    stopped landing KEEPs is where the saving comes from.
+
+    Returns ``False`` whenever the predictor could not answer anyway -- no
+    endpoint, shadow mode, an unsupported framework. Getting that wrong would
+    suppress every proposer at once and leave the phase with nothing to
+    benchmark.
+
+    Args:
+        state (Any): The ``SharedState``.
+
+    Returns:
+        bool: True while specialists should be held back.
+    """
+    conf = predictor_config.load()
+    if not conf.enqueues:
+        return False
+    if not conf.supports(getattr(state, "framework", "")):
+        return False
+    return attempts_without_keep(state) < conf.max_chain
 
 
 def _declined(reason: str) -> None:
     log.debug("predictor_pump: standing down (%s)", reason)
+
+
+async def _release_finished_round(phase: Any) -> None:
+    """Drop an in-flight marker naming a round that already finished.
+
+    ``predictor_round_task_id`` is what stops a second round from being
+    enqueued while the first is still on the benchmark lane -- without it the
+    attempt number bumps on dispatch, the key changes, and the next tick buys a
+    duplicate round at full GPU cost.
+
+    A task deduplicated into an already-finished attempt never reports back, so
+    the marker it left would gate the chain permanently, and it is persisted
+    state: a resumed session would inherit a gate nothing could open. That is
+    not hypothetical -- the roofline watermark shipped with exactly this bug and
+    needed the same release. Checking the registry here is what makes it
+    self-healing.
+
+    Args:
+        phase (Any): The collaborator exposing ``shared_state`` and ``tasks``.
+    """
+    from hyperloom.orchestrator.state.task_registry import TERMINAL_STATES
+
+    state = phase.shared_state
+    pending = str(getattr(state, "predictor_round_task_id", "") or "").strip()
+    if not pending:
+        return
+    try:
+        task = await phase.tasks.get(pending)
+    except Exception:  # noqa: BLE001 — a missing row is itself finished
+        task = None
+    if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
+        return
+    state.predictor_round_task_id = ""
+    log.info("predictor_pump: released the round gate held by finished task=%s", pending)
 
 
 def _gate(phase: Any, conf: predictor_config.PredictorConfig) -> bool:
@@ -111,42 +204,91 @@ def _gate(phase: Any, conf: predictor_config.PredictorConfig) -> bool:
         _declined(f"framework {framework!r} has no flag catalogue")
         return False
 
-    depth = _chain_depth(state)
-    if depth >= conf.max_chain:
-        _declined(f"chain cap reached ({depth}/{conf.max_chain})")
+    pending_round = str(getattr(state, "predictor_round_task_id", "") or "").strip()
+    if pending_round:
+        # One round at a time. The attempt number bumps on dispatch, so without
+        # this the next tick would see a different key and buy a second round
+        # while the first is still on the benchmark lane.
+        _declined(f"round {pending_round} still being measured")
         return False
 
-    spent = _budget_spent_pct(state)
-    if spent is not None and spent > conf.budget_pct:
-        # Budgets are cumulative across entries, so a cycle_reloop can land in a
-        # phase with nothing left while the chain re-fires on the new
-        # macro-cycle. The idempotency key cannot see that.
-        _declined(f"phase {spent:.0f}% spent, past the {conf.budget_pct:.0f}% the chain may use")
+    streak = attempts_without_keep(state)
+    if streak >= conf.max_chain:
+        _declined(f"{streak} attempts without a KEEP, at the cap of {conf.max_chain}")
+        return False
+
+    pending_roofline = str(getattr(state, "auto_roofline_pending_task_id", "") or "").strip()
+    if pending_roofline:
+        # Asking now would answer over the snapshot the last KEEP already
+        # invalidated. Only an in-flight re-profile is waited for: the watermark
+        # needs a 10% step, so a smaller KEEP triggers none and there would be
+        # nothing to wait for -- waiting anyway would stall the chain for good.
+        _declined(f"roofline {pending_roofline} in flight, waiting for fresh evidence")
         return False
 
     return True
 
 
-def _grid_entry(answer: Prediction, *, cycle: int, depth: int) -> dict[str, Any] | None:
-    """Turn a config answer into one explore variant, or ``None`` when it has none."""
-    if not answer.has_config:
-        return None
-    extra_args = " ".join(
-        flag if value is True else f"{flag} {value}" for flag, value in answer.server_args.items()
-    ).strip()
-    return {
-        "name": f"primatune-c{cycle}-s{depth}",
-        "extra_args": extra_args,
-        "extra_envs": dict(answer.envs),
-        "provenance": PROVENANCE,
-        "note": "first-pass tuning prediction",
-    }
+def _grid_entries(
+    answer: Prediction, *, cycle: int, depth: int, attempt: int, limit: int = 1
+) -> list[dict[str, Any]]:
+    """Turn each config proposal into an explore variant, up to ``limit``.
+
+    All of them go into one grid rather than one task each, which is what keeps
+    the idempotency key -- and with it the chain's termination rule -- a
+    property of the decision point rather than of how many samples the service
+    happened to return.
+
+    A grid is not a set of alternatives. The explore executor grades variants in
+    order and folds each KEEP onto the stack before grading the next, so N
+    entries are a greedy N-deep stacking attempt within one round. Order
+    therefore matters, and it is the order the service sampled in: the same
+    AITER backend switch measured -1.17% on a bare baseline and +2.68% stacked
+    on fp8 KV cache in this fleet.
+
+    Duplicates are the service's problem, not this one: it deduplicates the
+    samples before sending them, and explore's ``canonical_fingerprint`` check
+    covers repeats *within* a submitted grid only -- historical
+    ``explore_search`` results are evidence there, never an eligibility gate. A
+    proposal that repeats one an earlier round already measured is benchmarked
+    again.
+
+    Args:
+        answer (Prediction): The predictor's answer.
+        cycle (int): Macro-cycle, for the variant name.
+        depth (int): Stack depth, for the variant name.
+        attempt (int): Attempt at this depth, for the variant name. Two attempts
+            at one depth are different answers because the service samples.
+        limit (int): Most variants to emit. Each one is a benchmark round, so
+            this is the knob that decides what an answer costs.
+
+    Returns:
+        list[dict[str, Any]]: One grid entry per configuration proposal kept,
+            empty when the answer has none.
+    """
+    entries: list[dict[str, Any]] = []
+    for index, action in enumerate(answer.config_actions[: max(int(limit), 1)]):
+        extra_args = " ".join(
+            flag if value is True else f"{flag} {value}" for flag, value in action.server_args.items()
+        ).strip()
+        entries.append(
+            {
+                "name": f"primatune-c{cycle}-s{depth}-a{attempt}-{index}",
+                "extra_args": extra_args,
+                "extra_envs": dict(action.envs),
+                "provenance": PROVENANCE,
+                "note": "first-pass tuning prediction",
+            }
+        )
+    return entries
 
 
-async def _enqueue_config(phase: Any, answer: Prediction, *, cycle: int, depth: int) -> bool:
+async def _enqueue_config(
+    phase: Any, answer: Prediction, *, cycle: int, depth: int, attempt: int, limit: int
+) -> bool:
     """Enqueue the config channel as an explore task. Returns whether it landed."""
-    entry = _grid_entry(answer, cycle=cycle, depth=depth)
-    if entry is None:
+    entries = _grid_entries(answer, cycle=cycle, depth=depth, attempt=attempt, limit=limit)
+    if not entries:
         return False
 
     from hyperloom.orchestrator.state.shared_state import inject_stack_base_params
@@ -154,8 +296,8 @@ async def _enqueue_config(phase: Any, answer: Prediction, *, cycle: int, depth: 
     state = phase.shared_state
     params: dict[str, Any] = {
         "source": TASK_SOURCE,
-        "reason": f"primatune:cycle{cycle}:step{depth}",
-        "grid": [entry],
+        "reason": f"primatune:cycle{cycle}:step{depth}:attempt{attempt}",
+        "grid": entries,
         # Read by the breakdown recorder: per-variant provenance does not reach
         # it, so the round carries the proposer when the whole grid agrees.
         "provenance": PROVENANCE,
@@ -176,23 +318,32 @@ async def _enqueue_config(phase: Any, answer: Prediction, *, cycle: int, depth: 
     task, existing = await phase.tasks.create_or_return_existing(
         kind="explore",
         params=params,
-        idempotency_key=f"primatune-c{cycle}-s{depth}",
+        idempotency_key=f"primatune-c{cycle}-s{depth}-a{attempt}",
         requires_lanes=lanes,
         lease_ttl_sec=ttl,
     )
+    if not existing:
+        # Claimed before the log line so a crash between the two cannot leave a
+        # round running with nothing pointing at it.
+        state.predictor_round_task_id = str(task.task_id)
     log.info(
-        "predictor_pump: explore task_id=%s cycle=%d depth=%d existing=%s args=%r envs=%r",
+        "predictor_pump: explore task_id=%s cycle=%d depth=%d attempt=%d existing=%s "
+        "variants=%d/%d %r",
         task.task_id,
         cycle,
         depth,
+        attempt,
         existing,
-        entry["extra_args"],
-        entry["extra_envs"],
+        len(entries),
+        len(answer.config_actions),
+        [(e["extra_args"], e["extra_envs"]) for e in entries],
     )
     return not existing
 
 
-async def _dispatch_patch(phase: Any, answer: Prediction, *, cycle: int, depth: int) -> bool:
+async def _dispatch_patch(
+    phase: Any, answer: Prediction, *, cycle: int, depth: int, attempt: int
+) -> bool:
     """Hand a prose source change to a free-form specialist. Returns whether it landed."""
     if not answer.has_source_change:
         return False
@@ -226,16 +377,18 @@ async def _dispatch_patch(phase: Any, answer: Prediction, *, cycle: int, depth: 
     task, existing = await phase.tasks.create_or_return_existing(
         kind="specialist",
         params=params,
-        idempotency_key=f"primatune-patch-c{cycle}-s{depth}",
+        idempotency_key=f"primatune-patch-c{cycle}-s{depth}-a{attempt}",
         requires_lanes=lanes,
         side_effects=["writes_results", "writes_patches"],
         lease_ttl_sec=ttl,
     )
     log.info(
-        "predictor_pump: freeform specialist task_id=%s cycle=%d depth=%d existing=%s mandate=%r",
+        "predictor_pump: freeform specialist task_id=%s cycle=%d depth=%d attempt=%d "
+        "existing=%s mandate=%r",
         task.task_id,
         cycle,
         depth,
+        attempt,
         existing,
         mandate[:120],
     )
@@ -243,40 +396,59 @@ async def _dispatch_patch(phase: Any, answer: Prediction, *, cycle: int, depth: 
 
 
 def _log_shadow(answer: Prediction, *, cycle: int, depth: int, session_id: str) -> None:
-    """Record what would have been enqueued, at zero GPU cost."""
+    """Record what would have been enqueued, at zero GPU cost.
+
+    Every proposal is logged, not just the one that would have been benchmarked:
+    shadow mode exists to measure what the predictor nominates, and with
+    sampling on, the spread is the measurement. A run that only recorded the
+    head would have shown the flag that mattered on none of its lines while the
+    model was proposing it in one sample out of four.
+    """
     log.info(
-        "predictor_shadow: session=%s cycle=%d depth=%d parsed=%s "
-        "server_args=%r envs=%r source_change=%r prompt_chars=%s dropped=%r",
+        "predictor_shadow: session=%s cycle=%d depth=%d parsed=%s actions=%d "
+        "samples=%s prompt_chars=%s dropped=%r",
         session_id,
         cycle,
         depth,
         answer.parsed,
-        answer.server_args,
-        answer.envs,
-        answer.source_change[:200],
+        len(answer.actions),
+        answer.meta.get("samples"),
         answer.meta.get("prompt_chars"),
         answer.meta.get("dropped_flags"),
     )
+    for index, action in enumerate(answer.actions):
+        log.info(
+            "predictor_shadow:   [%d/%d] server_args=%r envs=%r source_change=%r",
+            index,
+            len(answer.actions),
+            action.server_args,
+            action.envs,
+            action.source_change[:200],
+        )
 
 
 async def pump(phase: Any, *, caller: str) -> None:
     """Consult the predictor once, and act on the answer.
 
-    Safe to call on every tick: the gate and the idempotency key make repeat
-    calls at an unchanged decision point free. Never raises into the tick loop.
+    Safe to call on every tick and from writeback: the gate and the idempotency
+    key make repeat calls at an unchanged decision point free. Never raises into
+    the tick loop.
 
     Args:
-        phase (Any): The ``FrameworkPhase`` collaborator.
-        caller (str): Label for the log ("entry" / "tick").
+        phase (Any): The ``FrameworkPhase`` collaborator, or anything else
+            exposing ``shared_state``, ``tasks`` and ``_registry_lanes_ttl``.
+        caller (str): Label for the log ("entry" / "tick" / "keep" / "roofline").
     """
     try:
         conf = predictor_config.load()
+        await _release_finished_round(phase)
         if not _gate(phase, conf):
             return
 
         state = phase.shared_state
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
         depth = len(getattr(state, "optimization_stack", None) or [])
+        attempt = attempts_without_keep(state)
         session_id = str(getattr(state, "session_id", "") or "")
 
         request = build_request(state, session_id=session_id, phase_label=conf.phase_label)
@@ -287,12 +459,32 @@ async def pump(phase: Any, *, caller: str) -> None:
             return
 
         if not answer.parsed or answer.is_empty:
-            log.info("predictor_pump: no action from %s (cycle=%d depth=%d)", caller, cycle, depth)
+            # An answer with nothing in it is a spent attempt like any other.
+            # Without counting it a predictor that always declines would hold
+            # the specialists back for the whole phase.
+            note_attempt(state)
+            log.info(
+                "predictor_pump: no action from %s (cycle=%d depth=%d attempt=%d)",
+                caller,
+                cycle,
+                depth,
+                attempt,
+            )
             return
 
-        landed = await _enqueue_config(phase, answer, cycle=cycle, depth=depth)
-        landed = await _dispatch_patch(phase, answer, cycle=cycle, depth=depth) or landed
+        landed = await _enqueue_config(
+            phase, answer, cycle=cycle, depth=depth, attempt=attempt, limit=conf.max_variants
+        )
+        landed = (
+            await _dispatch_patch(phase, answer, cycle=cycle, depth=depth, attempt=attempt)
+            or landed
+        )
         if landed:
-            _note_step(state)
+            # Counted on dispatch, not on the result: the round takes tens of
+            # minutes to grade, and an unincremented counter would leave the key
+            # unchanged and the streak unable to advance if the task failed
+            # outright. ``note_keep`` clears it from writeback when a variant
+            # lands, which is what makes this a losing streak.
+            note_attempt(state)
     except Exception:  # noqa: BLE001 — advisory work must never fail a session
         log.exception("predictor_pump (%s) failed", caller)

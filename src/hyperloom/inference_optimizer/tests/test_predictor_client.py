@@ -95,10 +95,27 @@ class TestConfig:
 
     def test_bad_numbers_fall_back_without_raising(self, monkeypatch):
         monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "lots")
-        monkeypatch.setenv(cfg.ENV_BUDGET_PCT, "-5")
+        monkeypatch.setenv(cfg.ENV_TIMEOUT_SEC, "-5")
         conf = cfg.load()
         assert conf.max_chain == cfg.DEFAULT_MAX_CHAIN
-        assert conf.budget_pct == cfg.DEFAULT_BUDGET_PCT
+        assert conf.timeout_sec == cfg.DEFAULT_TIMEOUT_SEC
+
+    def test_the_predictor_has_no_budget_of_its_own(self):
+        """Removed deliberately: measuring one proposal outspent the share.
+
+        The chain used to stand down past a fraction of the FRAMEWORK budget,
+        which cost it every step after the first however many KEEPs it earned.
+        """
+        assert not hasattr(cfg, "ENV_BUDGET_PCT")
+        assert not hasattr(cfg, "DEFAULT_BUDGET_PCT")
+        assert not hasattr(cfg.PredictorConfig(), "budget_pct")
+
+    def test_variant_cap_is_configurable_and_never_zero(self, monkeypatch):
+        """Zero would make a configured predictor silently enqueue nothing."""
+        monkeypatch.setenv(cfg.ENV_MAX_VARIANTS, "6")
+        assert cfg.load().max_variants == 6
+        monkeypatch.setenv(cfg.ENV_MAX_VARIANTS, "0")
+        assert cfg.load().max_variants == cfg.DEFAULT_MAX_VARIANTS
 
     def test_only_sglang_and_vllm_are_supported(self):
         conf = cfg.PredictorConfig()
@@ -157,6 +174,96 @@ class TestPredictSuccess:
     def test_empty_action_is_not_actionable(self, service):
         service.reply = (200, {"schema": "primatune.predictor_response.v1", "parsed": True, "action": {}})
         assert _predict(service).is_empty is True
+
+
+class TestSampledAnswer:
+    """A sampling service sends every distinct proposal under ``actions``."""
+
+    @staticmethod
+    def _reply(actions, action=None):
+        body = {"schema": "primatune.predictor_response.v1", "parsed": True, "actions": actions}
+        if action is not None:
+            body["action"] = action
+        return (200, body)
+
+    def test_reads_every_action(self, service):
+        service.reply = self._reply(
+            [
+                {"server_args": {"--kv-cache-dtype": "fp8"}},
+                {"server_args": {"--max-num-batched-tokens": "32768"}},
+                {"envs": {"VLLM_ROCM_USE_AITER": "1"}},
+            ]
+        )
+        out = _predict(service)
+        assert len(out.actions) == 3
+        assert out.config_actions == out.actions
+
+    def test_the_single_action_accessors_read_the_head(self, service):
+        """A caller that wants one answer must see the same one it always did."""
+        service.reply = self._reply(
+            [
+                {"server_args": {"--kv-cache-dtype": "fp8"}},
+                {"server_args": {"--max-num-batched-tokens": "32768"}},
+            ]
+        )
+        out = _predict(service)
+        assert out.server_args == {"--kv-cache-dtype": "fp8"}
+
+    def test_falls_back_to_the_single_action_field(self, service):
+        """A service without sampling sends only ``action``."""
+        service.reply = (
+            200,
+            {
+                "schema": "primatune.predictor_response.v1",
+                "parsed": True,
+                "action": {"server_args": {"--kv-cache-dtype": "fp8"}},
+            },
+        )
+        out = _predict(service)
+        assert len(out.actions) == 1
+        assert out.server_args == {"--kv-cache-dtype": "fp8"}
+
+    def test_empty_actions_are_dropped(self, service):
+        """An empty one would become a variant with no flags to benchmark."""
+        service.reply = self._reply(
+            [{}, {"server_args": {"--kv-cache-dtype": "fp8"}}, {"envs": {}, "server_args": {}}]
+        )
+        out = _predict(service)
+        assert len(out.actions) == 1
+        assert out.server_args == {"--kv-cache-dtype": "fp8"}
+
+    def test_an_all_empty_list_is_not_actionable(self, service):
+        service.reply = self._reply([{}, {}])
+        assert _predict(service).is_empty is True
+
+    def test_source_change_comes_from_the_action_that_has_one(self, service):
+        """``has_source_change`` and ``source_change`` must agree.
+
+        Reading the head instead would report a patch and then hand the
+        specialist an empty mandate.
+        """
+        service.reply = self._reply(
+            [
+                {"server_args": {"--kv-cache-dtype": "fp8"}},
+                {"source_change": "Fuse RoPE into the KV write."},
+            ]
+        )
+        out = _predict(service)
+        assert out.has_source_change is True
+        assert out.source_change == "Fuse RoPE into the KV write."
+        assert out.server_args == {"--kv-cache-dtype": "fp8"}
+
+    def test_a_malformed_row_does_not_lose_its_siblings(self, service):
+        service.reply = self._reply(["not an object", {"server_args": {"--kv-cache-dtype": "fp8"}}])
+        assert _predict(service).server_args == {"--kv-cache-dtype": "fp8"}
+
+    def test_actions_wins_over_the_compatibility_action(self, service):
+        """Both are sent; the list is the whole answer and the field is its head."""
+        service.reply = self._reply(
+            [{"server_args": {"--kv-cache-dtype": "fp8"}}, {"server_args": {"--block-size": "32"}}],
+            action={"server_args": {"--kv-cache-dtype": "fp8"}},
+        )
+        assert len(_predict(service).actions) == 2
 
 
 class TestPredictFailure:

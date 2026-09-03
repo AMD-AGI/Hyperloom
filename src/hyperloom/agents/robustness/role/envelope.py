@@ -147,6 +147,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # First-pass predictor chain accounting.
         "predictor_chain_steps",
         "predictor_chain_cycle",
+        "predictor_round_task_id",
         "pending_bottleneck_switch",
         "last_cycle_bottleneck",
         "saturated_directions",

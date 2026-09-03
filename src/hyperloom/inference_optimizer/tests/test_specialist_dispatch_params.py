@@ -830,3 +830,94 @@ def test_patch_capable_domains_default_to_patch():
         assert domain.default_mode == "patch"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_PATCH
+
+
+# --------------------------------------------------------------------------- #
+# Deferring the paid proposers to the free one
+# --------------------------------------------------------------------------- #
+def _gate_with_predictor_state(**fields) -> PolicyGate:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState()
+    state.phase = "FRAMEWORK_AGENT"
+    state.framework = "vllm"
+    state.macro_cycle = 0
+    state.predictor_chain_cycle = 0
+    for name, value in fields.items():
+        setattr(state, name, value)
+    return PolicyGate(role_registry=default_role_registry(), shared_state=state)
+
+
+@pytest.fixture
+def predictor_active(monkeypatch):
+    """A configured, enqueueing predictor."""
+    from hyperloom.orchestrator.predictor import config as predictor_config
+
+    monkeypatch.setenv(predictor_config.ENV_ENDPOINT, "http://predictor:8973")
+    monkeypatch.setenv(predictor_config.ENV_MODE, predictor_config.MODE_ACTIVE)
+    monkeypatch.delenv(predictor_config.ENV_MAX_CHAIN, raising=False)
+
+
+def test_specialist_deferred_while_the_predictor_leads(predictor_active, orchestration_role):
+    """The predictor costs no API spend; a specialist was 97% of a session's.
+
+    Denied rather than queued: the point is that the specialist subprocess never
+    starts, which is where essentially all of the cost sits.
+    """
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_specialist_dispatch(
+            orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+        )
+    assert excinfo.value.rule == "specialist_deferred_to_predictor"
+
+
+def test_specialist_admitted_once_the_predictor_stops_landing(
+    monkeypatch, predictor_active, orchestration_role
+):
+    from hyperloom.orchestrator.predictor import config as predictor_config
+
+    monkeypatch.setenv(predictor_config.ENV_MAX_CHAIN, "2")
+    gate = _gate_with_predictor_state(predictor_chain_steps=2)
+    gate._validate_specialist_dispatch(
+        orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+    )
+
+
+def test_anchored_specialist_is_deferred_too(predictor_active, orchestration_role):
+    """Every LLM specialist is paid, not just the freeform ones."""
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_specialist_dispatch(
+            orchestration_role,
+            _dispatch({"domain": "serving_specialist", "gap_canonical_id": "gap.x"}),
+        )
+    assert excinfo.value.rule == "specialist_deferred_to_predictor"
+
+
+def test_no_deferral_outside_the_framework_phase(predictor_active, orchestration_role):
+    """PRELUDE's research scout and static recon must not be held back."""
+    gate = _gate_with_predictor_state(phase="PRELUDE", predictor_chain_steps=0)
+    gate._validate_specialist_dispatch(
+        orchestration_role, _dispatch({"scope": "freeform", "task_description": "survey"})
+    )
+
+
+def test_no_deferral_without_a_predictor(monkeypatch, orchestration_role):
+    """Suppressing every proposer would leave the phase nothing to benchmark."""
+    from hyperloom.orchestrator.predictor import config as predictor_config
+
+    monkeypatch.delenv(predictor_config.ENV_ENDPOINT, raising=False)
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    gate._validate_specialist_dispatch(
+        orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+    )
+
+
+def test_no_deferral_for_a_framework_the_predictor_cannot_answer_for(
+    predictor_active, orchestration_role
+):
+    gate = _gate_with_predictor_state(framework="atom", predictor_chain_steps=0)
+    gate._validate_specialist_dispatch(
+        orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+    )

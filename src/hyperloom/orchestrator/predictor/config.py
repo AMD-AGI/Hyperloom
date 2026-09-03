@@ -33,9 +33,9 @@ MODES = (MODE_OFF, MODE_SHADOW, MODE_ACTIVE)
 ENV_ENDPOINT = "HYPERLOOM_PREDICTOR_ENDPOINT"
 ENV_MODE = "HYPERLOOM_PREDICTOR_MODE"
 ENV_MAX_CHAIN = "HYPERLOOM_PREDICTOR_MAX_CHAIN"
-ENV_BUDGET_PCT = "HYPERLOOM_PREDICTOR_BUDGET_PCT"
 ENV_TIMEOUT_SEC = "HYPERLOOM_PREDICTOR_TIMEOUT_SEC"
 ENV_PHASE_LABEL = "HYPERLOOM_PREDICTOR_PHASE_LABEL"
+ENV_MAX_VARIANTS = "HYPERLOOM_PREDICTOR_MAX_VARIANTS"
 
 #: Shadow, not active. The two known mismatches between what Hyperloom reports
 #: and what a consumer was trained on are both silent, so the default has to be
@@ -43,12 +43,26 @@ ENV_PHASE_LABEL = "HYPERLOOM_PREDICTOR_PHASE_LABEL"
 #: on them.
 DEFAULT_MODE = MODE_SHADOW
 
-#: Three steps covers the overwhelming majority of observed stack depths, and a
-#: chain that has not converged by then is unlikely to.
+#: Consecutive predictor rounds without a KEEP before the phase falls back to
+#: the LLM specialists. A losing streak, not a total: a KEEP resets it, so a
+#: chain that keeps landing is never cut off. Three attempts at one decision
+#: point are three independent draws from a sampling service, which is a real
+#: second and third look rather than a repeat.
 DEFAULT_MAX_CHAIN = 3
 
-#: Share of the FRAMEWORK budget the chain may spend before it stands down.
-DEFAULT_BUDGET_PCT = 25.0
+#: Variants one answer may contribute to a round. A sampling predictor returns
+#: as many distinct proposals as it found -- eight samples deduplicated to about
+#: six in every batch measured -- and each one is a benchmark round of roughly
+#: seven minutes. Unbounded, a single decision point would spend ~42 minutes
+#: against a FRAMEWORK budget of ~96, and the three-step chain would need more
+#: than the whole phase. Three keeps the full chain affordable
+#: (3 x 3 x 7 = 63 minutes) with headroom for the round the phase runs anyway.
+#:
+#: Not a ranking: the proposals arrive in sample order and the truncation keeps
+#: the head. There is no way to order them by value here without duplicating the
+#: judgement the model was asked to make, and the flag that mattered most in the
+#: observed sessions was a minority sample rather than the modal one.
+DEFAULT_MAX_VARIANTS = 3
 
 DEFAULT_TIMEOUT_SEC = 120.0
 
@@ -99,9 +113,9 @@ class PredictorConfig:
     endpoint: str = ""
     mode: str = DEFAULT_MODE
     max_chain: int = DEFAULT_MAX_CHAIN
-    budget_pct: float = DEFAULT_BUDGET_PCT
     timeout_sec: float = DEFAULT_TIMEOUT_SEC
     phase_label: str = DEFAULT_PHASE_LABEL
+    max_variants: int = DEFAULT_MAX_VARIANTS
 
     @property
     def enabled(self) -> bool:
@@ -136,7 +150,7 @@ def load() -> PredictorConfig:
         endpoint=os.environ.get(ENV_ENDPOINT, "").strip(),
         mode=mode,
         max_chain=_env_int(ENV_MAX_CHAIN, DEFAULT_MAX_CHAIN),
-        budget_pct=_env_float(ENV_BUDGET_PCT, DEFAULT_BUDGET_PCT),
         timeout_sec=_env_float(ENV_TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC, minimum=1.0),
         phase_label=os.environ.get(ENV_PHASE_LABEL, "").strip() or DEFAULT_PHASE_LABEL,
+        max_variants=_env_int(ENV_MAX_VARIANTS, DEFAULT_MAX_VARIANTS, minimum=1),
     )
