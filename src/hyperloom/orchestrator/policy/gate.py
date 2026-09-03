@@ -1002,10 +1002,10 @@ class PolicyGate:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
         Requires ``action_name``, then hard-rejects kernel_agent-owned
-        actions (REQUEST-only). Mirrors the delegate channel's
-        sweep-singleton, per-action source, GEMM-tuning ownership, phase,
-        and external-tool collision gates so an LLM cannot sidestep them by
-        proposing instead of delegating.
+        actions (REQUEST-only). Mirrors the delegate channel's per-action
+        source, GEMM-tuning ownership, phase, and external-tool collision
+        gates so an LLM cannot sidestep them by proposing instead of
+        delegating.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
