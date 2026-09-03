@@ -1159,7 +1159,7 @@ sandbox, and the pod is reclaimed out from under it about fifteen minutes after
 the turn ends. That is not hypothetical: on 2026-09-02 four dispatches lost a
 live sandbox exactly this way, the cleanest of them reporting `task.completed`
 at 10:43:14 and losing its pod at 10:57:46, with no error in between and the
-optimiser still working.
+optimizer still working.
 
 `run_in_background=true` detaches the same way but through the door the platform
 can see: Hands registers the shell against the session, which is what lets the
@@ -1199,13 +1199,12 @@ launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
 pid="$(jq -r '.pid // empty' "$launch_info" 2>/dev/null)"
 [ -n "$pid" ] && echo "$pid" > "$PID_FILE"
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry, and sandbox PID 1
-# does not reap, so that check reports a dead optimiser as alive indefinitely.
+# does not reap, so that check reports a dead optimizer as alive indefinitely.
 # Ask for the state and reject Z.
 ps -o stat= -p "$pid" 2>/dev/null | grep -qv '^Z' \
   && echo "optimizer_alive=true pid=$pid"
 # Authoritative session dir from the launch-info JSON (--launch-info-file).
 # Never guess by timestamp: overlapping sessions break any "latest dir" pick.
-launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
 session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
 if [ -z "$session_dir" ]; then
   echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
@@ -1291,10 +1290,10 @@ bash "$RUN_DIR/robustness_monitor.sh" \
   2>&1 < /dev/null
 ```
 
-Launch it the same way you launched the optimiser: under Claw with the bash
+Launch it the same way you launched the optimizer: under Claw with the bash
 tool's `run_in_background=true`, everywhere else prefixed with `setsid nohup`
 and suffixed with ` &`. The monitor outlives the turn by design, so under Claw
-it has the same problem the optimiser had — detached by hand, it is invisible,
+it has the same problem the optimizer had — detached by hand, it is invisible,
 and it holds nothing open.
 
 Reads `$PID_FILE` plus (optional) `$INFERENCE_OPTIMIZER_SESSION_DIR` /

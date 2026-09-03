@@ -142,7 +142,11 @@ read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
 [ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
 [ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
-test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
+# does not reap, so that check reports a dead optimizer as alive indefinitely.
+# Ask for the process state and reject Z.
+ps -o stat= -p "$REAL_PID" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$REAL_PID"
 
 SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$SESSION_DIR" ]; then
