@@ -179,8 +179,8 @@ def test_conc_sweep_renames_the_comparison_columns_and_keeps_the_arms(tmp_path):
     assert event["end_time"] == "2026-08-27T04:00:00+00:00"
     assert event["ext"]["comparison"][0] == {
         "conc": 8,
-        "baseline_output_throughput": 90.0,
-        "optimized_output_throughput": 99.0,
+        "baseline_throughput": 90.0,
+        "optimized_throughput": 99.0,
         "speedup": 1.1,
         "error": None,
     }

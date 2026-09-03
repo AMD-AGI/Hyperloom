@@ -8,16 +8,23 @@ produced by :mod:`conc_sweep`.  The function is **best-effort**: any import
 failure (missing ``matplotlib``) or data / IO error is logged and ``None``
 is returned so callers can skip the chart without aborting the report.
 
-Axes follow the payload's ``benchmark_mode``; the two workloads are ranked on
-different quantities.
+Axes follow the metric the payload's ``summary`` was graded on, so the chart
+shows the ranking the session was actually scored by -- read off the record
+rather than re-derived, because the grading rule consults the environment of
+the process that ran the sweep.
 
-Agentic — the pair InferenceX ranks a submission by:
+Total token throughput — the pair InferenceX ranks a submission by:
   x = intvty_p90                     (p90 interactivity, tok/s/user)
   y = total_token_throughput / tp    (tok/s per chip)
 
-Synthetic — no aiperf export, so interactivity is approximated from concurrency:
+Output throughput — no aiperf export, so interactivity is approximated from
+concurrency:
   x = output_throughput / conc       (tok/s per user)
   y = output_throughput / tp         (tok/s per GPU)
+
+``benchmark_mode`` stays a separate question: it says whether the workload was
+an agentic replay, which decides whether the session's ISL/OSL are real and so
+whether the roofline can be drawn at all.
 
 Rendered on a black background for a high-contrast dashboard look. Colours:
   baseline  — red        ``#FF4C4C``
@@ -33,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import GRADED_OUTPUT, is_agentx_mode
 
 log = logging.getLogger(__name__)
 
@@ -65,28 +72,36 @@ def _synthetic_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float
 
 @dataclass(frozen=True)
 class _Axes:
-    """The pair one mode's points are plotted on."""
+    """The pair a graded metric is plotted on."""
 
     point_xy: Callable[[Mapping[str, Any], float], tuple[float, float] | None]
     x_label: str
     y_label: str
-    agentic: bool
 
 
-def _resolve_axes(benchmark_mode: Any, tp_eff: float) -> _Axes:
-    """Pick the axis pair the payload's mode is ranked on."""
-    if is_agentx_mode(benchmark_mode):
+def _graded_metric_of(data: Mapping[str, Any]) -> str:
+    """The axis this sweep was graded on, as the sweep recorded it.
+
+    Read rather than re-derived: the grading rule consults the environment,
+    which describes the process that ran the sweep, not the one drawing the
+    chart. A summary that names no metric was taken on
+    ``conc_pair_comparison``'s default.
+    """
+    return str((data.get("summary") or {}).get("metric") or "").strip() or GRADED_OUTPUT
+
+
+def _axes_for_metric(metric: str, tp_eff: float) -> _Axes:
+    """Pick the axis pair a graded metric is read on."""
+    if metric != GRADED_OUTPUT:
         return _Axes(
             point_xy=_agentx_xy,
             x_label="P90 Interactivity  (tok/s/user)",
             y_label=f"Token Throughput per Chip  (tok/s/chip, tp={int(tp_eff)})",
-            agentic=True,
         )
     return _Axes(
         point_xy=_synthetic_xy,
         x_label="Interactivity  (output_throughput / concurrency,  tok/s/user)",
         y_label=f"Efficiency  (output_throughput / tp={int(tp_eff)},  tok/s/GPU)",
-        agentic=False,
     )
 
 
@@ -227,7 +242,12 @@ def _render(
 
     data = _load_payload(payload)
     tp_eff = float(max(tp, 1))
-    axes = _resolve_axes(data.get("benchmark_mode"), tp_eff)
+    # Two independent facts the payload records separately: the axis the sweep
+    # was graded on, which an operator can pin against the workload's default,
+    # and whether the workload was an agentic replay at all.
+    metric = _graded_metric_of(data)
+    agentic = is_agentx_mode(data.get("benchmark_mode"))
+    axes = _axes_for_metric(metric, tp_eff)
 
     baseline_pts = (data.get("baseline") or {}).get("points") or []
     optimized_pts = (data.get("optimized") or {}).get("points") or []
@@ -253,8 +273,10 @@ def _render(
     ax.set_facecolor(bg)
 
     # The roofline is a decode-only output_throughput bound computed from the
-    # placeholder ISL/OSL, so it sits on neither agentic axis.
-    if draw_ceiling and not axes.agentic:
+    # session's ISL/OSL, and ``_ceiling_series`` returns it in that axis pair's
+    # units. It needs both: a workload whose ISL/OSL are real, and a chart whose
+    # y axis is the throughput the bound is on.
+    if draw_ceiling and not agentic and metric == GRADED_OUTPUT:
         ceiling_data = data.get("roofline_ceiling") or {}
         cx, cy = _ceiling_series(ceiling_data, tp_eff)
         if cx:
@@ -295,7 +317,7 @@ def _render(
     # An agentic replay takes its request shapes from the trace corpus, so the
     # session's ISL/OSL are inert placeholders and naming them would misreport
     # what was measured.
-    if axes.agentic:
+    if agentic:
         title_parts.append("Agentic")
     elif isl or osl:
         title_parts.append(f"ISL={isl} OSL={osl}")

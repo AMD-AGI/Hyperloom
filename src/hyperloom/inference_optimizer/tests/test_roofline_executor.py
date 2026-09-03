@@ -489,10 +489,7 @@ from hyperloom.orchestrator.roles import (
     MockRobustnessBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import (
-    _AUDIT_ACTIONS as COORDINATOR_AUDIT_ACTIONS,
-    Coordinator,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
@@ -552,9 +549,12 @@ def test_shared_state_has_roofline_audit_fields_by_default():
     assert {"roofline_attempts", "last_roofline"} <= set(s.to_dict())
 
 
-def test_audit_actions_includes_roofline_in_both_modules():
+def test_audit_actions_includes_roofline():
+    """One set gates both the recorder and writeback's failed-attempt row."""
+    from hyperloom.orchestrator.loop import writeback as wb
+
     assert "roofline" in SHARED_STATE_AUDIT_ACTIONS
-    assert "roofline" in COORDINATOR_AUDIT_ACTIONS
+    assert wb._AUDIT_ACTIONS is SHARED_STATE_AUDIT_ACTIONS
 
 
 def test_key_metric_map_has_roofline_snapshot_id():

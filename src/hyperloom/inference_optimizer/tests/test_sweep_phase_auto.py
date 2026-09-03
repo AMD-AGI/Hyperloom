@@ -674,6 +674,26 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
 
 
 @pytest.mark.asyncio
+async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
+    """An unseeded ladder must reach the engine as "unset", not as "none wanted".
+
+    The executor reads an empty list as a deliberate choice and skips the whole
+    sweep, so collapsing None into [] here would silently drop it for any state
+    the CLI did not seed.
+    """
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
+    ]
+    coord.shared_state.conc_sweep_concs = []
+    await coord._on_enter_sweep(from_phase="KERNEL")
+
+    task = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
+    assert task.params["concs"] is None
+    evidence = coord.shared_state.phase_history[-1]["evidence"]
+    assert evidence["auto_conc_sweep_concs"] is None
+
+
+@pytest.mark.asyncio
 async def test_on_enter_sweep_idempotent_on_reentry(coord):
     """Re-entering SWEEP twice hits the same conc_sweep idempotency_key."""
     coord.shared_state.phase_history = [
@@ -714,22 +734,17 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_on_enter_sweep_none_records_terminal_skip(coord, monkeypatch):
-    """If the enqueue helper returns None, SWEEP records a terminal skip."""
-
-    async def _none(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _none)
+async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
+    """The helper's budget decline is terminal; the hook must not restate it."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
+    coord.shared_state.remaining_minutes = lambda: 1.0
+
     await coord._on_enter_sweep(from_phase="KERNEL")
-    evidence = coord.shared_state.phase_history[-1]["evidence"]
-    assert evidence["auto_conc_sweep_error"] == "enqueue_returned_none"
+
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "enqueue_returned_none"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
 
 
 @pytest.mark.asyncio

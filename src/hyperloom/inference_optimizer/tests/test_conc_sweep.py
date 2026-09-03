@@ -35,6 +35,7 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     run_conc_sweep,
 )
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
+from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -1295,6 +1296,84 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
     assert rows[0]["arm"] == "baseline"
 
 
+class TestTheSummaryIsTakenOnTheChartsAxis:
+    """The headline speedup and the curve beside it have to be one quantity.
+
+    On the agentic corpus output throughput is about 1% of the token budget, so
+    a summary left on that axis reports a number the chart contradicts.
+    """
+
+    def _pts(self, arm: str, out: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {"arm": arm, "conc": 8, "status": "succeeded", "output_throughput": out, "total_token_throughput": total}
+        ]
+
+    def test_agentx_grades_on_total_token_throughput(self):
+        comparison, summary = _build_comparison(
+            self._pts("baseline", 183.0, 20000.0),
+            self._pts("optimized", 183.0, 26000.0),
+            metric_key=graded_metric_key(benchmark_mode="agentx"),
+        )
+        assert summary["metric"] == "total_token_throughput"
+        assert summary["best_speedup"] == pytest.approx(26000.0 / 20000.0)
+        assert comparison[0]["baseline_tput"] == pytest.approx(20000.0)
+
+    def test_synthetic_stays_on_output_throughput(self):
+        _comparison, summary = _build_comparison(
+            self._pts("baseline", 100.0, 20000.0),
+            self._pts("optimized", 130.0, 26000.0),
+            metric_key=graded_metric_key(benchmark_mode=""),
+        )
+        assert summary["metric"] == "output_throughput"
+        assert summary["best_speedup"] == pytest.approx(1.3)
+
+    def test_the_key_follows_the_mode(self):
+        assert graded_metric_key(benchmark_mode="agentx") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="AgentX") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="synthetic") == "output_throughput"
+        assert graded_metric_key(benchmark_mode="") == "output_throughput"
+
+    def test_an_explicit_grading_override_wins_over_the_mode(self, monkeypatch):
+        """The summary follows the axis the KEEP verdicts were taken on."""
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+        assert graded_metric_key(benchmark_mode="synthetic") == "total_token_throughput"
+
+    def test_the_ambient_agentx_signal_reaches_the_summary(self, monkeypatch):
+        """A session whose mode never persisted still grades on the total axis."""
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        assert graded_metric_key(benchmark_mode="") == "total_token_throughput"
+
+
+class TestAnUnreportedTotalComesFromItsHalves:
+    """A row graded on the total axis must not read as unmeasured."""
+
+    def _variant(self, **kw: Any) -> VariantResult:
+        return VariantResult(
+            name="baseline_c8", extra_server_args="", extra_envs={"CONC": "8"}, status="succeeded", **kw
+        )
+
+    def test_the_halves_sum_when_the_parser_named_no_total(self):
+        point = _point_from_variant(
+            self._variant(input_throughput=24000.0, output_throughput=180.0),
+            arm="baseline",
+        )
+        assert point["total_token_throughput"] == pytest.approx(24180.0)
+
+    def test_a_reported_total_is_not_recomputed(self):
+        point = _point_from_variant(
+            self._variant(input_throughput=1.0, output_throughput=1.0, total_token_throughput=25984.8),
+            arm="baseline",
+        )
+        assert point["total_token_throughput"] == pytest.approx(25984.8)
+
+    def test_a_missing_half_leaves_the_total_unmeasured(self):
+        point = _point_from_variant(self._variant(output_throughput=180.0), arm="baseline")
+        assert point["total_token_throughput"] is None
+
+
 # --- the chart's data contract ---
 
 
@@ -1485,16 +1564,17 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
     assert result.exists()
 
 
-class TestTheChartFollowsTheMode:
-    """Two workloads, two rankings, two axis pairs.
+class TestTheChartFollowsTheGradedAxis:
+    """The chart has to show the ranking the session was scored by.
 
-    Plotting an agentic ladder on ``output_throughput / conc`` would label a
-    number that is ~1% of the token budget as the thing being optimised.
+    A chart drawn on a different axis from the summary beside it invites
+    reading off a rung the grading did not pick.
     """
 
-    def _payload(self, mode: str) -> dict[str, Any]:
+    def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
             "benchmark_mode": mode,
+            "summary": {"metric": metric},
             "baseline": {
                 "points": [
                     {
@@ -1508,34 +1588,63 @@ class TestTheChartFollowsTheMode:
             "optimized": {"points": []},
         }
 
-    def test_agentx_reads_interactivity_and_total(self):
+    def test_the_total_axis_reads_interactivity_and_total(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        axes = plot._resolve_axes("agentx", tp_eff=8.0)
-        xs, ys = plot._arm_series(self._payload("agentx")["baseline"]["points"], 8.0, axes)
+        axes = plot._axes_for_metric("total_token_throughput", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("agentx", "total_token_throughput")["baseline"]["points"], 8.0, axes)
         assert xs == [pytest.approx(447.2)]
         assert ys == [pytest.approx(25984.8 / 8.0)]
         assert "P90 Interactivity" in axes.x_label
         assert "per Chip" in axes.y_label
 
-    def test_synthetic_keeps_the_output_pair(self):
+    def test_the_output_axis_keeps_the_output_pair(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        axes = plot._resolve_axes("synthetic", tp_eff=8.0)
-        xs, ys = plot._arm_series(self._payload("synthetic")["baseline"]["points"], 8.0, axes)
+        axes = plot._axes_for_metric("output_throughput", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("synthetic", "output_throughput")["baseline"]["points"], 8.0, axes)
         assert xs == [pytest.approx(183.44 / 8)]
         assert ys == [pytest.approx(183.44 / 8.0)]
 
-    def test_an_unset_mode_reads_as_synthetic(self):
+    def test_a_summary_naming_no_metric_reads_as_the_comparison_default(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        assert plot._resolve_axes("", tp_eff=1.0).agentic is False
-        assert plot._resolve_axes(None, tp_eff=1.0).agentic is False
+        assert plot._graded_metric_of({}) == "output_throughput"
+        assert plot._graded_metric_of({"summary": {"metric": ""}}) == "output_throughput"
+        assert plot._graded_metric_of({"summary": {"metric": "total_token_throughput"}}) == "total_token_throughput"
+
+    @pytest.mark.parametrize(
+        ("mode", "env"),
+        [
+            ("agentx", {}),
+            ("synthetic", {}),
+            ("agentx", {"HYPERLOOM_PERF_METRIC": "output_throughput"}),
+            ("synthetic", {"HYPERLOOM_PERF_METRIC": "composite_v1"}),
+            ("", {"HYPERLOOM_AGENTX": "1"}),
+        ],
+    )
+    def test_the_chart_plots_the_field_the_summary_graded(self, monkeypatch, mode: str, env: dict[str, str]):
+        """Binds both sides: whichever way the session resolved its axis, the
+        curve reads the same point field the summary took its speedups on."""
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        metric = graded_metric_key(benchmark_mode=mode)
+        payload = self._payload(mode, metric)
+        axes = plot._axes_for_metric(plot._graded_metric_of(payload), tp_eff=8.0)
+
+        _xs, ys = plot._arm_series(payload["baseline"]["points"], 8.0, axes)
+
+        assert ys == [pytest.approx(payload["baseline"]["points"][0][metric] / 8.0)]
 
     def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
-        axes = plot._resolve_axes("agentx", tp_eff=1.0)
+        axes = plot._axes_for_metric("total_token_throughput", tp_eff=1.0)
         points = [
             {"conc": 8, "total_token_throughput": 25984.8},
             {"conc": 4, "total_token_throughput": 20000.0, "intvty_p90": 500.0},
@@ -1543,6 +1652,47 @@ class TestTheChartFollowsTheMode:
         xs, ys = plot._arm_series(points, 1.0, axes)
         assert xs == [pytest.approx(500.0)]
         assert ys == [pytest.approx(20000.0)]
+
+
+class TestTheRooflineNeedsBothItsAxisAndARealShape:
+    """``_ceiling_series`` returns a decode-only output-throughput bound, in the
+    output pair's units, computed from the session's ISL/OSL."""
+
+    def _payload(self, mode: str, metric: str) -> dict[str, Any]:
+        return {
+            "benchmark_mode": mode,
+            "summary": {"metric": metric},
+            "roofline_ceiling": {"rows": [{"conc": 8, "t_peak_tok_s": 4000.0}]},
+            "baseline": {
+                "points": [
+                    {
+                        "conc": 8,
+                        "output_throughput": 183.44,
+                        "total_token_throughput": 25984.8,
+                        "intvty_p90": 447.2,
+                    }
+                ]
+            },
+            "optimized": {"points": []},
+        }
+
+    def _drew_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> bool:
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+        calls = _install_fake_matplotlib(monkeypatch)
+        out_path = tmp_path / "curve.png"
+        assert render_conc_sweep_curve(payload, out_path, tp=8, draw_ceiling=True) == out_path
+        return any("roofline" in str(kwargs.get("label", "")).lower() for _args, kwargs in calls["plots"])
+
+    def test_a_synthetic_output_chart_draws_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Positive control: without it the two denials below prove nothing."""
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "output_throughput")) is True
+
+    def test_a_total_y_axis_is_not_the_bounds_axis(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("synthetic", "total_token_throughput")) is False
+
+    def test_an_agentic_replay_has_no_real_isl_to_bound(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        assert self._drew_it(tmp_path, monkeypatch, self._payload("agentx", "output_throughput")) is False
 
 
 def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
@@ -1575,7 +1725,7 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     from hyperloom.orchestrator.kernel import conc_sweep_plot
 
-    axes = conc_sweep_plot._resolve_axes("synthetic", 2.0)
+    axes = conc_sweep_plot._axes_for_metric("output_throughput", 2.0)
     xs, ys = conc_sweep_plot._arm_series(
         [
             {"conc": 4, "output_throughput": 800.0},
@@ -1608,9 +1758,12 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     assert conc_sweep_plot._ceiling_series({"rows": [{"conc": 0, "t_peak_tok_s": 0}]}, 1.0) == ([], [])
 
 
-def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+def _install_fake_matplotlib(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Render through a stand-in pyplot and return what the chart asked it to do.
 
+    Lets a chart's decisions be asserted where matplotlib is not installed,
+    which is most CI shards.
+    """
     calls: dict[str, Any] = {"plots": [], "annotations": [], "labels": [], "titles": [], "closed": False}
 
     class _FakePatch:
@@ -1678,7 +1831,13 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
     fake_matplotlib.pyplot = fake_pyplot
     monkeypatch.setitem(sys.modules, "matplotlib", fake_matplotlib)
     monkeypatch.setitem(sys.modules, "matplotlib.pyplot", fake_pyplot)
+    return calls
 
+
+def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+    calls = _install_fake_matplotlib(monkeypatch)
     payload = {
         "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
         "optimized": {"points": [{"conc": 8, "output_throughput": 1200.0}]},

@@ -1181,11 +1181,9 @@ def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     lines.append("## Concurrency Sweep — Throughput vs Interactivity")
     lines.append("")
-    lines.append(
-        "Efficiency (tok/s/GPU) vs Interactivity (tok/s/user) across the "
-        "post-optimization concurrency ladder.  "
-        "Red = baseline, orange = optimized."
-    )
+    # The PNG draws its own axis labels, and they differ by workload; naming
+    # them here too drifts from the chart.
+    lines.append("The post-optimization concurrency ladder.  Red = baseline, orange = optimized.")
     lines.append("")
     lines.append(f"![Concurrency sweep curve]({png_md_rel})")
     lines.append("")
@@ -1200,7 +1198,8 @@ def _render_conc_sweep_curve_for_report(
     """Render the concurrency-sweep curve PNG into the reports directory.
 
     Loads the full ``conc_sweep_summary.json`` (not the slim pointer), calls
-    :func:`render_conc_sweep_curve`, and returns the path on success.
+    :func:`render_conc_sweep_curve`, and returns the path on success. The
+    renderer drops a payload with nothing plottable on its own axes.
 
     Args:
         session_dir: Session directory used to locate
@@ -1213,33 +1212,19 @@ def _render_conc_sweep_curve_for_report(
         Path to the written PNG, or ``None`` when the chart cannot be
         produced (missing data, missing matplotlib, IO error).
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
     from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
-    if not json_path.exists():
-        return None
     try:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
         return None
 
-    # The axis the chart is drawn on differs by mode, so probe the one this
-    # payload will actually use.
-    axis_key = "total_token_throughput" if is_agentx_mode(payload.get("benchmark_mode")) else "output_throughput"
-
-    def _has_data(arm_key: str) -> bool:
-        pts = (payload.get(arm_key) or {}).get("points") or []
-        return any(p.get(axis_key) is not None for p in pts)
-
-    if not _has_data("baseline") and not _has_data("optimized"):
-        log.debug("report_executor: conc_sweep_summary has no %s data — skipping plot", axis_key)
-        return None
-
     png_path = output_dir / "conc_sweep_curve.png"
     tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
+
     model_label = str(getattr(state, "model_name", "") or "")
     gpu_label = str(getattr(state, "gpu_type", "") or "").upper()
     isl = int(payload.get("isl") or 0)

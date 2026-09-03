@@ -97,19 +97,6 @@ from .coordinator_helpers import (
 log = logging.getLogger(__name__)
 
 
-# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS).
-_AUDIT_ACTIONS: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "profile",
-        "sweep",
-        "explore",
-        # Composite roofline runs profile + trace_analyze atomically.
-        "roofline",
-    }
-)
-
-
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
     """Extract launch/traceback text from a failed baseline result payload.
 

@@ -803,13 +803,8 @@ class PolicyGate:
             trusted_framework_targets=trusted_framework_targets,
         )
         # Coordinator-managed internal actions (roofline / profile /
-        # replay_warm_recipe / conc_sweep) are dispatched by
-        # the Coordinator itself, never LLM-delegated, so they receive path
-        # checks only. In particular the SWEEP-entry auto-enqueued conc_sweep
-        # must NOT be re-validated against the delegate-body sweep-family
-        # singleton guard here — that guard keys on auto_conc_sweep_task_id,
-        # which is the auto-enqueued task's own id, so it would deny the sole
-        # conc_sweep against itself and surface as a spurious sweep_failed.
+        # replay_warm_recipe / conc_sweep) are dispatched by the Coordinator
+        # itself, never LLM-delegated, so they receive path checks only.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
         skip_baseline_singleton = (
@@ -1007,10 +1002,10 @@ class PolicyGate:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
         Requires ``action_name``, then hard-rejects kernel_agent-owned
-        actions (REQUEST-only). Mirrors the delegate channel's
-        sweep-singleton, per-action source, GEMM-tuning ownership, phase,
-        and external-tool collision gates so an LLM cannot sidestep them by
-        proposing instead of delegating.
+        actions (REQUEST-only). Mirrors the delegate channel's per-action
+        source, GEMM-tuning ownership, phase, and external-tool collision
+        gates so an LLM cannot sidestep them by proposing instead of
+        delegating.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.

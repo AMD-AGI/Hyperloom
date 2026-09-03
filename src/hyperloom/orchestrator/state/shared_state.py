@@ -682,7 +682,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by
-    # ``_parse_conc_sweep_concs``. Empty => skip_reason=empty_conc_list.
+    # ``_parse_conc_sweep_concs``. Empty is not an instruction: both readers
+    # send None instead, which resolves to the ladder for this workload.
     conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
