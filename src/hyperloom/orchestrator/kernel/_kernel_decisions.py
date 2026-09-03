@@ -56,6 +56,12 @@ log = logging.getLogger(__name__)
 #: independent reference implementation in the generated driver.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
+#: Stack labels whose KEEP overwrote a whole kernel source file, so a queued
+#: patch on that file can no longer be measured on its own. Every reader of the
+#: same-source exclusion draws from here: writeback labels a lane's KEEP by its
+#: own name, and a label missing from this set silently re-drains a spent patch.
+INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "collective", "fusion"})
+
 #: Batch-filter skip reasons that mean no backend ever saw the kernel. Two
 #: readers depend on the same answer -- the dispatcher reports such a skip
 #: instead of falling through to its validation guards, and
@@ -465,7 +471,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
+        if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
     attempted_entries = [
         entry
@@ -1413,13 +1419,13 @@ def _kernel_ids_in_optimization_stack(state) -> set[str]:
 
     Returns:
         set[str]: The set of ``kernel_id`` values that appear on an
-            ``integrate`` or ``collective`` entry of
+            :data:`INTEGRATING_STACK_ACTIONS` entry of
             :attr:`optimization_stack`.
     """
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
-        if isinstance(e, dict) and e.get("action") in {"integrate", "collective"} and e.get("kernel_id")
+        if isinstance(e, dict) and e.get("action") in INTEGRATING_STACK_ACTIONS and e.get("kernel_id")
     }
 
 
@@ -1428,12 +1434,12 @@ def _source_files_in_optimization_stack(state) -> set[str]:
 
     Returns:
         set[str]: The set of ``target_file`` / ``source_file`` paths
-            referenced by ``integrate`` or ``collective`` entries of
+            referenced by :data:`INTEGRATING_STACK_ACTIONS` entries of
             :attr:`optimization_stack`.
     """
     sources: set[str] = set()
     for e in state.optimization_stack or []:
-        if not isinstance(e, dict) or e.get("action") not in {"integrate", "collective"}:
+        if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
             continue
         src = record_source_path(e)
         if src:
@@ -1713,7 +1719,7 @@ def untried_hot_reusable_kernels(
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
+        if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)

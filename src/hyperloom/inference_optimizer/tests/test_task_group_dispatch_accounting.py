@@ -998,6 +998,83 @@ class TestEnqueueNominatedPatch:
             "/repo/b.py",
         }
 
+    def _keep_the_strongest(self, state, source, *, action):
+        """KEEP the surviving sibling on ``source`` and lift it onto the stack."""
+        (record,) = [r for r in state.pending_kernel_integration_records() if r["source_file"] == source]
+        state.record_kernel_integrate_result(
+            {
+                "status": "complete",
+                "decision": "KEEP",
+                "kernel_id": record["kernel_id"],
+                "integration_id": record["integration_id"],
+                "target_file": source,
+            }
+        )
+        state.optimization_stack.append(
+            {"action": action, "kernel_id": record["kernel_id"], "target_file": source, "decision": "KEEP"}
+        )
+
+    def test_a_kept_fusion_retires_its_same_source_siblings(self):
+        """A fusion KEEP overwrites the whole file, so the losing sibling is spent.
+
+        Draining it would re-apply the file over the KEEP and spend another e2e
+        measurement on a patch that can no longer be evaluated on its own.
+        """
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+
+        state = SharedState()
+        enqueue_nominated_patch(state, patch=self._patch("weak", "/repo/a.py", micro=1.1))
+        enqueue_nominated_patch(state, patch=self._patch("strong", "/repo/a.py", micro=1.9))
+
+        self._keep_the_strongest(state, "/repo/a.py", action="fusion")
+
+        assert [r["kernel_id"] for r in state.pending_kernel_integration_records()] == []
+        assert state.has_keep_pending_integrate is False
+        assert state.next_pending_keep_kernel_id() == ""
+
+    def test_a_kept_fusion_leaves_other_source_files_alone(self):
+        """The retirement is per source file, not a blanket drop of the queue."""
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+
+        state = SharedState()
+        enqueue_nominated_patch(state, patch=self._patch("weak", "/repo/a.py", micro=1.1))
+        enqueue_nominated_patch(state, patch=self._patch("strong", "/repo/a.py", micro=1.9))
+        enqueue_nominated_patch(state, patch=self._patch("elsewhere", "/repo/b.py", micro=1.5))
+
+        self._keep_the_strongest(state, "/repo/a.py", action="fusion")
+
+        assert [r["kernel_id"] for r in state.pending_kernel_integration_records()] == ["elsewhere"]
+
+    def test_a_non_integrating_stack_entry_retires_nothing(self):
+        """Only a whole-file kernel overwrite spends a queued patch.
+
+        A framework or explore entry can name the same path without having
+        rewritten the kernel, and dropping the queue on it strands real work.
+        """
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+
+        for action in ("explore", "baseline", "specialist", "integrate_patch"):
+            state = SharedState()
+            enqueue_nominated_patch(state, patch=self._patch("queued", "/repo/a.py", micro=1.4))
+            state.optimization_stack.append(
+                {"action": action, "kernel_id": "other", "target_file": "/repo/a.py", "decision": "KEEP"}
+            )
+
+            assert [r["kernel_id"] for r in state.pending_kernel_integration_records()] == ["queued"], action
+
+    def test_every_integrating_lane_retires_its_same_source_siblings(self):
+        """The exclusion follows the whole-file overwrite, not one lane's label."""
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+
+        for action in ("integrate", "collective", "fusion"):
+            state = SharedState()
+            enqueue_nominated_patch(state, patch=self._patch("weak", "/repo/a.py", micro=1.1))
+            enqueue_nominated_patch(state, patch=self._patch("strong", "/repo/a.py", micro=1.9))
+
+            self._keep_the_strongest(state, "/repo/a.py", action=action)
+
+            assert [r["kernel_id"] for r in state.pending_kernel_integration_records()] == [], action
+
     def test_the_patch_budget_caps_dispatched_siblings(self, monkeypatch):
         from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
 
