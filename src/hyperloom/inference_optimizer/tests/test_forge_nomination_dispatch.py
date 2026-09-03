@@ -433,3 +433,58 @@ def test_auto_false_never_touches_the_nomination_path(tmp_path, monkeypatch):
     assert result.get("auto") is not True
     assert not (tmp_path / "forge_candidate_manifest.json").exists()
     assert not (tmp_path / "forge_nomination_input.json").exists()
+
+
+def test_auto_true_a_failed_run_queues_nothing_even_when_it_returns_patches(tmp_path, monkeypatch):
+    """A patch from a run whose own tooling broke must never reach the queue.
+
+    The status is decided before anything lands, so a nonzero-exit envelope that
+    still lists a sibling leaves the pending queue untouched.
+    """
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    envelope = {
+        "status": "failed",
+        "patches": [_patch_entry("k001", micro=1.4)],
+        "error": "forge-loop --auto exited rc=2",
+    }
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: envelope)
+
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
+
+    assert result["status"] == "failed"
+    assert result["queued"] == 0
+    assert result["error"] == "forge-loop --auto exited rc=2"
+    state = SharedState.load_or_init(tmp_path)
+    assert state.pending_kernel_integrations == {}
+
+
+def test_auto_true_a_timed_out_run_queues_nothing_even_when_it_returns_patches(tmp_path, monkeypatch):
+    """Same rule for a deadline kill: the queue stays empty."""
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    envelope = {
+        "status": "timeout",
+        "patches": [_patch_entry("k001", micro=2.0)],
+        "error": "deadline exceeded",
+    }
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: envelope)
+
+    result = asyncio.run(krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path))
+
+    assert result["status"] == "timeout"
+    assert result["queued"] == 0
+    state = SharedState.load_or_init(tmp_path)
+    assert state.pending_kernel_integrations == {}

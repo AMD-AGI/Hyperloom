@@ -245,3 +245,135 @@ def test_stale_result_sidecar_is_cleared_before_launch(tmp_path, monkeypatch):
     assert result["status"] == "failed"
     assert result["patches"] == []
     assert not stale.exists()
+
+
+def test_a_nonzero_exit_is_failed_even_with_a_parseable_sidecar(tmp_path, monkeypatch):
+    """forge's task-preparation failure writes a sidecar and then exits nonzero.
+
+    That sidecar carries neither ``status`` nor ``patches``, so returning it
+    verbatim reads as a clean empty nomination and the phase latches as if a
+    pass had run. Only exit code 0 makes an empty ``patches`` a valid answer.
+    """
+    _neutralize_env_probes(monkeypatch)
+    request = _write_request(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    def fake_popen(command, **_kwargs):
+        result_json = Path(command[command.index("--result-json") + 1])
+        result_json.write_text(json.dumps({"improved": False, "error": "task prep failed"}), encoding="utf-8")
+        return _FakeProcess(returncode=2, stdout="", stderr="Error: could not prepare task\n")
+
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        workspace=str(workspace),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    assert result["status"] == "failed"
+    assert result["patches"] == []
+    assert "rc=2" in result["error"]
+    # The sidecar may only enrich the error, never decide the outcome.
+    assert "task prep failed" in result["error"]
+
+
+def test_a_failed_run_reports_no_patches_even_when_the_sidecar_lists_some(tmp_path, monkeypatch):
+    """A patch from a run whose own tooling broke must not reach the queue."""
+    _neutralize_env_probes(monkeypatch)
+    request = _write_request(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    def fake_popen(command, **_kwargs):
+        result_json = Path(command[command.index("--result-json") + 1])
+        result_json.write_text(
+            json.dumps({"patches": [{"kernel_name": "half_written"}], "status": "complete"}),
+            encoding="utf-8",
+        )
+        return _FakeProcess(returncode=1, stdout="", stderr="boom\n")
+
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        workspace=str(workspace),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    assert result["status"] == "failed"
+    assert result["patches"] == []
+
+
+def test_a_timeout_outranks_a_sidecar_that_claims_success(tmp_path, monkeypatch):
+    """A hard-killed run keeps the timeout status the handler routes on.
+
+    forge can commit a sidecar and then hang; the deadline is still the truth
+    about that run, so a ``complete`` claim on disk must not override it.
+    """
+    _neutralize_env_probes(monkeypatch)
+    request = _write_request(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    class TimeoutProcess:
+        pid = 54321
+        returncode = None
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(["forge-loop"], timeout)
+
+    def fake_popen(command, **_kwargs):
+        result_json = Path(command[command.index("--result-json") + 1])
+        result_json.write_text(
+            json.dumps({"status": "complete", "patches": [{"kernel_name": "mid_flight"}]}),
+            encoding="utf-8",
+        )
+        return TimeoutProcess()
+
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(forge_submit, "_terminate_forge_process", lambda _proc: ("", ""))
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        workspace=str(workspace),
+        output_dir=tmp_path / "attempt",
+        timeout_s=10,
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    assert result["status"] == "timeout"
+    assert result["patches"] == []
+
+
+def test_the_nomination_summary_survives_a_failed_run(tmp_path, monkeypatch):
+    """Counts are triage data, so they ride along even on a failure."""
+    _neutralize_env_probes(monkeypatch)
+    request = _write_request(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    summary = {"candidates_seen": 9, "resolved": 4, "selected": 1}
+
+    def fake_popen(command, **_kwargs):
+        result_json = Path(command[command.index("--result-json") + 1])
+        result_json.write_text(json.dumps({"nomination": summary}), encoding="utf-8")
+        return _FakeProcess(returncode=3, stdout="", stderr="late crash\n")
+
+    monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request),
+        workspace=str(workspace),
+        output_dir=tmp_path / "attempt",
+        gpu_target="gfx950",
+        gpu_type="mi355x",
+    )
+
+    assert result["status"] == "failed"
+    assert result["nomination"] == summary

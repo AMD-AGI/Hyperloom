@@ -5162,11 +5162,32 @@ def submit_auto(
             parsed = json.loads(out.split("__FORGE_RESULT__")[1])
         except Exception:
             parsed = None
+    if loop_exc is not None:
+        # The process outcome outranks whatever the sidecar says. A
+        # task-preparation failure writes a JSON carrying neither ``status`` nor
+        # ``patches`` and then exits nonzero; returned verbatim that reads as a
+        # clean empty nomination, and the phase latches as if a pass had run.
+        # Only an exit code of 0 makes an empty ``patches`` a valid answer, so a
+        # failed run reports no patches at all rather than offering some from a
+        # run whose own tooling broke. The sidecar may only enrich the error.
+        envelope: dict[str, Any] = {
+            "status": "timeout" if timed_out else "failed",
+            "patches": [],
+            "error": str(loop_exc),
+        }
+        if isinstance(parsed, dict):
+            detail = str(parsed.get("error") or "").strip()
+            if detail:
+                envelope["error"] = f"{envelope['error']}: {detail}"
+            summary = parsed.get("nomination")
+            if isinstance(summary, dict):
+                envelope["nomination"] = summary
+        return envelope
     if isinstance(parsed, dict):
         # The raw envelope is what the handler lands; forge owns its shape.
         return parsed
     return {
-        "status": "timeout" if timed_out else "failed",
+        "status": "failed",
         "patches": [],
-        "error": str(loop_exc) if loop_exc else "forge-loop --auto produced no result",
+        "error": "forge-loop --auto produced no result",
     }

@@ -6495,19 +6495,19 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         gpu_type=target_platform,
     )
 
-    queued = _land_nomination_outcome(result, session_dir=session_dir)
+    # Decided BEFORE anything is queued: a crashed or timed-out run must not land
+    # a patch, and reporting "complete, queued=0" would be indistinguishable from
+    # forge having cleanly nominated nothing.
     forge_status = str(result.get("status") or "") if isinstance(result, dict) else ""
     if forge_status in {"timeout", "failed"}:
-        # A crashed/timed-out forge run returns an empty patches[]; without this we
-        # would report "complete, queued=0" -- indistinguishable from forge having
-        # cleanly nominated nothing. Surface the real outcome and its error.
         forge_error = str(result.get("error") or "") if isinstance(result, dict) else ""
         return {
             "status": forge_status,
             "auto": True,
-            "queued": queued,
+            "queued": 0,
             "error": forge_error,
         }
+    queued = _land_nomination_outcome(result, session_dir=session_dir)
     nomination = result.get("nomination") if isinstance(result, dict) else None
     # GUARD (12g): forge nominated N siblings that each land as their own pending
     # record. This result must NOT carry a single-kernel identity (kernel_id /
