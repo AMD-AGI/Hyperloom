@@ -1248,6 +1248,32 @@ def test_skipped_setup_commands_are_named_in_the_round_reason():
     assert "ln -sf a b" in reason
 
 
+def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monkeypatch):
+    """``applied`` is the replay channel AND an artifact. It needs both.
+
+    ``lane.py`` stacks ``setup_commands_applied`` into
+    ``state.enablement.setup_commands``, and the next round EXECUTES what it
+    finds there. The allowlist admits
+    ``pip install --index-url https://user:token@host/simple foo``, so the
+    command that must stay runnable is also the one that must not be written
+    down verbatim -- redacting where the list is built would hand pip a masked
+    URL. It is redacted at the artifact writer instead.
+    """
+    from hyperloom.orchestrator.phases import _enablement_artifacts as art
+
+    cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
+    monkeypatch.setattr(
+        subprocess, "run", lambda c, **kw: subprocess.CompletedProcess(args=c, returncode=0, stdout="", stderr="")
+    )
+
+    out = _run_setup_commands([cmd], cwd=tmp_path, log_dir=tmp_path / "logs")
+    # Replay must still work: the stored command is the one that ran.
+    assert out["applied"] == [cmd]
+
+    written = [art._sanitize_setup_command(c) for c in out["applied"]]
+    assert "ghp_notarealtoken" not in " ".join(written), "the artifact would carry the token"
+
+
 def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
     """The list itself must be safe, not just the sentence built from it.
 
@@ -1256,12 +1282,11 @@ def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, 
     reporting sites protects those four and leaks at the fifth, so the list is
     stored in its safe form.
     """
-    monkeypatch.setenv("HYPERLOOM_TEST_TOKEN_FOR_REDACTION", "ghp_supersecretvalue")
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: pytest.fail("a rejected command was executed"))
 
     out = _run_setup_commands(
         [
-            "curl -H 'Authorization: Bearer ghp_supersecretvalue' http://x",
+            "rm -rf /tmp/ghp_notarealtoken",
             "rm -rf " + "z" * 900,
         ],
         cwd=tmp_path,
@@ -1269,7 +1294,7 @@ def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, 
     )
 
     stored = " ".join(out["skipped"])
-    assert "ghp_supersecretvalue" not in stored, "a credential was stored verbatim"
+    assert "ghp_notarealtoken" not in stored, "a credential was stored verbatim"
     assert all(len(c) <= 200 for c in out["skipped"]), "an unbounded command was stored"
 
 
@@ -1280,11 +1305,10 @@ def test_skipped_setup_commands_are_redacted_and_bounded(monkeypatch):
     next round's mandate -- so a credential in one must not survive, and twelve
     long ones must not bury the reason they are appended to.
     """
-    monkeypatch.setenv("HYPERLOOM_TEST_TOKEN_FOR_REDACTION", "sk-supersecretvalue")
-    skipped = [f"curl -H 'Authorization: Bearer sk-supersecretvalue' http://x/{i} " + "y" * 400 for i in range(30)]
+    skipped = [f"rm -rf /tmp/{i}/ghp_notarealtoken " + "y" * 400 for i in range(30)]
     out = _with_skipped_setup_reason("boot failed", {"applied": [], "skipped": skipped, "failed": []})
 
-    assert "sk-supersecretvalue" not in out
+    assert "ghp_notarealtoken" not in out
     assert "boot failed" in out
     assert "(+18 more)" in out, "the command count was not bounded"
     assert len(out) < 4000, f"one rejection list grew to {len(out)} chars"

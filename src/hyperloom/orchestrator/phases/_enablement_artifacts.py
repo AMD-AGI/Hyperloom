@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.io import atomic_write_json, atomic_write_text
+from hyperloom.orchestrator.actions.executors.integrate_patch import _sanitize_setup_command
 from hyperloom.inference_optimizer.session.session_paths import (
     enablement_dir,
     enablement_round_dir,
@@ -70,7 +71,15 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
             "extra_envs_applied": res.get("extra_envs_applied") or {},
             "dropped_env_overrides": res.get("dropped_env_overrides") or [],
             "extra_server_args_applied": res.get("extra_server_args_applied") or "",
-            "setup_commands_applied": res.get("setup_commands_applied") or [],
+            # Redacted HERE and not where the list is built: the same field is
+            # the replay channel -- ``lane.py`` stacks it into
+            # ``state.enablement.setup_commands`` and the next round EXECUTES
+            # what it finds there. The allowlist admits
+            # ``pip install --index-url https://user:token@host/simple foo``,
+            # so the command that has to stay runnable is also the one that must
+            # not be written down verbatim. Sanitising at the source would send
+            # a redacted string to pip; sanitising here separates the two.
+            "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
             "framework_switch_problems": res.get("framework_switch_problems") or [],
             "after_signature": res.get("after_signature") or {},
             "enablement_accepted_config_path": res.get("enablement_accepted_config_path") or "",
