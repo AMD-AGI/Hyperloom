@@ -118,6 +118,11 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
     # the installer's own log says why it ran, and so a future refactor that
     # re-routes this through the ordinary gate keeps working.
     child_env["INSTALL_AIPERF"] = "1"
+    # The installer runs under ``set -u`` and expands ``${HOME}`` for its state
+    # dir. The benchmark child env this inherits does not always carry HOME, and
+    # the resulting "HOME: unbound variable" reads like a packaging bug rather
+    # than a missing variable, so supply this process's own.
+    child_env.setdefault("HOME", os.path.expanduser("~"))
 
     log.warning(
         "AgentX: aiperf is missing or is not the pinned build; installing it via "

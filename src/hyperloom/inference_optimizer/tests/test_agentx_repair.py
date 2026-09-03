@@ -256,6 +256,59 @@ def test_stale_build_is_reinstalled(tmp_path, monkeypatch):
     assert installs["n"] == 1
 
 
+def test_aiperf_bin_override_is_not_repaired(tmp_path, monkeypatch):
+    """An operator override is not a supply gap, and installing cannot close it.
+
+    ``ensure_aiperf`` returns 0 without doing anything when AIPERF_BIN is set,
+    and ``resolve_aiperf_bin`` hands back that same binary afterwards. Repairing
+    would report an install that never happened and point the reader away from
+    the only thing that fixes it.
+    """
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/custom/aiperf")
+    monkeypatch.setattr(_CHECK, _raiser(AgentXPreflightError("aiperf was not found", repairable=True)))
+    installs = {"n": 0}
+    monkeypatch.setattr(_INSTALL, lambda **kw: installs.__setitem__("n", installs["n"] + 1))
+
+    with pytest.raises(AgentXPreflightError) as ei:
+        runtime.maybe_prepare_agentx(
+            env={"AIPERF_BIN": "/custom/aiperf"},
+            inferencex_path=str(tmp_path),
+            config_path=_cfg(tmp_path),
+        )
+    assert installs["n"] == 0, "an install was attempted that cannot help"
+    assert "AIPERF_BIN" in str(ei.value)
+    assert ei.value.repairable is False
+
+
+def test_capability_check_sees_the_child_env(tmp_path, monkeypatch):
+    """The corpus pin lives in the benchmark env, not this process's.
+
+    Without it the loader-allowlist admission check reads an empty override and
+    a misspelled corpus sails through preflight to die after the server boots.
+    """
+    seen = {}
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **kw: seen.update(kw))
+
+    child = {"WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_062126"}
+    runtime.maybe_prepare_agentx(env=child, inferencex_path=str(tmp_path), config_path=_cfg(tmp_path))
+    assert seen.get("env") == child
+
+
+def test_repair_supplies_home_to_the_installer(monkeypatch):
+    """install.sh runs under ``set -u`` and expands ${HOME} for its state dir."""
+    seen = {}
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: (seen.update(kw.get("env") or {}), subprocess.CompletedProcess(cmd, 0, "", ""))[1],
+    )
+    repair.ensure_aiperf_installed(env={"PATH": "/usr/bin"})
+    assert seen.get("HOME"), "the installer would die on HOME: unbound variable"
+
+
 def test_operator_config_error_is_not_reinstalled(tmp_path, monkeypatch):
     """A corpus pin outside the allowlist is the operator's, not the build's.
 

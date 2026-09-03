@@ -102,11 +102,25 @@ def _preflight_or_repair(aiperf_bin: str | None, *, env: Mapping[str, str]) -> s
     from .preflight import AgentXPreflightError, check_aiperf_capability, resolve_aiperf_bin
 
     try:
-        check_aiperf_capability(aiperf_bin)
+        check_aiperf_capability(aiperf_bin, env=env)
         return aiperf_bin
     except AgentXPreflightError as exc:
         if not getattr(exc, "repairable", False):
             raise
+        # An operator override is not a supply gap, and installing cannot close
+        # it: ``ensure_aiperf`` returns 0 without doing anything when AIPERF_BIN
+        # is set, and ``resolve_aiperf_bin`` would hand back that same binary
+        # afterwards. Repairing here would report a successful install that
+        # never happened and steer the reader away from the one thing that
+        # fixes it.
+        override = (env.get("AIPERF_BIN") or "").strip()
+        if override:
+            raise AgentXPreflightError(
+                f"{exc} AIPERF_BIN is set to {override!r}, so this is the build being "
+                f"checked and no install can replace it. Point AIPERF_BIN at a pinned "
+                f"build, or unset it and let install.sh supply one.",
+                repairable=False,
+            ) from exc
         from .repair import ensure_aiperf_installed
 
         repair_error = ensure_aiperf_installed(env=env)
@@ -120,12 +134,13 @@ def _preflight_or_repair(aiperf_bin: str | None, *, env: Mapping[str, str]) -> s
     # lookup (possibly None) says nothing about what is there now.
     repaired_bin = resolve_aiperf_bin(env)
     try:
-        check_aiperf_capability(repaired_bin)
+        check_aiperf_capability(repaired_bin, env=env)
     except AgentXPreflightError as exc:
         # The install reported success and the build is still unusable, so this
-        # is no longer a supply gap this process can close. Clear the flag: a
-        # later round would otherwise re-enter the repair branch every time, pay
-        # a capability probe, and get the memoized success back.
+        # is no longer a supply gap this process can close. Re-raise it as
+        # non-repairable: the repair result is memoized as a success, so a later
+        # round that trusted ``repairable`` would re-enter this branch, get that
+        # memoized success back, and arrive here again having done nothing.
         raise AgentXPreflightError(
             f"{exc} The pinned build was installed during this run and the check still fails.",
             repairable=False,

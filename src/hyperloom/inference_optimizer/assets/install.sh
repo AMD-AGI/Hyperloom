@@ -1220,6 +1220,16 @@ ensure_aiperf() {
       log "aiperf on PATH is the pinned ref ${AIPERF_REF:0:8}; skipping install"
       return 0
     fi
+    if [ "$AIPERF_REQUIRED" -ne 1 ]; then
+      # Pre-warm, and something is already on PATH. --force-reinstall below
+      # rebuilds aiperf's whole dependency tree (deliberately NOT --no-deps),
+      # which on a shared venv can move packages this box actually runs on --
+      # and nothing has said this box will run AgentX at all. Leave it: the
+      # runtime preflight sees the stale ref, and its repair asks for the
+      # upgrade by name, which does reach the branch below.
+      log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); leaving it alone on a pre-warm -- the runtime repair upgrades it if AgentX is actually used"
+      return 0
+    fi
     log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); reinstalling"
     # Deliberately NOT --no-deps: a newer aiperf may need dependencies the old
     # one did not, and installing the package without them is a worse failure
@@ -1698,10 +1708,11 @@ chain_kernel_agent() {
 
 # --- targeted entry point: aiperf only -------------------------------------
 # Placed after every function definition (so ensure_aiperf exists) and before
-# the first heavy step. Everything ensure_aiperf reads is already resolved by
-# here: $PYTHON (resolve_python), $PIP_EXTRA, $AIPERF_PACKAGE_SPEC and the
-# state dir. Nothing between the PIP_EXTRA block and this line executes at top
-# level, so the short-circuit skips no setup ensure_aiperf depends on.
+# the first heavy step. Everything ensure_aiperf reads is resolved by here:
+# $PYTHON (resolve_python), $PIP_EXTRA, $AIPERF_PACKAGE_SPEC, $AIPERF_REQUIRED
+# and the state dir. Other top-level statements do run between those and this
+# line -- directory setup, dependency-list arrays -- but ensure_aiperf reads
+# none of them, so the short-circuit drops nothing it depends on.
 #
 # The lock is taken for the same reason a full install takes it: two sessions on
 # one node must not pip into the same interpreter concurrently.
