@@ -242,27 +242,31 @@ def _with_skipped_setup_reason(reason: str, setup_result: dict[str, Any]) -> str
         ``reason`` unchanged when nothing was rejected, else ``reason`` with a
         one-line summary of the rejected commands appended.
     """
-    skipped = [str(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
+    # ``_run_setup_commands`` already stores the sanitised form, so for every
+    # production caller this is a no-op. Applied again anyway: the lesson of the
+    # gap this closes is that a safety step placed at the call sites protects
+    # the call sites that exist, and the sanitiser is idempotent.
+    skipped = [_sanitize_setup_command(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
     if not skipped:
         return reason
-    # These are commands an LLM wrote. They land in the journal, the report and
-    # the KB, and are read back into the next round's mandate -- so redact them
-    # the way every other path that writes a command into a durable result does,
-    # and bound the length, so one rejected install listing a hundred packages
-    # cannot crowd out the reason it is appended to.
-    listed = "; ".join(_ellipsize(c, _SKIPPED_CMD_CHARS) for c in skipped[:_SETUP_CMD_MAX])
+    listed = "; ".join(skipped[:_SETUP_CMD_MAX])
     if len(skipped) > _SETUP_CMD_MAX:
         listed += f"; (+{len(skipped) - _SETUP_CMD_MAX} more)"
-    note = redact_secret_values(
-        f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
-    )
+    note = f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
     return f"{reason} ({note})" if reason else note
 
 
-def _ellipsize(text: str, limit: int) -> str:
-    """``text`` clipped to ``limit`` characters, marked when it was clipped."""
-    text = text.strip()
-    return text if len(text) <= limit else text[:limit] + "..."
+def _sanitize_setup_command(cmd: str) -> str:
+    """A rejected command in the form it is safe to store and hand back.
+
+    Rejected commands are LLM-written text. They reach the journal, the report
+    and the KB, and are read back into the next round's mandate, so a bearer
+    token or a credentialed URL in one would outlive the round that produced it.
+    Clipped as well, so a single rejected install naming a hundred packages
+    cannot crowd out the reason it is reported alongside.
+    """
+    text = redact_secret_values(str(cmd).strip())
+    return text if len(text) <= _SKIPPED_CMD_CHARS else text[:_SKIPPED_CMD_CHARS] + "..."
 
 
 def _is_allowlisted_setup_command(cmd: str) -> bool:
@@ -394,12 +398,20 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     for cmd in commands:
         if not _is_allowlisted_setup_command(cmd):
-            skipped.append(cmd)
+            # Sanitised HERE, not at the reporting sites. This list is copied
+            # verbatim into every result payload that carries
+            # ``setup_commands_skipped``, and a rejected command is LLM-written
+            # text that can hold a bearer token or a credentialed URL. Doing it
+            # at the four call sites protects those four; doing it at the source
+            # protects the fifth as well.
+            safe_cmd = _sanitize_setup_command(cmd)
+            skipped.append(safe_cmd)
             # Also carried into the round's ``reason`` by
             # _with_skipped_setup_reason: a warning alone left the caller with an
             # outcome and no link to the cause, so the same proposal was
-            # re-authored and re-dropped until the budget ran out.
-            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", cmd)
+            # re-authored and re-dropped until the budget ran out. The log is a
+            # disk-backed surface too, so it gets the sanitised form as well.
+            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
             continue
         log.info("integrate_patch: enablement setup replay: %s", cmd)
         try:

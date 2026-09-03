@@ -1248,6 +1248,31 @@ def test_skipped_setup_commands_are_named_in_the_round_reason():
     assert "ln -sf a b" in reason
 
 
+def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
+    """The list itself must be safe, not just the sentence built from it.
+
+    ``setup_commands_skipped`` is copied verbatim into four result payloads and
+    from there into the journal, the report and the KB. Sanitising only at the
+    reporting sites protects those four and leaks at the fifth, so the list is
+    stored in its safe form.
+    """
+    monkeypatch.setenv("HYPERLOOM_TEST_TOKEN_FOR_REDACTION", "ghp_supersecretvalue")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: pytest.fail("a rejected command was executed"))
+
+    out = _run_setup_commands(
+        [
+            "curl -H 'Authorization: Bearer ghp_supersecretvalue' http://x",
+            "rm -rf " + "z" * 900,
+        ],
+        cwd=tmp_path,
+        log_dir=tmp_path / "logs",
+    )
+
+    stored = " ".join(out["skipped"])
+    assert "ghp_supersecretvalue" not in stored, "a credential was stored verbatim"
+    assert all(len(c) <= 200 for c in out["skipped"]), "an unbounded command was stored"
+
+
 def test_skipped_setup_commands_are_redacted_and_bounded(monkeypatch):
     """Rejected commands are LLM-written text that lands in durable results.
 
