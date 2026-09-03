@@ -1079,10 +1079,12 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
-    from hyperloom.inference_optimizer.session.session_paths import patches_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
-    backup_root = payload.get("backup_root") or (patches_dir(session_dir, kid or "anon") / "backup")
+    # Same fold as the integrate workspace: a fusion sibling keys this dir by its
+    # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
+    backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
     tool = _load_apply_tool()
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
@@ -8872,9 +8874,12 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
 
-    fake_task_id = f"integrate-{kernel_id or 'anon'}"
+    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
+    # only reaches this handler now that fusion lands through the generic queue.
+    # It is a legal id but not a legal directory name everywhere -- fold it.
+    fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     from ..state.shared_state import SharedState

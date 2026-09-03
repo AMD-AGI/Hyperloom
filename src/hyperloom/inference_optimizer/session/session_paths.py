@@ -10,6 +10,7 @@ module; no ad-hoc string concatenation elsewhere.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ..protocol.action_surfaces import ACTION_CATALOGUE
@@ -125,6 +126,28 @@ def _validate_id_component(value: str, *, field: str) -> str:
     if not v or v == "." or "/" in v or "\\" in v or ".." in Path(v).parts or Path(v).is_absolute():
         raise ValueError(f"{field}: unsafe path component {value!r}")
     return v
+
+
+def fs_safe_id(value: str, *, fallback: str = "anon") -> str:
+    """Fold an identifier into a single path segment every filesystem accepts.
+
+    ``_validate_id_component`` rejects traversal, not hostility: a fusion
+    operator name like ``llm:ar_residual_rmsnorm_fp8quant_wiring`` carries no
+    separator and no ``..``, so it passes -- and then ``mkdir`` raises
+    ``OSError(EINVAL)`` on filesystems that refuse ``:``. The identifier itself
+    stays canonical (it keys env flags and log lines); only the directory name
+    derived from it is folded here.
+
+    Args:
+        value (str): The identifier to fold. Blank folds to ``fallback``.
+        fallback (str): Segment to use when ``value`` holds nothing usable.
+
+    Returns:
+        str: ``value`` with every character outside ``[A-Za-z0-9._-]`` replaced
+            by ``-``, runs collapsed, and edge separators trimmed.
+    """
+    folded = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip("-._")
+    return folded or fallback
 
 
 def runs_root(session_dir: Path) -> Path:
