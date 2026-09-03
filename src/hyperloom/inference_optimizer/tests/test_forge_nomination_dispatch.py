@@ -27,12 +27,14 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 _AUTO_ENV = "HYPERLOOM_FORGE_NOMINATION_AUTO"
 
 
-def _row(kernel_id: str, **overrides: Any) -> dict[str, Any]:
+def _row(kernel_id: str, *, root: Path | None = None, **overrides: Any) -> dict[str, Any]:
+    """One candidate row; ``root`` puts its source file inside that workspace."""
+    source_file = str(root / f"{kernel_id}.py") if root is not None else f"/repo/{kernel_id}.py"
     row: dict[str, Any] = {
         "kernel_id": kernel_id,
         "name": f"{kernel_id}_kernel",
         "gpu_pct": 12.0,
-        "source_file": f"/repo/{kernel_id}.py",
+        "source_file": source_file,
         "reusable_native_kernel": True,
         "skip_reason": "",
     }
@@ -83,7 +85,7 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
     candidates = _candidates(
         tmp_path,
         [
-            _row("k001", gpu_pct=30.0),
+            _row("k001", root=tmp_path, gpu_pct=30.0),
             # An unroutable row: the manifest must keep it as a superset even
             # though the selector would drop it.
             _row("k002", source_file="", reusable_native_kernel=False, skip_reason="source file not resolved"),
@@ -150,7 +152,7 @@ def test_auto_true_empty_nomination_queues_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
     trace.write_text("{}", encoding="utf-8")
-    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
     _seed_state(tmp_path, trace=trace)
 
     from hyperloom.agents.kernel.tools.backends import forge_submit
@@ -171,7 +173,7 @@ def test_auto_true_forge_timeout_is_surfaced_not_reported_complete(tmp_path, mon
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
     trace.write_text("{}", encoding="utf-8")
-    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
     _seed_state(tmp_path, trace=trace)
 
     from hyperloom.agents.kernel.tools.backends import forge_submit
@@ -203,7 +205,7 @@ def test_auto_true_missing_trace_fails_cleanly_without_leaking_request(tmp_path,
     a result, not a raise) rather than leaking a request artifact.
     """
     monkeypatch.setenv(_AUTO_ENV, "1")
-    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
     # Funded budget, but NO last_profile_trace -> _resolve_fusion_decode_trace "".
     state = SharedState.load_or_init(tmp_path)
     state.max_minutes = 600.0
@@ -231,7 +233,7 @@ def test_auto_true_unbounded_session_skips_without_calling_forge(tmp_path, monke
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
     trace.write_text("{}", encoding="utf-8")
-    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
     # No max_minutes -> unbounded -> zero budget -> nothing to nominate.
     _seed_state(tmp_path, trace=trace, max_minutes=None)
 
@@ -262,7 +264,7 @@ def test_auto_true_without_candidates_path_skips(tmp_path, monkeypatch):
     # Trace-analyze validation passes off a cached candidates_path, but the
     # payload itself names none -> the manifest helper has nothing to project and
     # the auto path skips before ever reaching forge.
-    cached = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    cached = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
     state = SharedState.load_or_init(tmp_path)
     state.max_minutes = 600.0
     state.last_profile_trace = str(tmp_path / "t.json")
@@ -281,12 +283,147 @@ def test_auto_true_without_candidates_path_skips(tmp_path, monkeypatch):
     assert result["reason"] == "no_candidates"
 
 
+def test_auto_true_all_candidates_outside_workspace_fails_before_writing_anything(tmp_path, monkeypatch):
+    """Every nominatable row outside the workspace makes the forge run futile.
+
+    forge resolves the nominated kernel against the workspace and rejects anything
+    outside it, and nothing stages a nominated source in. The handler must say so
+    itself instead of letting forge die on a bare ValueError.
+    """
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    outside = tmp_path.parent / "elsewhere"
+    candidates = _candidates(
+        tmp_path,
+        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=outside, gpu_pct=10.0)],
+    )
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(
+        forge_submit,
+        "submit_auto",
+        lambda **_: (_ for _ in ()).throw(AssertionError("no candidate is stageable; forge must not run")),
+    )
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    assert result["status"] == "failed"
+    assert result["auto"] is True
+    assert result["error_class"] == "forge_workspace_staging_unavailable"
+    assert "not implemented" in result["error"]
+    assert str(tmp_path) in result["error"]
+    # The refusal happens before any write, so no artifact is left behind.
+    assert not (tmp_path / "forge_candidate_manifest.json").exists()
+    assert not (tmp_path / "forge_nomination_input.json").exists()
+
+
+def test_auto_true_one_candidate_inside_workspace_lets_the_run_proceed(tmp_path, monkeypatch):
+    """A single stageable row is enough; the guard must not refuse the whole run."""
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    outside = tmp_path.parent / "elsewhere"
+    candidates = _candidates(
+        tmp_path,
+        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=tmp_path, gpu_pct=10.0)],
+    )
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    assert result == {
+        "status": "complete",
+        "auto": True,
+        "queued": 0,
+        "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 0},
+    }
+    assert (tmp_path / "forge_candidate_manifest.json").exists()
+
+
+def test_auto_true_rejected_candidate_inside_workspace_does_not_rescue_the_run(tmp_path, monkeypatch):
+    """A rejected row can never be nominated, so it cannot satisfy the guard."""
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    outside = tmp_path.parent / "elsewhere"
+    candidates = _candidates(
+        tmp_path,
+        [_row("k001", root=outside, gpu_pct=30.0), _row("k002", root=tmp_path, gpu_pct=10.0)],
+    )
+    state = SharedState.load_or_init(tmp_path)
+    state.max_minutes = 600.0
+    state.last_profile_trace = str(trace)
+    state.rejected_kernel_ids = ["k002"]
+    state.save(tmp_path)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(
+        forge_submit,
+        "submit_auto",
+        lambda **_: (_ for _ in ()).throw(AssertionError("the only inside row is rejected; forge must not run")),
+    )
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "forge_workspace_staging_unavailable"
+    assert not (tmp_path / "forge_candidate_manifest.json").exists()
+
+
+def test_auto_true_symlinked_workspace_root_does_not_produce_a_false_refusal(tmp_path, monkeypatch):
+    """A candidate under a symlinked workspace root is genuinely inside it.
+
+    ``/link/k001.py`` shares no string prefix with the real ``/real`` root, so a
+    prefix test refuses it; both sides must be resolved before comparing.
+    """
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    linked_root = tmp_path / "link"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    trace = real_root / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    # The row names the path through the symlink; the workspace is the real dir.
+    candidates = _candidates(real_root, [_row("k001", root=linked_root, gpu_pct=30.0)])
+    _seed_state(real_root, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
+
+    result = asyncio.run(
+        krh.run_optimization_handler(
+            {"candidates_path": str(candidates), "workspace_path": str(real_root)},
+            session_dir=real_root,
+        )
+    )
+    assert result == {
+        "status": "complete",
+        "auto": True,
+        "queued": 0,
+        "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 0},
+    }
+    assert (real_root / "forge_candidate_manifest.json").exists()
+
+
 # --------------------------------------------------------------------------- #
 # auto=false (env unset)
 # --------------------------------------------------------------------------- #
 def test_auto_false_never_touches_the_nomination_path(tmp_path, monkeypatch):
     monkeypatch.delenv(_AUTO_ENV, raising=False)
-    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    candidates = _candidates(tmp_path, [_row("k001", root=tmp_path, gpu_pct=30.0)])
     _seed_state(tmp_path, trace=tmp_path / "t.json", max_minutes=600.0)
 
     from hyperloom.agents.kernel.tools.backends import forge_submit

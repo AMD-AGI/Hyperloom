@@ -6182,6 +6182,82 @@ def _validate_trace_analyze_inputs(
     return None
 
 
+def _build_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> dict[str, Any] | None:
+    """Build the manifest document forge reads under ``--auto``, without writing it.
+
+    Split from the write so a caller can inspect what forge would be handed and
+    decline before any artifact lands in the session directory.
+
+    Args:
+        payload: The run_optimization request payload; supplies ``candidates_path``.
+        session_dir: Session directory whose SharedState supplies the merged history.
+
+    Returns:
+        The manifest document, or ``None`` when the payload named no candidate
+        artifact.
+
+    Raises:
+        candidate_manifest.CandidateManifestError: When the candidate artifact is
+            unreadable or carries no recognizable row array.
+    """
+    candidates_path = str(payload.get("candidates_path") or "").strip()
+    if not candidates_path:
+        return None
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    document, _stats = candidate_manifest.build_manifest(
+        candidates_path,
+        rejected_kernel_ids=state.rejected_kernel_ids,
+        attempts_by_kernel_id=index_attempts_by_kernel_id(state.kernel_opt_task_attempts),
+        trace_path=_resolve_fusion_decode_trace(state, payload),
+    )
+    return document
+
+
+def _forge_auto_staging_blocker(document: dict[str, Any], workspace_path: str) -> str:
+    """Name why a ``--auto`` run cannot reach a campaign, or ``""`` when it can.
+
+    forge derives its kernel from the nomination and then resolves that path
+    against the workspace, rejecting anything outside it. Nothing stages a
+    nominated source into the workspace, so when every row forge could nominate
+    lies outside it the run is futile and must be declined here rather than left
+    to die on a bare ``ValueError`` deep inside forge.
+
+    Containment resolves both sides: an unexpanded symlinked root (e.g.
+    ``USER_DATA_PATH=/primus/x/... -> /primus/data/x/...``) otherwise rejects a
+    candidate that is genuinely inside the workspace.
+
+    Args:
+        document: The manifest document forge would receive.
+        workspace_path: The workspace the run would be given.
+
+    Returns:
+        An operator-readable reason, or an empty string when at least one
+        nominatable candidate already resolves inside the workspace.
+    """
+    from ..framework.paths import resolved_within
+
+    rows = document.get("hot_kernels")
+    rows = rows if isinstance(rows, list) else []
+    # Mirror the nominator's own eligibility: a row with no source file, or one
+    # this session already rejected, can never be picked.
+    nominatable = [
+        str(row.get("source_file") or "").strip()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("source_file") or "").strip() and not row.get("rejected")
+    ]
+    if any(resolved_within(source, workspace_path) for source in nominatable):
+        return ""
+    return (
+        f"forge --auto has no runnable target: none of the {len(nominatable)} nominatable "
+        f"candidate(s) resolves inside the workspace {workspace_path}, and forge requires the "
+        "nominated kernel to be inside it. Staging the nominated source into the workspace "
+        "(and synthesizing the driver --auto never supplies) is not implemented, so this lane "
+        "stays dormant until it is."
+    )
+
+
 def _write_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> Path | None:
     """Project the hot-kernel candidate list into the manifest forge reads under ``--auto``.
 
@@ -6198,39 +6274,39 @@ def _write_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> Path
         The manifest path, or ``None`` when the payload named no candidate artifact
         (the auto path then has nothing to hand forge and skips).
     """
-    candidates_path = str(payload.get("candidates_path") or "").strip()
-    if not candidates_path:
+    document = _build_forge_candidate_manifest(payload, session_dir=session_dir)
+    if document is None:
         return None
-    from ..state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    document, _stats = candidate_manifest.build_manifest(
-        candidates_path,
-        rejected_kernel_ids=state.rejected_kernel_ids,
-        attempts_by_kernel_id=index_attempts_by_kernel_id(state.kernel_opt_task_attempts),
-        trace_path=_resolve_fusion_decode_trace(state, payload),
-    )
     return candidate_manifest.write_manifest(Path(session_dir), document)
 
 
-def _nomination_lane_budget(state: Any):
-    """Derive the rewrite lane's share of the phase's remaining time.
+def _nomination_lane_budget(
+    state: Any,
+    lane: str = LANE_REWRITE,
+    *,
+    gemm_target_costs_sec: tuple[int, ...] = (),
+):
+    """Derive one lane's share of the phase's remaining time.
 
     Wraps :func:`lane_budget.allocate`, which divides ``remaining_minutes`` between
     the lanes and returns, per lane, both a second budget and how many targets that
-    budget can fund. Only the rewrite lane is wired for now.
+    budget can fund. Every lane draws its share from this single probe of session
+    state, so the shares stay parts of one whole.
 
     Args:
         state: SharedState exposing ``remaining_minutes()``.
+        lane: Which lane's allocation to return.
+        gemm_target_costs_sec: Per-tuner estimates in the router's priority order;
+            only the gemm lane's target ceiling consumes them.
 
     Returns:
-        The rewrite ``LaneAllocation``. An unbounded session yields a zero budget
+        That lane's ``LaneAllocation``. An unbounded session yields a zero budget
         and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
-        reads as "no auto pass to make".
+        reads as "no allocation to make".
     """
     remaining_fn = getattr(state, "remaining_minutes", None)
     remaining = remaining_fn() if callable(remaining_fn) else None
-    return _allocate_lane_budgets(remaining)[LANE_REWRITE]
+    return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
 
 
 def _write_nomination_request(
@@ -6319,11 +6395,13 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
     ``_run_optimization_single`` / the single-kernel stamping -- forge, not
     Hyperloom, picks the kernels here:
 
-    1. Project the candidate list into the manifest forge reads.
-    2. Derive the rewrite lane's budget from the time actually left; an unbounded
+    1. Derive the rewrite lane's budget from the time actually left; an unbounded
        session funds nothing, so there is nothing to nominate -- skip cleanly
        rather than send forge a zero-budget brief.
-    3. Write the request that ties trace + manifest + budget together.
+    2. Project the candidate list into the manifest forge reads, and refuse a run
+       whose every nominatable row lies outside the workspace
+       (:func:`_forge_auto_staging_blocker`).
+    3. Write the manifest and the request that ties trace + manifest + budget together.
     4. Run ``forge-loop --auto`` and take back its raw ``patches[]`` envelope.
     5. Queue each sibling for the shared integrate lane; the SWEEP-entry drain
        decides KEEP/REVERT later.
@@ -6333,8 +6411,9 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         session_dir: Session directory for state, manifest, request and workspace.
 
     Returns:
-        A ``HandlerResult`` reporting how many siblings were queued, or a
-        ``skipped``/``failed`` status when there was no budget or no manifest.
+        A ``HandlerResult`` reporting how many siblings were queued, a ``skipped``
+        status when there was no budget or no manifest, or a ``failed`` status when
+        the run could not reach a campaign.
     """
     import asyncio
 
@@ -6352,9 +6431,24 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         # writing any artifact.
         return {"status": "skipped", "reason": "no_budget"}
 
-    manifest_path = _write_forge_candidate_manifest(payload, session_dir=session_dir)
-    if manifest_path is None:
+    manifest_document = _build_forge_candidate_manifest(payload, session_dir=session_dir)
+    if manifest_document is None:
         return {"status": "skipped", "reason": "no_candidates"}
+
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    # Same reason the budget is checked first: decline before anything is written,
+    # so a futile run leaves no stale manifest behind.
+    blocker = _forge_auto_staging_blocker(manifest_document, str(workspace_path))
+    if blocker:
+        log.warning("nomination auto: %s", blocker)
+        return {
+            "status": "failed",
+            "auto": True,
+            "error_class": "forge_workspace_staging_unavailable",
+            "error": blocker,
+        }
+
+    manifest_path = candidate_manifest.write_manifest(Path(session_dir), manifest_document)
 
     # Producers raise a typed error on a missing decode trace or malformed
     # candidate JSON (the up-front validation only checks candidates_path exists,
@@ -6376,7 +6470,6 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
             "error": str(error),
         }
 
-    workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
     output_dir = kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name)) / "auto"
     target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
