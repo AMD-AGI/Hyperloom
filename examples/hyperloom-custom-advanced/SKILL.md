@@ -285,7 +285,10 @@ mkdir -p "$RUN_DIR"
 # $RUN_TAG is timestamped and cannot be recomputed, and under Claw the launch
 # and the health check are separate tool calls with separate shells. Persist the
 # run-scoped vars so the health-check block can source them. Session-scoped
-# filename, for the same WekaFS reason setup_env.sh must never be shared.
+# filename, for the same WekaFS reason setup_env.sh must never be shared: set
+# $RUN_ENV yourself before launching if two non-Claw runs share a host, or the
+# second launch overwrites the first one's run vars and the health checks
+# reconcile the wrong pidfile.
 export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
 printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
   "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
@@ -380,7 +383,15 @@ if [ -z "$REAL_PID" ]; then
          "($N_MATCHES matches); refusing to guess. Inspect $RUN_LOG." >&2
   fi
 fi
-[ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
+if [ -n "$REAL_PID" ]; then
+  echo "$REAL_PID" > "$PID_FILE"
+else
+  # Never leave the dead setsid `$!` wrapper pid in the file -- the monitor
+  # would read it and fire a spurious resume. Absent means "unknown", which
+  # sends the monitor to the lock/heartbeat/lease signals instead.
+  rm -f "$PID_FILE"
+  echo "WARN: removed $PID_FILE (no authoritative pid)." >&2
+fi
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
 # does not reap, so that reports a dead optimizer as alive indefinitely.
 ps -o stat= -p "$REAL_PID" 2>/dev/null | grep -qv '^Z' \

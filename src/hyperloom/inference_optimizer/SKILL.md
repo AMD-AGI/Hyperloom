@@ -1157,6 +1157,13 @@ tool returns a `shell_id`, not a pid, so `$PID_FILE` is written in the health
 check below from the launch-info JSON, which carries the real one. The monitor
 requires that file, so do not skip it.
 
+If that reconciliation cannot find a real pid, the health check **removes**
+`$PID_FILE` rather than leaving whatever the launch put there. On the `setsid`
+path that leftover is the wrapper pid, already dead, and a monitor reading it
+resumes a session that never stopped. An absent pidfile is the honest answer:
+the monitor treats it as unknown and falls back to the session lock's owner pid,
+`state.json` freshness, and live leases.
+
 Because that launch is its own background tool call, the health check has to be
 a **separate foreground** call — it cannot be appended to the same block, or the
 `sleep 30` and every line it prints would run in the background too, invisible
@@ -1225,7 +1232,20 @@ read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get
 # Authoritative pid, from the CLI rather than from whatever launched it: under
 # Claw the tool returned a shell_id, and under setsid `$!` is the wrapper.
 pid="$(read_json "$LAUNCH_INFO_FILE" pid)"
-[ -n "$pid" ] && echo "$pid" > "$PID_FILE"
+if [ -n "$pid" ]; then
+  echo "$pid" > "$PID_FILE"
+else
+  # Do NOT leave the file holding the setsid `$!` wrapper pid: the wrapper has
+  # already exited, and a monitor that reads it sees a dead pid and fires a
+  # spurious resume. Removing it is the safe state -- the monitor guards the
+  # read with `[ -f "$PID_FILE" ]`, so an absent file means "unknown" and it
+  # falls through to the authoritative signals (the owner pid in
+  # $session_dir/runtime/optimizer.lock, state.json freshness, live leases).
+  rm -f "$PID_FILE"
+  echo "ERROR: no .pid in $LAUNCH_INFO_FILE; removed $PID_FILE rather than" \
+       "leave a stale wrapper pid. Inspect $RUN_LOG before starting the" \
+       "monitor." >&2
+fi
 # Not `test -d /proc/$pid`: a zombie keeps its /proc entry, and sandbox PID 1
 # does not reap, so that check reports a dead optimizer as alive indefinitely.
 # Ask for the state and reject Z.
@@ -1355,6 +1375,10 @@ Resolve `$SESSION` the same way the Robustness Monitor does — never from
 `$USER_DATA_PATH`, which is the workspace root, not the session dir.
 
 ```bash
+# Another separate tool call under Claw: source the run-scoped env for
+# $LAUNCH_INFO_FILE before resolving the session dir from it.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")}"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
@@ -1366,6 +1390,11 @@ It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_
 Recent action counts from SQLite (last 500 events grouped by category):
 
 ```bash
+# Self-sufficient: $SESSION from the block above is gone if this is its own
+# tool call, so re-source and re-resolve rather than inheriting it.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")}"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
 ```
 
