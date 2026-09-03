@@ -31,11 +31,11 @@ from hyperloom.orchestrator.kernel.conc_sweep import (
     _has_optimization,
     _order_concs_desc,
     _point_from_variant,
-    graded_metric_key,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
 from hyperloom.common.gain_math import conc_pair_comparison as _build_comparison
+from hyperloom.common.perf_metric import graded_metric_key
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -1312,7 +1312,7 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         comparison, summary = _build_comparison(
             self._pts("baseline", 183.0, 20000.0),
             self._pts("optimized", 183.0, 26000.0),
-            metric_key=graded_metric_key("agentx"),
+            metric_key=graded_metric_key(benchmark_mode="agentx"),
         )
         assert summary["metric"] == "total_token_throughput"
         assert summary["best_speedup"] == pytest.approx(26000.0 / 20000.0)
@@ -1322,16 +1322,29 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         _comparison, summary = _build_comparison(
             self._pts("baseline", 100.0, 20000.0),
             self._pts("optimized", 130.0, 26000.0),
-            metric_key=graded_metric_key(""),
+            metric_key=graded_metric_key(benchmark_mode=""),
         )
         assert summary["metric"] == "output_throughput"
         assert summary["best_speedup"] == pytest.approx(1.3)
 
     def test_the_key_follows_the_mode(self):
-        assert graded_metric_key("agentx") == "total_token_throughput"
-        assert graded_metric_key("AgentX") == "total_token_throughput"
-        assert graded_metric_key("synthetic") == "output_throughput"
-        assert graded_metric_key("") == "output_throughput"
+        assert graded_metric_key(benchmark_mode="agentx") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="AgentX") == "total_token_throughput"
+        assert graded_metric_key(benchmark_mode="synthetic") == "output_throughput"
+        assert graded_metric_key(benchmark_mode="") == "output_throughput"
+
+    def test_an_explicit_grading_override_wins_over_the_mode(self, monkeypatch):
+        """The summary follows the axis the KEEP verdicts were taken on."""
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+        assert graded_metric_key(benchmark_mode="synthetic") == "total_token_throughput"
+
+    def test_the_ambient_agentx_signal_reaches_the_summary(self, monkeypatch):
+        """A session whose mode never persisted still grades on the total axis."""
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        assert graded_metric_key(benchmark_mode="") == "total_token_throughput"
 
 
 # --- the chart's data contract ---

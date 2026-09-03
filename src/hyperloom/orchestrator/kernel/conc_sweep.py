@@ -23,7 +23,7 @@ from typing import Any, Mapping
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
@@ -60,22 +60,6 @@ SCHEMA_VERSION = "1.0"
 # spaced across the interactivity range the chart is drawn over.
 DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
 AGENTX_DEFAULT_CONCS: list[int] = [1, 4, 8, 10, 14, 20, 28]
-
-
-def graded_metric_key(benchmark_mode: Any = "") -> str:
-    """The point field a mode's speedup and its curve are both read on.
-
-    An agentic replay is ranked on total token throughput; output throughput is
-    about 1% of its token budget, so a summary computed there would report a
-    different quantity from the curve drawn beside it.
-
-    Args:
-        benchmark_mode: ``SharedState.benchmark_mode``.
-
-    Returns:
-        The point-record key holding that mode's graded throughput.
-    """
-    return "total_token_throughput" if is_agentx_mode(benchmark_mode) else "output_throughput"
 
 
 def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
@@ -1199,7 +1183,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
         o_pts.sort(key=lambda p: p["conc"])
 
         comparison, summary = conc_pair_comparison(
-            b_pts, o_pts, metric_key=graded_metric_key(getattr(state, "benchmark_mode", ""))
+            b_pts, o_pts, metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
         )
         p: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -1545,7 +1529,9 @@ async def run_conc_sweep(
     optimized_points.sort(key=lambda p: p["conc"])
 
     comparison, summary = conc_pair_comparison(
-        baseline_points, optimized_points, metric_key=graded_metric_key(getattr(state, "benchmark_mode", ""))
+        baseline_points,
+        optimized_points,
+        metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or "")),
     )
     budget_limited_no_pair = _budget_limited_without_valid_pair(
         budget_exhausted=budget_exhausted,
@@ -1629,6 +1615,5 @@ __all__ = [
     "_order_concs_desc",
     "conc_sweep_declined_to_run",
     "default_concs_for_mode",
-    "graded_metric_key",
     "run_conc_sweep",
 ]
