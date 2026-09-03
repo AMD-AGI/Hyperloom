@@ -53,7 +53,7 @@ def _state(session_dir: Path, *, max_minutes: float | None = 600.0, **fields: An
 
 
 # --------------------------------------------------------------------------- #
-# 12a — manifest emission
+# manifest emission
 # --------------------------------------------------------------------------- #
 def test_manifest_keeps_the_unroutable_row_and_merges_history(tmp_path: Path) -> None:
     rows = [
@@ -96,7 +96,7 @@ def test_manifest_is_none_without_a_candidate_path(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 12b — rewrite lane budget
+# rewrite lane budget
 # --------------------------------------------------------------------------- #
 def test_rewrite_budget_funds_targets_from_remaining_time(tmp_path: Path) -> None:
     # 600 min - 5 min reserve = 595 min; rewrite gets 50% = ~17850s;
@@ -117,7 +117,7 @@ def test_unbounded_session_is_not_fundable(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 12b(ii) — the gemm and fusion lanes draw from the same split
+# the gemm and fusion lanes draw from the same split
 # --------------------------------------------------------------------------- #
 class _FixedClockState:
     """A session whose remaining time does not tick while the split is inspected."""
@@ -161,7 +161,7 @@ def test_an_unbounded_session_funds_no_lane() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 12c — nomination request producer
+# nomination request producer
 # --------------------------------------------------------------------------- #
 def test_request_points_candidates_path_at_the_manifest(tmp_path: Path) -> None:
     trace = tmp_path / "decode.trace.json"

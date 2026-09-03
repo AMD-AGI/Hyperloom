@@ -23,9 +23,8 @@ from typing import Any
 #: risking a partially understood request.
 PROTOCOL_VERSION = 1
 
-#: Must equal the producer's ``candidate_manifest.MANIFEST_VERSION``. The
-#: producer always writes it, so an absent version is a skew too and is refused.
-#: There is no compatibility path: both halves move together.
+#: Must equal the producer's ``candidate_manifest.MANIFEST_VERSION``; an absent
+#: version is a skew too. No compatibility path, so both halves move together.
 MANIFEST_VERSION = 2
 
 #: Every field a candidate row must carry. A row missing one comes from a

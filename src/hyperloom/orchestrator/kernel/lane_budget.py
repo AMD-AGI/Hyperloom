@@ -39,9 +39,8 @@ REWRITE_MIN_TARGET_SEC = 4500
 #: tuner. This is only the fallback for a tuner that reports none.
 GEMM_DEFAULT_TARGET_SEC = 20 * 60
 
-#: fusion: no admission floor and no per-recipe estimate exist, so its ceiling is
-#: a count rather than a division. Mirrors ``LoopConfig.max_recipes``' own default,
-#: which the forge-fuse path overrides with the full discovered recipe count.
+#: fusion: no admission floor and no per-recipe estimate, so its ceiling is a
+#: count rather than a division. Travels to forge-fuse as ``--max-recipes``.
 FUSION_MAX_TARGETS = 3
 
 #: Held back from the phase share so the lanes cannot consume the time the phase

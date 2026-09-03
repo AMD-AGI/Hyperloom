@@ -221,13 +221,8 @@ def test_geometry_only_source_marked_not_dispatchable(monkeypatch):
 
 
 def test_site_a_partition_skips_reusable_source_resolved_but_non_dispatchable(monkeypatch):
-    # Site A's routability is the STRICT dispatch predicate
-    # (reusable AND source_file AND shape_dispatchable), exercised through the real
-    # build_candidates -- not an inline lambda. A reusable kernel with a resolved
-    # source but only launch-grid geometry is non-dispatchable, so it must land in
-    # skipped_kernels, never routable_kernels. This locks the strict predicate at
-    # the live call site: dropping the shape_dispatchable conjunct would move this
-    # kernel into routable_kernels and fail here (defect 7).
+    # Driven through the real build_candidates, whose routability is the strict
+    # predicate: reusable + resolved source + a dispatch-grade shape.
     monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/k.cu", "op_to_source"))
     cands = report.build_candidates(
         _analyze(

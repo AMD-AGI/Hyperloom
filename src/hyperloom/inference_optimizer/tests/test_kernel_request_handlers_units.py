@@ -6255,9 +6255,8 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
 
     @pytest.mark.asyncio
     async def test_a_share_that_funds_one_tuner_caps_the_routed_set_at_one(self, tmp_path, monkeypatch):
-        # 600 min - 5 min reserve = 35700s; gemm gets 20% = 7140s, which pays for
-        # the first 60-minute tuner and not the second. The ceiling travels as a
-        # count, so the producer keeps deciding WHICH tuners those are.
+        # 600 min less the 5 min reserve leaves 35700s; gemm's 20% is 7140s, which
+        # funds the first 60-minute tuner and not the second.
         self._prepare(
             tmp_path,
             monkeypatch,

@@ -4310,9 +4310,8 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    # The lane's share of the phase, sized against what the router says its own
-    # tuners cost. A share that cannot fund the first of them is no budget at all,
-    # so it degrades to the module default rather than to a doomed short session.
+    # The lane's share, priced on the router's own per-tuner estimates. A share
+    # funding none of them degrades to the module default, not to a doomed run.
     gemm_targets = await asyncio.to_thread(
         _gemm_router_targets,
         model_path=resolved_model_path,
@@ -6500,12 +6499,8 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         }
     queued, dropped = _land_nomination_outcome(result, session_dir=session_dir)
     nomination = result.get("nomination") if isinstance(result, dict) else None
-    # GUARD (12g): forge nominated N siblings that each land as their own pending
-    # record. This result must NOT carry a single-kernel identity (kernel_id /
-    # kernel_id_pinned / requested_kernel_id) -- there is no one dispatched kernel
-    # here. If a future refactor folds this back through _run_optimization_single,
-    # those stamps would misattribute every sibling to one phantom kernel_id;
-    # test_forge_nomination_dispatch asserts their absence.
+    # Carries no single-kernel identity: every sibling lands as its own pending
+    # record, so a kernel_id here would misattribute all of them to one phantom.
     return {
         "status": "complete",
         "auto": True,

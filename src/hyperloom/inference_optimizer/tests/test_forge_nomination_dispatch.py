@@ -109,7 +109,7 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
     assert result["status"] == "complete"
     assert result["auto"] is True
     assert result["queued"] == 2
-    # No single-kernel stamping leaked onto the auto result (12g invariant).
+    # No single-kernel stamping leaked onto the auto result.
     assert "kernel_id" not in result
     assert "kernel_id_pinned" not in result
     assert "requested_kernel_id" not in result

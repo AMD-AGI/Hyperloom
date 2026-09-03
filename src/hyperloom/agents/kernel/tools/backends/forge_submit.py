@@ -5167,9 +5167,8 @@ def submit_auto(
     branch = _new_forge_branch(output_dir, "auto-nomination")
     deadline_unix = max(time.time() + 1.0, started + timeout_s)
 
-    # A fresh campaign needs a kernel AND a driver, and resolves both against the
-    # workspace. --auto supplies the kernel from the nomination and no driver at
-    # all, so both have to be arranged here before forge is launched.
+    # A fresh campaign resolves both a kernel and a driver against the workspace;
+    # --auto names neither, so both are arranged here before forge launches.
     try:
         # forge reports the commit each patch is diffed against on the envelope,
         # so the staged base is not needed again here.
