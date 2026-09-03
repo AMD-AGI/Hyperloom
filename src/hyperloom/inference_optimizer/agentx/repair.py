@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Mapping, Optional
@@ -55,6 +56,14 @@ _REPAIR_KEY = "aiperf"
 #: Installer output kept in the error summary. Enough to show the failing pip /
 #: git line without pasting a whole install log into a benchmark result.
 _OUTPUT_TAIL_LINES = 12
+
+#: Lines outside the tail window are dropped UNLESS they announce a failure --
+#: the installer's own ``[... ERROR]`` prefix, or a bare ``ERROR:`` from pip.
+_ERROR_LINE_RE = re.compile(r"(?:^|\W)(?:ERROR|FATAL)\b[: ]", re.IGNORECASE)
+
+#: Cap on those rescued lines, so a build that fails a hundred times cannot turn
+#: this one-line summary back into a log dump.
+_ERROR_LINE_BUDGET = 4
 
 
 def install_script_path() -> Path:
@@ -138,15 +147,28 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
 
 
 def _output_tail(stdout: Optional[str], stderr: Optional[str]) -> str:
-    """Last few installer lines, redacted, flattened onto one line.
+    """The installer lines worth keeping, redacted, flattened onto one line.
 
     The installer inherits the session environment, so its output can echo a
     credential; this lands in a benchmark result that is written to disk.
+
+    Lines that name a failure are kept even when they fall outside the tail
+    window. Measured against a Python 3.10 box, where the line that gives the
+    actual cause --
+
+        ERROR: Package 'aiperf' requires a different Python: 3.10.12 not in ...
+
+    -- landed second-from-last behind nine lines of torch-gate warnings. A plain
+    tail would have dropped exactly the sentence this summary exists to carry,
+    and the reader would have been left with "install failed" and no reason.
     """
     from hyperloom.common.env_safety import redact_secret_values
 
     combined = ((stdout or "") + (stderr or "")).strip()
     if not combined:
         return "(no output)"
-    tail = combined.splitlines()[-_OUTPUT_TAIL_LINES:]
-    return redact_secret_values(" | ".join(line.strip() for line in tail if line.strip()))
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    tail = lines[-_OUTPUT_TAIL_LINES:]
+    # Anything earlier that announces a failure, in the order it was printed.
+    kept = [line for line in lines[:-_OUTPUT_TAIL_LINES] if _ERROR_LINE_RE.search(line)]
+    return redact_secret_values(" | ".join(kept[-_ERROR_LINE_BUDGET:] + tail))

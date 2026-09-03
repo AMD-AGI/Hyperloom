@@ -1172,23 +1172,27 @@ PY
   fi
 }
 
-# --- 2a. aiperf (AgentX benchmark client) — AgentX-only ---
-# Installs the pinned aiperf for HYPERLOOM_AGENTX; only reached when the caller
-# opts in (see the INSTALL_AIPERF / HYPERLOOM_AGENTX gate at the call site) or
-# via --only-aiperf. Skipped when the operator points AIPERF_BIN at their own
-# build.
+# --- 2a. aiperf (AgentX benchmark client) ---
+# Installs the pinned aiperf. Reached from the gate at the call site on either
+# branch -- a default provision pre-warms it when this build ships the AgentX
+# client, and an explicit INSTALL_AIPERF / HYPERLOOM_AGENTX / --only-aiperf
+# demands it. Skipped when the operator points AIPERF_BIN at their own build.
 #
 # Failure handling is asymmetric by design, keyed on $AIPERF_REQUIRED:
-#   * default install (nobody asked for AgentX) -> unreachable; the gate below
-#     skips this function entirely.
-#   * explicit request -> FATAL. A dependency the caller asked for by name, with
-#     a pin this repository owns, must not end up absent with only a warning in
-#     a log nobody reads. Measured: the fail-soft warn let a provisioning run
-#     report success while leaving the box unable to run AgentX at all, and the
-#     gap surfaced hours later as a benchmark failure that was then handed to an
-#     enablement specialist as if it were a framework bug.
-# The synthetic path still grows no AgentX-only dependency it can be blocked
-# by, because AIPERF_REQUIRED is only ever set when AgentX was asked for.
+#   * pre-warm (nobody asked)  -> WARN. The install is speculative: nothing has
+#     said this box will run AgentX, so an interpreter below the pin's floor or
+#     an unreachable index must not fail a provision that was never going to use
+#     it. The runtime preflight repairs and, failing that, stops the run.
+#   * explicit request         -> FATAL. A dependency the caller asked for by
+#     name, with a pin this repository owns, must not end up absent with only a
+#     warning in a log nobody reads. Measured: the fail-soft warn let a
+#     provisioning run report success while leaving the box unable to run AgentX
+#     at all, and the gap surfaced hours later as a benchmark failure that was
+#     then handed to an enablement specialist as if it were a framework bug.
+#
+# So the synthetic path can still be provisioned on a box that cannot host
+# aiperf -- what it no longer does is skip the install merely because nobody
+# happened to export a runtime mode flag while provisioning.
 ensure_aiperf() {
   if [ -n "${AIPERF_BIN:-}" ]; then
     log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"

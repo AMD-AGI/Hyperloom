@@ -167,6 +167,38 @@ def test_repair_redacts_secrets_from_installer_output(monkeypatch):
     assert "sk-supersecretvalue" not in err
 
 
+def test_repair_keeps_the_cause_when_warnings_push_it_out_of_the_tail(monkeypatch):
+    """The line that gives the reason must survive a noisy installer.
+
+    Shape taken from a measured run on a Python 3.10 box: the pip line naming
+    the actual cause sat behind nine torch-gate warnings. A plain tail would
+    have dropped exactly the sentence this summary exists to carry.
+    """
+    noise = "\n".join(f"[inference-optimizer WARN] torch gate note {i}" for i in range(20))
+    cause = "ERROR: Package 'aiperf' requires a different Python: 3.10.12 not in '<3.14,>=3.11'"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, f"{cause}\n{noise}", ""),
+    )
+    err = repair.ensure_aiperf_installed(env={})
+    assert err is not None
+    assert "requires a different Python" in err, "the cause was truncated away"
+
+
+def test_repair_caps_the_rescued_error_lines(monkeypatch):
+    """Rescuing failure lines must not turn the summary back into a log dump."""
+    many = "\n".join(f"ERROR: failure number {i}" for i in range(40))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, many, ""),
+    )
+    err = repair.ensure_aiperf_installed(env={})
+    assert err is not None
+    assert err.count("failure number") <= repair._OUTPUT_TAIL_LINES + repair._ERROR_LINE_BUDGET
+
+
 def test_repair_reports_a_timeout_rather_than_hanging(monkeypatch):
     def _run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
