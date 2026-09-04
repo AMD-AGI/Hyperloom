@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -62,6 +62,11 @@ class ControllerRunState:
     analysis_rejected_task_count: int = 0
     task_count: int = 0
     patch_count: int = 0
+    skipped_task_count: int = 0
+    #: Base commit each source repository was pinned to, keyed by absolute root.
+    #: A task naming a repository already pinned to a different commit is skipped,
+    #: so this records what the campaign actually built against.
+    repository_pins: dict[str, str] = field(default_factory=dict)
     schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -98,12 +103,17 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
         f"- **Finished at:** `{state.finished_at or 'not finished'}`",
         f"- **Task count:** `{state.task_count}`",
         f"- **Patch count:** `{state.patch_count}`",
+        f"- **Skipped task count:** `{state.skipped_task_count}`",
         f"- **Analysis status:** `{state.analysis_status or 'not started'}`",
         f"- **Analysis reason:** {state.analysis_reason or 'none'}",
         f"- **Analysis published tasks:** `{state.analysis_published_task_count}`",
         f"- **Analysis rejected tasks:** `{state.analysis_rejected_task_count}`",
         "",
     ]
+    if state.repository_pins:
+        lines.extend(["## Pinned Source Repositories", ""])
+        lines.extend(f"- `{root}` @ `{commit}`" for root, commit in sorted(state.repository_pins.items()))
+        lines.append("")
     patches = published_operator_dirs(layout)
     if patches:
         lines.extend(["## Published Operator Patches", ""])
@@ -237,6 +247,8 @@ def run_controller(
             "analysis_rejected_task_count": analysis.rejected_task_count,
             "task_count": schedule.task_count,
             "patch_count": patch_count,
+            "skipped_task_count": schedule.skipped_count,
+            "repository_pins": schedule.repository_pins,
         }
     )
     _write_state(layout, completed)

@@ -185,10 +185,14 @@ async def integrate_controller_patches(
         configured_roots.append(Path(state_root).expanduser().resolve())
     allowed_roots = tuple(dict.fromkeys(configured_roots))
     results: list[PatchIntegrationResult] = []
-    shared_base = ""
-    shared_repo: Path | None = None
-    shared_baseline_error = ""
-    initial_head = ""
+    # One base commit per repository rather than one repository per run. A patch
+    # only ever applies to its own repository, so two independent repositories
+    # cannot conflict and each can carry its own baseline; a second base within
+    # one repository still cannot. Keyed by resolved root, established by the
+    # first publication naming that repository.
+    pinned_bases: dict[Path, str] = {}
+    pinned_heads: dict[Path, str] = {}
+    pin_errors: dict[Path, str] = {}
 
     for index, patch_dir in enumerate(discover_controller_patch_dirs(patches_root)):
         try:
@@ -217,48 +221,53 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
-        if not shared_base:
-            shared_base = publication.base_commit
-            shared_repo = publication.repo_root
+        repo = publication.repo_root
+        if repo not in pinned_bases:
+            pinned_bases[repo] = publication.base_commit
             try:
-                initial_head = _git_output(shared_repo, "rev-parse", "HEAD").lower()
+                pinned_heads[repo] = _git_output(repo, "rev-parse", "HEAD").lower()
             except Exception as error:
-                shared_baseline_error = f"could not read integration Git HEAD: {error}"
+                pinned_heads[repo] = ""
+                pin_errors[repo] = f"could not read integration Git HEAD: {error}"
             else:
-                shared_baseline_error = (
+                pin_errors[repo] = (
                     ""
-                    if initial_head == shared_base
-                    else f"integration HEAD {initial_head} does not match controller base {shared_base}"
+                    if pinned_heads[repo] == publication.base_commit
+                    else (
+                        f"integration HEAD {pinned_heads[repo]} does not match "
+                        f"controller base {publication.base_commit}"
+                    )
                 )
 
-        if shared_baseline_error:
+        if pin_errors.get(repo):
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="skipped_baseline_mismatch",
-                reason=shared_baseline_error,
+                reason=pin_errors[repo],
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
-                repo_root=str(publication.repo_root),
-                integration_head_before=initial_head,
+                repo_root=str(repo),
+                integration_head_before=pinned_heads.get(repo, ""),
             )
             results.append(result)
             _write_result(results_dir, index, result)
             continue
 
-        if publication.base_commit != shared_base or publication.repo_root != shared_repo:
+        if publication.base_commit != pinned_bases[repo]:
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="skipped_baseline_mismatch",
-                reason="publication does not share the Controller integration baseline",
+                reason=(
+                    f"repository {repo} is pinned to controller base {pinned_bases[repo]} for this integration"
+                ),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
-                repo_root=str(publication.repo_root),
+                repo_root=str(repo),
             )
             results.append(result)
             _write_result(results_dir, index, result)
             continue
 
-        repo = publication.repo_root
         try:
             head_before = _git_output(repo, "rev-parse", "HEAD").lower()
             clean = _git_output(repo, "status", "--porcelain", "--untracked-files=no")

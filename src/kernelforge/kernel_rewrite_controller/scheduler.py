@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kernelforge.kernel_rewrite_controller.contracts import (
@@ -40,6 +40,10 @@ class ScheduleResult:
     task_count: int
     results: tuple[SingleTaskResult, ...]
     stopped_for_budget: bool = False
+    #: Base commit this run pinned each source repository to, keyed by absolute
+    #: repository root. Reported so the campaign's baselines are auditable
+    #: without reading every task.
+    repository_pins: dict[str, str] = field(default_factory=dict)
 
     @property
     def succeeded_count(self) -> int:
@@ -106,18 +110,24 @@ def dispatch_prepared_tasks(
         )
 
     task_dirs_by_id = {task.operator_id: task_dir for task_dir, task in parsed_by_id.values()}
-    shared_base_commit = tasks[0].base_commit
-    shared_repo_root = tasks[0].repo_root
+    # One base commit per repository rather than one repository per campaign.
+    # Every patch is a diff from its own repository's pinned commit and is
+    # applied to that repository alone, so two independent repositories cannot
+    # conflict; only a second base within one repository can. The pin comes from
+    # the highest-priority task naming that repository, which makes it a function
+    # of the agent's own ranking rather than of publication order.
+    pinned_bases: dict[Path, str] = {}
     stopped_for_budget = False
 
     for index, task in enumerate(tasks):
         task_dir = task_dirs_by_id[task.operator_id]
-        if task.base_commit != shared_base_commit or task.repo_root != shared_repo_root:
+        pinned_base = pinned_bases.setdefault(task.repo_root, task.base_commit)
+        if task.base_commit != pinned_base:
             results.append(
                 _skip_task(
                     task_dir,
                     task,
-                    "task does not share the controller base commit and repository",
+                    f"repository {task.repo_root} is pinned to base commit {pinned_base}",
                 )
             )
             continue
@@ -149,7 +159,7 @@ def dispatch_prepared_tasks(
                 task_dir,
                 layout=layout,
                 deadline_unix=task_deadline,
-                expected_base_commit=shared_base_commit,
+                expected_base_commit=pinned_base,
             )
         )
 
@@ -157,6 +167,7 @@ def dispatch_prepared_tasks(
         task_count=len(task_dirs),
         results=tuple(results),
         stopped_for_budget=stopped_for_budget,
+        repository_pins=dict(sorted((str(repo), commit) for repo, commit in pinned_bases.items())),
     )
 
 

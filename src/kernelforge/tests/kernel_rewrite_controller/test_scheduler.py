@@ -164,6 +164,42 @@ def test_less_than_thirty_minutes_skips_all_remaining_tasks(
     assert [TaskStateStore(path).load().status for path in task_dirs] == ["skipped", "skipped"]  # type: ignore[union-attr]
 
 
+def test_tasks_from_separate_repositories_each_get_their_own_base(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    sglang = tmp_path / "sglang"
+    aiter = tmp_path / "aiter"
+    sglang.mkdir()
+    aiter.mkdir()
+    _publish_task(layout, repo_root=aiter, kernel_name="moe_stage1", priority=0, base_commit="a" * 40)
+    _publish_task(layout, repo_root=sglang, kernel_name="rmsnorm", priority=1, base_commit="c" * 40)
+    calls: list[str] = []
+
+    def _dispatch(task_dir, **kwargs):
+        task = scheduler.load_task(task_dir, record_state=False).task
+        assert task is not None
+        # Each task must be validated against its own repository's pin, not the
+        # top-priority task's, or the second repository could never run.
+        assert kwargs["expected_base_commit"] == task.base_commit
+        calls.append(task.identity.kernel_name)
+        return _result(task, "succeeded")
+
+    monkeypatch.setattr(scheduler, "dispatch_single_task", _dispatch)
+
+    result = scheduler.dispatch_prepared_tasks(
+        layout,
+        controller_deadline_unix=20_000,
+        clock=lambda: 10_000,
+    )
+
+    assert calls == ["moe_stage1", "rmsnorm"]
+    assert result.succeeded_count == 2
+    assert result.skipped_count == 0
+    assert result.repository_pins == {str(aiter): "a" * 40, str(sglang): "c" * 40}
+
+
 def test_a_different_shared_base_is_skipped_without_blocking_siblings(
     tmp_path: Path,
     monkeypatch,

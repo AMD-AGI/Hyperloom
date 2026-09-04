@@ -181,7 +181,18 @@ def test_controller_full_path_publishes_a_shared_base_patch(
     assert state.patch_count == 1
     assert patch_dir.is_dir()
     assert "VALUE = 2" in (patch_dir / "change.patch").read_text(encoding="utf-8")
-    assert operator_id in (tmp_path / "output" / "result" / "summary.md").read_text(encoding="utf-8")
+
+    # The pin has to survive in the durable record, not only in the returned
+    # object: it is the only place an operator can read what this campaign built
+    # against without opening every task.
+    base_commit = _git(repo, "rev-parse", "HEAD")
+    assert state.repository_pins == {str(repo): base_commit}
+    assert state.skipped_task_count == 0
+    persisted = json.loads((tmp_path / "output" / "controller" / "state.json").read_text(encoding="utf-8"))
+    assert persisted["repository_pins"] == {str(repo): base_commit}
+    summary = (tmp_path / "output" / "result" / "summary.md").read_text(encoding="utf-8")
+    assert operator_id in summary
+    assert f"`{repo}` @ `{base_commit}`" in summary
 
 
 def test_invalid_agent_task_becomes_no_result_without_starting_forge(

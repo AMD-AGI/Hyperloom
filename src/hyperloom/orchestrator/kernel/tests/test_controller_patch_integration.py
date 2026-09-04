@@ -47,6 +47,16 @@ def _repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
+def _named_repo(parent: Path, name: str, filename: str) -> tuple[Path, str]:
+    repo = parent / name
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / filename).write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", f"{name} baseline")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
 def _patch(repo: Path, relative: str, content: str) -> str:
     path = repo / relative
     original = path.read_text(encoding="utf-8")
@@ -297,6 +307,98 @@ async def test_dirty_integration_worktree_is_skipped_without_cleanup(tmp_path: P
 
     assert summary.results[0].status == "skipped_dirty_worktree"
     assert (repo / "second.py").read_text(encoding="utf-8") == "USER_CHANGE = True\n"
+
+
+@pytest.mark.asyncio
+async def test_patches_from_separate_repositories_each_keep_their_own_baseline(tmp_path: Path) -> None:
+    # A framework session hands the controller more than one editable repository
+    # (sglang and aiter here), and their HEADs are unrelated. Each publication
+    # must be graded against its own repository's baseline; requiring one shared
+    # commit would discard every patch from the second repository.
+    aiter, aiter_base = _named_repo(tmp_path, "aiter", "moe.py")
+    sglang, sglang_base = _named_repo(tmp_path, "sglang", "norm.py")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        aiter,
+        aiter_base,
+        kernel_name="moe_stage1",
+        kernel_path="moe.py",
+        patch=_patch(aiter, "moe.py", "VALUE = 2\n"),
+    )
+    _publish(
+        patches,
+        sglang,
+        sglang_base,
+        kernel_name="rmsnorm",
+        kernel_path="norm.py",
+        patch=_patch(sglang, "norm.py", "VALUE = 3\n"),
+    )
+    seen: list[str] = []
+
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0 + len(seen), "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        # The configured root is their common parent so both repositories are
+        # admissible; the point under test is the baseline, not the allowlist.
+        shared_state=_state(session_dir, tmp_path),
+        validator=_validate,
+    )
+
+    assert seen == ["moe_stage1", "rmsnorm"]
+    assert summary.kept_count == 2
+    assert (aiter / "moe.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (sglang / "norm.py").read_text(encoding="utf-8") == "VALUE = 3\n"
+    assert int(_git(aiter, "rev-list", "--count", "HEAD")) == 2
+    assert int(_git(sglang, "rev-list", "--count", "HEAD")) == 2
+
+
+@pytest.mark.asyncio
+async def test_second_base_within_one_repository_is_still_rejected(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="first",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    _publish(
+        patches,
+        repo,
+        "c" * 40,
+        kernel_name="second",
+        kernel_path="second.py",
+        patch=_patch(repo, "second.py", "VALUE = 3\n"),
+    )
+    seen: list[str] = []
+
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert seen == ["first"]
+    assert summary.kept_count == 1
+    assert [result.status for result in summary.results] == ["kept", "skipped_baseline_mismatch"]
+    assert "pinned to controller base" in summary.results[1].reason
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 @pytest.mark.asyncio
