@@ -11,12 +11,14 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     REBENCH_FALLBACK,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
     ROUTE_FORGE,
     ROUTE_GEAK,
+    SOURCE_FUSION,
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEAK_ENV_SELECTION,
     SOURCE_KERNEL_REWRITE,
@@ -37,6 +39,81 @@ def _bound_session(tmp_path):
 
 def _kernel_events(session_dir: Path) -> list[dict[str, Any]]:
     return [event for event in read_timeline_events(session_dir) if event.get("type") == "kernel"]
+
+
+def _record_historical_row(
+    recorder,
+    section: str,
+    row: dict[str, Any],
+    *,
+    row_type: str,
+    natural_ids: str | tuple[str, ...],
+) -> None:
+    """Write a legacy fragment directly so its read compatibility stays tested."""
+    make_sink(recorder.event_id, producer="orchestrator").record(
+        section,
+        row,
+        row_type=row_type,
+        natural_ids=natural_ids,
+    )
+
+
+def _record_lane_run(recorder, *, source_kind: str, run_id: str, status: str, **fields: Any) -> None:
+    """Write the historical lane-row shape without restoring a production API."""
+    row = {
+        "source_kind": source_kind,
+        "run_id": run_id,
+        "status": status,
+        "started_at": fields.pop("started_at", None),
+        "ended_at": fields.pop("ended_at", None),
+        "duration_sec": fields.pop("duration_sec", None),
+        "micro_decision": fields.pop("micro_decision", None),
+        "rebench_ref": fields.pop("rebench_ref", None),
+        "failure_reason": fields.pop("failure_reason", None),
+        **fields,
+    }
+    _record_historical_row(
+        recorder,
+        "kernel_lane_run",
+        row,
+        row_type="lane_run",
+        natural_ids=(source_kind, run_id),
+    )
+
+
+def _record_kernel_rewrite(recorder, *, run_id: str, kernel_id: str, status: str, **fields: Any) -> None:
+    _record_lane_run(
+        recorder,
+        source_kind=SOURCE_KERNEL_REWRITE,
+        run_id=run_id,
+        status=status,
+        kernel_id=kernel_id,
+        **fields,
+    )
+
+
+def _record_fusion_run(recorder, *, run_id: str, status: str, **fields: Any) -> None:
+    _record_lane_run(
+        recorder,
+        source_kind=SOURCE_FUSION,
+        run_id=run_id,
+        status=status,
+        **fields,
+    )
+
+
+def _record_rebench_attempt(recorder, *, attempt_id: str, **fields: Any) -> None:
+    base = fields.get("base_tput")
+    measured = fields.get("measured_tput")
+    if isinstance(base, (int, float)) and isinstance(measured, (int, float)) and base > 0:
+        fields["delta_pct"] = round((measured - base) / base * 100.0, 4)
+    _record_historical_row(
+        recorder,
+        "kernel_rebench_attempt",
+        {"attempt_id": attempt_id, "ledger": "forge", **fields},
+        row_type="rebench",
+        natural_ids=("forge", attempt_id),
+    )
 
 
 def _forge_recorder():
@@ -110,7 +187,8 @@ def test_the_stage_in_flight_is_recoverable_from_the_rows_alone(tmp_path):
 def test_a_keep_without_a_rebench_cannot_read_as_adopted(tmp_path):
     """The candidate layer's own verdict never settles end-to-end adoption."""
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(
+    _record_kernel_rewrite(
+        recorder,
         run_id="attempt-7",
         kernel_id="k001",
         status="success",
@@ -140,7 +218,8 @@ def test_a_keep_without_a_rebench_cannot_read_as_adopted(tmp_path):
 def test_a_validated_rebench_is_what_promotes_a_candidate(tmp_path):
     """Adoption is carried by the rebench row the lane points at."""
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(
+    _record_kernel_rewrite(
+        recorder,
         run_id="attempt-7",
         kernel_id="k001",
         status="success",
@@ -149,7 +228,8 @@ def test_a_validated_rebench_is_what_promotes_a_candidate(tmp_path):
         rebench_ref="rb-1",
         e2e={"integrated": True, "e2e_gain_pct": 6.0},
     )
-    recorder.record_rebench_attempt(
+    _record_rebench_attempt(
+        recorder,
         attempt_id="rb-1",
         source_kind=SOURCE_KERNEL_REWRITE,
         source_ref="attempt-7",
@@ -186,7 +266,8 @@ def test_a_validated_rebench_is_what_promotes_a_candidate(tmp_path):
 def test_a_rebench_that_did_not_promote_rejects_the_candidate(tmp_path):
     """Measured truthfully and did not beat current_best is a rejection."""
     recorder = _forge_recorder()
-    recorder.record_fusion_run(
+    _record_fusion_run(
+        recorder,
         run_id="fusion-1",
         status="success",
         pattern="rmsnorm+silu",
@@ -195,7 +276,8 @@ def test_a_rebench_that_did_not_promote_rejects_the_candidate(tmp_path):
         micro_decision="keep",
         rebench_ref="rb-2",
     )
-    recorder.record_rebench_attempt(
+    _record_rebench_attempt(
+        recorder,
         attempt_id="rb-2",
         source_kind="fusion",
         source_ref="fusion-1",
@@ -383,21 +465,27 @@ def test_a_phase_crash_closes_the_event_naming_the_stage(tmp_path):
 
 
 def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path):
-    """A phase-requested analysis has no roofline event to carry its evidence."""
+    """Historical phase-requested analysis fragments remain readable."""
     recorder = _forge_recorder()
-    recorder.record_trace_analyze_run(
-        run_id="ta-1",
-        trigger="pre_run_optimization",
-        status="ok",
-        requested_by="orchestration",
-        trace_input="/s/traces",
-        top_k=10,
-        result={
-            "analysis_meta": {"route": "agent", "tool": "tracelens"},
-            "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
-            "candidates_path": "/s/candidates.json",
+    _record_historical_row(
+        recorder,
+        "kernel_trace_analyze",
+        {
+            "run_id": "ta-1",
+            "trigger": "pre_run_optimization",
+            "status": "ok",
+            "requested_by": "orchestration",
+            "trace_input": "/s/traces",
+            "top_k": 10,
+            "route": "agent",
+            "tool": "tracelens",
+            "roofline_snapshot_id": 5,
+            "reusable_native_kernel_ids": ["k001", "k002"],
+            "artifacts": {"candidates_path": "/s/candidates.json"},
+            "hot_kernels": {"count": 1, "top": [{"name": "aten::mm", "gpu_pct": 10.0}]},
         },
-        snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
+        row_type="trace_analyze",
+        natural_ids="ta-1",
     )
     recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
 
@@ -474,7 +562,8 @@ def test_the_geak_ledger_stays_out_of_the_forge_ledger(tmp_path):
     """Which ledger asked for a re-measurement is recorded, not inferred."""
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED)
-    recorder.record_rebench_attempt(
+    _record_rebench_attempt(
+        recorder,
         attempt_id="forge-rb-1",
         source_kind=SOURCE_KERNEL_REWRITE,
         source_ref="attempt-7",
@@ -493,7 +582,7 @@ def test_the_geak_ledger_stays_out_of_the_forge_ledger(tmp_path):
 def test_the_verdict_stays_unstamped_when_nothing_was_adopted(tmp_path):
     """An entry that adopted nothing concluded nothing about a candidate."""
     recorder = _forge_recorder()
-    recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    _record_kernel_rewrite(recorder, run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
     recorder.finish(verdict="adopted", tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["outcome"]["verdict"] is None
@@ -522,10 +611,11 @@ def test_an_unnamed_verdict_stays_unstamped_when_the_rebench_rejected(tmp_path):
 
 
 def _forge_rewrite_with_rebench(recorder, **rebench: Any) -> None:
-    recorder.record_kernel_rewrite(
-        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", rebench_ref="rb-1"
+    _record_kernel_rewrite(
+        recorder, run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", rebench_ref="rb-1"
     )
-    recorder.record_rebench_attempt(
+    _record_rebench_attempt(
+        recorder,
         attempt_id="rb-1",
         source_kind=SOURCE_KERNEL_REWRITE,
         source_ref="attempt-7",
@@ -598,7 +688,7 @@ def test_a_fallback_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
 def test_a_lane_that_produced_nothing_stays_empty(tmp_path):
     """An absent lane is an empty list, not an empty shell of a row."""
     recorder = _forge_recorder()
-    recorder.record_fusion_run(run_id="fusion-1", status="success", applied=True)
+    _record_fusion_run(recorder, run_id="fusion-1", status="success", applied=True)
     recorder.finish(verdict="needs_review", tput_after=1000.0)
 
     lanes = _kernel_events(tmp_path)[0]["ext"]["forge"]["lanes"]
@@ -612,7 +702,8 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
     """A dispatch and its later verdict describe one attempt, not two."""
     recorder = _forge_recorder()
     for decision in (None, REBENCH_VALIDATED):
-        recorder.record_rebench_attempt(
+        _record_rebench_attempt(
+            recorder,
             attempt_id="rb-1",
             source_kind=SOURCE_KERNEL_REWRITE,
             source_ref="attempt-7",
@@ -641,8 +732,8 @@ def test_lane_rows_are_ordered_by_when_they_started(tmp_path):
     than the run.
     """
     recorder = _forge_recorder()
-    recorder.record_fusion_run(run_id="late", status="success", started_at="2026-09-02T00:05:00")
-    recorder.record_fusion_run(run_id="early", status="success", started_at="2026-09-02T00:01:00", applied=True)
+    _record_fusion_run(recorder, run_id="late", status="success", started_at="2026-09-02T00:05:00")
+    _record_fusion_run(recorder, run_id="early", status="success", started_at="2026-09-02T00:01:00", applied=True)
     recorder.finish(verdict="needs_review", tput_after=1000.0)
 
     lanes = _kernel_events(tmp_path)[0]["ext"]["forge"]["lanes"]["fusion_runs"]
