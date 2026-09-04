@@ -2481,7 +2481,14 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 
 @pytest.mark.asyncio
-async def test_probe_failed_sweep(session_dir):
+async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
+    """A met target does not relabel a sweep that failed.
+
+    ``sweep_failed`` returns above the rename in ``compute_next_phase``, so it
+    reaches CLOSE under its own name and the run still exits non-zero. Reporting
+    it as ``target_reached`` would call a run successful on the strength of a
+    concurrency curve that never measured anything.
+    """
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
@@ -2489,9 +2496,19 @@ async def test_probe_failed_sweep(session_dir):
     c.shared_state.cumulative_gain_validated = 50.0
     c.shared_state.last_conc_sweep = {"status": "failed"}
     c.shared_state.save(session_dir)
+
+    async def _ladder_already_settled(**_kwargs):
+        return None
+
+    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), max_ticks=6)
-        print("PROBE reason=", reason, "phase=", c.shared_state.phase, "stop=", c.shared_state.stop_reason)
+        assert reason == "sweep_failed"
+        assert c.shared_state.target_reached_at
+        hops = [(r.get("to_phase"), r.get("reason")) for r in c.shared_state.phase_history]
+        assert ("SWEEP", "target_reached") in hops
+        assert ("CLOSE", "sweep_failed") in hops
+        assert ("CLOSE", "target_reached") not in hops
     finally:
         await c.stop()
 
