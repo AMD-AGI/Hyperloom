@@ -26,6 +26,7 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
+from .sessions import session_elapsed_minutes
 from .v6_stages import project_conc_sweep_event
 
 
@@ -53,41 +54,78 @@ _FRAMEWORK_EXIT_REASON_MAP = {
     "explore_budget_cap": "optimize_budget_cap",
     "explore_force_exit_low_budget": "optimize_force_exit_low_budget",
 }
+# Structural model fields carried verbatim out of ``state.model_info``. Kept in
+# lockstep with the recorder's own list (``recorder/session_metadata.py``) so a
+# fragment-backed session and a collector fallback expose the same block.
+_ARCHITECTURE_FIELDS = (
+    "model_family",
+    "model_type",
+    "architectures",
+    "attention_type",
+    "num_hidden_layers",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "head_dim",
+    "hidden_size",
+    "intermediate_size",
+    "max_position_embeddings",
+    "vocab_size",
+    "torch_dtype",
+    "kv_cache_dtype",
+    "quantization",
+    "is_moe",
+    "num_experts",
+    "num_experts_per_tok",
+    "has_shared_expert",
+    "num_shared_experts",
+)
 
 
-def _tool_versions(versions: Any) -> dict[str, str | None]:
+def _tool_versions(versions: Any) -> dict[str, dict[str, Any]]:
+    """Fold the recorded ``versions`` item stream into a per-tool provenance map.
+
+    Each tool keeps its full recorded row (``root_dir`` / ``commit`` /
+    ``version``); a bare string is the shape a legacy session recorded before
+    the row carried provenance.
+    """
     if not isinstance(versions, dict):
         return {}
-    tools: dict[str, str | None] = {}
+    tools: dict[str, dict[str, Any]] = {}
     for name, value in versions.items():
         tool = str(name or "").strip()
         if not tool:
             continue
         if isinstance(value, str):
-            tools[tool] = value or None
+            tools[tool] = {"tool": tool, "version": value or None}
             continue
         if isinstance(value, dict):
-            label = value.get("version") or value.get("commit")
-            tools[tool] = str(label) if label not in (None, "") else None
+            row = {k: v for k, v in value.items() if v not in (None, "")}
+            row.setdefault("tool", tool)
+            tools[tool] = row
     return tools
 
 
 def _architecture(workload: dict[str, Any], model_info: dict[str, Any]) -> dict[str, Any]:
+    """The structural model summary, carried whole rather than digested.
+
+    ``model_class`` is the operator's declaration when present and a dense/moe
+    split otherwise; every other field is the parsed ``config.json`` summary as
+    ``summarize_model_config`` produced it.
+    """
     if not workload and not model_info:
         return {}
     model_class = str(workload.get("model_class") or "").strip()
     if not model_class and model_info:
         model_class = "moe" if bool(model_info.get("is_moe")) else "dense"
-    return {
-        "model_class": model_class,
-        "model_type": str(model_info.get("model_type") or ""),
-        "num_hidden_layers": model_info.get("num_hidden_layers"),
-        "attention_type": str(model_info.get("attention_type") or ""),
-        "num_experts": model_info.get("num_experts"),
-    }
+    architecture: dict[str, Any] = {"model_class": model_class}
+    for field in _ARCHITECTURE_FIELDS:
+        if field in model_info:
+            architecture[field] = model_info[field]
+    return architecture
 
 
 def _langfuse_projection(langfuse: dict[str, Any]) -> dict[str, Any]:
+    """The trace entrypoint plus the reason a disabled session pushed nothing."""
     config = langfuse.get("config") if isinstance(langfuse.get("config"), dict) else {}
     trace_url = langfuse.get("trace_url")
     if not trace_url:
@@ -95,9 +133,14 @@ def _langfuse_projection(langfuse: dict[str, Any]) -> dict[str, Any]:
         trace_id = str(langfuse.get("trace_id") or "").strip()
         if host and trace_id:
             trace_url = f"{host}/trace/{trace_id}"
+    counts = langfuse.get("counts")
     return {
         "enabled": bool(langfuse.get("enabled")),
+        "disabled_reason": langfuse.get("disabled_reason") or None,
+        "trace_id": langfuse.get("trace_id") or None,
+        "session_id": langfuse.get("session_id") or None,
         "trace_url": trace_url or None,
+        "counts": {str(k): int(v or 0) for k, v in counts.items()} if isinstance(counts, dict) else {},
     }
 
 
@@ -111,9 +154,35 @@ def collect_v6_metadata(
     versions: dict[str, Any],
     state: dict[str, Any],
     warnings: list[str],
+    recorded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Project V5 session/config sections into the V6 ``metadata`` shape."""
+    """Build the V6 ``metadata`` section, preferring recorded facts.
+
+    Every field here is recorded at the moment it is decided (see
+    ``recorder/session_metadata.py``); this collector is the fallback for a
+    session whose fragments are missing or partial, and ``recorded`` is
+    overlaid leaf-by-leaf on top of it so a live-recorded run is never
+    downgraded to a re-derived value.
+
+    ``exported_at_utc`` and ``warnings`` are facts about the export itself,
+    not the session, so they are never taken from a fragment.
+
+    Args:
+        exported_at_utc: When this export ran.
+        session: The resolved ``session`` section.
+        workload: The resolved ``workload`` section.
+        model_info: The parsed model config summary.
+        langfuse: The Langfuse push receipt.
+        versions: The assembled per-tool version map.
+        state: Parsed ``state.json``.
+        warnings: The V6 warnings accumulated by this export.
+        recorded: The recorder's ``metadata`` fragment, when present.
+
+    Returns:
+        The ``metadata`` section.
+    """
     recovery = session.get("recovery") if isinstance(session.get("recovery"), dict) else {}
+    image = str(session.get("image") or "").strip()
     task_config = {
         "model_name": str(workload.get("model_name") or ""),
         "model_path": str(workload.get("model_path") or ""),
@@ -131,8 +200,7 @@ def collect_v6_metadata(
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
         "architecture": _architecture(workload, model_info),
     }
-    return {
-        "exported_at_utc": exported_at_utc,
+    projected = {
         "versions": {
             "schema_version": SCHEMA_VERSION_V6,
             "hyperloom": str(session.get("code_revision") or ""),
@@ -152,19 +220,66 @@ def collect_v6_metadata(
             "user_data_path": str(session.get("user_data_path") or ""),
             "code_revision": str(session.get("code_revision") or ""),
             "pid": int(session.get("pid") or 0),
+            "image": image or None,
+            "image_id": (image.split("/")[-1] or None) if image else None,
             "max_minutes": int(session.get("max_minutes") or 0),
             "elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
             "tick_count": int(session.get("tick_count") or 0),
             "recovery": {
                 "recovered": bool(recovery.get("recovered")),
                 "crash_count": int(recovery.get("crash_count") or 0),
+                "crash_timestamps": list(recovery.get("crash_timestamps") or []),
                 "degraded_mode": bool(recovery.get("degraded_mode")),
+                "resume_pending_revalidation": bool(recovery.get("resume_pending_revalidation")),
+                "last_tick_exception": recovery.get("last_tick_exception"),
             },
         },
         "task_config": task_config,
         "langfuse": _langfuse_projection(langfuse),
-        "warnings": list(warnings),
     }
+    metadata = _overlay_recorded(projected, recorded)
+    # ``elapsed_minutes`` is measured, not recorded: the recorder snapshots the
+    # anchor and the end, and the span between them is only known once both are
+    # resolved -- which for a still-running session is at export.
+    metadata["session"]["elapsed_minutes"] = session_elapsed_minutes(metadata["session"])
+    return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+
+
+def _overlay_recorded(projected: dict[str, Any], recorded: Any) -> dict[str, Any]:
+    """Overlay recorded leaves onto the projection, keeping projected fallbacks.
+
+    An empty recorded value is absence of evidence and never overwrites a
+    projected one, but it does land on a key the projection has no source for.
+    """
+    merged = {key: dict(value) if isinstance(value, dict) else value for key, value in projected.items()}
+    if not isinstance(recorded, dict) or not recorded:
+        return merged
+    for block, value in recorded.items():
+        if not isinstance(value, dict):
+            continue
+        target = merged.get(block)
+        merged[block] = _overlay_leaves(target, value) if isinstance(target, dict) else dict(value)
+    return merged
+
+
+def _overlay_leaves(target: dict[str, Any], recorded: dict[str, Any]) -> dict[str, Any]:
+    """Leaf-wise overlay of ``recorded`` onto ``target`` (recursing into dicts)."""
+    merged = dict(target)
+    for key, value in recorded.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _overlay_leaves(merged[key], value)
+        elif _recorded_leaf(value) or key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _recorded_leaf(value: Any) -> bool:
+    """Whether a recorded leaf carries evidence (``0`` / ``""`` / ``None`` do not)."""
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return not (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
 
 
 def _dict_value_rows(value: Any) -> list[dict[str, Any]]:

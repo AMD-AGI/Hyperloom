@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
     forge_steps_path,
@@ -1472,11 +1473,17 @@ class LangfuseEmitter:
 
         Best-effort: a failed write must never break shutdown. The breakdown
         collector prefers this file over a live read of the singleton.
+
+        Every persistence point funnels through here, so recording the
+        breakdown's ``metadata.langfuse`` block alongside the receipt keeps the
+        two from ever disagreeing -- including on the disabled path, where the
+        receipt exists only to explain why nothing was pushed.
         """
+        receipt = self.receipt()
         try:
             atomic_write_json(
                 _receipt_path(self.session_dir),
-                _stamp_receipt_hash(self.receipt()),
+                _stamp_receipt_hash(receipt),
                 indent=2,
                 sort_keys=True,
                 make_parents=True,
@@ -1485,6 +1492,7 @@ class LangfuseEmitter:
             )
         except Exception:  # noqa: BLE001
             log.debug("langfuse: receipt write failed", exc_info=True)
+        record_metadata_langfuse(self.session_dir, receipt)
 
 
 # Process-wide singleton registry (one emitter per session_dir).

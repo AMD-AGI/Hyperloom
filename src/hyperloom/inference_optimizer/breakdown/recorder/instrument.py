@@ -49,6 +49,7 @@ from ..agent_ownership import (
     patch_lever_kind,
 )
 from ..critic_reviews import normalize_framework_reviews
+from .session_metadata import snapshot_metadata
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -952,6 +953,7 @@ def snapshot_state_sections(
 
     for name, fn in (
         ("session", _snapshot_session),
+        ("metadata", snapshot_metadata),
         ("explore_search", _snapshot_explore_search),
         ("optimization_stack", _snapshot_optimization_stack),
         ("roofline", _snapshot_roofline),

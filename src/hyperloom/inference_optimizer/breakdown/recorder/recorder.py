@@ -82,6 +82,13 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "artifacts": "item",
     "trace_events": "item",
     "session": "singleton",
+    # SBD v6 task identity. Written at the moment each fact is decided --
+    # identity and image when the manifest is stamped, the model architecture
+    # when the model's config is parsed, session lifecycle on every state
+    # save, and the Langfuse receipt when the emitter settles -- so the
+    # exporter never has to re-derive any of it. ``versions.tools`` is folded
+    # in from the ``versions`` item stream at assembly.
+    "metadata": "singleton",
     "workload": "singleton",
     "baseline": "singleton",
     "final": "singleton",

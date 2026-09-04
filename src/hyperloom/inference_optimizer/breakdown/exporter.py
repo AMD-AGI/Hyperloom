@@ -625,6 +625,7 @@ def build(
             versions=versions,
             state=state,
             warnings=v6_warnings,
+            recorded=assembled.get("metadata"),
         ),
         v6_warnings,
         default={},

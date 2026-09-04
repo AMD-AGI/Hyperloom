@@ -2779,6 +2779,15 @@ class Integrity(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
 
 
+class V6ToolVersion(TypedDict, total=False):
+    """One external tool's recorded provenance."""
+
+    tool: str
+    root_dir: str
+    commit: str
+    version: str
+
+
 class V6MetadataVersions(TypedDict, total=False):
     """Version identifiers projected into V6 metadata."""
 
@@ -2786,7 +2795,18 @@ class V6MetadataVersions(TypedDict, total=False):
     hyperloom: str
     framework: str | None
     framework_version: str | None
-    tools: dict[str, str | None]
+    tools: dict[str, V6ToolVersion]
+
+
+class V6MetadataRecovery(TypedDict, total=False):
+    """Crash / interruption / resume history for the session."""
+
+    recovered: bool
+    crash_count: int
+    crash_timestamps: list[str]
+    degraded_mode: bool
+    resume_pending_revalidation: bool
+    last_tick_exception: dict[str, Any] | None
 
 
 class V6MetadataSession(TypedDict, total=False):
@@ -2803,10 +2823,38 @@ class V6MetadataSession(TypedDict, total=False):
     user_data_path: str
     code_revision: str
     pid: int
+    image: str | None
+    image_id: str | None
     max_minutes: int
     elapsed_minutes: float
     tick_count: int
-    recovery: dict[str, Any]
+    recovery: V6MetadataRecovery
+
+
+class V6ModelArchitecture(TypedDict, total=False):
+    """Structural model summary parsed from the model's own config."""
+
+    model_class: str
+    model_family: str
+    model_type: str
+    architectures: list[str]
+    attention_type: str
+    num_hidden_layers: int | None
+    num_attention_heads: int | None
+    num_key_value_heads: int | None
+    head_dim: int | None
+    hidden_size: int | None
+    intermediate_size: int | None
+    max_position_embeddings: int | None
+    vocab_size: int | None
+    torch_dtype: str
+    kv_cache_dtype: str
+    quantization: str
+    is_moe: bool | None
+    num_experts: int | None
+    num_experts_per_tok: int | None
+    has_shared_expert: bool | None
+    num_shared_experts: int | None
 
 
 class V6TaskConfig(TypedDict, total=False):
@@ -2826,7 +2874,18 @@ class V6TaskConfig(TypedDict, total=False):
     objective: dict[str, Any]
     launch_env: dict[str, str]
     launch_server_args: str
-    architecture: dict[str, Any]
+    architecture: V6ModelArchitecture
+
+
+class V6MetadataLangfuse(TypedDict, total=False):
+    """Live-Langfuse trace entrypoint and push receipt."""
+
+    enabled: bool
+    disabled_reason: str | None
+    trace_id: str | None
+    session_id: str | None
+    trace_url: str | None
+    counts: dict[str, int]
 
 
 class V6Metadata(TypedDict, total=False):
@@ -2836,7 +2895,7 @@ class V6Metadata(TypedDict, total=False):
     versions: V6MetadataVersions
     session: V6MetadataSession
     task_config: V6TaskConfig
-    langfuse: dict[str, Any]
+    langfuse: V6MetadataLangfuse
     warnings: list[str]
 
 
@@ -4309,8 +4368,12 @@ __all__ = [
     "TokenUsageBucket",
     "TokenUsageTimelineEntry",
     "V6Metadata",
+    "V6MetadataLangfuse",
+    "V6MetadataRecovery",
     "V6MetadataSession",
     "V6MetadataVersions",
+    "V6ModelArchitecture",
+    "V6ToolVersion",
     "V6Close",
     "V6KBWriteBackExt",
     "V6KernelAdoptedRow",

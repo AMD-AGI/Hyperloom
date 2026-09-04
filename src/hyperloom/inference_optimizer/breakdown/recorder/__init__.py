@@ -121,6 +121,11 @@ from .recorder import (
     recorder_for,
     section_shape,
 )
+from .session_metadata import (
+    record_metadata_identity,
+    record_metadata_langfuse,
+    snapshot_metadata,
+)
 
 __all__ = [
     "BASELINE_EVENT_SECTIONS",
@@ -181,6 +186,8 @@ __all__ = [
     "record_geak_operation",
     "record_gemm_tuning_operation",
     "record_measurement",
+    "record_metadata_identity",
+    "record_metadata_langfuse",
     "record_operation",
     "record_phase_event",
     "record_phase_transition",
@@ -194,6 +201,7 @@ __all__ = [
     "recorder_for",
     "residual_events",
     "rows_for_event",
+    "snapshot_metadata",
     "snapshot_state_sections",
     "section_shape",
     "sort_rows",
