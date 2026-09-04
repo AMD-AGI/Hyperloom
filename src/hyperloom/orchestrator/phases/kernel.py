@@ -4787,6 +4787,18 @@ class KernelPhase(PhaseHandler):
         verdict. Readers must treat the two as one run only when the ids match.
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
+            from ..kernel.nomination_result import parse_outcome
+
+            skew = parse_outcome(result).schema_error
+            if skew:
+                # A KEEP whose envelope the contract cannot read judged nothing, so
+                # it is reported as infrastructure rather than latching the lane.
+                result["status"] = "failed"
+                result["error_class"] = "nomination_envelope_skew"
+                result["error"] = skew
+                result["infrastructure_abort"] = True
+                status = "failed"
         if isinstance(result, dict) and result.get("infrastructure_abort"):
             # Counted on the session, not on the record: ``last_fusion`` is
             # replaced by every run, so a timeout or a handler crash landing
