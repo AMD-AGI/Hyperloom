@@ -406,7 +406,6 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     assert "blank-anchor" in caplog.text
 
 
-
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --
 
 

@@ -351,13 +351,12 @@ def test_glossary_present_and_documents_efficiency_pct(tmp_path: Path) -> None:
     assert "backend_ladder" in out["field_glossary"]
 
 
-def test_takeaway_keeps_the_generic_line_without_a_recorded_reason(tmp_path: Path) -> None:
-    """No breadcrumb => the original wording stays (nothing to name)."""
+def test_takeaway_claims_nothing_about_lanes_that_do_not_report_here(tmp_path: Path) -> None:
+    """An empty ledger is silence, not a verdict on the workload."""
     state = _make_state(top15=[])
     out = build_kernel_optimization_summary(state, tmp_path)
     joined = " ".join(out["top_takeaways"])
-    assert "No kernels were attempted" in joined
-    assert "no candidates qualified" in joined
+    assert "No kernels were attempted through the lanes recorded here." in joined
 
 
 def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:

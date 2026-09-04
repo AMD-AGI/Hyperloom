@@ -4084,7 +4084,6 @@ class KernelPhase(PhaseHandler):
             )
         )
 
-
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry.
 

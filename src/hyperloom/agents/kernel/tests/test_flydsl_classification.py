@@ -275,8 +275,6 @@ class TestKernelCategoryDerivation(unittest.TestCase):
         )
 
 
-
-
 class TestFlyDSLKernelParams(unittest.TestCase):
     """FlyDSL-specific metadata enrichment for GEAK prompt construction."""
 
@@ -451,8 +449,6 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
             source_type_for("pseudo_op::moe_fused_aiter", ""),
             "unknown",
         )
-
-
 
 
 if __name__ == "__main__":

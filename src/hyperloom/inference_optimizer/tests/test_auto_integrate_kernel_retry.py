@@ -16,6 +16,8 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import seed_kernel_keep
+
 
 def _ok_result(
     kernel_id: str,
@@ -117,14 +119,13 @@ def test_integrate_attempt_count_sums_across_patch_keys():
 @pytest.mark.asyncio
 async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -140,14 +141,13 @@ async def test_auto_enqueue_dispatches_pending_keep_once_then_guards_inflight():
 @pytest.mark.asyncio
 async def test_auto_enqueue_retries_unexhausted_fault():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -177,14 +177,13 @@ async def test_auto_enqueue_retries_unexhausted_fault():
 @pytest.mark.asyncio
 async def test_auto_enqueue_stops_after_fault_budget_exhausted():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -213,14 +212,13 @@ async def test_auto_enqueue_stops_after_fault_budget_exhausted():
 @pytest.mark.asyncio
 async def test_auto_enqueue_no_redispatch_after_keep():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 
@@ -256,14 +254,13 @@ async def test_auto_enqueue_no_redispatch_after_keep():
 @pytest.mark.asyncio
 async def test_auto_enqueue_no_redispatch_after_genuine_revert():
     state = SharedState()
-    state.record_kernel_opt(
-        _ok_result(
-            "k001",
-            "KEEP",
-            3.0,
-            source_file="/p/a.py",
-            artifact="/tmp/k001_opt.py",
-        )
+    seed_kernel_keep(
+        state,
+        "k001",
+        decision="KEEP",
+        micro=3.0,
+        source_file="/p/a.py",
+        artifact="/tmp/k001_opt.py",
     )
     coord = _coord(state)
 

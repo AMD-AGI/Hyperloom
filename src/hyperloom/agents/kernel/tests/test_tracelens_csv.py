@@ -105,7 +105,6 @@ def test_dry_run_writes_the_source_resolution_artifact(
     assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
 
 
-
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked first in the buggy resume trace."""
@@ -3937,7 +3936,6 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert "(640,2880) bf16" in g["rows"][1]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
-
 
 
 def test_aggregate_drops_empty_prose_entries(tmp_path):

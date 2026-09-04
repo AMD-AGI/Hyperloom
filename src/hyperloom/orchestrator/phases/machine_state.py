@@ -1933,7 +1933,6 @@ def collective_integration_pending(state: Any) -> bool:
     return kept and cleanup != "complete"
 
 
-
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 

@@ -20,7 +20,6 @@ from hyperloom.common.codex_session import (
     DEFAULT_CODEX_SANDBOX_MODE,
 )
 from hyperloom.common.env import is_truthy
-from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.roles.agent_role import (
@@ -3102,7 +3101,6 @@ class TestReusableSourceRootsAtom:
         assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
 
 
-
 class TestRunGemmTuningHandler:
     def test_resolves_split_aiter_meta_root_for_forge(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
@@ -5329,138 +5327,6 @@ class TestTracelensRootResolution:
             _sys.modules.pop("tracelens_analysis", None)
         assert called["n"] == 1
         assert called["root"] == default_root
-
-
-class TestKernelOptArtifactBundleRecording:
-    def test_materialize_unified_patch_snapshot_for_forge_fusion_patch(self, tmp_path):
-        repo = tmp_path / "framework"
-        repo.mkdir()
-        (repo / "model.py").write_text("old = 1\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-        subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "base"],
-            check=True,
-        )
-        # The live tree is already dirty; snapshot materialization must start from HEAD.
-        (repo / "model.py").write_text("new = 2\n", encoding="utf-8")
-        (repo / "model_fused.py").write_text("fused = True\n", encoding="utf-8")
-        patch = tmp_path / "fusion.patch"
-        patch.write_text(
-            "\n".join(
-                [
-                    "diff --git a/model.py b/model.py",
-                    "--- a/model.py",
-                    "+++ b/model.py",
-                    "@@ -1 +1 @@",
-                    "-old = 1",
-                    "+new = 2",
-                    "diff --git a/model_fused.py b/model_fused.py",
-                    "new file mode 100644",
-                    "index 0000000..1111111",
-                    "--- /dev/null",
-                    "+++ b/model_fused.py",
-                    "@@ -0,0 +1 @@",
-                    "+fused = True",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        snap = Path(
-            krh.materialize_unified_patch_snapshot(
-                patch_path=patch,
-                repo_root=repo,
-                snapshot_dir=tmp_path / "snapshot",
-            )
-        )
-
-        assert (snap / "model.py").read_text(encoding="utf-8") == "new = 2\n"
-        assert (snap / "model_fused.py").read_text(encoding="utf-8") == "fused = True\n"
-        assert (repo / "model.py").read_text(encoding="utf-8") == "new = 2\n"
-
-    def test_record_kernel_opt_persists_best_artifact_bundle(self):
-        state = SharedState()
-        bundle = {
-            "type": "patch_snapshot",
-            "snapshot_dir": "/tmp/snap",
-            "patch_path": "/tmp/best.patch",
-            "repo_root": "/repo",
-            "write_paths": ["aiter/ops/moe.py", "benchmarks/bench_moe.py"],
-            "delete_paths": [],
-        }
-        kd.record_kernel_opt(
-            state,
-            {
-                "status": "completed",
-                "kernel_id": "k001",
-                "source_file": "/repo/aiter/ops/moe.py",
-                "verification": {
-                    "micro_speedup": 1.25,
-                    "compile_passed": True,
-                    "correctness_passed": True,
-                    "best_backend": "forge",
-                    "best_artifact_path": "/repo/aiter/ops/moe.py",
-                    "best_artifact_bundle": bundle,
-                    "deploy_snapshot_dir": "/tmp/snap",
-                    "deploy_patch_path": "/tmp/best.patch",
-                    "deploy_repo_root": "/repo",
-                },
-                "proposal": {"decision": "KEEP", "reasons": ["ok"]},
-            },
-        )
-
-        assert state.kernel_opt_attempts["k001"]["last_artifact_bundle"] == bundle
-        assert state.last_kernel_opt["best_artifact_bundle"] == bundle
-
-    def test_resolve_integrate_payload_uses_last_kernel_artifact_bundle(self, tmp_path):
-        bundle = {
-            "type": "patch_snapshot",
-            "snapshot_dir": "/tmp/snap",
-            "patch_path": "/tmp/best.patch",
-            "repo_root": "/repo",
-        }
-        state = SharedState.load_or_init(tmp_path)
-        state.last_kernel_opt = {
-            "kernel_id": "k001",
-            "source_file": "/repo/aiter/ops/moe.py",
-            "best_artifact_bundle": bundle,
-        }
-        state.save(tmp_path)
-
-        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k001"}, session_dir=tmp_path)
-
-        assert error is None
-        assert resolved["snapshot_dir"] == "/tmp/snap"
-        assert resolved["patch_path"] == "/tmp/best.patch"
-        assert resolved["kernel_repo"] == "/repo"
-        assert resolved["source_file"] == "/repo/aiter/ops/moe.py"
-
-    def test_resolve_integrate_payload_uses_per_kernel_artifact_bundle(self, tmp_path):
-        bundle = {
-            "type": "patch_snapshot",
-            "snapshot_dir": "/tmp/snap2",
-            "patch_path": "/tmp/queued.patch",
-            "repo_root": "/repo2",
-        }
-        state = SharedState.load_or_init(tmp_path)
-        state.last_kernel_opt = {"kernel_id": "other"}
-        state.kernel_opt_attempts = {
-            "k002": {
-                "last_source_file": "/repo2/aiter/ops/queued.py",
-                "last_artifact_bundle": bundle,
-            }
-        }
-        state.save(tmp_path)
-
-        resolved, error = krh._resolve_integrate_payload({"kernel_id": "k002"}, session_dir=tmp_path)
-
-        assert error is None
-        assert resolved["snapshot_dir"] == "/tmp/snap2"
-        assert resolved["patch_path"] == "/tmp/queued.patch"
-        assert resolved["kernel_repo"] == "/repo2"
-        assert resolved["source_file"] == "/repo2/aiter/ops/queued.py"
 
 
 class TestBuildTraceAnalyzeCmd:

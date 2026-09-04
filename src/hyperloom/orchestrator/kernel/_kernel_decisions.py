@@ -153,7 +153,6 @@ def _queue_kernel_keep(
     """Persist one KEEP patch snapshot without coupling it to an ordinal slot."""
     if entry.get("vendor_playbook_deploy_blocked"):
         # A vendor-playbook KEEP has no deployable artifact -- see
-        # record_kernel_opt()'s comment (PR #1191 review finding #1).
         # Refusing to queue it here means _auto_enqueue_pending_integrations()
         # never dispatches an integrate for it; integrate_handler() still
         # checks this flag independently for an LLM-initiated request that

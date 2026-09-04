@@ -302,8 +302,6 @@ _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
 
-
-
 _CANDIDATE_ENV_KEYS = {
     "CONC",
     "ISL",
@@ -448,10 +446,6 @@ def _kernel_agent_tool_path(tool_name: str) -> Path:
     if not path.is_file():
         raise RuntimeError(f"kernel-agent tool not found: {path}")
     return path
-
-
-
-
 
 
 def _coerce_runtime_value(value: Any) -> Any:
@@ -684,10 +678,6 @@ def _enrich_candidates_artifact(
             trace_report_path,
         )
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-
-
 
 
 def _load_apply_tool() -> Any:
@@ -6023,20 +6013,10 @@ async def trace_analyze_handler(
     return result
 
 
-
-
-
-
 #: Rewrite targets forge can actually execute in one ``--auto`` call. Running
 #: several needs a per-target base commit and scratch path, so its CLI refuses
 #: more than one; asking for what the budget funds would fail the whole lane.
 _REWRITE_EXECUTABLE_TARGETS = 1
-
-
-
-
-
-
 
 
 def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
@@ -6056,18 +6036,6 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
             reason,
         )
     return counts
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
@@ -6099,38 +6067,6 @@ def geak_selected(payload: dict | None = None) -> bool:
         bool: ``True`` when ``geak`` is in the resolved order.
     """
     return "geak" in _raw_kernel_backend_order(payload)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:

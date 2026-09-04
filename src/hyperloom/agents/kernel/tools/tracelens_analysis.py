@@ -4908,8 +4908,6 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     )
 
 
-
-
 def _forward_to_log(message: str) -> None:
     """Adapter so the resolution tiers' own diagnostics reach the logger.
 
@@ -5425,8 +5423,6 @@ _SOURCE_DERIVED_METADATA = (
     # the same pass, since _stamp_candidate_metadata re-runs the playbook match.
     "source_file_superseded_by_playbook",
 )
-
-
 
 
 def write_source_resolution_artifact(
@@ -6543,8 +6539,6 @@ def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
     if demangled and demangled != raw:
         row["device_kernel_name_demangled"] = demangled
     return row
-
-
 
 
 def write_reports(

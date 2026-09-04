@@ -19,6 +19,8 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import PolicyDenied
+
+from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
@@ -100,20 +102,14 @@ def _seed_kernel_opt_state(
     source_file: str = "/p/dummy.py",
     artifact: str = "/tmp/dummy.py",
 ) -> None:
-    """Mimic the streaming-record write path (PR-B) so the integrate gate fires realistically."""
-    coord.shared_state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": kernel_id,
-            "source_file": source_file,
-            "proposal": {"decision": decision, "reasons": []},
-            "verification": {
-                "micro_speedup": micro,
-                "best_artifact_path": artifact,
-                "compile_passed": True,
-                "correctness_passed": True,
-            },
-        }
+    """Queue one KEEP the way its surviving producer does, so the gate fires realistically."""
+    seed_kernel_keep(
+        coord.shared_state,
+        kernel_id,
+        decision=decision,
+        micro=micro,
+        source_file=source_file,
+        artifact=artifact,
     )
 
 

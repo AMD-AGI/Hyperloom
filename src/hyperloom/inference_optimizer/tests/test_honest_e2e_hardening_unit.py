@@ -251,5 +251,3 @@ def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
         "rejected_reason": "",
         "last_gpu_pct": gpu_pct,
     }
-
-

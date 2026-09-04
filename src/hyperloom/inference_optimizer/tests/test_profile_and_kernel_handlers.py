@@ -19,6 +19,8 @@ from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import model_gate as cli_model_gate
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.orchestrator.kernel import request_handlers as krh
+
+from .conftest import seed_kernel_keep
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     _default_baseline_config,
@@ -3507,27 +3509,22 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
     )
     assert state.last_trace_analyze.get("task_groups") == groups
     # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
-    state.record_kernel_opt(
-        {
-            "status": "failed",
-            "kernel_id": "k002",
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-            "error_class": "subtask_exception",
-        }
+    seed_kernel_keep(
+        state,
+        "k002",
+        decision="REVERT",
+        micro=0.0,
+        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        task_group_key="k002",
     )
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k004",
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-            "proposal": {"decision": "KEEP", "reasons": []},
-            "verification": {
-                "micro_speedup": 1.17,
-                "compile_passed": True,
-                "correctness_passed": True,
-                "best_artifact_path": "/tmp/k004.py",
-            },
-        }
+    seed_kernel_keep(
+        state,
+        "k004",
+        decision="KEEP",
+        micro=1.17,
+        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
+        artifact="/tmp/k004.py",
+        task_group_key="k004",
     )
     assert state.untried_hot_reusable_kernels() == [], (
         "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"

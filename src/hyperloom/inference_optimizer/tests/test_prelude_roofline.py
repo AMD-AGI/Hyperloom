@@ -687,5 +687,3 @@ async def _latch_after(coord: Coordinator, monkeypatch, handler) -> Any:
     await coord.phase_kernel._run_kernel_opt_nomination()
 
     return coord.shared_state.kernel_auto_pass_cycle
-
-
