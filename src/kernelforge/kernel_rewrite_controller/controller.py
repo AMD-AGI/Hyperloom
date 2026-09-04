@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
@@ -189,8 +190,7 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
     if state.recovery_failures:
         lines.extend(["## Unpublishable Validated Results", ""])
         lines.extend(
-            f"- `{failure.get('operator_id', '')}` @ `{failure.get('best_commit', '')}`: "
-            f"{failure.get('reason', '')}"
+            f"- `{failure.get('operator_id', '')}` @ `{failure.get('best_commit', '')}`: {failure.get('reason', '')}"
             for failure in state.recovery_failures
         )
         lines.append("")

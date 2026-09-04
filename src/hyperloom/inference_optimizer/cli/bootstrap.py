@@ -661,10 +661,7 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
             return
         integrated = int(totals.get("integrated") or 0)
         rejected = int(totals.get("rejected") or 0)
-        print(
-            f"  kernel_opt           : {attempted} attempted "
-            f"({integrated} integrated, {rejected} rejected)"
-        )
+        print(f"  kernel_opt           : {attempted} attempted ({integrated} integrated, {rejected} rejected)")
         takeaways = summary.get("top_takeaways") or []
         if len(takeaways) >= 2:
             print(f"  kernel_opt_top_cause : {takeaways[1]}")

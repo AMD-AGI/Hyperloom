@@ -265,9 +265,7 @@ async def integrate_controller_patches(
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="skipped_baseline_mismatch",
-                reason=(
-                    f"repository {repo} is pinned to controller base {pinned_bases[repo]} for this integration"
-                ),
+                reason=f"repository {repo} is pinned to controller base {pinned_bases[repo]} for this integration",
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),

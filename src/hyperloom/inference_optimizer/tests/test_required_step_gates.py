@@ -239,5 +239,3 @@ def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
 
     assert get_handler("select_kernels") is None
     assert get_handler("trace_analyze") is not None
-
-
