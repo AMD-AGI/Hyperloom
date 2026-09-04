@@ -204,7 +204,6 @@ _PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*
 
 # Editable source extensions: native device code plus repo-resident Triton .py.
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
-_PY_DIST_ROOT = "/usr/local/lib/python3.12/dist-packages/"
 
 # Active-finder resolver: resolve a kernel to its editable source in the
 # *currently installed* framework tree by demangling its device symbol. This is
@@ -916,21 +915,6 @@ def _check_selected_chunk_has_gpu_events_quality(
     }
 
 
-KERNEL_HINTS = (
-    "kernel",
-    "triton",
-    "hip",
-    "cuda",
-    "rocblas",
-    "hipblas",
-    "aiter",
-    "fmha",
-    "gemm",
-    "attention",
-    "moe",
-    "rmsnorm",
-    "layernorm",
-)
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
     "hipdevicesynchronize",

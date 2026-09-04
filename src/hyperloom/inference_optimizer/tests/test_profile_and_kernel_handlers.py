@@ -4301,7 +4301,7 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
     _gates = {kid: asyncio.Event() for kid in ("kA", "kB", "kC")}
     _release_after = {"kB": "kC", "kC": "kA"}  # kB done -> release kC -> release kA
 
-    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+    async def fake_sequence(base_payload, candidate, *, session_dir):
         kid = str(candidate.get("kernel_id"))
         if kid != "kB":
             # kC and kA wait until their predecessor signals completion.
@@ -4334,7 +4334,6 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
                 # monkeypatched sequence below is what this test exercises.
                 "backend_order": "synthetic",
                 "max_parallel": 3,
-                "parallel_backends": False,
             },
             candidates=candidates,
             session_dir=session_dir,
@@ -4348,12 +4347,12 @@ async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
 
 
 @pytest.mark.asyncio
-async def test_backend_ladder_breaks_on_first_keep(session_dir, monkeypatch):
-    """When forge already KEEPs, the ladder short-circuits."""
+async def test_backend_sequence_runs_single_forge_attempt(session_dir, monkeypatch):
+    """Explicit per-kernel mode dispatches exactly one Forge attempt."""
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     calls: list[str] = []
 
-    async def fake_single(child, *, session_dir, timeout_override_sec=None):
+    async def fake_single(child, *, session_dir):
         backend = child["backends"]
         calls.append(backend)
         if backend == "forge":
@@ -4367,7 +4366,7 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir, monkeypatch):
                     "best_artifact_path": "/tmp/forge.py",
                 },
             }
-        raise AssertionError(f"ladder must NOT run {backend!r} after forge KEEP")
+        raise AssertionError(f"unexpected backend {backend!r}")
 
     with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
         best = await krh._run_kernel_backend_sequence(
@@ -4382,57 +4381,36 @@ async def test_backend_ladder_breaks_on_first_keep(session_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_backend_sequence_forge_keep_short_circuits(session_dir, monkeypatch):
-    """Forge runs first and a KEEP short-circuits before GEAK fallback.
+async def test_backend_sequence_requires_explicit_forge(session_dir, monkeypatch):
+    """The per-kernel path stays disabled while GEAK owns the phase."""
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
 
-    Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
-    the short-circuit must inspect the KEEP slot instead of comparing the tuple
-    directly to int 0.
-    """
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    calls: list[str] = []
+    async def unexpected_single(*args, **kwargs):
+        raise AssertionError("per-kernel backend must not run in GEAK mode")
 
-    async def fake_single(child, *, session_dir, timeout_override_sec=None):
-        backend = child["backends"]
-        calls.append(backend)
-        if backend == "forge":
-            return {
-                "status": "ok",
-                "kernel_id": child["kernel_id"],
-                "proposal": {"decision": "KEEP", "reasons": []},
-                "verification": {"micro_speedup": 1.05, "best_artifact_path": "/tmp/forge.py"},
-            }
-        raise AssertionError(f"forge KEEP must short-circuit before {backend!r}")
-
-    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
-        best = await krh._run_kernel_backend_sequence(
-            {"candidates_path": "/dummy", "backend_order": "forge"},
+    with patch.object(krh, "_run_optimization_single", side_effect=unexpected_single):
+        result = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy"},
             {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
             session_dir=session_dir,
-            parallel_backends=True,
         )
 
-    assert calls == ["forge"]
-    assert (best.get("proposal") or {}).get("decision") == "KEEP"
-    assert best["batch_kernel_id"] == "k004"
-    assert {a["backend"] for a in best["backend_fallback_attempts"]} == {"forge"}
+    assert result["status"] == "failed"
+    assert result["batch_kernel_id"] == "k004"
 
 
 @pytest.mark.asyncio
-async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
+async def test_batch_serializes_explicit_forge(session_dir, monkeypatch):
     """Forge in-place editing is repo-global, so batch concurrency is capped at 1.
 
-    Even when GPU-rich mode says parallel backends are available, multiple
-    kernels must not race forge against other backends in the same live repo.
+    Multiple kernels must not race Forge edits in the same live repo.
     """
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     active = 0
     max_active = 0
-    seen_flags: list[bool] = []
 
-    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+    async def fake_sequence(base_payload, candidate, *, session_dir):
         nonlocal active, max_active
-        seen_flags.append(parallel_backends)
         active += 1
         max_active = max(max_active, active)
         await asyncio.sleep(0.01)
@@ -4444,7 +4422,6 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
             "verification": {"micro_speedup": 1.0},
         }
 
-    monkeypatch.setattr(krh, "_should_parallelize_backends", lambda payload, n: True)
     monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
 
     out = await krh._run_optimization_batch(
@@ -4457,25 +4434,21 @@ async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
     )
 
     assert max_active == 1
-    assert seen_flags == [True, True]
-    assert out["parallel_backends"] is True
+    assert out["backend_order"] == ["forge"]
 
 
 @pytest.mark.asyncio
-async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
-    """``_run_optimization_batch`` computes the GPU-rich decision once,
-    threads it into every ``_run_kernel_backend_sequence`` call, and
-    surfaces it on the aggregate result for observability."""
-    seen_flags: list[bool] = []
+async def test_batch_has_no_removed_backend_parallel_metadata(session_dir):
+    """Batch results expose kernel concurrency, not the removed backend knob."""
+    calls: list[str] = []
 
     async def fake_sequence(
         base_payload,
         candidate,
         *,
         session_dir,
-        parallel_backends=False,
     ):
-        seen_flags.append(parallel_backends)
+        calls.append(candidate["kernel_id"])
         return {
             "status": "ok",
             "kernel_id": candidate["kernel_id"],
@@ -4488,10 +4461,6 @@ async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
         {"kernel_id": "k1", "source_file": "/p/a.py", "reusable_native_kernel": True},
         {"kernel_id": "k2", "source_file": "/p/b.py", "reusable_native_kernel": True},
     ]
-    # Force the decision deterministically (no real GPUs under CI); the
-    # env override short-circuits the torch/GPU math in
-    # ``_should_parallelize_backends``.
-    monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
     with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
         out = await krh._run_optimization_batch(
             payload={"candidates_path": "/dummy", "max_parallel": 2},
@@ -4499,8 +4468,9 @@ async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
             session_dir=session_dir,
         )
 
-    assert seen_flags == [True, True], seen_flags
-    assert out["parallel_backends"] is True
+    assert calls == ["k1", "k2"]
+    assert out["max_parallel"] == 2
+    assert set(out) >= {"batch_mode", "backend_order", "batch_results"}
 
 
 @pytest.mark.asyncio
@@ -4517,7 +4487,7 @@ async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
     recorded: list[dict] = []
     completion_order: list[str] = []
 
-    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+    async def fake_sequence(base_payload, candidate, *, session_dir):
         kid = str(candidate.get("kernel_id"))
         if kid == "kFast":
             await asyncio.sleep(0.01)

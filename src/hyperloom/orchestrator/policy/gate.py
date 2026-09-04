@@ -138,9 +138,6 @@ SPECIALIST_ACTION_NAME: str = "specialist"
 # Orchestrator-side patch integration step (gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
-# Merged explore action.
-EXPLORE_ACTION_NAME: str = "explore"
-
 # GEMM tuning action; the hook that guards it is called for every action, so it
 # needs its own name to answer only for itself.
 GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"

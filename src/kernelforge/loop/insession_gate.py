@@ -524,7 +524,6 @@ class InSessionGate:
         self.target_abs = {os.path.normpath(os.path.abspath(f)) for f in targets if f}
         # Kept for logging/back-compat (the anchor file).
         self.kernel_abs = os.path.normpath(os.path.abspath(kernel_file)) if kernel_file else ""
-        self.kernel_base = os.path.basename(kernel_file) if kernel_file else ""
 
         # Per-session mutable state.
         self.edit_count = 0
@@ -536,7 +535,6 @@ class InSessionGate:
         self.last_wall_ms: float | None = None
         self.last_mean_case_speedup: float | None = None
         self.last_bench_result: dict | None = None
-        self.last_reason = ""
         # Why the gate ALLOWED the session to stop (set once, at an allow path):
         #   "converged"              — correct AND faster than best; a real win.
         #   "block_budget_exhausted" — max_blocks blocked stops spent; hand off to
@@ -588,7 +586,6 @@ class InSessionGate:
             for key, state in self._protected_baseline.items()
             if state.kind in {"file", "symlink"} and not state.error
         }
-        self._last_protected_states = dict(self._protected_baseline)
         self.integrity_verdict = "violation" if self._protected_snapshot_errors else "unknown"
         self.integrity_reason = "; ".join(self._protected_snapshot_errors)
         self.integrity_violation = bool(self._protected_snapshot_errors)
@@ -837,21 +834,10 @@ class InSessionGate:
                 errors.append(state.error)
         return out, errors
 
-    def _snapshot_protected_files(self) -> dict[str, str]:
-        """Return the current digest view retained for compatibility and tests."""
-
-        states, _errors = self._snapshot_protected_states(
-            include_baseline=hasattr(self, "_protected_baseline"),
-        )
-        return {
-            key: state.digest for key, state in states.items() if state.kind in {"file", "symlink"} and not state.error
-        }
-
     def _protected_changes(self) -> str:
         current, current_errors = self._snapshot_protected_states(
             include_baseline=True,
         )
-        self._last_protected_states = current
         before = self._protected_baseline
         errors = [*self._protected_snapshot_errors, *current_errors]
         modified: list[str] = []
@@ -1263,14 +1249,12 @@ class InSessionGate:
 
     def _block(self, reason: str) -> dict:
         self.block_count += 1
-        self.last_reason = reason
         # Keep a trimmed record for the experience ledger (cap each entry).
         self.findings.append(reason.strip()[:1200])
         return {"decision": "block", "reason": reason}
 
     def _harness_block(self, reason: str) -> dict:
         """Block a stop for unrestored harness tampering (does not eat perf budget)."""
-        self.last_reason = reason
         self.findings.append(reason.strip()[:1200])
         return {"decision": "block", "reason": reason}
 

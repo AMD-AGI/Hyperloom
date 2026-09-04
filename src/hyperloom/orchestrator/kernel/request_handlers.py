@@ -312,8 +312,6 @@ _DEFAULT_KERNEL_BATCH_PARALLEL = 8
 # optimized" rather than "the kernel was tried once". 90 leaves ~45 usable
 # minutes, enough for a second iteration to act on what the first measured.
 _DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
-# Minimum wall-clock a fallback backend needs; below this the ladder stops.
-_KERNEL_LADDER_MIN_BACKEND_SEC = 180
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
 # for large models with many GEMM shapes. Independent of the session --max-hours
 # budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
@@ -376,31 +374,6 @@ def _default_kernel_batch_parallel() -> int:
     if not n_gpus or n_gpus <= 0:
         return _DEFAULT_KERNEL_BATCH_PARALLEL
     return max(1, min(_DEFAULT_KERNEL_BATCH_PARALLEL, n_gpus // _per_task_gpus()))
-
-
-def _should_parallelize_backends(payload: dict, num_candidates: int) -> bool:
-    """Decide whether to run backend ladders in parallel per kernel.
-
-    With the ladder converged to a single forge backend there is no second
-    ladder to race, so the auto-derived default is always sequential. Operators
-    / tests can still force the flag via payload ``parallel_backends`` or env
-    ``KERNEL_OPT_PARALLEL_BACKENDS`` (truthy ``1/true/yes/on`` enables).
-
-    Args:
-        payload: Request payload; ``parallel_backends`` may force the choice.
-        num_candidates: Number of kernel candidates in this request.
-
-    Returns:
-        ``True`` only when explicitly forced on, else ``False``.
-    """
-    override = payload.get("parallel_backends")
-    if override is None:
-        raw_env = os.environ.get("KERNEL_OPT_PARALLEL_BACKENDS")
-        if raw_env is not None and raw_env.strip() != "":
-            override = raw_env
-    if override is not None:
-        return str(override).strip().lower() in {"1", "true", "yes", "on"}
-    return False
 
 
 _CANDIDATE_ENV_KEYS = {
@@ -6795,6 +6768,15 @@ async def run_optimization_handler(
     Returns:
         A ``HandlerResult`` describing the optimization outcome.
     """
+    if "kernel_budget_min" in payload or os.environ.get("KERNEL_OPT_KERNEL_BUDGET_MIN", "").strip():
+        return {
+            "status": "failed",
+            "error_class": "unsupported_option",
+            "error": (
+                "kernel_budget_min / KERNEL_OPT_KERNEL_BUDGET_MIN belonged to the removed "
+                "multi-backend ladder; use budget_minutes / KERNEL_OPT_BACKEND_BUDGET_MIN instead"
+            ),
+        }
     data_guard = _validate_trace_analyze_inputs(payload, session_dir=session_dir)
     if data_guard is not None:
         return data_guard
@@ -7002,43 +6984,6 @@ def geak_selected(payload: dict | None = None) -> bool:
         bool: ``True`` when ``geak`` is in the resolved order.
     """
     return "geak" in _raw_kernel_backend_order(payload)
-
-
-def _kernel_ladder_budget_sec(payload: dict) -> int:
-    """Total wall-clock budget for one kernel's whole backend ladder.
-
-    Bounds the whole ladder so a fallback only runs within the time left and an
-    exhausted budget exits cleanly, keeping the ladder from overshooting the
-    KERNEL-phase budget cap.
-
-    Priority: payload ``kernel_budget_min`` > env
-    ``KERNEL_OPT_KERNEL_BUDGET_MIN`` > the single-backend budget from
-    :func:`_optimization_budget_minutes`. A +180s grace mirrors the per-subprocess
-    wrapper so the first backend is never capped below its own timeout.
-
-    Args:
-        payload (dict): Request payload carrying optional ``kernel_budget_min``.
-
-    Returns:
-        int: The per-kernel ladder budget in seconds.
-    """
-    minutes = (
-        payload.get("kernel_budget_min")
-        or os.environ.get("KERNEL_OPT_KERNEL_BUDGET_MIN")
-        or _optimization_budget_minutes(payload)
-    )
-    return int(float(minutes) * 60) + 180
-
-
-def _backend_order(payload: dict) -> list[str]:
-    """Resolve the per-kernel backend ladder.
-
-    The per-kernel ladder is disabled unless forge is explicitly opted in via
-    ``KERNEL_OPT_BACKEND_ORDER=forge``.  GEAK owns the default whole KERNEL
-    phase, so request payloads and legacy aliases cannot select forge.
-    """
-    order = _raw_kernel_backend_order(payload)
-    return ["forge"] if order == ["forge"] else []
 
 
 def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
@@ -7689,8 +7634,7 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     (GEAK frequently reports a higher micro on a NEEDS_REVIEW that has no
     correctness gate, while a KEEP at a lower micro is a real
     integrate-ready patch); among equals, higher ``micro_speedup`` wins.
-    Mirrors the max-key in :func:`_run_optimization_batch` so the ladder,
-    the backend ladder and batch mode agree on "best".
+    Used as the max-key in :func:`_run_optimization_batch`.
 
     Args:
         result: A kernel-opt attempt result, or ``None``.
@@ -7706,88 +7650,6 @@ def _kernel_result_rank(result: HandlerResult | None) -> tuple[int, float]:
     keep = 1 if (result.get("status") == "ok" and proposal.get("decision") == "KEEP") else 0
     micro = float(verification.get("micro_speedup") or 0.0)
     return (keep, micro)
-
-
-async def _run_backend_ladder(
-    base_payload: dict,
-    candidate: dict[str, Any],
-    kernel_id: str,
-    backends: list[str],
-    *,
-    session_dir: Path,
-    deadline: float | None = None,
-) -> tuple[HandlerResult | None, list[dict[str, Any]]]:
-    """Run ``backends`` as a sequential break-on-KEEP ladder.
-
-    Returns ``(best, attempts)`` where ``best`` is the strongest result by
-    :func:`_kernel_result_rank` and ``attempts`` is the ordered per-backend
-    attempt log. Stops at the first KEEP so a clean KEEP short-circuits the
-    ladder and later backends only fire when an earlier one misses a KEEP.
-
-    When ``deadline`` (a :func:`time.monotonic` timestamp) is given, the ladder
-    enforces the per-kernel budget: each backend's subprocess timeout is capped
-    to the time left, and once less than :data:`_KERNEL_LADDER_MIN_BACKEND_SEC`
-    remains the ladder stops rather than launching a fallback it cannot finish.
-    This keeps a backend that hangs to its hard timeout from letting the
-    fallback overshoot the budget.
-
-    Args:
-        base_payload: The base request payload shared by every backend.
-        candidate: The kernel candidate to optimize.
-        kernel_id: The kernel id being optimized.
-        backends: The ordered backends to try.
-        session_dir: Session directory for workspace and state.
-        deadline: Optional ``time.monotonic`` deadline bounding the whole
-            ladder; ``None`` disables the per-kernel budget cap.
-
-    Returns:
-        A tuple of ``(best, attempts)`` where ``best`` is the strongest
-        result by ``_kernel_result_rank`` and ``attempts`` is the ordered
-        per-backend attempt log.
-    """
-    attempts: list[dict[str, Any]] = []
-    best: HandlerResult | None = None
-    for idx, backend in enumerate(backends):
-        timeout_override: int | None = None
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= _KERNEL_LADDER_MIN_BACKEND_SEC:
-                # Not enough budget left for another backend.
-                log.info(
-                    "kernel %s: per-kernel ladder budget exhausted (%.0fs left); skipping remaining backends %s",
-                    kernel_id,
-                    remaining,
-                    backends[idx:],
-                )
-                break
-            timeout_override = int(remaining)
-        child = dict(base_payload)
-        child["_single_kernel"] = True
-        child["kernel_id"] = kernel_id
-        child["backends"] = backend
-        child["candidate"] = candidate
-        child.setdefault("source_file", candidate.get("source_file"))
-        result = await _run_optimization_single(
-            child,
-            session_dir=session_dir,
-            timeout_override_sec=timeout_override,
-        )
-        attempts.append(
-            {
-                "backend": backend,
-                "status": result.get("status"),
-                "kernel_id": result.get("kernel_id"),
-                "proposal": result.get("proposal"),
-                "verification": result.get("verification"),
-                "best_artifact_path": result.get("best_artifact_path"),
-                "error": result.get("error"),
-            }
-        )
-        if best is None or _kernel_result_rank(result) > _kernel_result_rank(best):
-            best = result
-        if _kernel_result_rank(result)[0] == 1:  # KEEP -> stop this ladder
-            break
-    return best, attempts
 
 
 def _stamp_task_group_result(
@@ -7859,7 +7721,6 @@ async def _run_kernel_backend_sequence(
     candidate: dict[str, Any],
     *,
     session_dir: Path,
-    parallel_backends: bool = False,
 ) -> HandlerResult:
     """Optimize one kernel with the forge backend.
 
@@ -7867,47 +7728,39 @@ async def _run_kernel_backend_sequence(
         base_payload: The base request payload shared by every backend.
         candidate: The kernel candidate to optimize.
         session_dir: Session directory for workspace and state.
-        parallel_backends: Retained for signature compatibility; unused.
 
     Returns:
-        The strongest ``HandlerResult`` produced.
+        The Forge ``HandlerResult`` with batch metadata.
     """
     kernel_id = str(candidate.get("kernel_id") or base_payload.get("kernel_id") or "")
-    order = _backend_order(base_payload)
-
-    # Bound the backend to one wall-clock budget so a hang cannot overshoot
-    # the KERNEL-phase cap.
-    ladder_deadline = time.monotonic() + _kernel_ladder_budget_sec(base_payload)
-
-    best, attempts = await _run_backend_ladder(
-        base_payload,
-        candidate,
-        kernel_id,
-        order,
-        session_dir=session_dir,
-        deadline=ladder_deadline,
-    )
-
-    if best is None:
-        best = {
+    if not forge_explicitly_enabled():
+        result: HandlerResult = {
             "status": "failed",
             "kernel_id": kernel_id,
             "error": "no backend attempts were run",
         }
-    best = dict(best)
-    best["backend_fallback_attempts"] = attempts
-    best["batch_kernel_id"] = kernel_id
-    best = _stamp_task_group_result(
-        best,
+    else:
+        child = dict(base_payload)
+        child["_single_kernel"] = True
+        child["kernel_id"] = kernel_id
+        child["backends"] = "forge"
+        child["candidate"] = candidate
+        child.setdefault("source_file", candidate.get("source_file"))
+        result = await _run_optimization_single(child, session_dir=session_dir)
+
+    result = dict(result)
+    result["batch_kernel_id"] = kernel_id
+    result = _stamp_task_group_result(
+        result,
         candidate,
         fallback_kernel_id=kernel_id,
     )
     # Preserve source_file so the streaming callback can group by file.
-    if not best.get("source_file"):
+    if not result.get("source_file"):
         cand_src = candidate.get("source_file") if isinstance(candidate, dict) else None
         if cand_src:
-            best["source_file"] = str(cand_src)
-    return best
+            result["source_file"] = str(cand_src)
+    return result
 
 
 async def _run_optimization_batch(
@@ -7933,19 +7786,9 @@ async def _run_optimization_batch(
         payload.get("max_parallel") or os.environ.get("KERNEL_OPT_MAX_PARALLEL") or _default_kernel_batch_parallel()
     )
     max_parallel = max(1, max_parallel)
-    # Forge edits framework sources in-place; concurrent kernels could race the
-    # per-repo lock, so keep the batch serial whenever forge is in the ladder.
-    if "forge" in _backend_order(payload):
+    # Forge edits framework sources in-place, so per-kernel work is serial.
+    if forge_explicitly_enabled():
         max_parallel = 1
-    # parallel_backends is off by default; it only matters when explicit
-    # per-kernel forge mode is enabled.
-    parallel_backends = _should_parallelize_backends(payload, len(candidates))
-    # When forced on, halve the GPU budget so pre-Ray backend setup fits.
-    if parallel_backends:
-        n_gpus = _visible_gpu_count()
-        per_task = _per_task_gpus()
-        if n_gpus and per_task > 0:
-            max_parallel = min(max_parallel, max(1, n_gpus // (2 * per_task)))
     sem = asyncio.Semaphore(max_parallel)
 
     async def _guarded(candidate: dict[str, Any]) -> HandlerResult:
@@ -7972,7 +7815,6 @@ async def _run_optimization_batch(
                     payload,
                     candidate,
                     session_dir=session_dir,
-                    parallel_backends=parallel_backends,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Wrap a sub-task failure as a structured result so gather stays
@@ -8020,9 +7862,8 @@ async def _run_optimization_batch(
     out = dict(best)
     out["batch_mode"] = True
     out["batch_kernel_ids"] = [str(c.get("kernel_id")) for c in candidates]
-    out["backend_order"] = _backend_order(payload)
+    out["backend_order"] = ["forge"] if forge_explicitly_enabled() else []
     out["max_parallel"] = max_parallel
-    out["parallel_backends"] = parallel_backends
     out["batch_results"] = results
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -8061,7 +7902,6 @@ async def _run_optimization_single(
     payload: dict,
     *,
     session_dir: Path,
-    timeout_override_sec: int | None = None,
 ) -> HandlerResult:
     """Run Hyperloom/kernel-agent's kernel_optimization.py on one kernel.
 
@@ -8187,9 +8027,6 @@ async def _run_optimization_single(
     cmd += ["--budget-minutes", str(_optimization_budget_minutes(payload))]
     # Let the tool handle its own backend timeout and salvage partial artifacts.
     timeout_sec = _optimization_wrapper_timeout_sec(payload)
-    if timeout_override_sec is not None:
-        # Cap each subprocess to the time left in the per-kernel budget.
-        timeout_sec = max(1, min(timeout_sec, int(timeout_override_sec)))
 
     from ..actions.executors._multi_node_env import is_multi_node
 

@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -140,82 +139,45 @@ def test_record_kernel_invocations_geak_still_records(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
-# per-kernel ladder budget (option 1)
+# single per-kernel backend architecture
 # --------------------------------------------------------------------------- #
-def test_kernel_ladder_budget_sec_priority(monkeypatch):
-    monkeypatch.delenv("KERNEL_OPT_KERNEL_BUDGET_MIN", raising=False)
-    # payload override wins.
-    assert krh._kernel_ladder_budget_sec({"kernel_budget_min": 10}) == 10 * 60 + 180
-    # env is next in priority.
-    monkeypatch.setenv("KERNEL_OPT_KERNEL_BUDGET_MIN", "5")
-    assert krh._kernel_ladder_budget_sec({}) == 5 * 60 + 180
+def test_removed_backend_ladder_helpers_stay_removed():
+    assert not hasattr(krh, "_run_backend_ladder")
+    assert not hasattr(krh, "_kernel_ladder_budget_sec")
 
 
 @pytest.mark.asyncio
-async def test_ladder_continues_to_fallback_after_timeout(tmp_path: Path, monkeypatch):
-    # A timed-out backend does not abort the ladder; the next backend still runs.
-    calls: list[str] = []
+async def test_removed_ladder_budget_is_rejected_instead_of_silently_ignored(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("KERNEL_OPT_KERNEL_BUDGET_MIN", raising=False)
+    result = await krh.run_optimization_handler({"kernel_budget_min": 1}, session_dir=tmp_path)
+    assert result["status"] == "failed"
+    assert result["error_class"] == "unsupported_option"
 
-    async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
-        calls.append(payload["backends"])
-        return {"status": "failed", "backend": payload["backends"], "error_class": "subprocess_timeout"}
+
+@pytest.mark.asyncio
+async def test_removed_ladder_budget_env_is_rejected(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("KERNEL_OPT_KERNEL_BUDGET_MIN", "1")
+    result = await krh.run_optimization_handler({}, session_dir=tmp_path)
+    assert result["status"] == "failed"
+    assert result["error_class"] == "unsupported_option"
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_dispatches_forge_once(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    calls: list[dict] = []
+
+    async def _fake_single(payload, *, session_dir):
+        calls.append(payload)
+        return {"status": "failed", "backend": payload["backends"]}
 
     monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    deadline = time.monotonic() + 10_000  # plenty of budget left
-    best, attempts = await krh._run_backend_ladder(
+    result = await krh._run_kernel_backend_sequence(
         {},
         {"kernel_id": "k1", "source_file": "x"},
-        "k1",
-        ["forge", "claude"],
         session_dir=tmp_path,
-        deadline=deadline,
     )
-    assert calls == ["forge", "claude"], "fallback must run after a forge timeout"
-    assert len(attempts) == 2
 
-
-@pytest.mark.asyncio
-async def test_ladder_caps_backend_timeout_to_remaining_budget(tmp_path: Path, monkeypatch):
-    # Each backend's subprocess timeout is capped to the remaining per-kernel budget.
-    seen: list[int | None] = []
-
-    async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
-        seen.append(timeout_override_sec)
-        return {"status": "failed", "backend": payload["backends"]}
-
-    monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    deadline = time.monotonic() + 300  # ~5 min left
-    await krh._run_backend_ladder(
-        {},
-        {"kernel_id": "k1"},
-        "k1",
-        ["forge"],
-        session_dir=tmp_path,
-        deadline=deadline,
-    )
-    assert seen[0] is not None
-    assert 250 <= seen[0] <= 300
-
-
-@pytest.mark.asyncio
-async def test_ladder_skips_backends_when_budget_exhausted(tmp_path: Path, monkeypatch):
-    # When the per-kernel budget is already spent, remaining backends are skipped.
-    calls: list[str] = []
-
-    async def _fake_single(payload, *, session_dir, timeout_override_sec=None):
-        calls.append(payload["backends"])
-        return {"status": "failed", "backend": payload["backends"]}
-
-    monkeypatch.setattr(krh, "_run_optimization_single", _fake_single)
-    deadline = time.monotonic() - 1  # budget already exhausted
-    best, attempts = await krh._run_backend_ladder(
-        {},
-        {"kernel_id": "k1"},
-        "k1",
-        ["forge"],
-        session_dir=tmp_path,
-        deadline=deadline,
-    )
-    assert calls == [], "no backend should run once the budget is exhausted"
-    assert best is None
-    assert attempts == []
+    assert [call["backends"] for call in calls] == ["forge"]
+    assert result["batch_kernel_id"] == "k1"
+    assert "backend_fallback_attempts" not in result

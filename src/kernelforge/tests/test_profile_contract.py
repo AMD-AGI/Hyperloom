@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import asyncio
 
+from kernelforge.loop import profile_contract
 from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
 from kernelforge.mcp_server.tools.bench import bench_wallclock
 
 
 def test_profile_contract_exposes_only_profile_run_flag():
     assert PROFILE_RUN_FLAG == "--profile-run"
+    assert not hasattr(profile_contract, "PROFILE_CASE_FLAG")
+    assert not hasattr(profile_contract, "driver_supports_profile_case")
 
 
 def test_bench_case_times_remain_available_for_scoring(tmp_path):
