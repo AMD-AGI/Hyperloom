@@ -865,11 +865,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: float | None = None
-        # Set while a met objective's transition is forced. Distinct from
-        # ``closing_phase``, which means the wall clock ran out and CLOSE should
-        # shed expensive work; a met target has to produce the full set of
-        # artifacts. ``True`` lifts the session bound for that one advance.
-        self._unbounded_advance: bool = False
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -1631,27 +1626,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001
             log.exception("failed to persist Coordinator exception metadata")
 
-    def _phase_at_or_past_close(self) -> bool:
-        """Whether the phase machine has reached its terminal phase."""
-        current = _phase_state.phase_index(str(self.shared_state.phase or ""))
-        return current >= _phase_state.phase_index(_phase_state.PHASE_CLOSE)
-
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded.
 
         During CLOSE the session deadline has already passed, so the bound
         switches to ``_closing_deadline`` and CLOSE work is not skipped.
 
-        A met target's forced advance is unbounded here: the phases' own
-        per-step timeouts (``CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC`` is 600s on
-        its own) are the budget, and an outer bound short enough to matter would
-        cancel a step mid-flight.
-
         Returns:
             Remaining seconds, or ``None`` when no bound is armed.
         """
-        if self._unbounded_advance:
-            return None
         if bool(getattr(self.shared_state, "closing_phase", False)):
             bound = self._closing_deadline
         else:
@@ -1703,7 +1686,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (routed through SWEEP, then the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
@@ -1841,48 +1824,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 if self.shared_state.stop_reason and not in_closing:
                     stop_reason = self.shared_state.stop_reason
                     break
-                target_met = objective.reached(self.shared_state)
-                if target_met:
-                    if not self.shared_state.target_reached_at:
-                        self.shared_state.target_reached_at = now_iso()
-                        # The marker is already set in memory and the phases
-                        # persist state themselves, so a failed write must not
-                        # cost the run its close sequence.
-                        try:
-                            self.shared_state.save(self.session_dir)
-                        except Exception:  # noqa: BLE001
-                            log.exception("Coordinator: persisting target_reached_at failed; routing anyway")
-                    # In this tick, not the next: every advance in the tick
-                    # body is skipped once the session bound elapses. The bound
-                    # is lifted rather than ``closing_phase`` set, which CLOSE
-                    # reads to shed the post-opt roofline this route produces.
-                    self._unbounded_advance = True
-                    try:
-                        await self._await_within_session_bound(
-                            self._advance_phase_if_needed,
-                            stage="advance_phase_target_reached",
-                        )
-                    except Exception:  # noqa: BLE001
-                        log.exception("Coordinator: target_reached transition failed")
-                    finally:
-                        self._unbounded_advance = False
-                    # Only CLOSE ends the run. SWEEP takes many ticks to reach
-                    # a terminal ladder state, and stopping on the hop into it
-                    # would skip both the curve and the close sequencer.
-                    if self._phase_at_or_past_close():
-                        if not self.shared_state.stop_reason:
-                            self.shared_state.set_stop_reason("target_reached")
-                        stop_reason = self.shared_state.stop_reason
-                        break
-                # A currently-met target outranks the wall clock until it
-                # reaches CLOSE. Keyed on the live objective, not the sticky
-                # marker, which would disarm the clock for good.
-                if (
-                    deadline is not None
-                    and time.monotonic() >= deadline
-                    and not in_closing
-                    and not (target_met and not self._phase_at_or_past_close())
-                ):
+                if objective.reached(self.shared_state) and not self.shared_state.target_reached_at:
+                    # The phase machine reads the marker; the transition it makes
+                    # next persists it.
+                    self.shared_state.target_reached_at = now_iso()
+                if deadline is not None and time.monotonic() >= deadline and not in_closing:
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break

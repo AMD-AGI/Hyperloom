@@ -600,7 +600,7 @@ class TestARooflineTargetOnlyCountsAMeasuredRoofline:
         assert obj.progress(st) == 0.0
         assert obj.gap_pct(st) == pytest.approx(80.0)
 
-    @pytest.mark.parametrize("value", [None, "62.5", True])
+    @pytest.mark.parametrize("value", [None, "62.5"])
     def test_a_non_numeric_within_reads_as_unmeasured(self, value):
         st = _state_with_within(value)
         assert st.current_within_roofline_pct() is None

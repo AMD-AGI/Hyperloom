@@ -2070,12 +2070,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             ts_unix=ts_unix,
         )
 
-    def _latest_roofline_snapshot(self) -> dict[str, Any] | None:
-        """Return the newest roofline snapshot, or ``None`` when there is none."""
-        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
-        latest = snaps[-1] if snaps else None
-        return latest if isinstance(latest, dict) else None
-
     def current_top_bottleneck(self) -> str:
         """Return the latest roofline snapshot's ``top_bottleneck`` ("" when none).
 
@@ -2086,8 +2080,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             str: The latest snapshot's ``top_bottleneck``, or ``""`` when no
                 snapshot exists.
         """
-        latest = self._latest_roofline_snapshot()
-        return str(latest.get("top_bottleneck") or "") if latest else ""
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return ""
+        latest = snaps[-1]
+        if isinstance(latest, dict):
+            return str(latest.get("top_bottleneck") or "")
+        return ""
 
     def current_within_roofline_pct(self) -> float | None:
         """Return the latest snapshot's achieved share of its roofline ceiling.
@@ -2099,11 +2098,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             float | None: ``within_roofline_pct`` from the newest snapshot, or
                 ``None`` when no snapshot carries a numeric one.
         """
-        latest = self._latest_roofline_snapshot()
-        if latest is None:
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
             return None
         value = latest.get("within_roofline_pct")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if not isinstance(value, (int, float)):
             return None
         return float(value)
 

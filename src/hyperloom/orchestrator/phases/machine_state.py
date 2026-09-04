@@ -2542,9 +2542,13 @@ def exit_normal_kernel(
     return None
 
 
-#: SWEEP exits a met target renames after itself. ``sweep_failed`` is left out:
-#: it is the signal that the closing curve is missing.
-_TARGET_RENAMED_SWEEP_EXITS: frozenset[str] = frozenset({"sweep_done", "sweep_budget_exhausted", "sweep_budget_cap"})
+#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
+#: any other reason keeps the ladder's own exit reason.
+_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
+    "global_converged": "global_converged",
+    "max_cycles": "global_converged",
+    "target_reached": "target_reached",
+}
 
 
 def exit_normal_sweep(
@@ -2843,11 +2847,10 @@ def compute_next_phase(
         reason, evidence = closing
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
 
-    # A met target closes through SWEEP so the concurrency curve measures the
-    # configuration it was met on. Not terminal: that would mirror the reason
-    # onto ``stop_reason``, which routes the next tick to CLOSE instead. PRELUDE
-    # is excluded so its own terminal guards keep deciding whether the baseline
-    # is one the later phases can compare against at all.
+    # A met target ends the optimizing phases early; SWEEP is their normal next
+    # station, and the curve then measures the configuration it was met on.
+    # PRELUDE is excluded: its own terminal guards decide whether the baseline is
+    # one the later phases can compare against at all.
     if target_was_reached(state) and phase_index(PHASE_PRELUDE) < phase_index(current) < phase_index(PHASE_SWEEP):
         return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
@@ -2923,10 +2926,6 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # The budget exits are renamed too: they are outside
-            # STOP_REASON_VOCAB, so CLOSE would recover them as time_exhausted.
-            if exit_reason in _TARGET_RENAMED_SWEEP_EXITS and target_was_reached(state):
-                return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
             # reloop is blocked (budget, convergence, or max_cycles).
@@ -2945,10 +2944,11 @@ def compute_next_phase(
             # R7: if looping was blocked by global convergence or the safety cap,
             # terminate with a terminal stop_reason instead of idling in CLOSE.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
-            if blocked in ("global_converged", "max_cycles"):
+            terminal_reason = _RELOOP_BLOCK_TERMINALS.get(blocked)
+            if terminal_reason is not None:
                 return (
                     PHASE_CLOSE,
-                    "global_converged",
+                    terminal_reason,
                     {
                         **exit_evidence,
                         **reloop_ev,
