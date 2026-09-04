@@ -1852,12 +1852,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             self.shared_state.save(self.session_dir)
                         except Exception:  # noqa: BLE001
                             log.exception("Coordinator: persisting target_reached_at failed; routing anyway")
-                    # In this tick, not the next: every advance in the tick body
-                    # sits behind ``_await_within_session_bound``, so a target
-                    # met at or after the deadline would never get another one.
-                    # ``closing_phase`` stays unset -- CLOSE reads it to shed
-                    # expensive work, including the post-opt roofline this
-                    # routing exists to produce.
+                    # In this tick, not the next: every advance in the tick
+                    # body is skipped once the session bound elapses. The bound
+                    # is lifted rather than ``closing_phase`` set, which CLOSE
+                    # reads to shed the post-opt roofline this route produces.
                     self._unbounded_advance = True
                     try:
                         await self._await_within_session_bound(
@@ -1868,19 +1866,17 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         log.exception("Coordinator: target_reached transition failed")
                     finally:
                         self._unbounded_advance = False
-                    # Only CLOSE ends the run: SWEEP has to reach a terminal
-                    # ladder state first, which takes many ticks, and stopping
-                    # on the hop into it would skip both the curve and the close
-                    # sequencer.
+                    # Only CLOSE ends the run. SWEEP takes many ticks to reach
+                    # a terminal ladder state, and stopping on the hop into it
+                    # would skip both the curve and the close sequencer.
                     if self._phase_at_or_past_close():
                         if not self.shared_state.stop_reason:
                             self.shared_state.set_stop_reason("target_reached")
                         stop_reason = self.shared_state.stop_reason
                         break
-                # A target that is met right now outranks the wall clock until
-                # it reaches CLOSE. Keyed on the live objective, not the sticky
-                # marker: a roofline target reads the newest snapshot and can
-                # stop being met, and the run needs the clock back when it does.
+                # A currently-met target outranks the wall clock until it
+                # reaches CLOSE. Keyed on the live objective, not the sticky
+                # marker, which would disarm the clock for good.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline

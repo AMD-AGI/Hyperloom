@@ -231,7 +231,7 @@ class AnyObjective(Objective):
         return "+".join(o.kind() for o in self.objectives)
 
     def progress(self, state: "SharedState") -> float:
-        """Return the closest member's progress."""
+        """Return the highest member progress."""
         return max(o.progress(state) for o in self.objectives)
 
     def reached(self, state: "SharedState") -> bool:

@@ -2109,9 +2109,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     def current_comm_pct(self) -> float | None:
         """Return the latest exposed-communication percentage."""
-        latest = self._latest_roofline_snapshot()
-        if latest is None:
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
             return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            raise ValueError("Latest roofline snapshot must be a mapping")
         value = latest.get("comm_pct")
         if value is None:
             return None

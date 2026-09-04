@@ -181,7 +181,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
-        # Any phase → SWEEP on the way in, then SWEEP → CLOSE on the way out.
+        # A phase after PRELUDE → SWEEP on the way in, SWEEP → CLOSE on the way out.
         "target_reached",
         "time_exhausted",
         "time_exhausted_during_prelude",
@@ -2542,10 +2542,9 @@ def exit_normal_kernel(
     return None
 
 
-#: SWEEP exits a met target renames itself. ``sweep_failed`` is absent on
-#: purpose; the budget exits are here because they are not in
-#: ``STOP_REASON_VOCAB`` and would otherwise be recovered as ``time_exhausted``.
-_SWEEP_EXITS_THE_TARGET_NAMES: frozenset[str] = frozenset({"sweep_done", "sweep_budget_exhausted", "sweep_budget_cap"})
+#: SWEEP exits a met target renames after itself. ``sweep_failed`` is left out:
+#: it is the signal that the closing curve is missing.
+_TARGET_RENAMED_SWEEP_EXITS: frozenset[str] = frozenset({"sweep_done", "sweep_budget_exhausted", "sweep_budget_cap"})
 
 
 def exit_normal_sweep(
@@ -2813,8 +2812,8 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): a met target's forward jump to SWEEP first, then the
-    global terminal, then the wall-clock closing phase, then exit_terminal >
+    Priority (Inv-8.2): global terminal first, then the wall-clock closing
+    phase, then a met target's forward jump to SWEEP, then exit_terminal >
     exit_normal.
 
     Args:
@@ -2924,10 +2923,9 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # The target names any exit that is not a failure. A failed sweep
-            # keeps its own name: its exit code is the signal that the closing
-            # curve is missing.
-            if exit_reason in _SWEEP_EXITS_THE_TARGET_NAMES and target_was_reached(state):
+            # The budget exits are renamed too: they are outside
+            # STOP_REASON_VOCAB, so CLOSE would recover them as time_exhausted.
+            if exit_reason in _TARGET_RENAMED_SWEEP_EXITS and target_was_reached(state):
                 return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
