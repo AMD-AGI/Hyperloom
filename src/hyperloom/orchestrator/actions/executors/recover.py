@@ -7,8 +7,9 @@ Counterpart of the Robustness ``gpu_memory_leaked`` signal: when a crashed
 server leaves the ROCm KFD tables attributing VRAM to dead PIDs, every
 subsequent server start aborts on insufficient free memory. Invoked via
 ``delegate{action_name="recover", ...}`` (Robustness-only by PolicyGate)
-for a soft cleanup: ``pgrep`` stale owners, SIGTERM, wait
-``SERVER_KILL_WAIT_S``, SIGKILL survivors.
+for a soft cleanup: SIGTERM then SIGKILL owners recorded in this session's
+pidfiles, wait ``SERVER_KILL_WAIT_S``, SIGKILL survivors. Co-located
+sessions and host-wide ``pgrep`` matches are never signalled.
 
 We deliberately do NOT reload amdgpu, reset the GPU, restart the pod/Ray
 head, or touch persistent runtime config (would kill the optimizer, need
@@ -131,6 +132,7 @@ class RecoverExecutor:
         reason = str(params.get("reason", ""))
         force_cleanup = bool(params.get("force_gpu_cleanup", False))
         workspace = self._workspace_dir(ctx)
+        self._active_session_dir = self._session_dir(ctx)
 
         log.info(
             "recover_executor: start reason=%r force=%s",
@@ -219,6 +221,23 @@ class RecoverExecutor:
             return None
         try:
             return Path(ws)
+        except (TypeError, ValueError):
+            return None
+
+    def _session_dir(self, ctx: RunnerContext) -> Path | None:
+        """Resolve the session directory that owns recover pidfiles.
+
+        Args:
+            ctx (RunnerContext): The action runner context.
+
+        Returns:
+            Path | None: The session path, or ``None`` when none is configured.
+        """
+        sd = (ctx.extra or {}).get("session_dir")
+        if not sd:
+            return None
+        try:
+            return Path(sd)
         except (TypeError, ValueError):
             return None
 
@@ -355,9 +374,9 @@ class RecoverExecutor:
             isinstance(snap.get("free_mb"), (int, float)) and snap["free_mb"] >= self.FREE_MB_HEALTHY for snap in gpus
         )
 
-    # soft cleanup — pgrep + kill loop
+    # soft cleanup — session pidfiles + kill loop
     def _kill_stale_owners(self) -> list[dict[str, Any]]:
-        """SIGTERM then SIGKILL stale owners matching :data:`OWNER_PATTERNS`.
+        """SIGTERM then SIGKILL owners recorded in this session's pidfiles.
 
         Returns one record per signalled PID (cmdline at discovery + final
         signal name ``"TERM"`` / ``"KILL"``).
@@ -384,51 +403,47 @@ class RecoverExecutor:
                 entry["signal"] = "KILL"
         return killed
 
+    @staticmethod
+    def _pid_cmdline(pid: int) -> str:
+        """Best-effort cmdline from ``/proc``; empty when the pid is gone."""
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
-        """Run ``pgrep -a -f -- <pattern>`` per owner pattern (matches the
-        full cmdline) and return unique PID records, excluding our own PID.
+        """Return unique PIDs from this session's ``runs/**/*.pid`` files.
+
+        Host-wide ``pgrep`` is not used: only processes this session recorded
+        are candidates. Missing ``session_dir`` yields an empty list.
 
         Returns:
-            Unique PID records matching the owner patterns, or ``[]`` when
-            ``pgrep`` is unavailable or nothing matched.
+            Unique PID records from session pidfiles, excluding our own PID.
         """
-        if not shutil.which("pgrep"):
-            log.warning("recover_executor: pgrep not on PATH; skipping kill stage")
+        session_dir = getattr(self, "_active_session_dir", None)
+        if session_dir is None:
+            return []
+        runs = Path(session_dir) / "runs"
+        if not runs.is_dir():
             return []
         own_pid = os.getpid()
         seen: dict[int, dict[str, Any]] = {}
-        for pattern in self.OWNER_PATTERNS:
+        for pid_file in sorted(runs.rglob("*.pid")):
             try:
-                proc = subprocess.run(
-                    ["pgrep", "-a", "-f", "--", pattern],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=3.0,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                log.warning("recover_executor: pgrep(%r) failed: %s", pattern, exc)
+                parts = pid_file.read_text(encoding="utf-8").split()
+            except OSError:
                 continue
-            if proc.returncode not in (0, 1):  # 1 = no matches
+            if not parts:
                 continue
-            for line in proc.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(None, 1)
-                if len(parts) < 2:
-                    continue
-                try:
-                    pid = int(parts[0])
-                except ValueError:
-                    continue
-                cmd = parts[1]
-                if pid == own_pid:
-                    continue
-                # Confirm the pattern via plain substring (pgrep's regex is permissive).
-                if pattern not in cmd:
-                    continue
-                seen[pid] = {"pid": pid, "cmd": cmd, "pattern": pattern}
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid == own_pid:
+                continue
+            cmd = self._pid_cmdline(pid) or str(pid_file)
+            seen[pid] = {"pid": pid, "cmd": cmd, "pattern": "session_pidfile"}
         return list(seen.values())
 
     def _send_signal(self, pid: int, sig: signal.Signals) -> bool:

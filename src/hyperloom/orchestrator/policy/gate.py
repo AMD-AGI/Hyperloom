@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
+    is_rocm_hip_writable_path,
     resolve_session_framework_root,
     resolve_source_file_allowlist,
     resolved_within,
@@ -1991,6 +1992,13 @@ class PolicyGate:
                 )
             if key not in PATH_LIKE_FIELDS:
                 return
+            if not is_rocm_hip_writable_path(node):
+                raise PolicyDenied(
+                    f"role={role.name!r} {intent_type.value} payload field "
+                    f"{key!r}={node!r} is a ROCm runtime path, not HIP source",
+                    rule="rocm_runtime_write_denied",
+                    hint="ROCm writes are limited to source, header, and CMake files",
+                )
             if not self._path_under_session(node):
                 if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
                     try:

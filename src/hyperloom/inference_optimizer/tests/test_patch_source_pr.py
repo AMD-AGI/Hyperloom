@@ -151,6 +151,27 @@ def test_materialize_refuses_to_bench_when_every_explicit_patch_is_missing(tmp_p
     assert out.failure["error_class"] == "explicit_patches_missing"
 
 
+def test_fetch_diff_to_path_passes_max_filesize(tmp_path: Path, monkeypatch):
+    dest = tmp_path / "out.patch"
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        dest.write_text(_VALID_PATCH, encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._patch_source_pr.subprocess.run",
+        fake_run,
+    )
+    from hyperloom.orchestrator.actions.executors._patch_source_pr import DEFAULT_DIFF_MAX_BYTES
+
+    ok, err = _fetch_diff_to_path("https://example.test/pr.diff", dest, timeout_sec=5.0)
+    assert ok, err
+    assert "--max-filesize" in captured[0]
+    assert str(DEFAULT_DIFF_MAX_BYTES) in captured[0]
+
+
 def test_materialize_reports_no_patch_when_candidate_carries_no_source(tmp_path: Path):
     out = materialize_candidate_patches(
         candidate={},

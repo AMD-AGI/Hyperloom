@@ -62,6 +62,11 @@ _DECODER = json.JSONDecoder()
 # events a few KiB, so these retain generous headroom for embedded metadata.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
+_MAX_BUFFERED_KERNEL_EVENTS = 100_000
+_MAX_BUFFERED_MEMCPY_EVENTS = 100_000
+_MAX_ANNOTATION_WINDOWS = 100_000
+_MAX_STREAM_INTERVALS = 100_000
+_MAX_EVENT_NAME_CHARS = 256
 
 
 def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ...], ...], tuple[str, ...]]:
@@ -1082,8 +1087,10 @@ def analyze_trace(
     graph_launch_corrs: set[int] = set()
     # (pid, tid) -> [(ts, end, name), ...] for the duration-sanity check.
     stream_intervals: dict[Any, list[tuple[float, float, str]]] = {}
+    stream_interval_count = 0
     event_total = 0
     stream_errors: list[str] = []
+    cap_exceeded = ""
 
     fobj = _open_trace_binary(tf)
     try:
@@ -1120,17 +1127,29 @@ def analyze_trace(
                             extid_to_opmeta[extid] = meta
                 continue
             if cat == "gpu_user_annotation" and ev.get("ph") == "X":
+                if len(annotation_windows) >= _MAX_ANNOTATION_WINDOWS:
+                    cap_exceeded = "annotation_windows"
+                    break
                 ts = ev.get("ts", 0) or 0
                 dur = ev.get("dur", 0) or 0
-                annotation_windows.append({"name": ev.get("name", "") or "", "ts": float(ts), "dur": float(dur)})
+                name = str(ev.get("name", "") or "")[:_MAX_EVENT_NAME_CHARS]
+                annotation_windows.append({"name": name, "ts": float(ts), "dur": float(dur)})
                 continue
             if cat in _GPU_CATS and ev.get("ph") == "X":
                 dur = float(ev.get("dur", 0) or 0)
                 ts = float(ev.get("ts", 0) or 0)
                 end = ts + dur
-                name = ev.get("name", "") or ""
-                stream_intervals.setdefault((ev.get("pid"), ev.get("tid")), []).append((ts, end, name))
+                name = str(ev.get("name", "") or "")[:_MAX_EVENT_NAME_CHARS]
+                stream_key = (ev.get("pid"), ev.get("tid"))
+                if stream_interval_count >= _MAX_STREAM_INTERVALS:
+                    cap_exceeded = "stream_intervals"
+                    break
+                stream_intervals.setdefault(stream_key, []).append((ts, end, name))
+                stream_interval_count += 1
                 if cat == _GPU_KERNEL_CAT:
+                    if len(k_events) >= _MAX_BUFFERED_KERNEL_EVENTS:
+                        cap_exceeded = "k_events"
+                        break
                     kargs = ev.get("args") or {}
                     corr = kargs.get("correlation")
                     # Retain launch grid/block: for Triton (hipModuleLaunchKernel)
@@ -1142,9 +1161,20 @@ def analyze_trace(
                         corr_to_launch_geom[corr] = (grid, block)
                     k_events.append((name, dur, corr, ts, end))
                 else:
+                    if len(m_events) >= _MAX_BUFFERED_MEMCPY_EVENTS:
+                        cap_exceeded = "m_events"
+                        break
                     m_events.append((dur, ts, end))
     finally:
         fobj.close()
+
+    if cap_exceeded:
+        return {
+            "status": "failed",
+            "error": f"trace aggregation cap exceeded ({cap_exceeded})",
+            "trace_file": str(tf),
+            "event_total": event_total,
+        }
 
     scope = "full_trace"
     steady_window: dict[str, Any] | None = None

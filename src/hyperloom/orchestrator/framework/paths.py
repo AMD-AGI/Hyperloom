@@ -108,6 +108,56 @@ def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
     return _ROCM_HIP_SOURCE_ROOTS
 
 
+#: File types an enablement patch may write under the ROCm/HIP roots.
+#: Runtime objects (``.so``, binaries) stay readable via the source allowlist
+#: but are not writable through localization or artifact install.
+_ROCM_HIP_WRITE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".cu",
+        ".cuh",
+        ".h",
+        ".hh",
+        ".hpp",
+        ".hxx",
+        ".hip",
+        ".cl",
+        ".cmake",
+        ".txt",
+        ".in",
+        ".py",
+        ".s",
+        ".S",
+        ".asm",
+        ".inc",
+        ".inl",
+    }
+)
+_ROCM_HIP_WRITE_NAMES: frozenset[str] = frozenset({"cmakelists.txt", "makefile"})
+
+
+def is_rocm_hip_path(value: str) -> bool:
+    """True when ``value`` resolves under a ROCm/HIP source root."""
+    return any(resolved_within(value, root) for root in resolve_rocm_hip_source_roots())
+
+
+def is_rocm_hip_writable_path(value: str) -> bool:
+    """True when ``value`` may be written (not a ROCm runtime object).
+
+    Non-ROCm paths return True so callers can AND this with their own
+    allowlist. Paths under ``/opt/rocm/`` must be source/header/CMake files.
+    """
+    if not is_rocm_hip_path(value):
+        return True
+    path = Path(str(value))
+    if path.name.lower() in _ROCM_HIP_WRITE_NAMES:
+        return True
+    return path.suffix.lower() in _ROCM_HIP_WRITE_SUFFIXES
+
+
 # FlyDSL checkout roots. Env overrides come first, then the image defaults.
 _FLYDSL_ROOT_ENV_KEYS: tuple[str, ...] = ("DSL2_ROOT", "FLYDSL_ROOT")
 _FLYDSL_DEFAULT_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl/")
@@ -736,6 +786,8 @@ __all__ = [
     "resolve_kernel_search_roots",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
+    "is_rocm_hip_path",
+    "is_rocm_hip_writable_path",
     "resolve_session_framework_root",
     "resolve_source_file_allowlist",
     "resolved_within",

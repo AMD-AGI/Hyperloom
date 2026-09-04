@@ -71,6 +71,9 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
         # Legacy: not consumed anymore, still scrubbed if present.
         "SAFE_API_KEY",
     }
@@ -86,6 +89,11 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # or not.
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
+    (re.compile(r"(?i)(ocp-apim-subscription-key\s*:\s*)\S+"), r"\1[REDACTED]"),
+    (
+        re.compile(r"(?i)\b([A-Z0-9_]*CUSTOM_HEADERS\s*[=:]\s*)(\S.*?)(?=\s+[A-Z][A-Z0-9_]*=|\s*$)"),
+        r"\1[REDACTED]",
+    ),
     # Shell commands quote the value (``PASSWORD="x"``), and a command that has
     # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
     # The opening quote is matched separately and re-emitted so the mask keeps
@@ -106,7 +114,7 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
-            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
             r"\s*[=:]\s*)"
             r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),
@@ -418,6 +426,29 @@ def redact_secret_values(text: str) -> str:
     return out
 
 
+def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> None:
+    """Rewrite ``path`` with :func:`redact_secret_values` and restrict mode.
+
+    Missing files and I/O errors are ignored so a logging path cannot fail a run.
+    """
+    from pathlib import Path
+
+    target = Path(path)
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    redacted = redact_secret_values(text)
+    try:
+        if redacted != text:
+            tmp = target.with_name(target.name + ".redacting")
+            tmp.write_text(redacted, encoding="utf-8")
+            tmp.replace(target)
+        target.chmod(mode)
+    except OSError:
+        return
+
+
 __all__ = [
     "BENCHMARK_SECRET_ENV_NAMES",
     "BLOCKED_CHILD_ENV_NAMES",
@@ -433,6 +464,7 @@ __all__ = [
     "is_allowed_variant_env_key",
     "is_python_package_root",
     "is_secret_shaped_env_name",
+    "redact_file_in_place",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

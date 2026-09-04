@@ -132,3 +132,31 @@ def test_quantized_dir_resolved_relative(tmp_path):
     assert art.quantized_model_dir is not None
     assert art.quantized_model_dir.name == "out"
     assert art.has_weights
+
+
+def test_quantized_dir_absolute_outside_workspace(tmp_path):
+    pytest.importorskip("yaml")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (ws / "run_manifest.yaml").write_text(
+        f"outputs:\n  quantized_model_dir: {outside}\n",
+        encoding="utf-8",
+    )
+    art = collect_artifacts(ws)
+    assert art.quantized_model_dir is None
+    assert art.manifest_parse_error == "quantized_model_dir_outside_workspace"
+
+
+def test_quantized_dir_relative_escape(tmp_path):
+    pytest.importorskip("yaml")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "run_manifest.yaml").write_text(
+        "outputs:\n  quantized_model_dir: ../evil\n",
+        encoding="utf-8",
+    )
+    art = collect_artifacts(ws)
+    assert art.quantized_model_dir is None
+    assert art.manifest_parse_error == "quantized_model_dir_outside_workspace"

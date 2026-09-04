@@ -238,3 +238,10 @@ def test_redact_secret_values_masks_aws_key_and_jwt_shapes():
     assert access_id not in redacted
     assert jwt not in redacted
     assert redacted.count("[REDACTED]") == 2
+
+
+def test_redact_secret_values_masks_custom_headers_assignment():
+    text = "ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret"
+    out = common_env_safety.redact_secret_values(text)
+    assert "deadbeefsecret" not in out
+    assert "ANTHROPIC_CUSTOM_HEADERS=" in out

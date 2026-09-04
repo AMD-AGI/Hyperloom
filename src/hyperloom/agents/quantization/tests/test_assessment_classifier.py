@@ -65,6 +65,16 @@ def test_blocked_md_invalid_outcome_id_ignored(build_workspace):
     assert classify_attempt(ws) is None  # successful artifacts
 
 
+def test_blocked_md_eval_gap_accepted_does_not_bypass(build_workspace):
+    ws = build_workspace(
+        blocked_md="outcome_id: eval_gap_accepted\n",
+        include_quantized_dir=False,
+        include_validation_report=False,
+        include_eval_report=False,
+    )
+    assert classify_attempt(ws) != OutcomeId.eval_gap_accepted
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # phase-aware artifact gaps
 # ─────────────────────────────────────────────────────────────────────────────

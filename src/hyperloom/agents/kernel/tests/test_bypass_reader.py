@@ -969,3 +969,16 @@ def test_severity_grades_with_share_of_device_time():
     out_severe = reader._stream_overlap_health({(1, 1): list(severe)})
     assert out_severe and out_severe["severity"] == "warning"
     assert out_severe["excess_share"] >= 0.25
+
+
+def test_analyze_trace_caps_annotation_buffers(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "_MAX_ANNOTATION_WINDOWS", 2)
+    events = [
+        {"cat": "gpu_user_annotation", "ph": "X", "name": f"step{i}", "ts": i, "dur": 1}
+        for i in range(5)
+    ]
+    path = tmp_path / "cap.trace.json"
+    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    out = reader.analyze_trace(path, top_k=0)
+    assert out["status"] == "failed"
+    assert "annotation_windows" in out["error"]

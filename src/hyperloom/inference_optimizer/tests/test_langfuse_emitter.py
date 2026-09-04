@@ -313,6 +313,22 @@ def test_redact_env_keeps_names_redacts_secret_values():
     assert snap["DB_PASSWORD"] == "***redacted***"
 
 
+def test_redact_env_redacts_custom_headers_and_value_shaped_secrets():
+    snap = lfmap.redact_env(
+        {
+            "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: deadbeefsecret",
+            "OPENAI_CUSTOM_HEADERS": "Authorization: Bearer abcdefghijklmnop",
+            "HARMLESS": "ok",
+            "GATEWAY_HDR": "Ocp-Apim-Subscription-Key: anothersecretvalue",
+        }
+    )
+    assert snap["ANTHROPIC_CUSTOM_HEADERS"] == "***redacted***"
+    assert snap["OPENAI_CUSTOM_HEADERS"] == "***redacted***"
+    assert snap["HARMLESS"] == "ok"
+    assert snap["GATEWAY_HDR"] == "***redacted***"
+    assert "deadbeefsecret" not in snap.values()
+
+
 def test_session_start_is_idempotent(tmp_path, monkeypatch):
     _enable_env(monkeypatch)
     client = _FakeClient()

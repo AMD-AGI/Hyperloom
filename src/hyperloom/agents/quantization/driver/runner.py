@@ -2,7 +2,7 @@
 
 Keyword-only public API with injection seams (``sdk_query_factory`` /
 ``sdk_options_cls``) so tests don't need the SDK installed. Runs with
-``cwd = quark_root`` (graceful fallback for older SDK builds), stores SDK
+``cwd = workspace`` (graceful fallback for older SDK builds), stores SDK
 errors on the result rather than raising, and routes output through a single
 ``log`` callable. The agent leans on ``SKILL.md`` as the runtime contract;
 this module just plumbs run context into a templated prompt for the SDK.
@@ -11,6 +11,7 @@ this module just plumbs run context into a templated prompt for the SDK.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -92,15 +93,19 @@ def resolve_skill_path(package_root: Path | None = None) -> Path:
     return root / SKILL_RELATIVE_PATH
 
 
-def _prepare_quark_py310_compat(workspace: Path) -> Path:
-    """Create a workspace-local Python 3.10 compatibility shim for Quark 0.12.
+def _prepare_quark_py310_compat() -> Path:
+    """Create a workspace-external Python 3.10 compatibility shim for Quark 0.12.
 
     Quark 0.12 uses Python 3.11 symbols (``typing.Self`` and ``datetime.UTC``);
     inject them via ``sitecustomize`` without modifying the Quark checkout.
+    The directory is created outside the agent workspace and made read-only so
+    a Write/Edit hallucination cannot replace the shim.
     """
-    compat_dir = workspace / QUARK_PY310_COMPAT_DIR
-    compat_dir.mkdir(parents=True, exist_ok=True)
-    (compat_dir / "sitecustomize.py").write_text(QUARK_PY310_SITE_CUSTOMIZE, encoding="utf-8")
+    compat_dir = Path(tempfile.mkdtemp(prefix="hyperloom_quark_py310_"))
+    sitecustomize = compat_dir / "sitecustomize.py"
+    sitecustomize.write_text(QUARK_PY310_SITE_CUSTOMIZE, encoding="utf-8")
+    sitecustomize.chmod(0o444)
+    compat_dir.chmod(0o555)
     return compat_dir
 
 
@@ -109,11 +114,11 @@ def _prepend_pythonpath(path: Path, current: str | None) -> str:
     return prefix if not current else prefix + os.pathsep + current
 
 
-def _quark_py310_compat_env(workspace: Path, base_env: dict[str, str] | None = None) -> dict[str, str]:
+def _quark_py310_compat_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Return child-process env exposing Quark's Python 3.10 shim."""
 
     env = dict(os.environ if base_env is None else base_env)
-    compat_dir = _prepare_quark_py310_compat(workspace)
+    compat_dir = _prepare_quark_py310_compat()
     env["PYTHONPATH"] = _prepend_pythonpath(compat_dir, env.get("PYTHONPATH"))
     env["PIP_IGNORE_REQUIRES_PYTHON"] = "1"
     return env
@@ -278,12 +283,12 @@ async def run_one_attempt(
         "system_prompt": system_prompt,
         "allowed_tools": DEFAULT_ALLOWED_TOOLS if allowed_tools is None else allowed_tools,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
-        "env": _quark_py310_compat_env(workspace),
+        "env": _quark_py310_compat_env(),
     }
     kwargs["env"].update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
     if model:
         kwargs["model"] = model
-    kwargs["cwd"] = str(quark_root)
+    kwargs["cwd"] = str(workspace)
 
     try:
         options = sdk_options_cls(**kwargs)

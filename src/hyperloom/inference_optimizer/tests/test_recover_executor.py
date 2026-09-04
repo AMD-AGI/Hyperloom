@@ -489,53 +489,31 @@ class TestSendAndAlive:
 
 
 class TestDiscoverStalePids:
-    def test_no_pgrep_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: None,
-        )
+    def test_no_session_dir_returns_empty(self):
         assert RecoverExecutor()._discover_stale_pids() == []
 
-    def test_parses_pgrep_output(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: "/usr/bin/pgrep",
-        )
-        scripted = {
-            "sglang.launch_server": "12345 python sglang.launch_server --port 8000",
-            "vllm.entrypoints": "12347 python vllm.entrypoints.api_server\n0 invalid",
-            "EngineCore": "",
-        }
-
-        def fake_run(cmd, *args, **kwargs):
-            pattern = cmd[-1]
-            output = scripted.get(pattern, "")
-            rc = 0 if output else 1
-            return _ProcResult(returncode=rc, stdout=output)
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.subprocess.run",
-            fake_run,
-        )
+    def test_parses_session_pidfiles(self, tmp_path):
+        runs = tmp_path / "runs" / "baseline"
+        runs.mkdir(parents=True)
+        (runs / "sglang_8000.pid").write_text("12345 12345\n", encoding="utf-8")
+        (runs / "vllm_8001.pid").write_text("12347\n", encoding="utf-8")
+        (runs / "empty.pid").write_text("\n", encoding="utf-8")
+        (runs / "bad.pid").write_text("notapid rest\n", encoding="utf-8")
         ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server", "vllm.entrypoints", "EngineCore")
+        ex._active_session_dir = tmp_path
         out = ex._discover_stale_pids()
         pids = sorted(o["pid"] for o in out)
         assert pids == [12345, 12347]
+        assert all(o["pattern"] == "session_pidfile" for o in out)
 
-    def test_skips_own_pid(self, monkeypatch):
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.shutil.which",
-            lambda name: "/usr/bin/pgrep",
-        )
+    def test_skips_own_pid(self, tmp_path):
+        runs = tmp_path / "runs"
+        runs.mkdir()
         own_pid = os.getpid()
-        output = f"{own_pid} sglang.launch_server self\n12000 sglang.launch_server other"
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.recover.subprocess.run",
-            lambda *a, **k: _ProcResult(returncode=0, stdout=output),
-        )
+        (runs / "self.pid").write_text(f"{own_pid}\n", encoding="utf-8")
+        (runs / "other.pid").write_text("12000\n", encoding="utf-8")
         ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        ex._active_session_dir = tmp_path
         out = ex._discover_stale_pids()
         assert [o["pid"] for o in out] == [12000]
 
@@ -713,72 +691,20 @@ class TestKillStaleOwnersNoneSignalled:
 
 
 class TestDiscoverStalePidsBranches:
-    def test_pgrep_timeout_is_skipped(self, monkeypatch):
-        """A pgrep TimeoutExpired for a pattern is logged and skipped."""
-        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
-
-        def _boom(cmd, *a, **k):
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=3.0)
-
-        monkeypatch.setattr(recmod.subprocess, "run", _boom)
+    def test_missing_runs_dir_returns_empty(self, tmp_path):
         ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        ex._active_session_dir = tmp_path
         assert ex._discover_stale_pids() == []
 
-    def test_nonzero_nonone_returncode_is_skipped(self, monkeypatch):
-        """pgrep exit code not in (0, 1) is treated as an error and skipped."""
-        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
-        monkeypatch.setattr(
-            recmod.subprocess,
-            "run",
-            lambda *a, **k: _ProcResult(returncode=2, stdout="9999 sglang.launch_server x"),
-        )
+    def test_duplicate_pid_is_deduped(self, tmp_path):
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        (runs / "a.pid").write_text("5001 5001\n", encoding="utf-8")
+        (runs / "b.pid").write_text("5001\n", encoding="utf-8")
         ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server",)
-        assert ex._discover_stale_pids() == []
-
-    def test_blank_and_single_token_lines_skipped(self, monkeypatch):
-        """Blank lines and single-token lines (no cmd) are skipped."""
-        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
-        # Leading blank line, a single-token line (only pid), then a good match.
-        out = "\n   \n12345\n5001 sglang.launch_server --port 8000\n"
-        monkeypatch.setattr(
-            recmod.subprocess,
-            "run",
-            lambda *a, **k: _ProcResult(returncode=0, stdout=out),
-        )
-        ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server",)
+        ex._active_session_dir = tmp_path
         found = ex._discover_stale_pids()
         assert [o["pid"] for o in found] == [5001]
-
-    def test_non_integer_pid_token_skipped(self, monkeypatch):
-        """A non-integer pid field is skipped."""
-        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
-        out = "notapid sglang.launch_server foo\n7000 sglang.launch_server bar\n"
-        monkeypatch.setattr(
-            recmod.subprocess,
-            "run",
-            lambda *a, **k: _ProcResult(returncode=0, stdout=out),
-        )
-        ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server",)
-        found = ex._discover_stale_pids()
-        assert [o["pid"] for o in found] == [7000]
-
-    def test_pattern_not_in_cmd_is_skipped(self, monkeypatch):
-        """Defence-in-depth substring check drops permissive-regex false positives."""
-        monkeypatch.setattr(recmod.shutil, "which", lambda name: "/usr/bin/pgrep")
-        # pgrep returns a row whose cmd does NOT literally contain the pattern.
-        out = "8000 python some_other_process --flag\n"
-        monkeypatch.setattr(
-            recmod.subprocess,
-            "run",
-            lambda *a, **k: _ProcResult(returncode=0, stdout=out),
-        )
-        ex = RecoverExecutor()
-        ex.OWNER_PATTERNS = ("sglang.launch_server",)
-        assert ex._discover_stale_pids() == []
 
 
 class TestPidAliveTrue:

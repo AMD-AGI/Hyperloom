@@ -3332,6 +3332,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                         "--include=*.cuh",
                         "--include=*.hip",
                         "--include=*.sh",
+                        "--",
                         keyword,
                         str(sub_root),
                     ],
@@ -4011,6 +4012,17 @@ def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
     return f"{shape} {suffix}" if suffix else shape
 
 
+_LITERAL_EVAL_MAX_CHARS = 8192
+_LITERAL_EVAL_ERRORS = (ValueError, SyntaxError, RecursionError, MemoryError, TypeError)
+
+
+def _safe_literal_eval(text: str) -> Any:
+    """Parse a short Python literal; fail the cell rather than the process."""
+    if len(text) > _LITERAL_EVAL_MAX_CHARS:
+        raise ValueError("literal too large")
+    return ast.literal_eval(text)
+
+
 def _resolve_shapes_from_ops_unique_args_csv(
     perf_report_csv_dir: Path | str | None,
     row_matches: Callable[[str], bool],
@@ -4042,9 +4054,9 @@ def _resolve_shapes_from_ops_unique_args_csv(
                 if not row_matches(name):
                     continue
                 try:
-                    dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
-                    dtypes = ast.literal_eval(str(row.get("Input type") or "").strip() or "()")
-                except (ValueError, SyntaxError):
+                    dims = _safe_literal_eval(str(row.get("Input Dims") or "").strip() or "()")
+                    dtypes = _safe_literal_eval(str(row.get("Input type") or "").strip() or "()")
+                except _LITERAL_EVAL_ERRORS:
                     continue
                 if not isinstance(dims, (list, tuple)):
                     continue
@@ -4067,9 +4079,9 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
     raw_types = str(row.get("Input type") or "").strip()
     raw_concrete = str(row.get("Concrete Inputs") or "").strip()
     try:
-        dims = ast.literal_eval(raw_dims or "()")
-        dtypes = ast.literal_eval(raw_types or "()")
-    except (ValueError, SyntaxError):
+        dims = _safe_literal_eval(raw_dims or "()")
+        dtypes = _safe_literal_eval(raw_types or "()")
+    except _LITERAL_EVAL_ERRORS:
         return None
     if not isinstance(dims, (list, tuple)):
         return None
@@ -4368,12 +4380,12 @@ def _clean_category_label(raw: str) -> str:
     s = str(raw or "").strip()
     if s.startswith("[") and s.endswith("]"):
         try:
-            val = ast.literal_eval(s)
+            val = _safe_literal_eval(s)
             if isinstance(val, (list, tuple)) and val:
                 return str(val[0]).strip()
             if isinstance(val, (list, tuple)):
                 return ""
-        except (ValueError, SyntaxError):
+        except _LITERAL_EVAL_ERRORS:
             s = s.strip("[]")
     return s.strip().strip("'\"").strip()
 

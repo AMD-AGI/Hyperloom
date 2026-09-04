@@ -25,6 +25,8 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, is_secret_shaped_env_name, redact_secret_values
+
 UNPHASED = "(unphased)"
 UNKNOWN_AGENT = "(unknown)"
 
@@ -55,6 +57,8 @@ _SENSITIVE_ENV_MARKERS: tuple[str, ...] = (
     "SECRET_KEY",
     "AUTH",
     "SIGNATURE",
+    "HEADERS",
+    "CUSTOM_HEADERS",
 )
 _REDACTED = "***redacted***"
 
@@ -374,8 +378,9 @@ def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
     """Snapshot the process environment with secret values redacted.
 
     Keeps every variable name but replaces the value of anything whose name
-    looks like a credential (see :data:`_SENSITIVE_ENV_MARKERS`) with a
-    placeholder, so session_start never ships secrets to Langfuse.
+    looks like a credential (see :data:`_SENSITIVE_ENV_MARKERS` and
+    :data:`BENCHMARK_SECRET_ENV_NAMES`) or whose value matches a known secret
+    shape with a placeholder, so session_start never ships secrets to Langfuse.
 
     Args:
         environ: The process environment mapping (e.g. ``os.environ``).
@@ -386,7 +391,13 @@ def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in environ.items():
         upper = key.upper()
-        if any(marker in upper for marker in _SENSITIVE_ENV_MARKERS):
+        if (
+            upper in BENCHMARK_SECRET_ENV_NAMES
+            or is_secret_shaped_env_name(upper)
+            or any(marker in upper for marker in _SENSITIVE_ENV_MARKERS)
+        ):
+            out[key] = _REDACTED
+        elif value and redact_secret_values(value) != value:
             out[key] = _REDACTED
         else:
             out[key] = value

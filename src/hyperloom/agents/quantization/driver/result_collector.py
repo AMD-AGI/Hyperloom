@@ -205,10 +205,16 @@ def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | No
     if not raw_path:
         return None, True, "missing_outputs_quantized_model_dir"
 
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        # Manifest paths are relative to workspace.
-        path = (workspace / path).resolve()
+    try:
+        ws = workspace.resolve()
+        path = Path(str(raw_path))
+        path = path.resolve() if path.is_absolute() else (ws / path).resolve()
+    except (OSError, RuntimeError) as exc:
+        return None, True, f"quantized_model_dir_unresolvable:{exc}"
+    try:
+        path.relative_to(ws)
+    except ValueError:
+        return None, True, "quantized_model_dir_outside_workspace"
     return path, True, None
 
 

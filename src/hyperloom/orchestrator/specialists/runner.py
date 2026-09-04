@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
@@ -109,34 +110,36 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
 _now_iso = now_iso
 
 
-_SECRET_ENV_NAMES: tuple[str, ...] = (
-    "ANTHROPIC_API_KEY",
-    "CLAW_API_KEY",
-    "GITHUB_TOKEN",
-    "HF_TOKEN",
-    "HF_TOKEN_2",
-    "HYPERLOOM_GIT_TOKEN",
-    "HYPERLOOM_PR_CI_GH_TOKEN",
-    "LLM_API_KEY",
-    "OPENAI_API_KEY",
-    # Legacy: not consumed anymore, still redacted if present.
-    "SAFE_API_KEY",
+_SECRET_ENV_NAMES: tuple[str, ...] = tuple(
+    sorted(
+        {
+            *BENCHMARK_SECRET_ENV_NAMES,
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAW_API_KEY",
+            "GITHUB_TOKEN",
+            "HF_TOKEN",
+            "HF_TOKEN_2",
+            "HYPERLOOM_GIT_TOKEN",
+            "HYPERLOOM_PR_CI_GH_TOKEN",
+            "LLM_API_KEY",
+            "LLM_GATEWAY_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_CUSTOM_HEADERS",
+            "SAFE_API_KEY",
+        }
+    )
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?P<key>\b(?:"
     + "|".join(re.escape(name) for name in _SECRET_ENV_NAMES)
     + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?P<value>[^\s,'\"\]}]+)(?P=quote)",
     re.IGNORECASE,
-)
-_AUTHORIZATION_RE = re.compile(r"(?i)\b(?P<prefix>authorization\s*:\s*(?:bearer\s+)?)(?P<value>[A-Za-z0-9._~+/=-]+)")
-_BEARER_RE = re.compile(r"(?i)\b(?P<prefix>bearer\s+)(?P<value>[A-Za-z0-9._~+/=-]+)")
-_TOKEN_VALUE_RES = (
-    # Keep in sync with env_safety.redact_secret_values().
-    re.compile(r"\b(?:ak|pk|sk)-[A-Za-z0-9_-]{3,}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{3,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{10,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
 )
 
 
@@ -242,15 +245,12 @@ def _safe_redact(s: str) -> str:
         str: The line with recognised secret values replaced by
             ``[REDACTED]``.
     """
+    out = redact_secret_values(s)
     out = _SECRET_ASSIGNMENT_RE.sub(
         lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
-        s,
+        out,
     )
-    out = _AUTHORIZATION_RE.sub(lambda m: f"{m.group('prefix')}[REDACTED]", out)
-    out = _BEARER_RE.sub(lambda m: f"{m.group('prefix')}[REDACTED]", out)
-    for token_re in _TOKEN_VALUE_RES:
-        out = token_re.sub("[REDACTED]", out)
-    return out
+    return redact_secret_values(out)
 
 
 def _redact_transcript_value(value: Any) -> Any:
@@ -815,7 +815,7 @@ class SpecialistRunner:
                         "turn": turn,
                         "ts": ts,
                         "tool": str(call.get("tool") or "tool"),
-                        "query": call.get("query"),
+                        "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
         except Exception:  # noqa: BLE001 — trace must never break the run

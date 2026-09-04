@@ -347,6 +347,11 @@ def test_clean_category_label_handles_list_repr():
     assert tla._clean_category_label("") == ""
 
 
+def test_clean_category_label_swallows_oversized_literal():
+    nested = "[" * 9000 + "]" * 9000
+    assert tla._clean_category_label(nested) == ""
+
+
 def test_recover_moe_fused_real_schema(tmp_path):
     """The dominant MoE_fused row (67% GPU time) is recovered from the REAL
     ops_summary.csv schema even though it is NOT an "other"-bucket op."""

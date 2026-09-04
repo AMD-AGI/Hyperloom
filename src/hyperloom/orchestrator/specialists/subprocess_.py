@@ -47,6 +47,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
+    redact_file_in_place,
     scrub_child_process_env,
     valid_env_key,
 )
@@ -1055,6 +1056,10 @@ class SpecialistSubprocessDispatcher:
         else:
             proc_started = time.monotonic()
             log_fh = process_log.open("w", encoding="utf-8")
+            try:
+                process_log.chmod(0o600)
+            except OSError:
+                pass
             stdin_fh: Any = None
             try:
                 stdin_fh = prompt_file.open("rb")
@@ -1106,6 +1111,7 @@ class SpecialistSubprocessDispatcher:
         finally:
             if log_fh is not None:
                 log_fh.close()
+            redact_file_in_place(process_log, mode=0o600)
             clear_wall_budget_extension(task_id)
 
         # Patches: harvest from the worktree via git diff first; fall back to disk scan.

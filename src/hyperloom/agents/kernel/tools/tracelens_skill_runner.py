@@ -1311,6 +1311,17 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
 )
 
 
+_LITERAL_EVAL_MAX_CHARS = 8192
+_LITERAL_EVAL_ERRORS = (ValueError, SyntaxError, RecursionError, MemoryError, TypeError)
+
+
+def _safe_literal_eval(text: str) -> Any:
+    """Parse a short Python literal; fail the cell rather than the process."""
+    if len(text) > _LITERAL_EVAL_MAX_CHARS:
+        raise ValueError("literal too large")
+    return ast.literal_eval(text)
+
+
 def _launcher_frame_from_dict(obj: dict) -> str | None:
     """Pull the first ``<path>(<line>): <func>`` frame out of a TraceLens launcher dict.
 
@@ -1326,8 +1337,8 @@ def _launcher_frame_from_dict(obj: dict) -> str | None:
     wrappers = obj.get("wrappers")
     if isinstance(wrappers, str):
         try:
-            wrappers = ast.literal_eval(wrappers)
-        except (ValueError, SyntaxError):
+            wrappers = _safe_literal_eval(wrappers)
+        except _LITERAL_EVAL_ERRORS:
             wrappers = []
     if isinstance(wrappers, (list, tuple)):
         for frame in wrappers:
@@ -1364,8 +1375,8 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
         stripped = kernel_path.strip()
         if stripped.startswith("{") and stripped.endswith("}") and "entry_point" in stripped:
             try:
-                parsed_obj = ast.literal_eval(stripped)
-            except (ValueError, SyntaxError):
+                parsed_obj = _safe_literal_eval(stripped)
+            except _LITERAL_EVAL_ERRORS:
                 parsed_obj = None
             frame = _launcher_frame_from_dict(parsed_obj) if isinstance(parsed_obj, dict) else None
             if not frame:

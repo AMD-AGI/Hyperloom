@@ -10,7 +10,8 @@ Classification precedence (first match wins):
   1. Hard SDK-level signatures in ``sdk_error`` mapping to bootstrap-class
      outcomes, decisive even if some artifacts exist.
   2. Explicit ``blocked.md`` outcome marker (``outcome_id: <id>``) when it is
-     a known ``OutcomeId``.
+     a known failure/ask ``OutcomeId`` (success tags such as
+     ``eval_gap_accepted`` are ignored so they cannot skip MUST-have checks).
   3. Phase-aware artifact gaps under the recorded ``last_phase``.
   4. MUST-have model files on the quantized directory.
   5. Validator step results (FAIL > SKIPPED > absent step heading).
@@ -38,11 +39,17 @@ from .outcomes import (
     MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT,
     OutcomeId,
     SUCCESS_TAGS,
+    UNCLASSIFIED_FAILURE,
 )
 from .result_collector import CollectedArtifacts, collect_artifacts
 
 
 _BLOCKED_OUTCOME_RE = re.compile(r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+#: ``blocked.md`` may only stop the run on a failure/ask id. Success tags
+#: (``eval_gap_accepted``) and other non-blocked vocabulary must not short-
+#: circuit MUST-have / validator checks.
+_BLOCKED_MD_OUTCOMES: frozenset[OutcomeId] = AUTO_FAIL | ASK | AUTO_RECOVER | frozenset({UNCLASSIFIED_FAILURE})
 
 _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are clean success
 
@@ -168,9 +175,12 @@ def _parse_blocked_outcome(text: str | None) -> OutcomeId | None:
         return None
     raw = m.group(1).lower()
     try:
-        return OutcomeId(raw)
+        oid = OutcomeId(raw)
     except ValueError:
         return None
+    if oid not in _BLOCKED_MD_OUTCOMES:
+        return None
+    return oid
 
 
 def _classify_eval_outcome(

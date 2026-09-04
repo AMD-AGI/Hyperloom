@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 #: Timeout for fetching a served diff. The worktree route is given four times
 #: this, because it clones and diffs rather than downloading one file.
 DEFAULT_DIFF_FETCH_TIMEOUT_SEC: float = 30.0
+#: Cap on a downloaded unified-diff body (bytes). Larger payloads are refused.
+DEFAULT_DIFF_MAX_BYTES: int = 32 * 1024 * 1024
 
 
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
@@ -123,6 +125,8 @@ def _fetch_diff_to_path(
         "2",
         "--max-time",
         str(int(timeout_sec)),
+        "--max-filesize",
+        str(DEFAULT_DIFF_MAX_BYTES),
         "-o",
         str(dest),
         diff_url,
@@ -141,6 +145,9 @@ def _fetch_diff_to_path(
         return False, (cp.stderr or "").strip()
     if not dest.exists() or dest.stat().st_size == 0:
         return False, "curl wrote empty / missing file"
+    if dest.stat().st_size > DEFAULT_DIFF_MAX_BYTES:
+        dest.unlink(missing_ok=True)
+        return False, "diff exceeds max bytes"
     return True, ""
 
 
