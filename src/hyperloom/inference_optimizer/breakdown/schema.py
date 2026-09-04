@@ -121,13 +121,16 @@ class WorkloadObjective(TypedDict, total=False):
 
     Attributes:
         kind (str): Objective type (``gain_pct`` / ``tput`` / ``baseline`` /
-            ``time_only``).
+            ``roofline_pct`` / ``time_only``).
         value (Any): Goal value — a float target, a string (e.g.
             ``target_baseline_dir``), or None when not applicable.
+        objectives (list): Every target the run carried, present only when it
+            carried more than one; ``kind`` / ``value`` name the first.
     """
 
-    kind: str  # gain_pct / tput / baseline / time_only
+    kind: str  # gain_pct / tput / baseline / roofline_pct / time_only
     value: Any  # float or str (target_baseline_dir) or None
+    objectives: list[dict[str, Any]]
 
 
 class Workload(TypedDict, total=False):

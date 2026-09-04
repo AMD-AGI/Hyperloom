@@ -726,7 +726,9 @@ def _default_target_summary(args: argparse.Namespace) -> str:
 
     Used as the fallback ``target_summary`` when the operator did not pass an
     explicit ``--target-summary``. The phrasing depends on which target flag is
-    set: ``--target-gain`` (percentage), ``--target-tput`` (tok/s/GPU for
+    set: ``--target-gain`` (percentage), ``--target-roofline`` (percentage of
+    the modelled ceiling, which composes with the others), ``--target-tput``
+    (tok/s/GPU for
     serving; for scriptable xDiT the target throughput is img/s and is shown as
     the equivalent per-image latency e2el_mean_ms), or neither (open-ended
     optimization within the time budget).
@@ -738,17 +740,24 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     Returns:
         str: A one-sentence description of the run's objective.
     """
+    roofline = getattr(args, "target_roofline", None)
+    also = f" or {roofline}% of the roofline ceiling" if roofline else ""
     if args.target_gain:
         return (
             f"Establish baseline on {Path(args.model).name} then drive "
-            f"cumulative_gain_validated to >= {args.target_gain}% within "
+            f"cumulative_gain_validated to >= {args.target_gain}%{also} within "
             f"{args.max_hours}h."
         )
     if args.target_tput:
         from .. import framework_registry
 
         target = framework_registry.format_primary_metric(getattr(args, "framework", None), args.target_tput)
-        return f"Establish baseline on {Path(args.model).name} then reach {target} within {args.max_hours}h."
+        return f"Establish baseline on {Path(args.model).name} then reach {target}{also} within {args.max_hours}h."
+    if roofline:
+        return (
+            f"Establish baseline on {Path(args.model).name} then reach {roofline}% "
+            f"of the roofline ceiling within {args.max_hours}h."
+        )
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 

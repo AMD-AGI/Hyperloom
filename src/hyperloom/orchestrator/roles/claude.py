@@ -53,7 +53,10 @@ from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
     build_emit_intent_server,
+    coerce_emit_intent_input,
     constraints_sentence,
+    decode_emit_intent_input,
+    is_unparsed_tool_wrapper,
     payload_contract,
 )
 
@@ -135,6 +138,16 @@ _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 # Retried timeouts get a progressively larger idle budget so a genuinely slow
 # gateway is not re-killed at the same wall.
 _RETRY_IDLE_TIMEOUT_MULTIPLIER: float = 2.0
+
+
+def _intent_fingerprint(intent: Intent) -> str:
+    """Stable key for one validated intent used to drop fallback retries."""
+    return json.dumps(
+        {"intent_type": intent.type.value, "payload": intent.payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 # Built-in tools disallowed in raw_completion mode so the model produces
@@ -662,6 +675,7 @@ class ClaudeBackend:
             "raw_text": "",
             "tool_blocks": [],
             "parse_errors": [],
+            "deduped_fallback_intents": 0,
             "usage": {},
             "stderr_tail": [],
         }
@@ -886,6 +900,9 @@ class ClaudeBackend:
         text_chunks: list[str] = []
         result_chunks: list[str] = []
         tool_block_count = 0
+        # Defense in depth: identical wrapper envelopes in one query are the
+        # parser retry storm. Native duplicates still count separately.
+        seen_fallback_intents: set[str] = set()
         # Every usage dict the stream reports, in order: the last is cumulative
         # over the call, the ones before it describe single requests.
         usages: list[dict[str, Any]] = []
@@ -916,6 +933,17 @@ class ClaudeBackend:
                         tool_block_count += 1
                         intent = self._parse_tool_use_block(block)
                         if intent is not None:
+                            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
+                                fingerprint = _intent_fingerprint(intent)
+                                if fingerprint in seen_fallback_intents:
+                                    if self._active_turn_diagnostic is not None:
+                                        self._active_turn_diagnostic["deduped_fallback_intents"] += 1
+                                    log.info(
+                                        "claude fallback intent deduped (fingerprint=%s)",
+                                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
+                                    )
+                                    continue
+                                seen_fallback_intents.add(fingerprint)
                             intents.append(intent)
                     else:
                         txt = self._extract_text(block)
@@ -1022,13 +1050,22 @@ class ClaudeBackend:
 
         Args:
             block (Any): A tool-use block whose ``input`` carries
-                ``intent_type`` and ``payload``.
+                ``intent_type`` and ``payload``, or Claude Code's
+                ``__unparsedToolInput.raw`` wrapper around that JSON.
 
         Returns:
             Intent | None: The validated intent, or ``None`` if validation
             fails (the failure is logged, not raised).
         """
-        raw_input = getattr(block, "input", None) or {}
+        block_input = getattr(block, "input", None) or {}
+        if not isinstance(block_input, dict):
+            block_input = {}
+        raw_input, decode_error = decode_emit_intent_input(block_input)
+        if decode_error is not None:
+            log.info("claude tool_use decode failed: %s", decode_error)
+            if self._active_turn_diagnostic is not None:
+                self._active_turn_diagnostic["parse_errors"].append(decode_error)
+            return None
         try:
             envelope = {
                 "intents": [
@@ -1074,6 +1111,8 @@ class ClaudeBackend:
         if isinstance(raw_input, dict):
             summary["input_keys"] = sorted(str(key) for key in raw_input)
             intent_type = raw_input.get("intent_type")
+            if not isinstance(intent_type, str) and is_unparsed_tool_wrapper(raw_input):
+                intent_type = coerce_emit_intent_input(raw_input).get("intent_type")
             if isinstance(intent_type, str):
                 summary["intent_type"] = intent_type
         diag["tool_blocks"].append(summary)

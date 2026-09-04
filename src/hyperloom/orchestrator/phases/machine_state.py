@@ -181,6 +181,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
+        # Any phase → SWEEP on the way in, then SWEEP → CLOSE on the way out.
         "target_reached",
         "time_exhausted",
         "time_exhausted_during_prelude",
@@ -204,6 +205,13 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "no_candidates_and_discovery_exhausted",
     }
 )
+
+
+#: Named rather than inlined below because the writeback gate that sets it lives
+#: in another module, and the vocabulary is closed -- PolicyGate rejects any
+#: stop_reason outside it, so a typo on either side would silently degrade into
+#: "the run did not stop" rather than into an error anyone sees.
+AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 
 
 # stop_reason vocab
@@ -261,6 +269,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # run halts. Post-baseline accuracy failures REVERT the offending
         # change instead of stopping.
         "baseline_accuracy_failed",
+        # AgentX is on but its benchmark client (aiperf) is missing or is not
+        # the pinned build, and the runtime install could not supply it. An
+        # environment/supply gap, not a code gap: nothing downstream can author
+        # its way out of it, so the run halts on the FIRST occurrence instead of
+        # spending the budget in the enablement lane.
+        AGENTX_PREFLIGHT_STOP_REASON,
     }
 )
 
@@ -491,6 +505,18 @@ def _cumulative_gain_validated(state: Any) -> float:
         return 0.0
 
 
+def target_was_reached(state: Any) -> bool:
+    """Whether the run objective has been met.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``target_reached_at``.
+
+    Returns:
+        bool: True once the Coordinator has stamped the marker.
+    """
+    return bool(str(getattr(state, "target_reached_at", "") or "").strip())
+
+
 def should_reloop_to_explore(
     state: Any,
     *,
@@ -506,10 +532,10 @@ def should_reloop_to_explore(
     carries the *effective* no-gain streak for the cycle that just completed so
     the Coordinator can persist it on the loopback/close transition.
 
-    Loops back iff below the macro-cycle safety cap AND the run has not globally
-    converged (R7: ``no_gain_cycles`` consecutive no-gain cycles) AND no
-    roofline direction is saturated AND enough session budget remains to use a
-    fresh cycle.
+    Loops back iff the run objective is unmet AND below the macro-cycle safety
+    cap AND the run has not globally converged (R7: ``no_gain_cycles``
+    consecutive no-gain cycles) AND no roofline direction is saturated AND
+    enough session budget remains to use a fresh cycle.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -533,6 +559,10 @@ def should_reloop_to_explore(
     """
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"macro_cycle": cycle}
+
+    if target_was_reached(state):
+        evidence["reloop_blocked"] = "target_reached"
+        return False, evidence
 
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
     # "gained" only when its validated gain rose by at least the decaying KEEP bar.
@@ -2777,8 +2807,9 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): global terminal first, then the wall-clock closing
-    phase, then exit_terminal > exit_normal.
+    Priority (Inv-8.2): a met target's forward jump to SWEEP first, then the
+    global terminal, then the wall-clock closing phase, then exit_terminal >
+    exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
@@ -2795,6 +2826,12 @@ def compute_next_phase(
     """
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
+
+    # A met target closes through SWEEP so the concurrency curve measures the
+    # configuration it was met on. Not terminal: that would mirror the reason
+    # onto ``stop_reason``, which routes the next tick to CLOSE instead.
+    if target_was_reached(state) and phase_index(current) < phase_index(PHASE_SWEEP):
+        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
     # Global terminal stop_reason overrides phase-local judgments.
     terminal = _global_terminal(state)
@@ -2879,6 +2916,10 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
+            # The target names a clean exit. A failed sweep keeps its own name:
+            # its exit code is the signal that the closing curve is missing.
+            if exit_reason == "sweep_done" and target_was_reached(state):
+                return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
             # reloop is blocked (budget, convergence, or max_cycles).
@@ -3367,6 +3408,7 @@ __all__ = [
     "is_long_run",
     "resolve_keep_threshold",
     "should_reloop_to_explore",
+    "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
     "bank_phase_segment",

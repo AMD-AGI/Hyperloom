@@ -7,6 +7,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **AgentX installs its own benchmark client instead of letting an agent guess
+  at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
+  dependency and `install.sh` already owned that install, but it was gated on a
+  *runtime* mode flag being true in the *installer's* process — provision
+  without `HYPERLOOM_AGENTX`/`INSTALL_AIPERF`, turn AgentX on later, and the box
+  has no aiperf. Both halves behaved as designed; the combination did not.
+  Measured: the runtime preflight caught it and printed exactly the right fix,
+  but that sentence is written for an operator and on that path there is no
+  operator — so a supply gap was handed to an LLM specialist as if it were a
+  framework bug, and the run's budget went to re-deriving an install this
+  repository already had. Measured on that cluster: 11 of 13 provisioning runs
+  logged `aiperf (AgentX) skipped` and left a box that could not run AgentX.<br/>
+  **Install time** now keys on something it can actually know. A build that
+  ships `assets/agentx/` is a build whose boxes may be asked to run AgentX, so
+  the client is installed on that signal rather than on a runtime mode flag
+  nobody sets while provisioning. The pre-warm is deliberately timid: a failure
+  only warns, and an aiperf already on `PATH` is left alone even when its
+  recorded ref is stale, because replacing it takes `pip --force-reinstall`
+  (deliberately not `--no-deps`) and that rebuilds a dependency tree on a box
+  which may run nothing but the synthetic path.<br/>
+  **Run time** repairs what is still missing — once per process, when the
+  preflight finds aiperf absent or off the pinned `AIPERF_REF`. This is where a
+  stale client is upgraded, because here AgentX is demonstrably in use. A failed
+  repair is folded into the preflight error alongside the original diagnosis,
+  never swallowed. Two verdicts do not trigger an install: a corpus pin the
+  scenario does not admit (reinstalling the same build cannot change it), and a
+  build named by `AIPERF_BIN` (no install can replace an operator's override —
+  the error says so and names the variable).<br/>
+  **Operator note**: a default install now pays one pinned aiperf install
+  (measured ~30s; `ensure_aiperf` records the ref and skips on every later run).
+  Set `AIPERF_BIN` to an existing build to skip it, or `AGENTX_ASSET_DIR` to
+  point the check elsewhere. `install.sh` also gains `--only-aiperf`, which
+  installs just the client and exits — use it to add AgentX support to a box
+  provisioned without it. And when AgentX is asked for **by name**
+  (`INSTALL_AIPERF`, `HYPERLOOM_AGENTX` or `--only-aiperf`), a failed install is
+  FATAL rather than a warning: the caller named the dependency, so leaving it
+  absent with a warning in a log nobody reads is what produced the incident.
+
+- **A missing AgentX client stops the run instead of opening an enablement
+  round.** The enablement lane diagnoses things nobody knew about in advance;
+  a dependency AgentX declares for itself, that the runtime has already tried to
+  install, is not one of them. Measured: routed as an ordinary launch failure it
+  cost a full 24h budget — the specialist could not tell a supply gap from a
+  framework bug, its commands were rejected by the setup allowlist, and
+  PolicyGate's `enablement_round_in_flight` then blocked the baseline for the
+  rest of the run. The failure now stops on the first occurrence with the new
+  `agentx_client_unavailable` stop reason, and the report names the fix.
+  The grid runner also stops filing this abort as `no_benchmark_workspace`:
+  no workspace exists because Magpie never ran, and the generic class erased the
+  one fact that decides what to do next. A grid that hits it abandons its
+  remaining points rather than re-attempting each one — the client is missing
+  for the whole grid, and the stop above is baseline-scoped so nothing else
+  would have halted it. Nothing about the enablement channel itself changes.
+
+- **Enablement setup commands are judged by what they do, not how they are
+  spelled.** The install-only allowlist matched from the start of the command
+  and normalised only `sudo` and `KEY=VALUE` prefixes, so
+  `/opt/venv/bin/uv pip install X` was rejected while `uv pip install X` — the
+  same operation — was allowed. Measured: two sessions hit one missing
+  dependency and got opposite outcomes, decided by nothing but how the
+  specialist happened to spell the path. The executable's directory is now
+  stripped before matching — but only when it is an absolute system prefix
+  (`/opt/<name>`, `/usr`, `/usr/local`, `/bin`, `/sbin`). The allowlist is
+  matched on a normalised copy while the replay executes the original string, so
+  a blanket strip would let `./pip install foo` borrow an allowlisted name and
+  run a script the specialist had just written; `/opt/venv/bin/uv pip install`
+  normalises, `./pip`, `bin/pip` and `/tmp/pip` do not.
+  `uv venv` / `python -m venv` are also allowed now: without them the only
+  spelling that survived was installing into the system interpreter
+  (`PIP_BREAK_SYSTEM_PACKAGES=1`), so the gate was steering repairs toward the
+  less safe of its two options. `rm`, `systemctl`, `./configure` and `uv run`
+  stay rejected with or without a path.<br/>
+  Rejected commands also reach the conclusion now, as `setup_commands_skipped`
+  and a named clause in the round's `reason` — redacted and length-bounded,
+  since they are LLM-written text that lands in the journal, the report and the
+  KB. They were a lone log warning, so downstream saw an outcome with no link to
+  the cause and re-authored the same proposal until the budget ran out.
+
 - **BREAKING — the `deterministic` trace-analysis route is gone.**
   `HYPERLOOM_TRACE_ANALYSIS_ROUTE` and the `analysis_route` payload key now take
   `agent` or `bypass`, and `tracelens_analysis.py` no longer accepts
