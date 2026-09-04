@@ -212,6 +212,47 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
     assert exc.value.rule == "phase_incompatible"
 
 
+def test_gemm_tuning_lane_is_not_offered_to_the_llm():
+    """Same posture as the fusion and collective lanes it was closed alongside.
+
+    The phase-proposable set already drops it. Leaving it in the prompt-rendered
+    set advertises an action every model channel now refuses, which costs a tick
+    to discover.
+    """
+    from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
+    from hyperloom.orchestrator.phases.machine_state import (
+        PHASE_ALLOWED_ACTIONS,
+        PHASE_KERNEL_AGENT,
+    )
+
+    assert "gemm_tuning" not in FULL_ENABLED_ACTIONS
+    assert "gemm_tuning" not in PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT]
+    # Still kernel-owned: the Coordinator dispatches it and the request kind has
+    # to keep resolving, which is a separate question from offering it.
+    assert "gemm_tuning" in KERNEL_AGENT_OWNED_ACTIONS
+
+
+def test_explore_disabled_hint_names_no_action_the_gate_refuses():
+    """A hint that recommends a denied action buys the model a guaranteed retry."""
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    state.framework_agent_phase_enabled = False
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "explore", "predicted_gain_pct": 5.0},
+            ),
+        )
+
+    assert exc.value.rule == "explore_disabled"
+    assert "gemm_tuning" not in (exc.value.hint or "")
+    assert "kernel_opt" not in (exc.value.hint or "")
+    assert "integrate" in (exc.value.hint or "")
+
+
 def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
     """Closing the lanes must not close integrate; draining KEEPs stays its job."""
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")

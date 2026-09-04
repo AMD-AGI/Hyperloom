@@ -105,7 +105,6 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "integrate_patch",
     "conc_sweep",
     "integrate",
-    "gemm_tuning",
     "report",
 )
 
@@ -204,9 +203,9 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
             side_effects=("workspace_write", "server_restart", "writes_config"),
             description=(
-                "GEMM dispatch tuning request. Current GEAK owns the default KERNEL phase and decides applicability "
-                "internally. Private forge tuning is available only when the operator set exactly "
-                "KERNEL_OPT_BACKEND_ORDER=forge."
+                "GEMM dispatch tuning lane. Coordinator-owned: dispatched once at KERNEL entry from a lane "
+                "budget after its own deterministic gate passes, and refused by PolicyGate on every model "
+                "channel. Observe its outcome rather than requesting it."
             ),
         ),
         "integrate": ActionMetadata(
