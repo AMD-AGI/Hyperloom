@@ -9,8 +9,8 @@
 """Independent (TraceLens-free) trace analysis backend for the bypass route.
 
 This tool is the runtime target of ``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``.
-It replaces the TraceLens agent / TraceLens deterministic scripts entirely:
-it never imports or shells out to TraceLens. It reads the torch-profiler
+It replaces the TraceLens agent route entirely: it never imports or shells out
+to TraceLens. It reads the torch-profiler
 Kineto trace produced by the ``profile`` step and emits the same downstream
 artifact contract the Coordinator / kernel-agent expect:
 

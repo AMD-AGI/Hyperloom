@@ -3266,15 +3266,13 @@ class V6KernelAnalysisArtifacts(TypedDict, total=False):
 class V6KernelAnalysisDetail(TypedDict, total=False):
     """Trace-analysis metadata shared by the roofline and kernel events.
 
-    ``route`` and ``tool`` are independent: a request can be answered
-    deterministically by the analysis tool, delegated to the agent, or bypassed
-    entirely, and the tool that served it is a separate fact from the route
-    that chose it. Oversized sub-blocks are replaced by an omission marker
+    ``route`` records the routing policy and ``tool`` records the implementation
+    that served it. Oversized sub-blocks are replaced by an omission marker
     rather than dropped, so a consumer can tell a bounded block from a missing
     one.
 
     Attributes:
-        route (str): ``agent`` / ``deterministic`` / ``bypass``.
+        route (str): ``agent`` / ``bypass``.
         tool (str): ``tracelens`` / ``bypass``.
         tool_run_id (str): The analysis tool's own run id.
         steady_state (dict[str, Any]): Steady-state window selection.
