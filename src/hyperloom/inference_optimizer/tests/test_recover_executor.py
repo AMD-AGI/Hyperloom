@@ -200,12 +200,33 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
 
     monkeypatch.setattr(exe, "_send_signal", _send)
     monkeypatch.setattr(exe, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(exe, "_pid_cmdline", lambda pid: "EngineCore worker")
     monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
 
     out = await exe(_ctx(workspace, params={"force_gpu_cleanup": True}))
     assert (7777, signal.SIGTERM) in sent
     assert (7777, signal.SIGKILL) in sent
     assert out["killed_pids"][0]["signal"] == "KILL"
+
+
+def test_sigkill_skips_pid_reused_after_sigterm(monkeypatch):
+    """The KILL phase revalidates ownership after its grace period."""
+    exe = RecoverExecutor()
+    monkeypatch.setattr(
+        exe,
+        "_discover_stale_pids",
+        lambda: [{"pid": 7777, "cmd": "EngineCore worker", "pattern": "EngineCore"}],
+    )
+    sent: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(exe, "_send_signal", lambda pid, sig: sent.append((pid, sig)) or True)
+    monkeypatch.setattr(exe, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "python unrelated.py")
+    monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
+
+    out = exe._kill_stale_owners()
+
+    assert sent == [(7777, signal.SIGTERM)]
+    assert out[0]["signal"] == "TERM"
 
 
 # Soft-cleanup failure path: leaked VRAM after kills -> needs_review.
@@ -666,6 +687,22 @@ class TestParseRocmSmiCsvEdgeCases:
 
 
 class TestKillStaleOwnersNoneSignalled:
+    def test_unrecognized_pidfile_owner_is_not_signalled(self, monkeypatch):
+        """A recycled PID with an unrelated cmdline is ignored."""
+        exe = RecoverExecutor()
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: [{"pid": 111, "cmd": "python unrelated.py", "pattern": "session_pidfile"}],
+        )
+        monkeypatch.setattr(
+            exe,
+            "_send_signal",
+            lambda _pid, _sig: pytest.fail("unrecognized owner must not be signalled"),
+        )
+
+        assert exe._kill_stale_owners() == []
+
     def test_all_sigterm_fail_returns_empty(self, monkeypatch):
         """If every SIGTERM fails to deliver, no wait/KILL and returns []."""
         exe = RecoverExecutor()

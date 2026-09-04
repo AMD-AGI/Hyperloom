@@ -80,6 +80,13 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
 )
 
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"(?i)\b(authorization\s*:\s*)(?:(?:bearer|basic)\s+)?"
+            r"[^\s,;'\"\\]+"
+        ),
+        r"\1[REDACTED]",
+    ),
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
@@ -91,8 +98,11 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
     (re.compile(r"(?i)(ocp-apim-subscription-key\s*:\s*)\S+"), r"\1[REDACTED]"),
     (
-        re.compile(r"(?i)\b([A-Z0-9_]*CUSTOM_HEADERS\s*[=:]\s*)(\S.*?)(?=\s+[A-Z][A-Z0-9_]*=|\s*$)"),
-        r"\1[REDACTED]",
+        re.compile(
+            r"(?i)\b([A-Z0-9_]*CUSTOM_HEADERS\s*[=:]\s*)"
+            r"(\\?[\"'])?(?:[^\s,;'\"\\]+:[ \t]*)?[^\s,;'\"\\]+"
+        ),
+        r"\1\2[REDACTED]",
     ),
     # Shell commands quote the value (``PASSWORD="x"``), and a command that has
     # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
@@ -114,7 +124,7 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
-            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"(?:(?:API_?KEY|AUTH|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
             r"\s*[=:]\s*)"
             r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),
@@ -427,25 +437,33 @@ def redact_secret_values(text: str) -> str:
 
 
 def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> None:
-    """Rewrite ``path`` with :func:`redact_secret_values` and restrict mode.
+    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode.
 
     Missing files and I/O errors are ignored so a logging path cannot fail a run.
     """
     from pathlib import Path
 
     target = Path(path)
+    tmp = target.with_name(target.name + ".redacting")
+    changed = False
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return
-    redacted = redact_secret_values(text)
-    try:
-        if redacted != text:
-            tmp = target.with_name(target.name + ".redacting")
-            tmp.write_text(redacted, encoding="utf-8")
+        with target.open("r", encoding="utf-8", errors="replace") as source:
+            with tmp.open("w", encoding="utf-8") as destination:
+                for line in source:
+                    redacted = redact_secret_values(line)
+                    changed = changed or redacted != line
+                    destination.write(redacted)
+        if changed:
+            tmp.chmod(mode)
             tmp.replace(target)
+        else:
+            tmp.unlink()
         target.chmod(mode)
     except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return
 
 

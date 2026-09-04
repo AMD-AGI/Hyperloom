@@ -10,9 +10,12 @@ this module just plumbs run context into a templated prompt for the SDK.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -24,7 +27,6 @@ DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
 
 SKILL_RELATIVE_PATH = "SKILL.md"
-QUARK_PY310_COMPAT_DIR = ".hyperloom_quark_py310_compat"
 QUARK_PY310_SITE_CUSTOMIZE = """\
 import datetime as _datetime
 import typing as _typing
@@ -93,6 +95,16 @@ def resolve_skill_path(package_root: Path | None = None) -> Path:
     return root / SKILL_RELATIVE_PATH
 
 
+def _cleanup_quark_py310_compat(compat_dir: Path) -> None:
+    """Remove the process-level compatibility shim."""
+    try:
+        compat_dir.chmod(0o755)
+        shutil.rmtree(compat_dir)
+    except OSError:
+        pass
+
+
+@lru_cache(maxsize=1)
 def _prepare_quark_py310_compat() -> Path:
     """Create a workspace-external Python 3.10 compatibility shim for Quark 0.12.
 
@@ -106,6 +118,7 @@ def _prepare_quark_py310_compat() -> Path:
     sitecustomize.write_text(QUARK_PY310_SITE_CUSTOMIZE, encoding="utf-8")
     sitecustomize.chmod(0o444)
     compat_dir.chmod(0o555)
+    atexit.register(_cleanup_quark_py310_compat, compat_dir)
     return compat_dir
 
 

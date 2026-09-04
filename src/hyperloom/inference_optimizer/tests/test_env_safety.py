@@ -13,6 +13,8 @@ placed into the forward dict, so they are not SSH-forwarded to inference pods.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from hyperloom.inference_optimizer.multi_node._internal import env_safety
@@ -189,6 +191,30 @@ def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     assert redacted.count("[REDACTED]") == 2
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Authorization: abcdef1234567890",
+        "authorization: Basic YWJjOmRlZg==",
+        "AUTH_KEY=supersecret",
+    ),
+)
+def test_redact_secret_values_masks_authorization_forms(text):
+    """Authorization headers and AUTH assignments are masked."""
+    redacted = common_env_safety.redact_secret_values(text)
+
+    assert redacted.endswith("[REDACTED]")
+
+
+def test_redact_secret_values_preserves_json_around_authorization():
+    """Authorization redaction must stop at the enclosing JSON quote."""
+    text = '{"header": "Authorization: Basic YWJjOmRlZg==", "ok": true}'
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert json.loads(out) == {"header": "Authorization: [REDACTED]", "ok": True}
+
+
 def test_redact_secret_values_masks_quoted_assignments():
     """A quoted value is the common shape: shells quote it, json.dumps escapes it."""
     double = common_env_safety.redact_secret_values('export MYAPP_PASSWORD="hunter2"')
@@ -245,3 +271,22 @@ def test_redact_secret_values_masks_custom_headers_assignment():
     out = common_env_safety.redact_secret_values(text)
     assert "deadbeefsecret" not in out
     assert "ANTHROPIC_CUSTOM_HEADERS=" in out
+
+
+def test_redact_secret_values_preserves_json_around_custom_headers():
+    """A custom-header assignment must not consume adjacent JSON fields."""
+    text = '{"a": ["OPENAI_CUSTOM_HEADERS=h"], "b": "run with FOO=1"}'
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert json.loads(out) == {"a": ["OPENAI_CUSTOM_HEADERS=[REDACTED]"], "b": "run with FOO=1"}
+
+
+def test_redact_secret_values_masks_spaced_custom_header_before_newline():
+    """A custom-header value containing a space is masked on non-final lines."""
+    text = "ANTHROPIC_CUSTOM_HEADERS=x-key: deadbeefsecret\nnext line\n"
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert "deadbeefsecret" not in out
+    assert out.endswith("next line\n")

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.quantization.driver import runner as runner_module
 from hyperloom.agents.quantization.driver.runner import (
     DEFAULT_ALLOWED_TOOLS,
     AttemptResult,
@@ -34,6 +35,16 @@ def test_resolve_skill_path_respects_override(tmp_path):
     (tmp_path / "SKILL.md").write_text("x", encoding="utf-8")
     p = resolve_skill_path(package_root=tmp_path)
     assert p == tmp_path / "SKILL.md"
+
+
+def test_quark_py310_compat_dir_is_process_singleton():
+    """Repeated attempts reuse one read-only compatibility directory."""
+    first = runner_module._prepare_quark_py310_compat()
+    second = runner_module._prepare_quark_py310_compat()
+
+    assert first == second
+    assert first.is_dir()
+    assert (first.stat().st_mode & 0o222) == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

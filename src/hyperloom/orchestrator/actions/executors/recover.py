@@ -390,6 +390,15 @@ class RecoverExecutor:
         killed: list[dict[str, Any]] = []
         for entry in candidates:
             pid = entry["pid"]
+            cmd = str(entry.get("cmd", ""))
+            pattern = next((marker for marker in self.OWNER_PATTERNS if marker in cmd), None)
+            if pattern is None:
+                log.warning(
+                    "recover_executor: pid %d is not a recognized session owner; not signalling",
+                    pid,
+                )
+                continue
+            entry["pattern"] = pattern
             if self._send_signal(pid, signal.SIGTERM):
                 entry["signal"] = "TERM"
                 killed.append(entry)
@@ -399,7 +408,9 @@ class RecoverExecutor:
         time.sleep(self.SERVER_KILL_WAIT_S)
         for entry in killed:
             pid = entry["pid"]
-            if self._pid_alive(pid) and self._send_signal(pid, signal.SIGKILL):
+            current_cmd = self._pid_cmdline(pid)
+            still_owned = any(marker in current_cmd for marker in self.OWNER_PATTERNS)
+            if self._pid_alive(pid) and still_owned and self._send_signal(pid, signal.SIGKILL):
                 entry["signal"] = "KILL"
         return killed
 

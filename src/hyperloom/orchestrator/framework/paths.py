@@ -152,7 +152,10 @@ def is_rocm_hip_writable_path(value: str) -> bool:
     """
     if not is_rocm_hip_path(value):
         return True
-    path = Path(str(value))
+    try:
+        path = Path(str(value)).resolve()
+    except (OSError, RuntimeError):
+        return False
     if path.name.lower() in _ROCM_HIP_WRITE_NAMES:
         return True
     return path.suffix.lower() in _ROCM_HIP_WRITE_SUFFIXES

@@ -713,6 +713,13 @@ class TestRocmHipSourceRoots:
         assert fp.is_rocm_hip_writable_path("/opt/rocm/lib/libhip_hcc.so") is False
         assert fp.is_rocm_hip_writable_path("/sgl-workspace/vllm/foo.py") is True
 
+    def test_rocm_write_filter_checks_resolved_symlink_suffix(self, tmp_path):
+        """A source-looking symlink to a runtime object remains read-only."""
+        link = tmp_path / "patch_me.py"
+        link.symlink_to("/opt/rocm/lib/libamdhip64.so")
+
+        assert fp.is_rocm_hip_writable_path(str(link)) is False
+
 
 # Source-root resolution + prompt injection
 def test_resolve_source_file_allowlist_unions_env_override(monkeypatch):
