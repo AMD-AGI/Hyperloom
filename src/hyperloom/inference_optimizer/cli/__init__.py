@@ -1642,17 +1642,18 @@ def _export_predictor_settings(args: argparse.Namespace) -> None:
     mode = str(getattr(args, "primatune_mode", "") or "").strip().lower()
     if mode:
         os.environ[predictor_config.ENV_MODE] = mode
-    max_chain = getattr(args, "primatune_max_chain", None)
-    if max_chain is not None:
-        os.environ[predictor_config.ENV_MAX_CHAIN] = str(int(max_chain))
 
     conf = predictor_config.load()
     if conf.enabled:
-        held = "; LLM specialists held until then" if conf.enqueues else ""
+        held = (
+            "; one round of every sampled variant, specialists and "
+            "orchestration explore held until that round has no KEEP"
+            if conf.enqueues
+            else ""
+        )
         print(
             f"  predictor          : {conf.mode} at {conf.endpoint} "
-            f"(up to {conf.max_chain} rounds without a KEEP, "
-            f"{conf.max_variants} variants each, phase label {conf.phase_label}{held})"
+            f"(phase label {conf.phase_label}{held})"
         )
 
 

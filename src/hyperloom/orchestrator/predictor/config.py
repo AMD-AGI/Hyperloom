@@ -32,10 +32,8 @@ MODES = (MODE_OFF, MODE_SHADOW, MODE_ACTIVE)
 
 ENV_ENDPOINT = "HYPERLOOM_PREDICTOR_ENDPOINT"
 ENV_MODE = "HYPERLOOM_PREDICTOR_MODE"
-ENV_MAX_CHAIN = "HYPERLOOM_PREDICTOR_MAX_CHAIN"
 ENV_TIMEOUT_SEC = "HYPERLOOM_PREDICTOR_TIMEOUT_SEC"
 ENV_PHASE_LABEL = "HYPERLOOM_PREDICTOR_PHASE_LABEL"
-ENV_MAX_VARIANTS = "HYPERLOOM_PREDICTOR_MAX_VARIANTS"
 
 #: Shadow, not active. The two known mismatches between what Hyperloom reports
 #: and what a consumer was trained on are both silent, so the default has to be
@@ -43,26 +41,13 @@ ENV_MAX_VARIANTS = "HYPERLOOM_PREDICTOR_MAX_VARIANTS"
 #: on them.
 DEFAULT_MODE = MODE_SHADOW
 
-#: Consecutive predictor rounds without a KEEP before the phase falls back to
-#: the LLM specialists. A losing streak, not a total: a KEEP resets it, so a
-#: chain that keeps landing is never cut off. Three attempts at one decision
-#: point are three independent draws from a sampling service, which is a real
-#: second and third look rather than a repeat.
-DEFAULT_MAX_CHAIN = 3
-
-#: Variants one answer may contribute to a round. A sampling predictor returns
-#: as many distinct proposals as it found -- eight samples deduplicated to about
-#: six in every batch measured -- and each one is a benchmark round of roughly
-#: seven minutes. Unbounded, a single decision point would spend ~42 minutes
-#: against a FRAMEWORK budget of ~96, and the three-step chain would need more
-#: than the whole phase. Three keeps the full chain affordable
-#: (3 x 3 x 7 = 63 minutes) with headroom for the round the phase runs anyway.
-#:
-#: Not a ranking: the proposals arrive in sample order and the truncation keeps
-#: the head. There is no way to order them by value here without duplicating the
-#: judgement the model was asked to make, and the flag that mattered most in the
-#: observed sessions was a minority sample rather than the modal one.
-DEFAULT_MAX_VARIANTS = 3
+#: Consecutive *losing* rounds before the phase falls back to the LLM
+#: specialists and orchestration explore. Hardcoded: one sample batch is
+#: measured in full, and a KEEP still resets the streak so a win can deepen
+#: the stack and earn a second HTTP at the new depth. An operator knob here
+#: either truncated the batch (max_variants) or spent the FRAMEWORK budget on
+#: extra losing rounds that found nothing.
+DEFAULT_MAX_CHAIN = 1
 
 DEFAULT_TIMEOUT_SEC = 120.0
 
@@ -91,21 +76,6 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
     return value
 
 
-def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        log.warning("predictor_config: %s=%r is not an integer; using %s", name, raw, default)
-        return default
-    if value < minimum:
-        log.warning("predictor_config: %s=%r is below %s; using %s", name, raw, minimum, default)
-        return default
-    return value
-
-
 @dataclass(frozen=True)
 class PredictorConfig:
     """Resolved predictor settings for one tick."""
@@ -115,7 +85,6 @@ class PredictorConfig:
     max_chain: int = DEFAULT_MAX_CHAIN
     timeout_sec: float = DEFAULT_TIMEOUT_SEC
     phase_label: str = DEFAULT_PHASE_LABEL
-    max_variants: int = DEFAULT_MAX_VARIANTS
 
     @property
     def enabled(self) -> bool:
@@ -149,8 +118,7 @@ def load() -> PredictorConfig:
     return PredictorConfig(
         endpoint=os.environ.get(ENV_ENDPOINT, "").strip(),
         mode=mode,
-        max_chain=_env_int(ENV_MAX_CHAIN, DEFAULT_MAX_CHAIN),
+        max_chain=DEFAULT_MAX_CHAIN,
         timeout_sec=_env_float(ENV_TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC, minimum=1.0),
         phase_label=os.environ.get(ENV_PHASE_LABEL, "").strip() or DEFAULT_PHASE_LABEL,
-        max_variants=_env_int(ENV_MAX_VARIANTS, DEFAULT_MAX_VARIANTS, minimum=1),
     )

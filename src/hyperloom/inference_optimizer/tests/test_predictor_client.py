@@ -63,7 +63,7 @@ def _predict(service, request=None):
 
 class TestConfig:
     def test_defaults_to_shadow_and_disabled(self, monkeypatch):
-        for name in (cfg.ENV_ENDPOINT, cfg.ENV_MODE, cfg.ENV_MAX_CHAIN):
+        for name in (cfg.ENV_ENDPOINT, cfg.ENV_MODE):
             monkeypatch.delenv(name, raising=False)
         conf = cfg.load()
         assert conf.mode == cfg.MODE_SHADOW
@@ -94,10 +94,8 @@ class TestConfig:
         assert cfg.load().mode == cfg.MODE_SHADOW
 
     def test_bad_numbers_fall_back_without_raising(self, monkeypatch):
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "lots")
         monkeypatch.setenv(cfg.ENV_TIMEOUT_SEC, "-5")
         conf = cfg.load()
-        assert conf.max_chain == cfg.DEFAULT_MAX_CHAIN
         assert conf.timeout_sec == cfg.DEFAULT_TIMEOUT_SEC
 
     def test_the_predictor_has_no_budget_of_its_own(self):
@@ -110,12 +108,18 @@ class TestConfig:
         assert not hasattr(cfg, "DEFAULT_BUDGET_PCT")
         assert not hasattr(cfg.PredictorConfig(), "budget_pct")
 
-    def test_variant_cap_is_configurable_and_never_zero(self, monkeypatch):
-        """Zero would make a configured predictor silently enqueue nothing."""
-        monkeypatch.setenv(cfg.ENV_MAX_VARIANTS, "6")
-        assert cfg.load().max_variants == 6
-        monkeypatch.setenv(cfg.ENV_MAX_VARIANTS, "0")
-        assert cfg.load().max_variants == cfg.DEFAULT_MAX_VARIANTS
+    def test_chain_and_variant_caps_are_not_operator_knobs(self, monkeypatch):
+        """One losing round, every distinct sample. Leftover env vars are ignored."""
+        assert cfg.DEFAULT_MAX_CHAIN == 1
+        assert not hasattr(cfg, "ENV_MAX_CHAIN")
+        assert not hasattr(cfg, "ENV_MAX_VARIANTS")
+        assert not hasattr(cfg, "DEFAULT_MAX_VARIANTS")
+        assert not hasattr(cfg.PredictorConfig(), "max_variants")
+        monkeypatch.setenv("HYPERLOOM_PREDICTOR_MAX_CHAIN", "9")
+        monkeypatch.setenv("HYPERLOOM_PREDICTOR_MAX_VARIANTS", "2")
+        conf = cfg.load()
+        assert conf.max_chain == 1
+        assert not hasattr(conf, "max_variants")
 
     def test_only_sglang_and_vllm_are_supported(self):
         conf = cfg.PredictorConfig()

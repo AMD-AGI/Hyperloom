@@ -84,6 +84,7 @@ class _Phase:
             predictor_chain_cycle=-1,
             predictor_round_task_id="",
             auto_roofline_pending_task_id="",
+            explore_search={},
         )
         base.update(state)
         self.shared_state = SimpleNamespace(**base)
@@ -98,8 +99,6 @@ def active(monkeypatch):
     """Predictor configured and allowed to enqueue."""
     monkeypatch.setenv(cfg.ENV_ENDPOINT, "http://predictor:8973")
     monkeypatch.setenv(cfg.ENV_MODE, cfg.MODE_ACTIVE)
-    monkeypatch.delenv(cfg.ENV_MAX_CHAIN, raising=False)
-    monkeypatch.delenv(cfg.ENV_MAX_VARIANTS, raising=False)
 
 
 @pytest.fixture
@@ -161,16 +160,14 @@ class TestGate:
         assert seen == []
 
     def test_declines_once_the_chain_cap_is_reached(self, monkeypatch, active):
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "2")
         seen = _stub(monkeypatch, _answer())
-        _run(_Phase(predictor_chain_cycle=0, predictor_chain_steps=2))
+        _run(_Phase(predictor_chain_cycle=0, predictor_chain_steps=1))
         assert seen == []
 
     def test_chain_count_resets_on_a_new_macro_cycle(self, monkeypatch, active):
         """cycle_reloop reopens the phase, and the chain with it."""
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "2")
         seen = _stub(monkeypatch, _answer())
-        _run(_Phase(macro_cycle=1, predictor_chain_cycle=0, predictor_chain_steps=2))
+        _run(_Phase(macro_cycle=1, predictor_chain_cycle=0, predictor_chain_steps=1))
         assert len(seen) == 1
 
     def test_runs_however_much_of_the_phase_is_spent(self, monkeypatch, active):
@@ -288,6 +285,83 @@ class TestConfigChannel:
         assert phase.tasks.created[0]["params"]["benchmark_script"] == "vllm_mi300x.sh"
 
 
+class TestConfigDedup:
+    """Skip proposals already on the stack, in this batch, or already measured."""
+
+    def test_drops_a_second_copy_inside_the_same_batch(self, monkeypatch, active):
+        _stub(
+            monkeypatch,
+            _answer(
+                actions=[
+                    Action(server_args={"--kv-cache-dtype": "fp8"}),
+                    Action(server_args={"--kv-cache-dtype": "fp8"}),
+                    Action(server_args={"--block-size": "32"}),
+                ]
+            ),
+        )
+        phase = _Phase()
+        _run(phase)
+        grid = phase.tasks.created[0]["params"]["grid"]
+        assert [e["extra_args"] for e in grid] == ["--kv-cache-dtype fp8", "--block-size 32"]
+
+    def test_skips_a_proposal_already_on_the_champion(self, monkeypatch, active):
+        _stub(monkeypatch, _answer(server_args={"--kv-cache-dtype": "fp8_e4m3"}))
+        phase = _Phase(
+            current_best={"extra_server_args": "--kv-cache-dtype fp8_e4m3", "extra_envs": {}},
+            optimization_stack=[{"extra_server_args": "--kv-cache-dtype fp8_e4m3"}],
+        )
+        _run(phase)
+        assert phase.tasks.created == []
+        assert phase.shared_state.predictor_chain_steps == 1
+        assert phase.shared_state.predictor_round_task_id == ""
+
+    def test_skips_a_delta_already_in_explore_tested(self, monkeypatch, active):
+        from hyperloom.orchestrator.actions.executors._proposal_identity import (
+            effective_fingerprint,
+        )
+
+        fp = effective_fingerprint("--max-num-batched-tokens 16384", {})
+        _stub(monkeypatch, _answer())
+        phase = _Phase(explore_search={"tested": {fp: {"extra_server_args": "--max-num-batched-tokens 16384", "extra_envs": {}}}})
+        _run(phase)
+        assert phase.tasks.created == []
+        assert phase.shared_state.predictor_chain_steps == 1
+
+    def test_skips_a_new_delta_whose_launch_recipe_was_already_measured(
+        self, monkeypatch, active
+    ):
+        """Round-2 ``--quantization fp8`` on an e4m3 champion is the same launch as round 1."""
+        _stub(monkeypatch, _answer(server_args={"--quantization": "fp8"}))
+        phase = _Phase(
+            current_best={"extra_server_args": "--kv-cache-dtype fp8_e4m3", "extra_envs": {}},
+            optimization_stack=[{"extra_server_args": "--kv-cache-dtype fp8_e4m3"}],
+            explore_search={
+                "tested": {
+                    "prior": {
+                        "extra_server_args": "--kv-cache-dtype fp8_e4m3 --quantization fp8",
+                        "extra_envs": {},
+                        "launch_evidence": {
+                            "requested_server_flags": "--kv-cache-dtype fp8_e4m3 --quantization fp8"
+                        },
+                    }
+                }
+            },
+        )
+        _run(phase)
+        assert phase.tasks.created == []
+        assert phase.shared_state.predictor_chain_steps == 1
+        assert pp.predictor_holds_specialists(phase.shared_state) is False
+
+    def test_keeps_a_proposal_that_changes_the_launch(self, monkeypatch, active):
+        _stub(monkeypatch, _answer(server_args={"--quantization": "fp8"}))
+        phase = _Phase(
+            current_best={"extra_server_args": "--kv-cache-dtype fp8_e4m3", "extra_envs": {}},
+            explore_search={"tested": {}},
+        )
+        _run(phase)
+        assert phase.tasks.created[0]["params"]["grid"][0]["extra_args"] == "--quantization fp8"
+
+
 class TestSampledConfigChannel:
     """N sampled proposals become N variants of one round, not N rounds."""
 
@@ -314,36 +388,15 @@ class TestSampledConfigChannel:
         ]
         assert grid[2]["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
 
-    def test_variants_are_capped(self, monkeypatch, active):
-        """Each variant is a benchmark round, so the cap is a budget decision."""
-        monkeypatch.setenv(cfg.ENV_MAX_VARIANTS, "2")
-        _stub(monkeypatch, self._sampled())
-        phase = _Phase()
-        _run(phase)
-        grid = phase.tasks.created[0]["params"]["grid"]
-        assert [e["extra_args"] for e in grid] == [
-            "--kv-cache-dtype fp8",
-            "--max-num-batched-tokens 32768",
-        ]
-
-    def test_a_cap_of_one_reproduces_the_single_answer_round(self, monkeypatch, active):
-        monkeypatch.setenv(cfg.ENV_MAX_VARIANTS, "1")
-        _stub(monkeypatch, self._sampled())
-        phase = _Phase()
-        _run(phase)
-        grid = phase.tasks.created[0]["params"]["grid"]
-        assert len(grid) == 1
-        assert grid[0]["extra_args"] == "--kv-cache-dtype fp8"
-
-    def test_the_default_cap_bounds_the_round(self, monkeypatch, active):
-        """Unbounded, one decision point outspends the whole FRAMEWORK budget."""
+    def test_every_distinct_proposal_is_measured(self, monkeypatch, active):
+        """The service already dedupes; Hyperloom does not re-rank or truncate."""
         _stub(
             monkeypatch,
             _answer(actions=[Action(server_args={"--block-size": str(n)}) for n in range(9)]),
         )
         phase = _Phase()
         _run(phase)
-        assert len(phase.tasks.created[0]["params"]["grid"]) == cfg.DEFAULT_MAX_VARIANTS
+        assert len(phase.tasks.created[0]["params"]["grid"]) == 9
 
     def test_the_idempotency_key_stays_per_decision_point(self, monkeypatch, active):
         """Sampling must not change what makes the chain terminate."""
@@ -358,6 +411,40 @@ class TestSampledConfigChannel:
         _run(phase)
         names = [e["name"] for e in phase.tasks.created[0]["params"]["grid"]]
         assert names == ["primatune-c0-s0-a0-0", "primatune-c0-s0-a0-1", "primatune-c0-s0-a0-2"]
+
+    def test_drops_sglang_envs_on_a_vllm_session(self, monkeypatch, active):
+        """Repair strips illegal flags, not envs; a foreign env used to ride in."""
+        _stub(
+            monkeypatch,
+            _answer(
+                actions=[
+                    Action(
+                        server_args={"--kv-cache-dtype": "fp8"},
+                        envs={
+                            "SGLANG_USE_AITER": "1",
+                            "VLLM_ROCM_USE_AITER": "1",
+                            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+                        },
+                    )
+                ]
+            ),
+        )
+        phase = _Phase(framework="vllm")
+        _run(phase)
+        assert phase.tasks.created[0]["params"]["grid"][0]["extra_envs"] == {
+            "VLLM_ROCM_USE_AITER": "1",
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+        }
+
+    def test_drops_vllm_envs_on_an_sglang_session(self):
+        entries = pp._grid_entries(
+            _answer(envs={"VLLM_ROCM_USE_AITER": "1", "SGLANG_USE_AITER": "1"}),
+            cycle=0,
+            depth=0,
+            attempt=0,
+            framework="sglang",
+        )
+        assert entries[0]["extra_envs"] == {"SGLANG_USE_AITER": "1"}
 
     def test_one_step_is_counted_however_many_variants(self, monkeypatch, active):
         """The chain advances per decision point; the grid width is not depth."""
@@ -394,34 +481,17 @@ class TestChainTermination:
         _run(phase)
         assert phase.tasks.created[0]["idempotency_key"] == "primatune-c2-s2-a0"
 
-    def test_re_samples_at_an_unchanged_depth(self, monkeypatch, active):
-        """A second look at one decision point is a fresh draw, not a repeat.
-
-        The attempt number is in the key precisely so this can happen: the
-        service samples, and the flag that carried +30% in a real session
-        appeared in a minority of samples.
-        """
+    def test_does_not_re_sample_after_a_losing_round(self, monkeypatch, active):
+        """max_chain is 1: one losing round hands the phase to the LLM."""
         _stub(monkeypatch, _answer())
         phase = _Phase()
         _run(phase)
         _run(phase, caller="tick")
-        assert [c["idempotency_key"] for c in phase.tasks.created] == [
-            "primatune-c0-s0-a0",
-            "primatune-c0-s0-a1",
-        ]
-
-    def test_stops_re_sampling_at_the_cap(self, monkeypatch, active):
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "2")
-        _stub(monkeypatch, _answer())
-        phase = _Phase()
-        for _ in range(4):
-            _run(phase, caller="tick")
-        assert len(phase.tasks.created) == 2
-        assert phase.shared_state.predictor_chain_steps == 2
+        assert [c["idempotency_key"] for c in phase.tasks.created] == ["primatune-c0-s0-a0"]
+        assert phase.shared_state.predictor_chain_steps == 1
 
     def test_a_keep_re_opens_the_allowance(self, monkeypatch, active):
         """``note_keep`` is what turns the count into a losing streak."""
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "1")
         _stub(monkeypatch, _answer())
         phase = _Phase()
         _run(phase)
@@ -437,16 +507,16 @@ class TestChainTermination:
             "primatune-c0-s1-a0",
         ]
 
-    def test_a_deeper_stack_starts_the_next_step(self, monkeypatch, active):
+    def test_a_deeper_stack_without_a_keep_does_not_buy_another_round(
+        self, monkeypatch, active
+    ):
+        """The cap is the losing streak, not stack depth. Production calls note_keep."""
         _stub(monkeypatch, _answer())
         phase = _Phase()
         _run(phase)
-        phase.shared_state.optimization_stack = [{"tput": 1900.0}]  # a KEEP landed
+        phase.shared_state.optimization_stack = [{"tput": 1900.0}]
         _run(phase, caller="tick")
-        assert [c["idempotency_key"] for c in phase.tasks.created] == [
-            "primatune-c0-s0-a0",
-            "primatune-c0-s1-a1",
-        ]
+        assert [c["idempotency_key"] for c in phase.tasks.created] == ["primatune-c0-s0-a0"]
 
 
 class TestPatchChannel:
@@ -557,21 +627,35 @@ class TestHoldingTheSpecialists:
     def test_holds_while_the_predictor_has_attempts_left(self, active):
         assert pp.predictor_holds_specialists(_Phase().shared_state) is True
 
-    def test_releases_once_the_streak_reaches_the_cap(self, monkeypatch, active):
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "2")
-        state = _Phase(predictor_chain_cycle=0, predictor_chain_steps=2).shared_state
+    def test_releases_once_the_streak_reaches_the_cap(self, active):
+        state = _Phase(predictor_chain_cycle=0, predictor_chain_steps=1).shared_state
         assert pp.predictor_holds_specialists(state) is False
 
-    def test_a_keep_puts_the_hold_back_on(self, monkeypatch, active):
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "2")
-        state = _Phase(predictor_chain_cycle=0, predictor_chain_steps=2).shared_state
+    def test_holds_while_the_round_that_spent_the_cap_is_still_running(self, active):
+        """max_chain=1 bumps the streak on enqueue; the hold must outlive that."""
+        state = _Phase(
+            predictor_chain_cycle=0,
+            predictor_chain_steps=1,
+            predictor_round_task_id="explore-in-flight",
+        ).shared_state
+        assert pp.predictor_holds_specialists(state) is True
+
+    def test_holds_through_the_round_just_enqueued(self, monkeypatch, active):
+        _stub(monkeypatch, _answer())
+        phase = _Phase()
+        _run(phase)
+        assert phase.shared_state.predictor_chain_steps == 1
+        assert phase.shared_state.predictor_round_task_id
+        assert pp.predictor_holds_specialists(phase.shared_state) is True
+
+    def test_a_keep_puts_the_hold_back_on(self, active):
+        state = _Phase(predictor_chain_cycle=0, predictor_chain_steps=1).shared_state
         pp.note_keep(state)
         assert pp.predictor_holds_specialists(state) is True
 
-    def test_a_new_macro_cycle_puts_the_hold_back_on(self, monkeypatch, active):
+    def test_a_new_macro_cycle_puts_the_hold_back_on(self, active):
         """cycle_reloop re-enters against a different stack."""
-        monkeypatch.setenv(cfg.ENV_MAX_CHAIN, "2")
-        state = _Phase(macro_cycle=1, predictor_chain_cycle=0, predictor_chain_steps=2).shared_state
+        state = _Phase(macro_cycle=1, predictor_chain_cycle=0, predictor_chain_steps=1).shared_state
         assert pp.predictor_holds_specialists(state) is True
 
     def test_never_holds_without_an_endpoint(self, monkeypatch):

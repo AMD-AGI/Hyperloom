@@ -1007,15 +1007,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "predictor's trained distribution; 'active' enqueues; 'off' disables.",
     )
     opt.add_argument(
-        "--primatune-max-chain",
-        dest="primatune_max_chain",
-        type=int,
-        default=None,
-        help="Cap on consecutive predictions per macro-cycle. Each KEEP "
-        "deepens the stack, which is a new decision point the predictor can "
-        "answer; this bounds how far that chain runs (default 3).",
-    )
-    opt.add_argument(
         "--no-primatune",
         dest="no_primatune",
         action="store_true",

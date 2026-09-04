@@ -25,14 +25,13 @@ Termination
 KEEP, within one macro-cycle. It is bumped when a round is enqueued and reset to
 zero when one of that round's variants lands, so it measures a losing streak
 rather than total work: a chain that keeps winning is never cut off, and one
-that stops winning hands over after ``max_chain`` attempts.
+that stops winning hands over after ``max_chain`` attempts (hardcoded to 1:
+one sample batch is measured in full; a KEEP still resets the streak so a win
+can deepen the stack and earn a second HTTP).
 
-The count is also the attempt number in the idempotency key, which is what lets
-the predictor re-sample at an unchanged stack depth. Sampling makes every call a
-fresh draw -- the flag that carried +30% in one session was a minority sample --
-so a second look at the same decision point is a genuinely different answer, not
-a repeat. Without the attempt in the key the registry would return the existing
-row and the chain would get exactly one shot per depth.
+The count is also the attempt number in the idempotency key. After a KEEP the
+depth changes and the key is new; without the attempt in the key a later
+macro-cycle at the same depth would collide with the first round's row.
 
 Evidence freshness
 ------------------
@@ -53,6 +52,12 @@ import logging
 from typing import Any
 
 from hyperloom.common.prompt_safety import flatten_for_prompt
+from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    canonical_fingerprint,
+)
+from hyperloom.orchestrator.actions.executors._proposal_identity import (
+    effective_fingerprint,
+)
 from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 from hyperloom.orchestrator.predictor import config as predictor_config
 from hyperloom.orchestrator.predictor.client import Prediction, predict
@@ -121,9 +126,18 @@ def predictor_holds_specialists(state: Any) -> bool:
     """Whether the free proposer still owns this phase, so paid ones stand down.
 
     Read by the FRAMEWORK phase before it spends an LLM specialist and by the
-    PolicyGate before it admits a free-form delegate. Specialists were 97% of a
-    real session's LLM output tokens, so deferring them until the predictor has
-    stopped landing KEEPs is where the saving comes from.
+    PolicyGate before it admits a free-form delegate or an orchestration
+    explore. Specialists were 97% of a real session's LLM output tokens, so
+    deferring them until the predictor has stopped landing KEEPs is where the
+    saving comes from.
+
+    The streak is bumped when a round is *enqueued*, not when it finishes.
+    With ``max_chain=1`` that would release the hold the moment the grid
+    lands on the benchmark lane -- which is when orchestration explore and
+    candidate_discovery most want the same GPUs. So an in-flight round
+    (``predictor_round_task_id``) keeps the hold on until it is graded.
+    ``_release_finished_round`` clears the marker; a KEEP resets the streak
+    and the hold stays on for the next HTTP.
 
     Returns ``False`` whenever the predictor could not answer anyway -- no
     endpoint, shadow mode, an unsupported framework. Getting that wrong would
@@ -141,7 +155,9 @@ def predictor_holds_specialists(state: Any) -> bool:
         return False
     if not conf.supports(getattr(state, "framework", "")):
         return False
-    return attempts_without_keep(state) < conf.max_chain
+    if attempts_without_keep(state) < conf.max_chain:
+        return True
+    return bool(str(getattr(state, "predictor_round_task_id", "") or "").strip())
 
 
 def _declined(reason: str) -> None:
@@ -229,10 +245,121 @@ def _gate(phase: Any, conf: predictor_config.PredictorConfig) -> bool:
     return True
 
 
+#: Env prefixes that belong to the other serving stack. Repair already drops
+#: illegal *flags*; it does not drop envs, so a vLLM round used to inherit
+#: ``SGLANG_*`` from an SGLang-heavy sampler.
+_FOREIGN_ENV_PREFIXES: dict[str, tuple[str, ...]] = {
+    "vllm": ("SGLANG_",),
+    "sglang": ("VLLM_",),
+}
+
+
+def _envs_for_framework(envs: dict[str, Any] | None, framework: str) -> dict[str, str]:
+    """Keep same-framework and shared envs; drop the other stack's prefixes."""
+    raw = dict(envs or {})
+    prefixes = _FOREIGN_ENV_PREFIXES.get(str(framework or "").strip().lower(), ())
+    if not prefixes:
+        return {str(k): str(v) for k, v in raw.items()}
+    kept: dict[str, str] = {}
+    dropped: list[str] = []
+    for key, value in raw.items():
+        name = str(key)
+        if any(name.upper().startswith(prefix) for prefix in prefixes):
+            dropped.append(name)
+            continue
+        kept[name] = str(value)
+    if dropped:
+        log.info(
+            "predictor_pump: dropped cross-framework envs %s (framework=%s)",
+            dropped,
+            framework,
+        )
+    return kept
+
+
+def _stack_base(state: Any | None) -> tuple[str, dict[str, str]]:
+    """Current champion extras the next explore variant will launch on top of."""
+    if state is None:
+        return "", {}
+    best = getattr(state, "current_best", None) or {}
+    if not isinstance(best, dict):
+        return "", {}
+    args = str(best.get("effective_extra_server_args") or best.get("extra_server_args") or "").strip()
+    raw = best.get("extra_envs") or {}
+    envs = {str(k): str(v) for k, v in dict(raw).items()} if isinstance(raw, dict) else {}
+    return args, envs
+
+
+def _merge_launch(base_args: str, extra_args: str, base_envs: dict[str, str], extra_envs: dict[str, str]) -> tuple[str, dict[str, str]]:
+    """Stack ∪ proposal, last-wins on flags via ``canonical_fingerprint`` pairing."""
+    merged_args = f"{base_args} {extra_args}".strip()
+    merged_envs = dict(base_envs)
+    merged_envs.update(extra_envs)
+    return merged_args, merged_envs
+
+
+def _tested_maps(state: Any | None) -> tuple[set[str], set[str]]:
+    """Delta fingerprints (tested keys) and launched-recipe fingerprints."""
+    if state is None:
+        return set(), set()
+    search = getattr(state, "explore_search", None) or {}
+    tested = search.get("tested") if isinstance(search, dict) else None
+    if not isinstance(tested, dict):
+        return set(), set()
+    delta_keys = {str(key) for key in tested}
+    launch_fps: set[str] = set()
+    for row in tested.values():
+        if not isinstance(row, dict):
+            continue
+        evidence = row.get("launch_evidence")
+        flags = ""
+        if isinstance(evidence, dict):
+            flags = str(evidence.get("requested_server_flags") or "")
+        if not flags.strip():
+            flags = str(row.get("extra_server_args") or row.get("extra_args") or "")
+        envs = row.get("extra_envs") or {}
+        if not isinstance(envs, dict):
+            envs = {}
+        launch_fps.add(canonical_fingerprint(flags, envs))
+    return delta_keys, launch_fps
+
+
+def _skip_reason(
+    extra_args: str,
+    extra_envs: dict[str, str],
+    *,
+    seen_delta: set[str],
+    base_args: str,
+    base_envs: dict[str, str],
+    tested_delta: set[str],
+    tested_launch: set[str],
+) -> str | None:
+    """Why this proposal should not be benched, or ``None`` to keep it."""
+    delta_fp = effective_fingerprint(extra_args, extra_envs)
+    merged_args, merged_envs = _merge_launch(base_args, extra_args, base_envs, extra_envs)
+    launch_fp = canonical_fingerprint(merged_args, merged_envs)
+    base_fp = canonical_fingerprint(base_args, base_envs)
+    if delta_fp in seen_delta:
+        return "batch_dup"
+    if launch_fp == base_fp:
+        return "already_on_stack"
+    if delta_fp in tested_delta:
+        return "already_tested_delta"
+    if launch_fp in tested_launch:
+        return "already_tested_launch"
+    return None
+
+
 def _grid_entries(
-    answer: Prediction, *, cycle: int, depth: int, attempt: int, limit: int = 1
+    answer: Prediction,
+    *,
+    cycle: int,
+    depth: int,
+    attempt: int,
+    framework: str = "",
+    state: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Turn each config proposal into an explore variant, up to ``limit``.
+    """Turn every distinct config proposal into one explore variant.
 
     All of them go into one grid rather than one task each, which is what keeps
     the idempotency key -- and with it the chain's termination rule -- a
@@ -246,36 +373,64 @@ def _grid_entries(
     AITER backend switch measured -1.17% on a bare baseline and +2.68% stacked
     on fp8 KV cache in this fleet.
 
-    Duplicates are the service's problem, not this one: it deduplicates the
-    samples before sending them, and explore's ``canonical_fingerprint`` check
-    covers repeats *within* a submitted grid only -- historical
-    ``explore_search`` results are evidence there, never an eligibility gate. A
-    proposal that repeats one an earlier round already measured is benchmarked
-    again.
+    Historical ``explore_search.tested`` *is* an eligibility gate here. Explore
+    itself only collapses duplicates inside one submitted grid; a second HTTP
+    that re-proposes a delta already measured -- or a new delta whose launched
+    recipe matches one already measured -- would otherwise buy another Magpie
+    round. ``already_tested_launch`` is the case that caught DPO round-2
+    ``--quantization fp8`` on an ``fp8_e4m3`` champion after round 1 had already
+    launched that combination.
+
+    Cross-framework envs (``SGLANG_*`` on vLLM, ``VLLM_*`` on SGLang) are
+    dropped here. The consumer's ``repair()`` already strips illegal flags; it
+    does not strip envs, and a foreign env would ride into the launch.
 
     Args:
         answer (Prediction): The predictor's answer.
         cycle (int): Macro-cycle, for the variant name.
         depth (int): Stack depth, for the variant name.
-        attempt (int): Attempt at this depth, for the variant name. Two attempts
-            at one depth are different answers because the service samples.
-        limit (int): Most variants to emit. Each one is a benchmark round, so
-            this is the knob that decides what an answer costs.
+        attempt (int): Attempt at this depth, for the variant name.
+        framework (str): Session framework; used to drop the other stack's envs.
+        state (Any | None): SharedState, for stack extras and ``explore_search``.
 
     Returns:
-        list[dict[str, Any]]: One grid entry per configuration proposal kept,
-            empty when the answer has none.
+        list[dict[str, Any]]: One grid entry per configuration proposal that
+            is not a known duplicate, empty when the answer has none left.
     """
+    base_args, base_envs = _stack_base(state)
+    tested_delta, tested_launch = _tested_maps(state)
+    seen_delta: set[str] = set()
     entries: list[dict[str, Any]] = []
-    for index, action in enumerate(answer.config_actions[: max(int(limit), 1)]):
+    for index, action in enumerate(answer.config_actions):
         extra_args = " ".join(
             flag if value is True else f"{flag} {value}" for flag, value in action.server_args.items()
         ).strip()
+        extra_envs = _envs_for_framework(action.envs, framework)
+        reason = _skip_reason(
+            extra_args,
+            extra_envs,
+            seen_delta=seen_delta,
+            base_args=base_args,
+            base_envs=base_envs,
+            tested_delta=tested_delta,
+            tested_launch=tested_launch,
+        )
+        delta_fp = effective_fingerprint(extra_args, extra_envs)
+        if reason is not None:
+            log.info(
+                "predictor_pump: skip reason=%s fp=%s args=%r envs=%r",
+                reason,
+                delta_fp,
+                extra_args,
+                extra_envs,
+            )
+            continue
+        seen_delta.add(delta_fp)
         entries.append(
             {
                 "name": f"primatune-c{cycle}-s{depth}-a{attempt}-{index}",
                 "extra_args": extra_args,
-                "extra_envs": dict(action.envs),
+                "extra_envs": extra_envs,
                 "provenance": PROVENANCE,
                 "note": "first-pass tuning prediction",
             }
@@ -284,16 +439,29 @@ def _grid_entries(
 
 
 async def _enqueue_config(
-    phase: Any, answer: Prediction, *, cycle: int, depth: int, attempt: int, limit: int
-) -> bool:
-    """Enqueue the config channel as an explore task. Returns whether it landed."""
-    entries = _grid_entries(answer, cycle=cycle, depth=depth, attempt=attempt, limit=limit)
+    phase: Any, answer: Prediction, *, cycle: int, depth: int, attempt: int
+) -> str:
+    """Enqueue the config channel as an explore task.
+
+    Returns:
+        str: ``"new"`` when a fresh explore task was created, ``"existing"``
+            when the idempotency key hit an already-queued round, ``"empty"``
+            when every config proposal was absent or skipped.
+    """
+    state = phase.shared_state
+    entries = _grid_entries(
+        answer,
+        cycle=cycle,
+        depth=depth,
+        attempt=attempt,
+        framework=str(getattr(state, "framework", "") or ""),
+        state=state,
+    )
     if not entries:
-        return False
+        return "empty"
 
     from hyperloom.orchestrator.state.shared_state import inject_stack_base_params
 
-    state = phase.shared_state
     params: dict[str, Any] = {
         "source": TASK_SOURCE,
         "reason": f"primatune:cycle{cycle}:step{depth}:attempt{attempt}",
@@ -338,7 +506,7 @@ async def _enqueue_config(
         len(answer.config_actions),
         [(e["extra_args"], e["extra_envs"]) for e in entries],
     )
-    return not existing
+    return "existing" if existing else "new"
 
 
 async def _dispatch_patch(
@@ -472,19 +640,30 @@ async def pump(phase: Any, *, caller: str) -> None:
             )
             return
 
-        landed = await _enqueue_config(
-            phase, answer, cycle=cycle, depth=depth, attempt=attempt, limit=conf.max_variants
+        config_status = await _enqueue_config(
+            phase, answer, cycle=cycle, depth=depth, attempt=attempt
         )
-        landed = (
-            await _dispatch_patch(phase, answer, cycle=cycle, depth=depth, attempt=attempt)
-            or landed
+        patch_landed = await _dispatch_patch(
+            phase, answer, cycle=cycle, depth=depth, attempt=attempt
         )
-        if landed:
+        if config_status == "new" or patch_landed:
             # Counted on dispatch, not on the result: the round takes tens of
             # minutes to grade, and an unincremented counter would leave the key
             # unchanged and the streak unable to advance if the task failed
             # outright. ``note_keep`` clears it from writeback when a variant
             # lands, which is what makes this a losing streak.
             note_attempt(state)
+        elif config_status == "empty" and answer.config_actions:
+            # Every config proposal was a known duplicate. Count it so
+            # max_chain still hands the phase to specialists instead of
+            # re-POSTing forever.
+            note_attempt(state)
+            log.info(
+                "predictor_pump: all config proposals skipped (%s cycle=%d depth=%d attempt=%d)",
+                caller,
+                cycle,
+                depth,
+                attempt,
+            )
     except Exception:  # noqa: BLE001 — advisory work must never fail a session
         log.exception("predictor_pump (%s) failed", caller)

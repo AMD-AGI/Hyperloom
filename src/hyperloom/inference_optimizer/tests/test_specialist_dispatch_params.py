@@ -855,7 +855,6 @@ def predictor_active(monkeypatch):
 
     monkeypatch.setenv(predictor_config.ENV_ENDPOINT, "http://predictor:8973")
     monkeypatch.setenv(predictor_config.ENV_MODE, predictor_config.MODE_ACTIVE)
-    monkeypatch.delenv(predictor_config.ENV_MAX_CHAIN, raising=False)
 
 
 def test_specialist_deferred_while_the_predictor_leads(predictor_active, orchestration_role):
@@ -873,14 +872,100 @@ def test_specialist_deferred_while_the_predictor_leads(predictor_active, orchest
 
 
 def test_specialist_admitted_once_the_predictor_stops_landing(
-    monkeypatch, predictor_active, orchestration_role
+    predictor_active, orchestration_role
 ):
-    from hyperloom.orchestrator.predictor import config as predictor_config
-
-    monkeypatch.setenv(predictor_config.ENV_MAX_CHAIN, "2")
-    gate = _gate_with_predictor_state(predictor_chain_steps=2)
+    gate = _gate_with_predictor_state(predictor_chain_steps=1)
     gate._validate_specialist_dispatch(
         orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+    )
+
+
+def test_specialist_still_deferred_while_the_cap_round_is_in_flight(
+    predictor_active, orchestration_role
+):
+    gate = _gate_with_predictor_state(
+        predictor_chain_steps=1, predictor_round_task_id="explore-in-flight"
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_specialist_dispatch(
+            orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+        )
+    assert excinfo.value.rule == "specialist_deferred_to_predictor"
+
+
+def _explore_payload(**params) -> dict:
+    return {"action_name": "explore", "params": params}
+
+
+def test_explore_deferred_while_the_predictor_leads(predictor_active, orchestration_role):
+    """PRELUDE proposal_sets must not steal the FRAMEWORK lane from the grid."""
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_delegate(
+            orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
+        )
+    assert excinfo.value.rule == "explore_deferred_to_predictor"
+
+
+def test_propose_explore_deferred_while_the_predictor_leads(
+    predictor_active, orchestration_role
+):
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_propose_action(
+            orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
+        )
+    assert excinfo.value.rule == "explore_deferred_to_predictor"
+
+
+def test_explore_admitted_once_the_predictor_stops_landing(
+    predictor_active, orchestration_role
+):
+    gate = _gate_with_predictor_state(predictor_chain_steps=1)
+    gate._validate_delegate(
+        orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
+    )
+
+
+def test_explore_still_deferred_while_the_cap_round_is_in_flight(
+    predictor_active, orchestration_role
+):
+    gate = _gate_with_predictor_state(
+        predictor_chain_steps=1, predictor_round_task_id="explore-in-flight"
+    )
+    with pytest.raises(PolicyDenied) as excinfo:
+        gate._validate_delegate(
+            orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
+        )
+    assert excinfo.value.rule == "explore_deferred_to_predictor"
+
+
+def test_predictor_owned_explore_is_not_held_on_the_intent_path(
+    predictor_active, orchestration_role
+):
+    """The pump's own grid is coordinator-internal; the hold is for LLM explores."""
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    gate._validate_delegate(
+        orchestration_role,
+        _explore_payload(source="coordinator_internal_primatune", grid=[{"name": "p0"}]),
+    )
+
+
+def test_dispatched_predictor_explore_skips_the_hold(predictor_active):
+    """Dispatch replay uses check_phase=False; the predictor grid must still run."""
+    gate = _gate_with_predictor_state(predictor_chain_steps=0)
+    gate.validate_dispatched_task(
+        "explore",
+        {"source": "coordinator_internal_primatune", "grid": [{"name": "p0"}]},
+    )
+
+
+def test_no_explore_deferral_outside_the_framework_phase(
+    predictor_active, orchestration_role
+):
+    gate = _gate_with_predictor_state(phase="PRELUDE", predictor_chain_steps=0)
+    gate._validate_delegate(
+        orchestration_role, _explore_payload(grid=[{"name": "prelude-ok"}])
     )
 
 

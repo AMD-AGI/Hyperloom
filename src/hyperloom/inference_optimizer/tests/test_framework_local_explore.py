@@ -58,7 +58,6 @@ def _no_predictor(monkeypatch):
     for name in (
         predictor_config.ENV_ENDPOINT,
         predictor_config.ENV_MODE,
-        predictor_config.ENV_MAX_CHAIN,
     ):
         monkeypatch.delenv(name, raising=False)
 

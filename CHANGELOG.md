@@ -16,10 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `llm_direct` — the evaluation path gains no new branch.
 
   The pump re-fires as the stack deepens, forming a greedy chain that ends by
-  itself: the idempotency key carries the macro-cycle and the stack depth, so
-  a step that fails to KEEP repeats a key and enqueues nothing. It is bounded
-  by `--primatune-max-chain` (3) and by the share of the phase budget the
-  chain may spend (`HYPERLOOM_PREDICTOR_BUDGET_PCT`, 25%).
+  itself: one losing round of every distinct sample hands FRAMEWORK to the
+  LLM specialists and to orchestration `explore`. A KEEP still resets the
+  streak, so a win can deepen the stack and earn a second HTTP. Cross-framework
+  envs (`SGLANG_*` on vLLM) are dropped when the grid is built.
 
   Default mode is `shadow`: predict, parse and log without enqueueing.
   Hyperloom's request is built from its own field names and the consumer owns
@@ -35,6 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   See [Predictor HTTP contract](docs/reference/primatune-predictor.md).
 
 ### Changed
+
+- **The first-pass predictor holds all FRAMEWORK LLM measurement, not only
+  specialists.** While it leads, orchestration `delegate explore` /
+  `propose_action explore` is denied (`explore_deferred_to_predictor`) so a
+  PRELUDE `proposal_set` cannot steal the serving lane. The predictor's own
+  grid is unchanged (`source=coordinator_internal_primatune`). One losing
+  round of every distinct sample is measured (`max_chain` hardcoded to 1; no
+  `--primatune-max-chain` / `HYPERLOOM_PREDICTOR_MAX_VARIANTS`). A KEEP still
+  resets the streak. Cross-framework envs are dropped in `_grid_entries`.
 
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP

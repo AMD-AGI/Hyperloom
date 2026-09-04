@@ -1016,6 +1016,13 @@ class PolicyGate:
         # R1 phase_incompatible; after structural checks so cheaper denials win.
         if check_phase:
             self._validate_phase_action(role, action_name, intent_kind="delegate")
+            # Intent ingress only. Dispatch replay uses check_phase=False, which
+            # is what lets the predictor's own explore (enqueued outside this
+            # gate) still run while orchestration explores are held.
+            if action_name == EXPLORE_ACTION_NAME and not self._explore_is_predictor_owned(
+                payload
+            ):
+                self._deny_explore_while_predictor_leads()
         # R5 — block a delegate whose action_name invokes an external tool.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -1081,6 +1088,8 @@ class PolicyGate:
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
+        if action_name == EXPLORE_ACTION_NAME and not self._explore_is_predictor_owned(payload):
+            self._deny_explore_while_predictor_leads()
         # R5 — defense in depth on propose_action.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -1762,24 +1771,18 @@ class PolicyGate:
 
         self._validate_specialist_gpu_request(params)
 
-    def _deny_specialist_while_predictor_leads(self) -> None:
-        """Refuse a paid specialist while the free predictor still leads FRAMEWORK.
+    @staticmethod
+    def _explore_is_predictor_owned(payload: dict[str, Any]) -> bool:
+        """Whether this explore was enqueued by the predictor pump, not an LLM."""
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return False
+        from hyperloom.orchestrator.predictor.pump import TASK_SOURCE
 
-        The predictor is a local model: seconds of GPU on its own host and no API
-        spend. An LLM specialist is the opposite -- over one measured session
-        they were 83 of 87 LLM calls and 97% of the output tokens, and the two
-        most expensive of them produced candidates that all benchmarked
-        negative. So the loop asks the free proposer first and admits these only
-        once it has gone ``HYPERLOOM_PREDICTOR_MAX_CHAIN`` rounds without a KEEP.
+        return str(params.get("source") or "").strip() == TASK_SOURCE
 
-        Scoped to FRAMEWORK_AGENT, and a no-op when the predictor could not
-        answer anyway. The PRELUDE research scout and static recon are
-        unaffected twice over: they run in a different phase, and the
-        Coordinator dispatches them without passing through the gate at all.
-
-        Raises:
-            PolicyDenied: while the hold is on.
-        """
+    def _deny_while_predictor_leads(self, *, rule: str, hint: str) -> None:
+        """Shared hold: FRAMEWORK only, and only while the predictor still leads."""
         state = self.shared_state
         if state is None:
             return
@@ -1796,11 +1799,54 @@ class PolicyGate:
         raise PolicyDenied(
             f"the first-pass predictor still leads this phase "
             f"({spent}/{cap} rounds without a KEEP)",
+            rule=rule,
+            hint=hint,
+        )
+
+    def _deny_specialist_while_predictor_leads(self) -> None:
+        """Refuse a paid specialist while the free predictor still leads FRAMEWORK.
+
+        The predictor is a local model: seconds of GPU on its own host and no API
+        spend. An LLM specialist is the opposite -- over one measured session
+        they were 83 of 87 LLM calls and 97% of the output tokens, and the two
+        most expensive of them produced candidates that all benchmarked
+        negative. So the loop asks the free proposer first and admits these only
+        once it has spent its one losing round without a KEEP.
+
+        Scoped to FRAMEWORK_AGENT, and a no-op when the predictor could not
+        answer anyway. The PRELUDE research scout and static recon are
+        unaffected twice over: they run in a different phase, and the
+        Coordinator dispatches them without passing through the gate at all.
+
+        Raises:
+            PolicyDenied: while the hold is on.
+        """
+        self._deny_while_predictor_leads(
             rule="specialist_deferred_to_predictor",
             hint=(
                 "The predictor costs no API spend and re-fires after every KEEP. "
                 "Specialists are admitted once it has spent its rounds without "
                 "landing one, so there is nothing to retry here."
+            ),
+        )
+
+    def _deny_explore_while_predictor_leads(self) -> None:
+        """Refuse an orchestration explore while the free predictor still leads.
+
+        PRELUDE scout/recon ``proposal_set`` explores wait until the losing
+        streak hits the cap. The predictor's own grid never comes through this
+        path: the pump enqueues it as ``source=coordinator_internal_primatune``
+        and intent validation never sees it.
+
+        Raises:
+            PolicyDenied: while the hold is on.
+        """
+        self._deny_while_predictor_leads(
+            rule="explore_deferred_to_predictor",
+            hint=(
+                "The predictor measures every distinct sample from its batch first. "
+                "Orchestration explores, including PRELUDE proposal_sets, are "
+                "admitted once that round finishes without a KEEP."
             ),
         )
 
