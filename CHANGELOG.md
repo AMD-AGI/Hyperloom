@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Graph-capture traces go through the single-trace exporter, and the shape
+  manifest says when that costs it something.**
+  `SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE` replaces
+  `SGLANG_GRAPH_BATCH_CAPTURE`, which selected a per-batch-size exporter that
+  cannot survive a model capturing more than one variant per batch size. It
+  indexes a list built from `capture_bs` once per profiler callback, but
+  `capture()` fires one callback per `(bs, lora, dsa)` combination, so a DSA
+  dual-graph model — dense and sparse for every batch size — walks off the end
+  of the list and takes the server down during graph capture, before it is
+  ready to serve. Upstream gives the single-trace flag precedence when both are
+  set (`decode_cuda_graph_runner.py::_graph_batch_capture_active`, from
+  sgl-project/sglang#24370), so an inherited `SGLANG_GRAPH_BATCH_CAPTURE=1`
+  cannot re-select the crashing path.<br/>
+  **The layout it writes is not a drop-in.** One combined file per rank holds
+  every batch size at once and carries no variant identity in its name, so the
+  shape-manifest classifier rejects it — deliberately, since admitting it would
+  mint one shape-identical variant per rank and defeat the dedup behind
+  `variant_count`. The identity is not recoverable from inside the file either:
+  the capture-phase `record_function` spans are not emitted on this path
+  (measured on a GLM-5.2 MI355X capture — 15166 `user_annotation` events, not
+  one of them a capture span). The manifest therefore falls back to eager and
+  Forge loses the per-batch-size dense shapes.<br/>
+  That fallback is also what an eager profile produces legitimately, so until
+  now the two were indistinguishable downstream. The manifest now emits
+  `shape_manifest_capture_not_indexable` when capture ran and only its layout
+  was unreadable, naming the files. A server that starts takes precedence over
+  a manifest that indexes, but the trade is recorded rather than silent.
+
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
   dependency and `install.sh` already owned that install, but it was gated on a

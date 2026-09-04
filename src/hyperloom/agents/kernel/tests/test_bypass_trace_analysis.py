@@ -895,7 +895,7 @@ def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
 
 
 def test_discover_capture_shards_dedups_a_runner_prefixed_batch(tmp_path):
-    # An SGLang without the profiler patch prefixes the runner name:
+    # The upstream per-bs exporter prefixes the runner name:
     # DecodeCudaGraphRunner_bs_104_rank0. The batch token is still what
     # identifies the variant, so the ranks must collapse the same way — an
     # anchored read finds nothing here and falls back to the per-rank stem,
@@ -924,6 +924,74 @@ def test_discover_capture_shards_skips_a_whole_capture_per_rank_file(tmp_path):
     for rank in range(3):
         (d / f"cuda_graph_capture-DecodeCudaGraphRunner-TP-{rank}.json").write_text("{}", encoding="utf-8")
     assert bta._discover_capture_shards(str(d), str(d)) == []
+
+
+def test_unindexable_capture_names_reports_the_combined_layout(tmp_path):
+    # Skipping the combined layout is right; skipping it silently is not. The
+    # manifest degrades to eager exactly as it does when capture never ran, so
+    # the files have to be named for the two to be told apart downstream.
+    d = tmp_path / "graph_capture_profile"
+    d.mkdir()
+    for rank in range(2):
+        (d / f"cuda_graph_capture-DecodeCudaGraphRunner-TP-{rank}.json").write_text("{}", encoding="utf-8")
+
+    assert bta._unindexable_capture_names(str(d), str(d)) == [
+        "cuda_graph_capture-DecodeCudaGraphRunner-TP-0.json",
+        "cuda_graph_capture-DecodeCudaGraphRunner-TP-1.json",
+    ]
+
+
+def test_unindexable_capture_names_ignores_indexable_and_metadata(tmp_path):
+    # A per-bs shard is indexed, not reported, or every healthy profile would
+    # carry the warning. execution_details.json sits in the same directory and
+    # is metadata, not a trace.
+    d = tmp_path / "graph_capture_profile"
+    d.mkdir()
+    (d / "DecodeCudaGraphRunner_bs_8_rank0.json").write_text("{}", encoding="utf-8")
+    (d / "execution_details.json").write_text("[]", encoding="utf-8")
+
+    assert bta._unindexable_capture_names(str(d), str(d)) == []
+
+
+def test_shape_manifest_warns_when_capture_cannot_be_indexed(tmp_path, monkeypatch):
+    # End of the chain: a combined-layout profile still writes a manifest, but
+    # an eager one, and the run has to be able to see that from the result
+    # rather than by diffing variant_count against a healthy run.
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    d = tmp_path / "graph_capture_profile"
+    d.mkdir()
+    (d / "cuda_graph_capture-DecodeCudaGraphRunner-TP-0.json").write_text("{}", encoding="utf-8")
+
+    res = bta._maybe_build_shape_manifest(
+        _mk_args(trace_input=str(d), capture_folder=str(d)),
+        {"trace_file": ""},
+        tmp_path,
+        generated_at="t0",
+    )
+
+    assert res["status"] == "ok"
+    assert res["variant_count"] == 0
+    codes = [w.get("code") for w in res["warnings"] if isinstance(w, dict)]
+    assert "shape_manifest_capture_not_indexable" in codes
+    warning = next(
+        w for w in res["warnings"] if isinstance(w, dict) and w.get("code") == "shape_manifest_capture_not_indexable"
+    )
+    assert "cuda_graph_capture-DecodeCudaGraphRunner-TP-0.json" in warning["capture_files"]
+
+
+def test_shape_manifest_stays_quiet_when_capture_never_ran(tmp_path, monkeypatch):
+    # An eager manifest is the correct answer for an eager profile. Warning
+    # there would train the reader to ignore the one case that matters.
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    res = bta._maybe_build_shape_manifest(
+        _mk_args(trace_input=str(tmp_path), capture_folder=""),
+        {"trace_file": ""},
+        tmp_path,
+        generated_at="t0",
+    )
+
+    codes = [w.get("code") for w in res["warnings"] if isinstance(w, dict)]
+    assert "shape_manifest_capture_not_indexable" not in codes
 
 
 # ── CUDA/HIP graph-mode under-recording ──────────────────────────────────────

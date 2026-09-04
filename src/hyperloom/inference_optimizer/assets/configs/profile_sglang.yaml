@@ -51,10 +51,29 @@ benchmark:
     # --- Profiler: shape + callstack annotations (#126) ---
     SGLANG_PROFILE_WITH_STACK: "true"
     SGLANG_PROFILE_RECORD_SHAPE: "true"
-    SGLANG_GRAPH_BATCH_CAPTURE: "1"
     # --- Profiler: graph capture (#126; shape-discovery flag dropped
     # because the deployed SGLang argparse rejects it) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
+    # One combined capture trace per TP rank instead of one per batch size.
+    # The per-bs exporter indexes a list built from capture_bs once per
+    # profiler callback, but capture() fires one callback per
+    # (bs, lora, dsa) combination: a DSA dual-graph model captures dense and
+    # sparse for every bs, so the index walks off the end of the list and
+    # takes the server down during graph capture, before it is ready to
+    # serve. Upstream gives this flag precedence over SGLANG_GRAPH_BATCH_CAPTURE
+    # when both are set, so an inherited environment cannot re-select the
+    # per-bs path (decode_cuda_graph_runner.py::_graph_batch_capture_active,
+    # added by upstream sgl-project/sglang#24370).
+    #
+    # Known cost: the combined layout carries no per-bs variant identity in
+    # the filename, and the capture spans that would carry it inside the file
+    # are not emitted on this path, so the shape manifest degrades to eager
+    # and Forge loses the per-bs dense shapes. That degrade is reported as
+    # shape_manifest_capture_not_indexable
+    # (bypass_trace_analysis.py::_maybe_build_shape_manifest) rather than left
+    # to look like an ordinary eager profile. The server starting at all takes
+    # precedence.
+    SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE: "1"
     # --- Profiler: steady-state window via extra_body (#194) ---
     # PROFILE_EXTRA_BODY is consumed by InferenceX benchmark_lib.sh to inject
     # into the benchmark request body. start_step skips warmup, num_steps
