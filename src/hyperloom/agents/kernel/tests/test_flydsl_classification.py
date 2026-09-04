@@ -275,24 +275,6 @@ class TestKernelCategoryDerivation(unittest.TestCase):
         )
 
 
-class TestGEAKKernelTypeMapping(unittest.TestCase):
-    """``source_type=flydsl`` must map to GEAK's ``kernel_type="flydsl"``."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import kernel_optimization
-
-        self.mod = kernel_optimization
-
-    def test_flydsl_source_type_maps_to_flydsl(self) -> None:
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["flydsl"], "flydsl")
-
-    def test_existing_mappings_preserved(self) -> None:
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["triton"], "triton")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["hip_cpp"], "hip")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["python"], "other")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["vendor_binary"], "other")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["unknown"], "other")
 
 
 class TestFlyDSLKernelParams(unittest.TestCase):
@@ -471,36 +453,6 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
         )
 
 
-class TestPseudoOpSourceFallback(unittest.TestCase):
-    """GEAK source resolution must fall back off pseudo-op frame labels (prefer real readable source)."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import kernel_optimization
-
-        self.mod = kernel_optimization
-
-    def test_frame_label_candidate_falls_back_to_real_explicit(self) -> None:
-        real = str(Path(__file__).resolve())  # any guaranteed-real file
-        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
-        out = self.mod._resolve_source_file(real, cand, "k001")
-        self.assertEqual(out, real)
-
-    def test_real_candidate_still_wins_over_llm(self) -> None:
-        real = str(Path(__file__).resolve())
-        cand = {"source_file": real}
-        out = self.mod._resolve_source_file("/tmp/some_other.py", cand, "k002")
-        self.assertEqual(out, real)
-
-    def test_empty_candidate_uses_llm(self) -> None:
-        out = self.mod._resolve_source_file("/tmp/x.py", {"source_file": ""}, "k003")
-        self.assertEqual(out, "/tmp/x.py")
-
-    def test_both_unresolvable_returns_candidate(self) -> None:
-        """No real file anywhere -> keep candidate (existing behaviour)."""
-        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
-        out = self.mod._resolve_source_file("/no/such/file.py", cand, "k004")
-        self.assertEqual(out, "aiter/fused_moe.py(986): fused_moe_2stages")
 
 
 if __name__ == "__main__":

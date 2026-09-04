@@ -1112,7 +1112,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # "untried" forever and the phase-pending predicate never goes quiet. Stored
     # as the cycle rather than a bare flag so the next cycle retires it without
     # anyone having to clear it.
-    kernel_auto_pass_cycle: int | None = None
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)

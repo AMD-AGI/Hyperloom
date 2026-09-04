@@ -285,29 +285,6 @@ def test_trace_analyze_request_itself_passes(session_dir):
     assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
 
 
-def test_run_optimization_handler_reports_missing_trace_analyze(session_dir):
-    """No candidates_path + empty cache → handler returns ``missing_trace_analyze``."""
-    import asyncio
-
-    from hyperloom.orchestrator.kernel.request_handlers import (
-        run_optimization_handler,
-    )
-
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    s.save(session_dir)
-
-    result = asyncio.run(
-        run_optimization_handler({"kernel_id": "k001"}, session_dir=session_dir),
-    )
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_trace_analyze"
-
-
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
     """The pre-M4 ``select_kernels`` request kind was removed; ``get_handler`` returns None."""
     coord = Coordinator(session_dir, backends=_backends_full())

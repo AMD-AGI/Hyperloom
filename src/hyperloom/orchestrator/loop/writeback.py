@@ -631,26 +631,6 @@ class WritebackCollaborator:
         self.shared_state.optimization_stack = stack
         self.shared_state.save(self.session_dir)
 
-    def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Retained record-partial hook for the run_optimization calling convention: writes a per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate.
-
-        The which-kernel fan-out that once streamed several sub-attempts now
-        lives in forge nomination, so the surviving single-kernel path invokes
-        this at most once per dispatch.
-
-        Args:
-            result: One per-kernel result dict.
-        """
-        try:
-            self.shared_state.record_kernel_opt(result)
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            # Never let a per-sub-attempt hiccup poison the gather.
-            log.exception(
-                "_record_kernel_opt_partial failed for kernel_id=%s",
-                (result or {}).get("kernel_id") if isinstance(result, dict) else None,
-            )
-
     def _update_cumulative_gain_validated(
         self,
         new_tput: float,

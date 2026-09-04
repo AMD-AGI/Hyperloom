@@ -81,17 +81,6 @@ MAX_FUSION_INFRA_RETRIES = 2
 # unfunded. Retrying re-runs discovery, so the re-arming it grants is capped.
 MAX_FUSION_WITHHELD_RETRIES = 2
 
-# Why KERNEL entry dispatched no kernel_opt at all, recorded on
-# ``last_kernel_opt_dispatch_skip`` and surfaced by the summary as
-# ``dispatch_skip_reason``. A wholesale skip is invisible in the summary's
-# unattempted buckets, which only ever count kernels the candidate table
-# listed: an absent table leaves every bucket at zero, which reads as "this
-# workload had nothing worth optimising" rather than "nothing was ever asked".
-KERNEL_OPT_SKIP_DISABLED = "auto_kernel_opt_disabled"
-KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE = "no_candidate_table"
-KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS = "no_untried_hot_kernels"
-KERNEL_OPT_SKIP_NO_CANDIDATES_PATH = "no_candidates_path"
-
 
 def _as_int(value: object) -> int:
     """Read a counter that round-tripped through JSON, defaulting to 0."""
@@ -3908,219 +3897,17 @@ class KernelPhase(PhaseHandler):
         self._replace_latest_gemm_tuning_attempt(result)
 
     async def _finish_kernel_entry(self) -> None:
-        """Close out KERNEL entry on either route: re-profile, run the
-        independently gated stages, then dispatch whatever kernel_opt work the
-        candidate table already justifies.
+        """Close out KERNEL entry on either route: re-profile, then run the
+        independently gated stages.
 
-        The dispatch used to sit on the GEMM route alone, so skipping GEMM
-        tuning silently removed the phase's own kernel_opt as well. The two
-        settings are unrelated -- one tunes GEMM shape tables, the other
-        rewrites source-level kernels -- and nothing in the log connected them,
-        so a run could hold eight routable candidates, clear the dispatch floor,
-        and still reach SWEEP having optimized nothing, waiting on an
-        orchestration request that never came.
-
-        What the dispatch needs is untried routable candidates. That is what it
-        asks for, on both routes.
+        Each stage owns its own gate and its own end-to-end validation, so the
+        order here is sequencing, not dependency: skipping one does not disable
+        the next.
         """
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
         await self._maybe_run_collective_before_kernel_opt()
-        if self._kernel_opt_work_remains():
-            await self._run_kernel_opt_nomination()
-        else:
-            self._record_kernel_opt_dispatch_skip(self._kernel_opt_dispatch_skip_reason())
 
-    def _kernel_opt_dispatch_skip_reason(self) -> str:
-        """Name why the phase is declining to dispatch kernel_opt itself.
-
-        Separates the three states :meth:`_kernel_opt_work_remains` collapses
-        into one ``False``: the feature is off, no candidate table was ever
-        produced, or the table's hot kernels have all been tried.
-
-        Reads the same field the gate reads. ``last_trace_analyze`` being a
-        non-empty dict does not mean it carries a table -- a trace_analyze that
-        ran and failed leaves ``{"status": "failed", ...}`` behind -- and
-        calling that "the kernels were all tried" states the very conclusion
-        this breadcrumb exists to prevent.
-
-        Returns:
-            str: One of ``auto_kernel_opt_disabled`` /
-                ``no_candidate_table`` / ``no_untried_hot_kernels``.
-        """
-        state = self.shared_state
-        if not bool(getattr(state, "auto_kernel_opt_enabled", True)):
-            return KERNEL_OPT_SKIP_DISABLED
-        cached = getattr(state, "last_trace_analyze", None)
-        cached = cached if isinstance(cached, dict) else {}
-        hot = cached.get("hot_kernels_top15") or cached.get("hot_kernels") or []
-        if not isinstance(hot, list) or not hot:
-            return KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE
-        return KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS
-
-    def _record_kernel_opt_dispatch_skip(self, reason: str) -> None:
-        """Record why KERNEL entry skipped the whole kernel_opt batch.
-
-        The summary's unattempted buckets each mean "the candidate table listed
-        this kernel and nobody tried it", so a run whose table never
-        materialised counts zero in every bucket and reads as "nothing here was
-        worth optimising". Both skip paths return before ``run_optimization``
-        is called, so ``record_kernel_opt`` -- this field's other writer --
-        never runs to say otherwise.
-
-        The evidence fields carry the state the decision was made on, so the
-        report answers "why was the table empty" without a state.json dig.
-
-        Args:
-            reason: One of the ``KERNEL_OPT_SKIP_*`` reason codes.
-        """
-        state = self.shared_state
-        cached = getattr(state, "last_trace_analyze", None)
-        cached = cached if isinstance(cached, dict) else {}
-        try:
-            streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
-        except (TypeError, ValueError):
-            streak = 0
-        state.last_kernel_opt_dispatch_skip = {
-            "reason": reason,
-            "candidates_path": str(cached.get("candidates_path") or ""),
-            "trace_analyze_empty": not cached,
-            "profile_trace": str(getattr(state, "last_profile_trace", "") or ""),
-            "profile_status": str(getattr(state, "last_profile_status", "") or ""),
-            "roofline_failure_streak": streak,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        log.info(
-            "KERNEL entry: no kernel_opt dispatch (reason=%s, trace_analyze_empty=%s, roofline_failure_streak=%d)",
-            reason,
-            not cached,
-            streak,
-        )
-        # Persisted here rather than left to whichever later turn happens to
-        # save: the run this breadcrumb is for is the one that spends hours in
-        # the phase and is then killed or wedged, which is exactly when an
-        # unsaved breadcrumb is lost and the report falls back to reading as
-        # "nothing worth optimising".
-        try:
-            state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — a breadcrumb must never fail the phase
-            log.debug("KERNEL entry: saving the dispatch-skip breadcrumb failed", exc_info=True)
-
-    def _kernel_opt_work_remains(self) -> bool:
-        """Whether KERNEL entry should call forge to nominate a kernel itself.
-
-        The switch scopes to this entry call alone. ``kernel_opt`` stays in the
-        phase's allowed actions either way, so orchestration can still request
-        it; opting out only means the phase stops asking on its own.
-
-        Returns:
-            bool: ``True`` when the ``auto_kernel_opt_enabled`` flag is set and
-                there are untried hot reusable kernels remaining.
-        """
-        if not bool(getattr(self.shared_state, "auto_kernel_opt_enabled", True)):
-            return False
-        return bool(self.shared_state.untried_hot_reusable_kernels())
-
-    async def _run_kernel_opt_nomination(self) -> None:
-        """Dispatch the KERNEL entry's source-level kernel_opt pass.
-
-        Hands the latest trace context (``candidates_path``) to one
-        ``run_optimization_handler`` call. Which-kernel selection belongs to the
-        handler: under ``auto=true`` it forwards to forge self-nomination, and
-        otherwise it resolves the candidate set itself.
-
-        The call is fired for its side effect on the phase-exit latch as much as
-        for the patch it may produce: once forge has looked at the trace and
-        returned -- whether or not it nominated anything -- the pass is complete
-        for this macro cycle (see :func:`mark_kernel_auto_pass_complete`). Skip
-        it only when there is no trace to hand over.
-        """
-        cached = self.shared_state.last_trace_analyze or {}
-        candidates_path = str(cached.get("candidates_path") or "")
-        if not candidates_path:
-            log.info("KERNEL entry: skip kernel_opt; no candidates_path")
-            self._record_kernel_opt_dispatch_skip(KERNEL_OPT_SKIP_NO_CANDIDATES_PATH)
-            return
-        log.info(
-            "KERNEL entry: calling forge to nominate source-level kernel_opt",
-        )
-        # A dispatch retires any earlier skip breadcrumb. ``record_kernel_opt``
-        # clears it too, but only for a result naming a ``kernel_id``, and this
-        # batch names none by design -- so an earlier "never dispatched" would
-        # outlive the dispatch and the report would assert it as fact for a
-        # round whose candidates were merely filtered by the handler's floor.
-        self.shared_state.last_kernel_opt_dispatch_skip = {}
-        try:
-            from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
-
-            from ..kernel.request_handlers import run_optimization_handler
-            from .machine_state import KERNEL_HEARTBEAT_SEC
-
-            # This step awaits a subprocess that can run for an hour. Without a
-            # re-stamped progress marker the idle guard cannot tell a working
-            # phase from a stuck one, and the phase is unobservable throughout.
-            def _stamp(when: float) -> None:
-                self.shared_state.kernel_inline_step_seen_unix = when
-
-            async with inline_step_heartbeat(stamp=_stamp, interval_sec=KERNEL_HEARTBEAT_SEC):
-                result = await run_optimization_handler(
-                    {
-                        "candidates_path": candidates_path,
-                        "session_id": self.session_dir.name,
-                    },
-                    session_dir=self.session_dir,
-                    record_partial=self._record_kernel_opt_partial,
-                )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("KERNEL entry run_optimization after GEMM failed")
-            result = {
-                "status": "failed",
-                "error_class": exc.__class__.__name__,
-                "error": repr(exc),
-            }
-        # Only a completed auto pass answers for the kernels it declined, empty
-        # selection included. A failure, a skip or the legacy path answers for none.
-        if isinstance(result, dict) and result.get("auto") is True and result.get("status") == "complete":
-            from .machine_state import mark_kernel_auto_pass_complete
-
-            mark_kernel_auto_pass_complete(self.shared_state)
-        # Queued on this instance, which is the one saved below. The handler reads
-        # the envelope but owns no state: a record written to a second instance is
-        # lost the moment this full save runs.
-        if isinstance(result, dict) and result.get("nominated_patches"):
-            from dataclasses import asdict, is_dataclass
-
-            from ..kernel.request_handlers import queue_nominated_siblings
-
-            queued = queue_nominated_siblings(self.shared_state, result["nominated_patches"])
-            result["queued"] = queued
-            log.info("KERNEL entry: queued %d nominated rewrite sibling(s)", queued)
-            # The bus serialises its payload as JSON, so the siblings travel as
-            # plain rows once the landing that needs the typed form is done.
-            result["nominated_patches"] = [
-                asdict(patch) if is_dataclass(patch) and not isinstance(patch, type) else patch
-                for patch in result["nominated_patches"]
-            ]
-        await self.bus.append_and_seq(
-            Message.new(
-                "kernel_agent",
-                "orchestration",
-                "response",
-                {
-                    "in_reply_to": "",
-                    "kind": "run_optimization_done",
-                    "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
-                    "result": result,
-                    "source": "kernel_entry_auto",
-                },
-                priority=1,
-            )
-        )
-        # Batch mode already streamed each sub-result; re-recording the aggregate
-        # would double-count its winner's attempts and retire it early.
-        if isinstance(result, dict) and not result.get("batch_mode"):
-            self.shared_state.record_kernel_opt(result)
-        self.shared_state.save(self.session_dir)
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry.

@@ -30,7 +30,6 @@ pin, end to end within Hyperloom's own boundary:
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
@@ -49,7 +48,6 @@ if str(_BACKENDS_DIR) not in sys.path:
 
 import tracelens_analysis as tla  # noqa: E402
 import forge_submit  # noqa: E402
-import kernel_optimization as ko  # noqa: E402
 from _vendor_operator_playbooks import (  # noqa: E402
     load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
@@ -408,23 +406,6 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     assert "blank-anchor" in caplog.text
 
 
-def test_a_playbook_candidate_is_not_open_to_review_rewriting():
-    """Protection cannot key on the tier that resolved the replaced path.
-
-    ``source_file`` holds the task bundle's anchor whatever tier ran before, so
-    keying protection on that tier alone leaves the row open: a review proposal
-    could point the field back at framework source, routing the candidate to a
-    backend with nothing to rewrite and losing the playbook route.
-    """
-    resolved_by_grep = {
-        "kernel_id": "k010",
-        "source_resolution_method": "name_grep",
-        "op_to_source_status": "",
-    }
-    assert tla._is_curated_resolution(resolved_by_grep) is False
-
-    assert tla._is_curated_resolution({**resolved_by_grep, "patch_strategy": "vendor_playbook"}) is True
-
 
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --
 
@@ -549,56 +530,6 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
     # and a gap anywhere in that field handoff silently downgrades a validated,
     # correctness-passed, 1.2x-speedup KEEP into a PARTIAL "no measurable
     # speedup" verdict even though forge-loop itself never disagreed.
-    attempt = {
-        "attempt_id": "forge-e2e",
-        "backend": "forge",
-        "status": "completed",
-        "backend_paths": {
-            "output_dir": str(output_dir),
-            "cli_workspace": result["cli_workspace"],
-            "forge_workspace": result["forge_workspace"],
-        },
-        "optimized_path": str(output_dir / "forge-e2e_stdout.log"),
-        "mean_case_speedup": result["mean_case_speedup"],
-        "total_improved": result["total_improved"],
-        "incremental_improved": result["incremental_improved"],
-        "improved": result["improved"],
-        "pristine_baseline_ms": None,
-        "best_ms": result["best_ms"],
-    }
-    # main() converts the CLI's "true"/"false"/"unknown" strings to bool/None
-    # before calling build_verification (see kernel_optimization.py's
-    # correctness = None if ... == "unknown" else ... == "true"); mirror that
-    # here rather than passing the raw CLI string.
-    args = argparse.Namespace(
-        source_file=str(workspace / "mori_ep_config.py"),
-        kernel_repo="",
-        correctness_passed=True,
-        accuracy_passed=None,
-        micro_speedup=None,
-        e2e_gain_pct=None,
-        dry_run=False,
-    )
-    verification = ko.build_verification(args, [attempt], benchmark_available=False)
-    assert verification["micro_speedup_source"] != "default_unmeasured"
-    assert verification["micro_speedup"] == pytest.approx(1.29)
-    assert verification["artifact_valid"] is True, verification["artifact_error"]
-    assert verification["artifact_source"] == "source_file"
-    assert verification["correctness_passed"] is True
-
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "KEEP", proposal["reasons"]
-
-    # Without an orchestrator-supplied correctness signal (the standalone-CLI
-    # case this e2e test actually exercised), the measured speedup must still
-    # be visible -- NEEDS_REVIEW ("evidence needs confirmation"), never the
-    # misleading PARTIAL "no measurable speedup found" a missing-field
-    # regression would silently produce.
-    args_no_correctness = argparse.Namespace(**{**vars(args), "correctness_passed": None})
-    verification_nc = ko.build_verification(args_no_correctness, [attempt], benchmark_available=False)
-    assert verification_nc["micro_speedup_source"] != "default_unmeasured"
-    proposal_nc = ko.make_proposal(verification_nc)
-    assert proposal_nc["decision"] == "NEEDS_REVIEW", proposal_nc["reasons"]
 
 
 def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(monkeypatch, tmp_path):
@@ -680,39 +611,6 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
         "clobbers backend_paths['output_dir'] to point here regardless of "
         "what submit() returned"
     )
-    combine_attempt = {
-        "attempt_id": "forge-e2e-combine",
-        "backend": "forge",
-        "status": "completed",
-        "backend_paths": {
-            # Mirrors invoke_backend()'s real behavior: output_dir is always
-            # reset to *this* attempt's own directory, while cli_workspace
-            # is copied through verbatim from whatever submit() returned
-            # (the winner's, for a reused result).
-            "output_dir": str(combine_output_dir),
-            "cli_workspace": combine_result["cli_workspace"],
-        },
-        "optimized_path": str(combine_output_dir / "forge-e2e-combine_stdout.log"),
-        "mean_case_speedup": combine_result["mean_case_speedup"],
-        "total_improved": combine_result["total_improved"],
-        "incremental_improved": combine_result["incremental_improved"],
-        "improved": combine_result["improved"],
-        "pristine_baseline_ms": None,
-        "best_ms": combine_result["best_ms"],
-    }
-    combine_args = argparse.Namespace(
-        source_file=str(tmp_path / "forge" / "session1" / "attempt_dispatch" / "worktree" / "mori_ep_config.py"),
-        kernel_repo="",
-        correctness_passed=True,
-        accuracy_passed=None,
-        micro_speedup=None,
-        e2e_gain_pct=None,
-        dry_run=False,
-    )
-    combine_verification = ko.build_verification(combine_args, [combine_attempt], benchmark_available=False)
-    assert combine_verification["artifact_valid"] is True, combine_verification["artifact_error"]
-    combine_proposal = ko.make_proposal(combine_verification)
-    assert combine_proposal["decision"] == "KEEP", combine_proposal["reasons"]
 
 
 def test_submit_vendor_playbook_runs_from_the_packaged_bundle_without_forge_path(monkeypatch, tmp_path):

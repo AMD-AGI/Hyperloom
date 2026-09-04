@@ -1266,11 +1266,9 @@ class ExplorePhase(CoordinatorCollaborator):
 
         a = str(action or "").strip().lower()
         if a in {
-            "kernel_opt",
             "integrate",
             "trace_analyze",
             "run_gemm_tuning",
-            "run_optimization",
             "profile",
             "roofline",
         }:

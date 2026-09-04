@@ -139,29 +139,6 @@ def forge_explicitly_enabled() -> bool:
     return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "forge"
 
 
-def nomination_auto_enabled() -> bool:
-    """Whether forge self-nomination (``--auto``) drives the KERNEL rewrite lane.
-
-    A single opt-in env, off by default, mirroring
-    :func:`forge_explicitly_enabled`: it reads one variable and touches no
-    SharedState schema. Unset leaves the rewrite lane's kernel selection on the
-    Hyperloom selector path and dispatches no self-nomination; it does not leave
-    the KERNEL phase as a whole unchanged, since the fusion, gemm and rewrite
-    lane changes shipped alongside this contract are not gated on it. Set it to
-    route ``auto=true`` through forge's own nominator instead.
-
-    This enables the contract, not the capability the contract exists for. The
-    shipped nominator is a placeholder ranking already-resolved candidates by
-    ``gpu_pct``; trace-driven source resolution, per-target base commits and
-    multi-target execution are forge-side work that has not landed, so one target
-    runs per call. Treat it as a plumbing preview rather than a feature.
-
-    Returns:
-        True for any truthy ``HYPERLOOM_FORGE_NOMINATION_AUTO``.
-    """
-    return env_bool("HYPERLOOM_FORGE_NOMINATION_AUTO", default=False)
-
-
 __all__ = [
     "is_truthy",
     "env_bool",
@@ -169,5 +146,4 @@ __all__ = [
     "env_float",
     "env_str",
     "forge_explicitly_enabled",
-    "nomination_auto_enabled",
 ]

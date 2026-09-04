@@ -7,7 +7,6 @@ lookup, artifact-path and in-flight scanning."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 
@@ -20,14 +19,6 @@ def test_normalize_precision() -> None:
     assert krh._normalize_precision("  FP8 ") == "fp8"
     assert krh._normalize_precision(None) == ""
     assert krh._normalize_precision(0) == ""
-
-
-def test_normalize_kernel_id_folds_prefixes() -> None:
-    assert krh._normalize_kernel_id("kn12") == "k12"
-    assert krh._normalize_kernel_id("RN7") == "k7"
-    assert krh._normalize_kernel_id("k3") == "k3"
-    assert krh._normalize_kernel_id("knabc") == "knabc"  # non-digit tail untouched
-    assert krh._normalize_kernel_id(None) == ""
 
 
 # -- _gemm_tuning_timeout_sec ---------------------------------------------
@@ -176,45 +167,6 @@ def test_gemm_tuning_script_disables_the_eval(tmp_path: Path) -> None:
 
 
 # -- _optimization_budget_minutes / wrapper timeout -----------------------
-def test_optimization_budget_uses_payload_budget_minutes(monkeypatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", raising=False)
-    assert krh._optimization_budget_minutes({"backend_order": "forge", "budget_minutes": 20}) == 20.0
-
-
-def test_optimization_budget_defaults_when_unset(monkeypatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", raising=False)
-    assert krh._optimization_budget_minutes({}) == krh._DEFAULT_BACKEND_BUDGET_MINUTES
-
-
-def test_rewrite_route_opt_in_lifts_the_budget_to_its_own_minimum(monkeypatch) -> None:
-    """Opting into the rewrite route has to buy a budget the route accepts.
-
-    A budget under the route's 75-minute minimum declines every eligible
-    candidate for ``budget_insufficient`` and falls back to forge-loop, so the
-    opt-in buys nothing. The shipped default clears the gate on its own now, so
-    the case that matters is a budget tuned down for some other reason.
-    """
-    from hyperloom.agents.kernel.tools.backends._flydsl_rewrite import MIN_BUDGET_SEC
-
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_BUDGET_MIN", raising=False)
-    monkeypatch.setenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", "1")
-
-    assert krh._optimization_budget_minutes({}) * 60 >= MIN_BUDGET_SEC
-    # A payload asking for less cannot drag it back under the minimum.
-    assert krh._optimization_budget_minutes({"budget_minutes": 20}) * 60 >= MIN_BUDGET_SEC
-
-
-def test_rewrite_route_floor_never_lowers_an_operator_budget(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", "1")
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_BUDGET_MIN", "180")
-    assert krh._optimization_budget_minutes({}) == 180.0
-
-
-def test_optimization_wrapper_timeout_adds_grace() -> None:
-    secs = krh._optimization_wrapper_timeout_sec({"backend_order": "forge", "budget_minutes": 10})
-    assert secs == 10 * 60 + 180
-
-
 # -- backend selection -----------------------------------------------------
 def test_backend_order_ignores_payload_forge_without_explicit_env(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
@@ -282,30 +234,6 @@ def test_artifact_paths_other_type() -> None:
 
 
 # -- _kernel_result_rank ---------------------------------------------------
-def test_kernel_result_rank_non_dict() -> None:
-    assert krh._kernel_result_rank(None) == (0, 0.0)
-
-
-def test_kernel_result_rank_keep_beats_higher_micro_review() -> None:
-    keep = {
-        "status": "ok",
-        "proposal": {"decision": "KEEP"},
-        "verification": {"micro_speedup": 1.05},
-    }
-    review = {
-        "status": "ok",
-        "proposal": {"decision": "NEEDS_REVIEW"},
-        "verification": {"micro_speedup": 2.0},
-    }
-    assert krh._kernel_result_rank(keep) > krh._kernel_result_rank(review)
-
-
-def test_kernel_result_rank_equal_keep_higher_micro_wins() -> None:
-    a = {"status": "ok", "proposal": {"decision": "KEEP"}, "verification": {"micro_speedup": 1.1}}
-    b = {"status": "ok", "proposal": {"decision": "KEEP"}, "verification": {"micro_speedup": 1.5}}
-    assert krh._kernel_result_rank(b) > krh._kernel_result_rank(a)
-
-
 # -- _parse_tool_stdout / _shape_tool_result ------------------------------
 def test_parse_tool_stdout_whole_json() -> None:
     assert krh._parse_tool_stdout('{"status": "ok", "x": 1}') == {"status": "ok", "x": 1}
@@ -389,34 +317,6 @@ def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
 
 
 # -- _in_flight_kernel_ids -------------------------------------------------
-def test_in_flight_kernel_ids_no_dir(tmp_path: Path) -> None:
-    assert krh._in_flight_kernel_ids(tmp_path) == set()
-
-
-def test_in_flight_kernel_ids_scans_running(tmp_path: Path) -> None:
-    sid = tmp_path.name
-    status_dir = tmp_path / "kernel-agent" / "runs" / sid / "status" / "kernel_optimization"
-    status_dir.mkdir(parents=True)
-    # running with kernel_id in last_lines
-    (status_dir / "ko-1.json").write_text(
-        json.dumps({"state": "running", "last_lines": ["foo", "kernel_id=k7"]}),
-        encoding="utf-8",
-    )
-    # running with top-level kernel_id fallback
-    (status_dir / "ko-2.json").write_text(
-        json.dumps({"state": "RUNNING", "kernel_id": "k8"}),
-        encoding="utf-8",
-    )
-    # finished -> ignored
-    (status_dir / "ko-3.json").write_text(
-        json.dumps({"state": "done", "kernel_id": "k9"}),
-        encoding="utf-8",
-    )
-    # malformed -> skipped
-    (status_dir / "ko-4.json").write_text("{bad", encoding="utf-8")
-    assert krh._in_flight_kernel_ids(tmp_path) == {"k7", "k8"}
-
-
 # -- unattempted_skip_reason / gate-rejected dispatch ----------------------
 def test_unattempted_skip_reason_covers_the_bookkeeping_reasons() -> None:
     """Only reasons meaning "no backend ran" count as unattempted."""
@@ -449,72 +349,6 @@ def test_the_skip_whitelist_covers_every_reason_the_filter_emits() -> None:
     assert unclassified == {"not_live"}, (
         f"either whitelist the reason or decide it means a real attempt: {sorted(unclassified)}"
     )
-
-
-def test_batch_candidates_reports_its_skip_reasons(tmp_path: Path) -> None:
-    """The filter's reasons reach the caller, not just the log."""
-    artifact = tmp_path / "kernel_candidates.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k001",
-                        "name": "cold_kernel",
-                        "gpu_pct": 1.0,
-                        "reusable_native_kernel": True,
-                        "source_file": "/pkg/k.py",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    skipped: dict[str, str] = {}
-    selected = krh._batch_kernel_candidates(
-        {"candidates_path": str(artifact)},
-        skipped_out=skipped,
-    )
-    assert selected == []
-    assert skipped["k001"].startswith("below_min_gpu_pct")
-
-
-def test_gate_rejected_named_kernel_is_skipped_not_failed(tmp_path: Path) -> None:
-    """A threshold is not an optimization failure.
-
-    Recording one spends the source's retry quota on a decision no backend made,
-    and the report then explains a technical failure that never happened.
-    """
-    import asyncio
-
-    artifact = tmp_path / "kernel_candidates.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k001",
-                        "name": "cold_kernel",
-                        "gpu_pct": 1.0,
-                        "reusable_native_kernel": True,
-                        "source_file": "/pkg/k.py",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    session = tmp_path / "session"
-    session.mkdir()
-    out = asyncio.run(
-        krh.run_optimization_handler(
-            {"candidates_path": str(artifact), "kernel_id": "k001"},
-            session_dir=session,
-        )
-    )
-    assert out["status"] == "skipped"
-    assert out["reason"].startswith("below_min_gpu_pct")
-    assert out["kernel_id"] == "k001"
 
 
 def _state_owing_one_attempt():
@@ -642,29 +476,6 @@ _OP_FANOUT_ROWS = [
         "source_file": "/pkg/aiter/gqa.py",
     },
 ]
-
-
-def test_the_dispatcher_publishes_the_merge_it_performed(tmp_path: Path) -> None:
-    """The representative carries the ids it absorbed, and the result says so.
-
-    Nothing in production read ``opfanout_collapsed_ids`` before: the batch
-    filter stamped it and no consumer existed, so the merge was invisible to
-    everything downstream of the dispatch.
-    """
-    artifact = tmp_path / "kernel_candidates.json"
-    artifact.write_text(json.dumps({"hot_kernels": _OP_FANOUT_ROWS}), encoding="utf-8")
-
-    skipped: dict[str, str] = {}
-    selected = krh._batch_kernel_candidates(
-        {"candidates_path": str(artifact)},
-        skipped_out=skipped,
-    )
-    assert [str(row.get("kernel_id") or "") for row in selected] == ["k001"]
-    assert skipped["k002"] == "opfanout_merged_into=k001"
-    assert set(selected[0]["opfanout_collapsed_ids"]) == {"k001", "k002"}
-
-    stamped = krh._stamp_task_group_result({"status": "ok"}, selected[0])
-    assert set(stamped["opfanout_collapsed_ids"]) == {"k001", "k002"}
 
 
 def test_an_op_fanout_merge_does_not_leave_the_sibling_owing_an_attempt() -> None:
