@@ -23,10 +23,11 @@ Design contract:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env_safety import redact_secret_values
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.timeutil import now_iso
@@ -65,48 +66,15 @@ class ConversationRowError(ValueError):
     """Raised when a conversation row violates the closed schema."""
 
 
-# Secret redaction. Each pattern keeps a leading "label" group and replaces the
-# trailing secret value with a placeholder. Ordered most-specific first.
-_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Authorization: Bearer <token>
-    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
-    # Provider key prefixes: ak-, sk-, pk-, sk-lf-, pk-lf- ...
-    (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
-    # GitHub tokens: ghp_, gho_, ghs_, ghr_, github_pat_
-    (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
-    # KEY=value / TOKEN=value / SECRET=value / PASSWORD=value (env shape)
-    (
-        re.compile(
-            r"(?i)\b([A-Z0-9_]*"
-            r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL)"
-            r"[A-Z0-9_]*\s*[=:]\s*)"
-            r"[^\s,;'\"]+"
-        ),
-        r"\1[REDACTED]",
-    ),
-)
-
-
 def redact_secrets(text: str) -> str:
     """Strip obvious secret *values* from ``text`` before it hits disk.
 
-    Conservative and idempotent: the label / prefix is preserved so the
-    redacted line still reads sensibly, only the secret material is
-    replaced with ``[REDACTED]``. Returns ``text`` unchanged when it
-    carries no recognizable secret shape.
-
-    Args:
-        text: Raw text that may embed secret values.
-
-    Returns:
-        The text with recognizable secret values replaced by ``[REDACTED]``.
+    Delegates to :func:`hyperloom.common.env_safety.redact_secret_values` so
+    conversations, transcripts, and Langfuse snapshots share one rule set.
     """
     if not text:
         return text
-    out = text
-    for pattern, repl in _REDACT_PATTERNS:
-        out = pattern.sub(repl, out)
-    return out
+    return redact_secret_values(text)
 
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).

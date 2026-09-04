@@ -71,21 +71,52 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
         # Legacy: not consumed anymore, still scrubbed if present.
         "SAFE_API_KEY",
     }
 )
 
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
+    (
+        re.compile(
+            r"(?i)\b(authorization\s*:\s*)"
+            r"(?:(?P<authorization_scheme>[A-Za-z][A-Za-z0-9._~+/-]*[ \t]+)"
+            r"(?=[^\s,;'\"\\]+))?"
+            r"[^\s,;'\"\\]+"
+        ),
+        r"\1\g<authorization_scheme>[REDACTED]",
+    ),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
-    (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
+    (re.compile(r"\b(gh[pousr]_)[A-Za-z0-9_]{3,}"), r"\1[REDACTED]"),
+    (re.compile(r"\b(github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
     # AWS access-key id and compact JWT. Same two shapes the specialist
     # transcript redactor already matches; kept here so a command that
     # carries either form is masked whether it went through an assignment
     # or not.
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
+    (
+        re.compile(r"(?i)(ocp-apim-subscription-key\s*:\s*)[^\s,;'\"\\]+"),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(r"(?i)(?<![A-Z0-9_./-])(authorization\s*=\s*)[^\s,;'\"\\]+"),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(
+            r"(?i)\b([A-Z0-9_]*CUSTOM_HEADERS\s*[=:]\s*)"
+            r"(\\?[\"'])?"
+            r"(?:[A-Z0-9_-]+:[ \t]*[^\r\n,;'\"\\]+"
+            r"(?:,[ \t]*[A-Z0-9_-]+:[ \t]*[^\r\n,;'\"\\]+)*|"
+            r"[^\s,;'\"\\]+)"
+        ),
+        r"\1\2[REDACTED]",
+    ),
     # Shell commands quote the value (``PASSWORD="x"``), and a command that has
     # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
     # The opening quote is matched separately and re-emitted so the mask keeps
@@ -97,16 +128,20 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # for IZER / TOKENS still left ``tokenized_requests`` and
     # ``stop_token_ids`` matching — TOKEN is a generic word in this stack,
     # and a half-redacted list (``stop_token_ids=[REDACTED], 154827]``) is
-    # worse than leaving the knob readable. ``API_KEY`` / ``SECRET`` /
-    # ``PASSWORD`` / ``CREDENTIAL`` still allow trailing name characters, so
-    # ``AWS_SECRET_ACCESS_KEY`` is unchanged. A backslash is only excluded
-    # from the value when it precedes a quote, so a JSON-escaped closer is
-    # left in place (the quoting stays balanced) while ``PASSWORD=C:\foo``
-    # is still masked whole.
+    # worse than leaving the knob readable. ``AUTH`` is the same kind of
+    # suffix (``AUTH_KEY``) so ``Unauthorized:`` is not treated as a secret
+    # assignment. ``API_KEY`` / ``SECRET`` / ``PASSWORD`` / ``CREDENTIAL``
+    # still allow trailing name characters, so ``AWS_SECRET_ACCESS_KEY`` is
+    # unchanged. A backslash is only excluded from the value when it
+    # precedes a quote, so a JSON-escaped closer is left in place (the
+    # quoting stays balanced) while ``PASSWORD=C:\foo`` is still masked whole.
     (
         re.compile(
-            r"(?i)\b([A-Z0-9_]*"
-            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"(?i)(?<![A-Z0-9_./-])("
+            r"(?:[A-Z0-9_]*(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|"
+            r"AUTH(?:_[A-Z0-9_]+)?|"
+            r"[A-Z0-9_]+_AUTH(?:ORIZATION)?(?:_[A-Z0-9_]+)?|"
+            r"(?:[A-Z0-9_]+_)?TOKEN(?:_\d+)?)"
             r"\s*[=:]\s*)"
             r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),
@@ -418,6 +453,38 @@ def redact_secret_values(text: str) -> str:
     return out
 
 
+def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> None:
+    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode.
+
+    Missing files and I/O errors are ignored so a logging path cannot fail a run.
+    """
+    from pathlib import Path
+
+    target = Path(path)
+    tmp = target.with_name(target.name + ".redacting")
+    changed = False
+    try:
+        with target.open("r", encoding="utf-8", errors="replace") as source:
+            with tmp.open("w", encoding="utf-8") as destination:
+                for line in source:
+                    redacted = redact_secret_values(line)
+                    changed = changed or redacted != line
+                    destination.write(redacted)
+        if changed:
+            tmp.chmod(mode)
+            tmp.replace(target)
+        else:
+            tmp.unlink()
+        target.chmod(mode)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # The temp file is already gone or unreachable; nothing left to clean.
+            pass
+        return
+
+
 __all__ = [
     "BENCHMARK_SECRET_ENV_NAMES",
     "BLOCKED_CHILD_ENV_NAMES",
@@ -433,6 +500,7 @@ __all__ = [
     "is_allowed_variant_env_key",
     "is_python_package_root",
     "is_secret_shaped_env_name",
+    "redact_file_in_place",
     "redact_secret_values",
     "scrub_benchmark_process_env",
     "scrub_child_process_env",

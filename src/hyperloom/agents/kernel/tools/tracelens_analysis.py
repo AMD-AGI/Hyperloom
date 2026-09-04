@@ -9,7 +9,6 @@ capture directories, and has a dry-run path that works without TraceLens install
 """
 
 import argparse
-import ast
 import asyncio
 import contextlib
 import csv
@@ -87,6 +86,8 @@ from tracelens_skill_runner import (
 )
 
 from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from _literal_utils import safe_literal_eval as _safe_literal_eval
 from _nccl_summary_candidates import extract_collective_candidates
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
@@ -427,6 +428,8 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
         import _bypass_trace_reader as _reader
 
         analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
+        if analyze.get("truncated"):
+            return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
     except Exception:  # noqa: BLE001 - guard is advisory; never block on it
@@ -3304,6 +3307,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                         "--include=*.cuh",
                         "--include=*.hip",
                         "--include=*.sh",
+                        "--",
                         keyword,
                         str(sub_root),
                     ],
@@ -4017,9 +4021,9 @@ def _resolve_shapes_from_ops_unique_args_csv(
                 if not row_matches(name):
                     continue
                 try:
-                    dims = ast.literal_eval(str(row.get("Input Dims") or "").strip() or "()")
-                    dtypes = ast.literal_eval(str(row.get("Input type") or "").strip() or "()")
-                except (ValueError, SyntaxError):
+                    dims = _safe_literal_eval(str(row.get("Input Dims") or "").strip() or "()")
+                    dtypes = _safe_literal_eval(str(row.get("Input type") or "").strip() or "()")
+                except _LITERAL_EVAL_ERRORS:
                     continue
                 if not isinstance(dims, (list, tuple)):
                     continue
@@ -4042,9 +4046,9 @@ def _invocation_case_from_csv_row(row: dict[str, str]) -> dict[str, Any] | None:
     raw_types = str(row.get("Input type") or "").strip()
     raw_concrete = str(row.get("Concrete Inputs") or "").strip()
     try:
-        dims = ast.literal_eval(raw_dims or "()")
-        dtypes = ast.literal_eval(raw_types or "()")
-    except (ValueError, SyntaxError):
+        dims = _safe_literal_eval(raw_dims or "()")
+        dtypes = _safe_literal_eval(raw_types or "()")
+    except _LITERAL_EVAL_ERRORS:
         return None
     if not isinstance(dims, (list, tuple)):
         return None
@@ -4343,12 +4347,12 @@ def _clean_category_label(raw: str) -> str:
     s = str(raw or "").strip()
     if s.startswith("[") and s.endswith("]"):
         try:
-            val = ast.literal_eval(s)
+            val = _safe_literal_eval(s)
             if isinstance(val, (list, tuple)) and val:
                 return str(val[0]).strip()
             if isinstance(val, (list, tuple)):
                 return ""
-        except (ValueError, SyntaxError):
+        except _LITERAL_EVAL_ERRORS:
             s = s.strip("[]")
     return s.strip().strip("'\"").strip()
 

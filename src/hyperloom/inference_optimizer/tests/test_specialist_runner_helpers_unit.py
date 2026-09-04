@@ -36,6 +36,7 @@ def test_safe_redact():
     assert "GITHUB_TOKEN=[REDACTED]" in out
     assert "redact_me" not in out
     assert "redact_me_too" not in out
+    assert "[REDACTED]]" not in out
     assert sr._safe_redact("plain line") == "plain line"
 
 
@@ -54,6 +55,19 @@ def test_safe_redact_bare_gateway_token_shapes():
     assert "pk-lf-98765" not in out
     assert "sk-zyx987" not in out
     assert out.count("[REDACTED]") == 3
+
+
+def test_safe_redact_aws_and_custom_headers():
+    line = (
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY "
+        "AWS_SESSION_TOKEN=FwoGZXIvYXdzEHsaDNEXAMPLETOKEN "
+        "ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret"
+    )
+    out = sr._safe_redact(line)
+    assert "wJalrXUtnFEMI" not in out
+    assert "FwoGZXIvYXdzEHsaDNEXAMPLETOKEN" not in out
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
 
 
 def test_extra_focus_tags(monkeypatch):

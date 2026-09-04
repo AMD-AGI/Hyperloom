@@ -7,8 +7,9 @@ Counterpart of the Robustness ``gpu_memory_leaked`` signal: when a crashed
 server leaves the ROCm KFD tables attributing VRAM to dead PIDs, every
 subsequent server start aborts on insufficient free memory. Invoked via
 ``delegate{action_name="recover", ...}`` (Robustness-only by PolicyGate)
-for a soft cleanup: ``pgrep`` stale owners, SIGTERM, wait
-``SERVER_KILL_WAIT_S``, SIGKILL survivors.
+for a soft cleanup: SIGTERM then SIGKILL owners recorded in this session's
+pidfiles, wait ``SERVER_KILL_WAIT_S``, SIGKILL survivors. Co-located
+sessions and host-wide ``pgrep`` matches are never signalled.
 
 We deliberately do NOT reload amdgpu, reset the GPU, restart the pod/Ray
 head, or touch persistent runtime config (would kill the optimizer, need
@@ -46,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from ...loop.sub_agent_runner import RunnerContext
+from ._server_lifecycle import _pid_cmdline as _shared_pid_cmdline
 
 
 log = logging.getLogger(__name__)
@@ -110,6 +112,7 @@ class RecoverExecutor:
     FREE_MB_HEALTHY: float = 500.0
     # Owner patterns enforced by ``_kill_stale_owners``.
     OWNER_PATTERNS: tuple[str, ...] = _OWNER_PATTERNS
+    _pid_cmdline = staticmethod(_shared_pid_cmdline)
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the GPU recovery sequence and report the outcome.
@@ -131,6 +134,7 @@ class RecoverExecutor:
         reason = str(params.get("reason", ""))
         force_cleanup = bool(params.get("force_gpu_cleanup", False))
         workspace = self._workspace_dir(ctx)
+        self._active_session_dir = self._session_dir(ctx)
 
         log.info(
             "recover_executor: start reason=%r force=%s",
@@ -219,6 +223,23 @@ class RecoverExecutor:
             return None
         try:
             return Path(ws)
+        except (TypeError, ValueError):
+            return None
+
+    def _session_dir(self, ctx: RunnerContext) -> Path | None:
+        """Resolve the session directory that owns recover pidfiles.
+
+        Args:
+            ctx (RunnerContext): The action runner context.
+
+        Returns:
+            Path | None: The session path, or ``None`` when none is configured.
+        """
+        sd = (ctx.extra or {}).get("session_dir")
+        if not sd:
+            return None
+        try:
+            return Path(sd)
         except (TypeError, ValueError):
             return None
 
@@ -355,9 +376,9 @@ class RecoverExecutor:
             isinstance(snap.get("free_mb"), (int, float)) and snap["free_mb"] >= self.FREE_MB_HEALTHY for snap in gpus
         )
 
-    # soft cleanup — pgrep + kill loop
+    # soft cleanup — session pidfiles + kill loop
     def _kill_stale_owners(self) -> list[dict[str, Any]]:
-        """SIGTERM then SIGKILL stale owners matching :data:`OWNER_PATTERNS`.
+        """SIGTERM then SIGKILL owners recorded in this session's pidfiles.
 
         Returns one record per signalled PID (cmdline at discovery + final
         signal name ``"TERM"`` / ``"KILL"``).
@@ -371,7 +392,23 @@ class RecoverExecutor:
         killed: list[dict[str, Any]] = []
         for entry in candidates:
             pid = entry["pid"]
-            if self._send_signal(pid, signal.SIGTERM):
+            cmd = str(entry.get("cmd", ""))
+            pattern = next((marker for marker in self.OWNER_PATTERNS if marker in cmd), None)
+            if pattern is None:
+                log.warning(
+                    "recover_executor: pid %d is not a recognized session owner; not signalling",
+                    pid,
+                )
+                self._remove_finished_pidfile(entry)
+                continue
+            entry["pattern"] = pattern
+            pgid = entry.get("pgid")
+            sent = (
+                self._send_group_signal(int(pgid), signal.SIGTERM) or self._send_signal(pid, signal.SIGTERM)
+                if isinstance(pgid, int)
+                else self._send_signal(pid, signal.SIGTERM)
+            )
+            if sent:
                 entry["signal"] = "TERM"
                 killed.append(entry)
         if not killed:
@@ -380,55 +417,135 @@ class RecoverExecutor:
         time.sleep(self.SERVER_KILL_WAIT_S)
         for entry in killed:
             pid = entry["pid"]
-            if self._pid_alive(pid) and self._send_signal(pid, signal.SIGKILL):
+            pgid = entry.get("pgid")
+            if isinstance(pgid, int):
+                still_owned = bool(self._process_group_owner_cmd(pgid))
+                alive = self._process_group_alive(pgid)
+                if alive and still_owned:
+                    sent = self._send_group_signal(pgid, signal.SIGKILL)
+                else:
+                    current_cmd = self._pid_cmdline(pid)
+                    pid_owned = any(marker in current_cmd for marker in self.OWNER_PATTERNS)
+                    sent = self._pid_alive(pid) and pid_owned and self._send_signal(pid, signal.SIGKILL)
+            else:
+                current_cmd = self._pid_cmdline(pid)
+                still_owned = any(marker in current_cmd for marker in self.OWNER_PATTERNS)
+                sent = self._pid_alive(pid) and still_owned and self._send_signal(pid, signal.SIGKILL)
+            if sent:
                 entry["signal"] = "KILL"
+            self._remove_finished_pidfile(entry, force=bool(sent))
         return killed
 
+    def _send_group_signal(self, pgid: int, sig: signal.Signals) -> bool:
+        """Signal an owned process group without touching our own group."""
+        if os.name != "posix" or pgid <= 0 or pgid == os.getpgrp():
+            return False
+        try:
+            os.killpg(pgid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            log.warning("recover_executor: cannot signal pgid=%d sig=%s: %s", pgid, sig.name, exc)
+            return False
+
+    @staticmethod
+    def _process_group_alive(pgid: int) -> bool:
+        """Return whether a POSIX process group still has members."""
+        if os.name != "posix":
+            return False
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _process_group_owner_cmd(self, pgid: int) -> str:
+        """Return a recognized owner cmdline from ``pgid``, if one exists."""
+        try:
+            entries = list(Path("/proc").iterdir())
+        except OSError:
+            return ""
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8")
+                entry_pgid = int(stat.rsplit(")", 1)[1].split()[2])
+            except (IndexError, OSError, ValueError):
+                continue
+            if entry_pgid != pgid:
+                continue
+            cmd = self._pid_cmdline(int(entry.name))
+            if any(marker in cmd for marker in self.OWNER_PATTERNS):
+                return cmd
+        return ""
+
+    def _remove_finished_pidfile(self, entry: dict[str, Any], *, force: bool = False) -> None:
+        """Remove a pidfile after its recorded process group has exited."""
+        pid_file = entry.get("pid_file")
+        if not isinstance(pid_file, str):
+            return
+        pgid = entry.get("pgid")
+        alive = self._pid_alive(entry["pid"])
+        if isinstance(pgid, int):
+            alive = alive or self._process_group_alive(pgid)
+        if alive and not force:
+            return
+        path = Path(pid_file)
+        for candidate in (path, path.with_suffix(".json")):
+            try:
+                candidate.unlink()
+            except OSError:
+                # Best-effort cleanup: an absent or locked pidfile is not an error.
+                pass
+
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
-        """Run ``pgrep -a -f -- <pattern>`` per owner pattern (matches the
-        full cmdline) and return unique PID records, excluding our own PID.
+        """Return unique PIDs from this session's ``runs/**/*.pid`` files.
+
+        Host-wide ``pgrep`` is not used: only processes this session recorded
+        are candidates. Missing ``session_dir`` yields an empty list.
 
         Returns:
-            Unique PID records matching the owner patterns, or ``[]`` when
-            ``pgrep`` is unavailable or nothing matched.
+            Unique PID records from session pidfiles, excluding our own PID.
         """
-        if not shutil.which("pgrep"):
-            log.warning("recover_executor: pgrep not on PATH; skipping kill stage")
+        session_dir = getattr(self, "_active_session_dir", None)
+        if session_dir is None:
+            return []
+        runs = Path(session_dir) / "runs"
+        if not runs.is_dir():
             return []
         own_pid = os.getpid()
         seen: dict[int, dict[str, Any]] = {}
-        for pattern in self.OWNER_PATTERNS:
+        for pid_file in sorted(runs.rglob("*.pid")):
             try:
-                proc = subprocess.run(
-                    ["pgrep", "-a", "-f", "--", pattern],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=3.0,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                log.warning("recover_executor: pgrep(%r) failed: %s", pattern, exc)
+                parts = pid_file.read_text(encoding="utf-8").split()
+            except OSError:
                 continue
-            if proc.returncode not in (0, 1):  # 1 = no matches
+            if not parts:
                 continue
-            for line in proc.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(None, 1)
-                if len(parts) < 2:
-                    continue
-                try:
-                    pid = int(parts[0])
-                except ValueError:
-                    continue
-                cmd = parts[1]
-                if pid == own_pid:
-                    continue
-                # Confirm the pattern via plain substring (pgrep's regex is permissive).
-                if pattern not in cmd:
-                    continue
-                seen[pid] = {"pid": pid, "cmd": cmd, "pattern": pattern}
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid == own_pid:
+                continue
+            try:
+                pgid = int(parts[1]) if len(parts) > 1 else pid
+            except ValueError:
+                pgid = pid
+            cmd = self._pid_cmdline(pid)
+            if not cmd and pgid != own_pid:
+                cmd = self._process_group_owner_cmd(pgid)
+            seen[pid] = {
+                "pid": pid,
+                "pgid": pgid,
+                "pid_file": str(pid_file),
+                "cmd": cmd,
+                "pattern": "session_pidfile",
+            }
         return list(seen.values())
 
     def _send_signal(self, pid: int, sig: signal.Signals) -> bool:

@@ -438,7 +438,7 @@ def _maybe_build_shape_manifest(
         variant_meta: dict[str, dict[str, Any]] = {}
         for path, label, mode in shards:
             shard_an = _reader.analyze_trace(path, top_k=0, steady_state=False, emit_launches=True)
-            if shard_an.get("status") != "ok":
+            if shard_an.get("status") != "ok" or shard_an.get("truncated"):
                 continue
             capture_variants.append((label, shard_an))
             capture_hashes[label] = _sha256_file(path)
@@ -725,6 +725,17 @@ def main(argv: list[str] | None = None) -> int:
                 "code": "bypass_trace_parse_failed",
                 "severity": "warning",
                 "message": f"bypass reader could not analyze trace: {analyze.get('error', 'unknown')}",
+            }
+        )
+    elif analyze.get("truncated"):
+        trace_health_warnings.append(
+            {
+                "code": "bypass_trace_aggregation_truncated",
+                "severity": "warning",
+                "message": (
+                    "trace aggregation reached its safety cap; kernel rankings use only "
+                    f"the retained prefix ({analyze.get('truncation_reason', 'unknown')})."
+                ),
             }
         )
         analyze = {

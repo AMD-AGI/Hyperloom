@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
+    is_rocm_hip_writable_path,
     resolve_session_framework_root,
     resolve_source_file_allowlist,
     resolved_within,
@@ -431,6 +432,9 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 # `source_file` and `framework_source_root` may point at trusted installed source
 # scopes outside the session directory. Real-path containment prevents escapes.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
+
+# Payload fields that name files modified by patch/install actions.
+ROCM_WRITE_PATH_FIELDS: frozenset[str] = frozenset({"patch_path", "target_file", "resolved_patch_targets"})
 
 # Coordinator-owned warm replay may deploy a KB patch into the active framework
 # checkout.  The exception is intentionally narrower than SOURCE_LIKE_FIELDS:
@@ -1990,6 +1994,13 @@ class PolicyGate:
                 )
             if key not in PATH_LIKE_FIELDS:
                 return
+            if key in ROCM_WRITE_PATH_FIELDS and not is_rocm_hip_writable_path(node):
+                raise PolicyDenied(
+                    f"role={role.name!r} {intent_type.value} payload field "
+                    f"{key!r}={node!r} is a ROCm runtime path, not HIP source",
+                    rule="rocm_runtime_write_denied",
+                    hint="ROCm writes are limited to source, header, and CMake files",
+                )
             if not self._path_under_session(node):
                 if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
                     try:
@@ -2246,6 +2257,7 @@ __all__ = [
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
+    "ROCM_WRITE_PATH_FIELDS",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",

@@ -3392,6 +3392,11 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
     assert func is None
 
 
+def test_parse_launcher_path_swallows_deep_dict_repr():
+    payload = "{'entry_point': " + "(" * 9000 + "'a.py(1): f'" + ")" * 9000 + "}"
+    assert tlr._parse_launcher_path(payload) == ("", None, None)
+
+
 # ---------------------------------------------------------------------------
 # _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
 # Pins the three resolution paths (importlib spec, env override, hardcoded fallback) plus no-op cases.

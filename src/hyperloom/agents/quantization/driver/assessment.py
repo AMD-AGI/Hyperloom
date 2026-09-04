@@ -10,7 +10,8 @@ Classification precedence (first match wins):
   1. Hard SDK-level signatures in ``sdk_error`` mapping to bootstrap-class
      outcomes, decisive even if some artifacts exist.
   2. Explicit ``blocked.md`` outcome marker (``outcome_id: <id>``) when it is
-     a known ``OutcomeId``.
+     a known failure/ask ``OutcomeId`` (success tags such as
+     ``eval_gap_accepted`` are ignored so they cannot skip MUST-have checks).
   3. Phase-aware artifact gaps under the recorded ``last_phase``.
   4. MUST-have model files on the quantized directory.
   5. Validator step results (FAIL > SKIPPED > absent step heading).
@@ -168,9 +169,12 @@ def _parse_blocked_outcome(text: str | None) -> OutcomeId | None:
         return None
     raw = m.group(1).lower()
     try:
-        return OutcomeId(raw)
+        oid = OutcomeId(raw)
     except ValueError:
         return None
+    if oid in SUCCESS_TAGS:
+        return None
+    return oid
 
 
 def _classify_eval_outcome(

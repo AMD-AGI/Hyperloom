@@ -63,6 +63,42 @@ def test_analyze_basic_aggregates(tmp_path):
     assert kernels["paged_attention_v1"]["count"] == 1
 
 
+def test_long_kernel_names_are_not_merged_before_display_truncation(tmp_path):
+    """Kernel aggregation retains distinguishing suffixes beyond 256 chars."""
+    prefix = "templated_kernel_" + "x" * 300
+    events = [
+        {"cat": "kernel", "ph": "X", "name": prefix + "_a", "ts": 0, "dur": 10, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": prefix + "_b", "ts": 20, "dur": 20, "args": {}},
+    ]
+    tf = tmp_path / "long-names.trace.json"
+    tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+
+    out = reader.analyze_trace(tf, top_k=0)
+
+    assert len(out["kernels"]) == 2
+    assert sorted(row["gpu_time_us"] for row in out["kernels"]) == [10.0, 20.0]
+    assert all(len(row["name"]) == reader._MAX_EVENT_NAME_CHARS for row in out["kernels"])
+
+
+def test_gpu_event_cap_returns_truncated_analysis(tmp_path, monkeypatch):
+    """An oversized trace returns the retained prefix instead of failing."""
+    events = [
+        {"cat": "kernel", "ph": "X", "name": "kernel_0", "ts": 0, "dur": 1, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": "kernel_1", "ts": 10, "dur": 1, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": "kernel_2", "ts": 20, "dur": 1, "args": {}},
+    ]
+    tf = tmp_path / "capped.trace.json"
+    tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    monkeypatch.setattr(reader, "_MAX_BUFFERED_GPU_EVENTS", 2)
+
+    out = reader.analyze_trace(tf, top_k=0)
+
+    assert out["status"] == "ok"
+    assert out["truncated"] is True
+    assert out["truncation_reason"] == "gpu_events"
+    assert out["attribution"]["kernel_count"] == 2
+
+
 def test_correlation_attribution(tmp_path):
     tf = _write_trace(tmp_path / "t.trace.json")
     out = reader.analyze_trace(tf, top_k=0)
@@ -969,3 +1005,15 @@ def test_severity_grades_with_share_of_device_time():
     out_severe = reader._stream_overlap_health({(1, 1): list(severe)})
     assert out_severe and out_severe["severity"] == "warning"
     assert out_severe["excess_share"] >= 0.25
+
+
+def test_analyze_trace_caps_annotation_buffers(tmp_path, monkeypatch):
+    monkeypatch.setattr(reader, "_MAX_ANNOTATION_WINDOWS", 2)
+    events = [{"cat": "gpu_user_annotation", "ph": "X", "name": f"step{i}", "ts": i, "dur": 1} for i in range(5)]
+    path = tmp_path / "cap.trace.json"
+    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    out = reader.analyze_trace(path, top_k=0)
+    assert out["status"] == "ok"
+    assert out["truncated"] is True
+    assert out["truncation_reason"] == "annotation_windows"
+    assert len(out["annotation_windows"]) == 2

@@ -30,6 +30,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import (
+    is_rocm_hip_writable_path,
     resolve_session_framework_root,
     resolve_source_file_allowlist,
     resolved_within,
@@ -735,7 +736,7 @@ def _localization_paths_outside_allowlist(
             continue
         base = framework_root if framework_root is not None else Path("/")
         cand = (base / rel_s).resolve() if not Path(rel_s).is_absolute() else Path(rel_s).resolve()
-        if not any(_is_within(cand, root) for root in roots):
+        if not any(_is_within(cand, root) for root in roots) or not is_rocm_hip_writable_path(str(cand)):
             outside.append(rel_s)
     return outside
 
@@ -1389,20 +1390,20 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     if Path(rel).is_absolute():
         cand = Path(rel).resolve()
         for root in roots:
-            if _is_within(cand, root):
+            if _is_within(cand, root) and is_rocm_hip_writable_path(str(cand)):
                 return cand, cand.relative_to(root).as_posix(), root
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:
         cand = (root / rel).resolve()
-        if not _is_within(cand, root):
+        if not _is_within(cand, root) or not is_rocm_hip_writable_path(str(cand)):
             continue
         if cand.parent.is_dir():
             return cand, cand.relative_to(root).as_posix(), root
     # Fall back to the first root that keeps the path contained.
     for root in roots:
         cand = (root / rel).resolve()
-        if _is_within(cand, root):
+        if _is_within(cand, root) and is_rocm_hip_writable_path(str(cand)):
             return cand, cand.relative_to(root).as_posix(), root
     return None
 
