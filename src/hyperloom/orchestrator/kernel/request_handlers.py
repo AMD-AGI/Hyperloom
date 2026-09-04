@@ -64,7 +64,6 @@ from ._kernel_decisions import (
     kernel_patch_key as kernel_patch_key,
     find_rejected_kernel_patch as find_rejected_kernel_patch,
     record_kernel_integrate_result as record_kernel_integrate_result,
-    record_kernel_opt as record_kernel_opt,
     record_gemm_tuning as record_gemm_tuning,
     _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
     _source_files_in_optimization_stack as _source_files_in_optimization_stack,
@@ -77,7 +76,6 @@ from ._kernel_decisions import (
     kernel_opt_attempts_count as kernel_opt_attempts_count,
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
     is_collective_candidate as is_collective_candidate,
-    unattempted_skip_reason as unattempted_skip_reason,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
     enqueue_nominated_patch as enqueue_nominated_patch,
 )

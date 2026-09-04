@@ -969,7 +969,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle reloop clearing ``last_conc_sweep`` so redundant closeout is
     # skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
-    # Most recent run_optimization_done so Orch doesn't re-dispatch the same kernel_id every tick.
+    # Most recent per-kernel optimization record. No lane writes it now that
+    # source-level rewrite belongs to the KernelForge controller, but the
+    # integrate path still reads it to back-fill a patch identity from a payload
+    # carrying only a kernel_id, and a resumed session can still carry one.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
@@ -989,9 +992,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)
     collective_only_mode: bool = False
-    # Most recent run_optimization dispatch skipped with no eligible kernels;
-    # recorded as a non-failure so the breakdown can surface it.
-    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)
@@ -2623,12 +2623,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
-
-    def record_kernel_opt(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.record_kernel_opt(self, result)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""

@@ -657,16 +657,11 @@ def _print_kernel_opt_summary_line(state: SharedState) -> None:
         summary = build_kernel_optimization_summary(state, session_dir)
         totals = summary.get("totals") or {}
         attempted = int(totals.get("attempted") or 0)
-        if attempted == 0 and int(totals.get("unattempted") or 0) == 0:
+        if attempted == 0:
             return
         integrated = int(totals.get("integrated") or 0)
         rejected = int(totals.get("rejected") or 0)
-        unattempted = int(totals.get("unattempted") or 0)
-        print(
-            f"  kernel_opt           : {attempted} attempted "
-            f"({integrated} integrated, {rejected} rejected), "
-            f"{unattempted} unattempted in top candidates"
-        )
+        print(f"  kernel_opt           : {attempted} attempted ({integrated} integrated, {rejected} rejected)")
         takeaways = summary.get("top_takeaways") or []
         if len(takeaways) >= 2:
             print(f"  kernel_opt_top_cause : {takeaways[1]}")
