@@ -68,12 +68,6 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 )
 
 
-# Request kinds an LLM may address to the kernel agent.
-LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(KERNEL_ACTION_REQUEST_KINDS.values()) | {
-    "trace_analyze",
-    "apply_patch",
-}
-
 # Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and
 # once their own gate passes. A direct request would skip that gate. An
 # unregistered kind is not listed here: the handler lookup auto-rejects it with
@@ -89,6 +83,23 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
         "run_gemm_tuning",
     }
 )
+
+
+# Request kinds an LLM may address to the kernel agent. Derived from the action
+# table minus the Coordinator-owned lanes: those two are still kernel-owned
+# *actions* (they keep their catalogue entry and their handler), but the
+# Coordinator is the only caller, so advertising them here would invite a
+# request PolicyGate then denies.
+LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
+    frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
+    | {
+        "trace_analyze",
+        "apply_patch",
+    }
+) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+
+# The two sets answer the same question and must never both claim a kind.
+assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
 
 
 # Coordinator-managed actions that agents should not directly propose.

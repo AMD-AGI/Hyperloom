@@ -22,6 +22,7 @@ from pathlib import Path
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ActionMetadata,
     COORDINATOR_INTERNAL_ACTIONS,
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     FULL_ENABLED_ACTIONS,
     KERNEL_ACTION_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
@@ -411,6 +412,12 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     """
     if meta.name in KERNEL_AGENT_OWNED_ACTIONS:
         kind_hint = KERNEL_ACTION_REQUEST_KINDS[meta.name]
+        if kind_hint in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
+            # The lane still has a catalogue entry so the model can read what it
+            # does, but the Coordinator dispatches it at KERNEL entry from the
+            # nomination. A payload template here would invite a request the
+            # gate then denies.
+            return f"(no emit — Coordinator dispatches `{kind_hint}` at KERNEL entry)"
         return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
