@@ -1631,6 +1631,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         except Exception:  # noqa: BLE001
             log.exception("failed to persist Coordinator exception metadata")
 
+    def _phase_at_or_past_close(self) -> bool:
+        """Whether the phase machine has reached its terminal phase."""
+        current = _phase_state.phase_index(str(self.shared_state.phase or ""))
+        return current >= _phase_state.phase_index(_phase_state.PHASE_CLOSE)
+
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded.
 
@@ -1836,7 +1841,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 if self.shared_state.stop_reason and not in_closing:
                     stop_reason = self.shared_state.stop_reason
                     break
-                if objective.reached(self.shared_state):
+                target_met = objective.reached(self.shared_state)
+                if target_met:
                     if not self.shared_state.target_reached_at:
                         self.shared_state.target_reached_at = now_iso()
                         # The marker is already set in memory and the phases
@@ -1852,9 +1858,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     # ``closing_phase`` stays unset -- CLOSE reads it to shed
                     # expensive work, including the post-opt roofline this
                     # routing exists to produce.
-                    routed_to_sweep = _phase_state.phase_index(
-                        str(self.shared_state.phase or "")
-                    ) < _phase_state.phase_index(_phase_state.PHASE_SWEEP)
                     self._unbounded_advance = True
                     try:
                         await self._await_within_session_bound(
@@ -1865,22 +1868,24 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         log.exception("Coordinator: target_reached transition failed")
                     finally:
                         self._unbounded_advance = False
-                    # The SWEEP hop leaves through the stop_reason check instead,
-                    # once SWEEP names the exit.
-                    if not routed_to_sweep:
+                    # Only CLOSE ends the run: SWEEP has to reach a terminal
+                    # ladder state first, which takes many ticks, and stopping
+                    # on the hop into it would skip both the curve and the close
+                    # sequencer.
+                    if self._phase_at_or_past_close():
                         if not self.shared_state.stop_reason:
                             self.shared_state.set_stop_reason("target_reached")
                         stop_reason = self.shared_state.stop_reason
                         break
-                # A met target outranks the wall clock for the hops it needs.
-                # conc_sweep clamps to the remaining session budget and declines
-                # when nothing is left, so SWEEP cannot run past --max-hours;
-                # max_ticks, emergency and signal still bound the loop.
+                # A target that is met right now outranks the wall clock until
+                # it reaches CLOSE. Keyed on the live objective, not the sticky
+                # marker: a roofline target reads the newest snapshot and can
+                # stop being met, and the run needs the clock back when it does.
                 if (
                     deadline is not None
                     and time.monotonic() >= deadline
                     and not in_closing
-                    and not self.shared_state.target_reached_at
+                    and not (target_met and not self._phase_at_or_past_close())
                 ):
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"

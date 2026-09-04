@@ -560,10 +560,6 @@ def should_reloop_to_explore(
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"macro_cycle": cycle}
 
-    if target_was_reached(state):
-        evidence["reloop_blocked"] = "target_reached"
-        return False, evidence
-
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
     # "gained" only when its validated gain rose by at least the decaying KEEP bar.
     effective_min_gain = decaying_keep_threshold_pct(cycle) if min_gain_pct is None else float(min_gain_pct)
@@ -576,6 +572,10 @@ def should_reloop_to_explore(
     evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
     evidence["cycle_gained"] = cycle_gained
     evidence["no_gain_cycle_streak_effective"] = effective_streak
+
+    if target_was_reached(state):
+        evidence["reloop_blocked"] = "target_reached"
+        return False, evidence
 
     # Safety cap on macro-cycles.
     if (cycle + 1) >= int(max_cycles):
@@ -2542,6 +2542,12 @@ def exit_normal_kernel(
     return None
 
 
+#: SWEEP exits a met target renames itself. ``sweep_failed`` is absent on
+#: purpose; the budget exits are here because they are not in
+#: ``STOP_REASON_VOCAB`` and would otherwise be recovered as ``time_exhausted``.
+_SWEEP_EXITS_THE_TARGET_NAMES: frozenset[str] = frozenset({"sweep_done", "sweep_budget_exhausted", "sweep_budget_cap"})
+
+
 def exit_normal_sweep(
     state: Any,
     *,
@@ -2827,12 +2833,6 @@ def compute_next_phase(
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
 
-    # A met target closes through SWEEP so the concurrency curve measures the
-    # configuration it was met on. Not terminal: that would mirror the reason
-    # onto ``stop_reason``, which routes the next tick to CLOSE instead.
-    if target_was_reached(state) and phase_index(current) < phase_index(PHASE_SWEEP):
-        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
-
     # Global terminal stop_reason overrides phase-local judgments.
     terminal = _global_terminal(state)
     if terminal is not None and current != PHASE_CLOSE:
@@ -2843,6 +2843,14 @@ def compute_next_phase(
     if closing is not None and current != PHASE_CLOSE:
         reason, evidence = closing
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
+
+    # A met target closes through SWEEP so the concurrency curve measures the
+    # configuration it was met on. Not terminal: that would mirror the reason
+    # onto ``stop_reason``, which routes the next tick to CLOSE instead. PRELUDE
+    # is excluded so its own terminal guards keep deciding whether the baseline
+    # is one the later phases can compare against at all.
+    if target_was_reached(state) and phase_index(PHASE_PRELUDE) < phase_index(current) < phase_index(PHASE_SWEEP):
+        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
     if current == PHASE_PRELUDE:
         term = exit_terminal_prelude(state)
@@ -2916,9 +2924,10 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # The target names a clean exit. A failed sweep keeps its own name:
-            # its exit code is the signal that the closing curve is missing.
-            if exit_reason == "sweep_done" and target_was_reached(state):
+            # The target names any exit that is not a failure. A failed sweep
+            # keeps its own name: its exit code is the signal that the closing
+            # curve is missing.
+            if exit_reason in _SWEEP_EXITS_THE_TARGET_NAMES and target_was_reached(state):
                 return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when

@@ -32,7 +32,7 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
 )
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.state.objective import TargetGainObjective
+from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
@@ -2485,6 +2485,68 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 @pytest.mark.asyncio
 @pytest.mark.asyncio
+async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
+    """The run must not stop on the hop into SWEEP.
+
+    conc_sweep is a queued task that reaches a terminal state many ticks later,
+    so ``exit_normal_sweep`` returns None meanwhile and the advance is a no-op.
+    Stopping there skips both the curve and the close sequencer -- the regression
+    routing through SWEEP exists to avoid.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.save(session_dir)
+
+    async def _ladder_stays_queued(**_kwargs):
+        return None
+
+    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
+    try:
+        reason = await c.run(
+            objective=TargetGainObjective(target_gain_pct=10.0),
+            max_ticks=6,
+        )
+        assert c.shared_state.target_reached_at
+        assert c.shared_state.last_conc_sweep == {}
+        assert (c.shared_state.phase or "").upper() == "SWEEP"
+        assert reason == "max_ticks", "the run stopped before the ladder reached a terminal state"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_target_that_stops_being_met_does_not_disarm_the_wall_clock(session_dir):
+    """The marker is sticky but ``reached()`` is recomputed every tick.
+
+    A roofline target reads the newest snapshot, so a later one below the bar
+    flips it back. The deadline has to survive that, or a run whose objective
+    branch no longer fires has nothing left to stop it.
+    """
+    _write_marker_target_baseline(session_dir)
+    c = Coordinator(session_dir, backends=_silent_backends())
+    c.sub.register_executor("report", report_executor)
+    c.shared_state.baseline_tput = 100.0
+    c.shared_state.save(session_dir)
+
+    class _MetOnce(TimeOnlyObjective):
+        calls = 0
+
+        def reached(self, state):
+            _MetOnce.calls += 1
+            return _MetOnce.calls == 1
+
+    try:
+        reason = await c.run(objective=_MetOnce(), max_minutes=0.0001, max_ticks=12)
+        assert c.shared_state.target_reached_at
+        assert reason == "time_exhausted", "the wall clock stayed disarmed after the target flipped back"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_target_reached_routes_through_sweep_then_close(session_dir):
     """A met objective goes to SWEEP first, then closes on the target.
 
@@ -2661,7 +2723,7 @@ async def test_target_reached_close_is_not_cancelled_by_an_outer_bound(session_d
             reason = await c.run(
                 objective=TargetGainObjective(target_gain_pct=10.0),
                 max_minutes=0.0001,
-                max_ticks=2,
+                max_ticks=3,
             )
         assert reason == "target_reached"
         assert completed, "the close step was skipped or cancelled by an outer bound"
