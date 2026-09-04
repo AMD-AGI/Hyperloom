@@ -257,6 +257,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "quantization. Ignored if --quantize (free text) is also given.",
     )
     opt.add_argument(
+        "--quantize-provider",
+        choices=("claude", "codex", "hermes"),
+        default=None,
+        help="Agent runtime for the original Quark skill prelude. Resolution: "
+        "--quantize-provider > HYPERLOOM_QUANT_PROVIDER > claude.",
+    )
+    opt.add_argument(
         "--gpu-type",
         type=str.lower,
         # Sorted for a stable --help listing, and derived so a board added to
@@ -269,7 +276,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "verbatim only when the probe fails (CPU sandbox / no "
         "rocm-smi). Magpie runner_type is derived separately; "
         "mi308x and mi325x currently run with mi300x runner scripts because "
-        "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
+        "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts. "
+        "Radeon 8060S uses the dedicated radeon8060s/gfx1151 runner.",
     )
     opt.add_argument(
         "--compute-partition-mode",

@@ -1,9 +1,9 @@
 """Standalone CLI for the quantization-agent.
 
 Lets you drive the Quark PTQ skill chain from a natural-language prompt
-without going through ``inference_optimizer``. The prompt is fed to the
-Claude Agent SDK, which loads ``hyperloom/agents/quantization/SKILL.md`` as the
-runtime contract and invokes the Quark skills end-to-end.
+without going through ``inference_optimizer``. Claude, Codex, and Hermes
+receive the same ``hyperloom/agents/quantization/SKILL.md`` runtime contract
+and invoke the same Quark skills end-to-end.
 
 Example (or use the ``quantization-agent`` console script)::
 
@@ -33,7 +33,7 @@ import sys
 from typing import Any
 
 from .driver.retry import quantize_via_prompt
-from .driver.runner import DEFAULT_MODEL
+from .driver.runner import DEFAULT_MODEL, SUPPORTED_PROVIDERS
 
 
 def _interactive_value(raw: str) -> bool | None:
@@ -110,9 +110,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Upper bound on Python-driven retries for Ask-class outcomes (#3/#6/#16/#26) and #30. Default 1.",
     )
     p.add_argument(
+        "--provider",
+        choices=SUPPORTED_PROVIDERS,
+        default="claude",
+        help="Agent runtime for the unchanged Quark skill workflow (default: claude).",
+    )
+    p.add_argument(
         "--model-id",
         default=None,
-        help=f"Override the Claude model id used by the SDK (default {DEFAULT_MODEL}).",
+        help=f"Override the selected provider model id (Claude default {DEFAULT_MODEL}).",
     )
     p.add_argument(
         "--verbose",
@@ -149,6 +155,7 @@ async def _run(args: argparse.Namespace) -> int:
         interactive=args.interactive,
         acceptable_eval_gap=args.acceptable_eval_gap,
         max_requantize_attempts=args.max_requantize_attempts,
+        provider=args.provider,
         model=args.model_id,
         log=log,
     )

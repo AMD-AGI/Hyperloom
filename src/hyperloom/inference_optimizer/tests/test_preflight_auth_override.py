@@ -811,6 +811,26 @@ def test_ensure_python_sdks_skips_when_all_present(monkeypatch, capsys):
     assert "httpx OK" in captured
 
 
+def test_ensure_python_sdks_explicit_hermes_skips_unused_agent_sdks(monkeypatch, capsys):
+    runner = _RecordingRun([_Completed(returncode=0) for _ in range(2)])
+    monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
+    monkeypatch.setenv("HYPERLOOM_AGENT_BACKEND", "hermes")
+
+    result = cli_preflight._ensure_python_sdks("/opt/venv/bin/python", [])
+
+    assert [call[2] for call in runner.calls] == ["import openai", "import httpx"]
+    assert "claude-agent-sdk" not in result["target"]
+    assert "openai-codex" not in result["target"]
+    captured = capsys.readouterr().out
+    assert "openai OK" in captured and "httpx OK" in captured
+
+
+def test_ray_version_tracks_python_wheel_support():
+    assert cli_preflight._ray_version_for_python((3, 12)) == "2.44.1"
+    assert cli_preflight._ray_version_for_python((3, 13)) == "2.44.1"
+    assert cli_preflight._ray_version_for_python((3, 14)) == "2.55.1"
+
+
 def test_ensure_python_sdks_installs_missing_openai_codex(monkeypatch, capsys):
     """Both agent runtimes are provisioned: a missing codex SDK is installed too.
 
@@ -985,6 +1005,20 @@ def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     import os as _os
 
     assert _os.environ["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
+
+
+def test_visibility_normalizer_prefers_hip_when_explicit(monkeypatch, capsys):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("HYPERLOOM_PREFER_HIP_VISIBLE_DEVICES", "1")
+
+    cli_preflight._unset_hip_visible_devices()
+
+    import os as _os
+
+    assert _os.environ["HIP_VISIBLE_DEVICES"] == "0,1"
+    assert "ROCR_VISIBLE_DEVICES" not in _os.environ
+    assert "explicit HIP visibility" in capsys.readouterr().out
 
 
 def _make_args(**overrides) -> argparse.Namespace:

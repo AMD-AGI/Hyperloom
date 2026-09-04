@@ -17,6 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hyperloom.common.hermes_runtime import resolve_hermes_executable
 from hyperloom.common.llm_config import (
     ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
     CLAUDE_OAUTH_TOKEN_ENV,
@@ -28,6 +29,22 @@ log = logging.getLogger(__name__)
 
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
+def _explicit_hermes_profile_is_configured() -> bool:
+    """Return whether explicit Hermes orchestration has a resolvable profile."""
+
+    if os.environ.get("HYPERLOOM_AGENT_BACKEND", "").strip().lower() != "hermes":
+        return False
+    profile = os.environ.get("HYPERLOOM_HERMES_PROFILE", "").strip()
+    if not profile:
+        return False
+    if not resolve_hermes_executable():
+        return False
+    root = Path(os.environ.get("HERMES_HOME", "").strip() or (Path.home() / ".hermes"))
+    config = root / "config.yaml" if profile == "default" else root / "profiles" / profile / "config.yaml"
+    return config.is_file()
+
 
 # AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks
 # this tuple and takes the first id the gateway actually serves, so the order
@@ -455,6 +472,8 @@ def _validate_credentials() -> None:
     _warn_on_shadowed_oauth_token()
     _warn_on_oauth_against_a_foreign_endpoint()
     _warn_on_oauth_widened_provider_shape()
+    if _explicit_hermes_profile_is_configured():
+        return
     anthropic_url, openai_url = _resolve_llm_endpoints()
     has_anthropic_side = has_anthropic_credential()
     has_key = bool(os.environ.get("OPENAI_API_KEY") or has_anthropic_side)
@@ -500,7 +519,10 @@ def _validate_credentials() -> None:
         "  4. Claude Max/Pro subscription (no API credits; run `claude setup-token`):\n"
         "       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-xxx\n"
         "       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset: either one\n"
-        "       # switches the Claude CLI off subscription mode.",
+        "       # switches the Claude CLI off subscription mode.\n"
+        "  5. Explicit Hermes profile (profile owns provider/auth):\n"
+        "       export HYPERLOOM_AGENT_BACKEND=hermes\n"
+        "       export HYPERLOOM_HERMES_PROFILE=<profile-name>",
         file=sys.stderr,
     )
     sys.exit(2)

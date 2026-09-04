@@ -122,6 +122,9 @@ class Config:
     # "not specified" indistinguishable, so __post_init__ would silently
     # overwrite an explicit False with whatever the env var said.
     include_mori_kb: bool | None = field(default=None)
+    # Appended to preserve the positional order of the pre-existing Config
+    # contract. None keeps the provider default; empty/none/off disables it.
+    agent_fallback_model: str | None = None
 
     def __post_init__(self):
         """Derive paths and validate provider-specific runtime settings."""
@@ -134,8 +137,13 @@ class Config:
         self.agent_reasoning_effort = (self.agent_reasoning_effort or "high").strip()
         self.agent_sandbox_mode = (self.agent_sandbox_mode or "bypass").strip().lower()
         self.agent_fallback_provider = (self.agent_fallback_provider or "").strip().lower()
+        if self.agent_fallback_provider == "none":
+            self.agent_fallback_provider = ""
         if self.agent_fallback_provider:
             get_agent_provider(self.agent_fallback_provider)
+        if self.agent_fallback_model is not None:
+            fallback_model = str(self.agent_fallback_model).strip()
+            self.agent_fallback_model = "" if fallback_model.lower() in {"", "none", "off"} else fallback_model
         if self.agent_timeout_sec <= 0:
             raise ValueError("agent_timeout_sec must be greater than zero")
         if self.specialist_probe_max <= 0:
@@ -184,6 +192,7 @@ class Config:
         return resolve_agent_runtime(
             provider,
             model=self.agent_model,
+            fallback_model=self.agent_fallback_model,
             executable=self.agent_cli,
             timeout_sec=self.agent_timeout_sec,
             reasoning_effort=self.agent_reasoning_effort,
@@ -238,6 +247,10 @@ class Config:
             agent_fallback_provider=overrides.get(
                 "agent_fallback_provider",
                 os.getenv("FORGE_AGENT_FALLBACK_PROVIDER", "claude"),
+            ),
+            agent_fallback_model=overrides.get(
+                "agent_fallback_model",
+                os.getenv("FORGE_AGENT_FALLBACK_MODEL") if "FORGE_AGENT_FALLBACK_MODEL" in os.environ else None,
             ),
             agent_options=overrides.get("agent_options")
             if "agent_options" in overrides

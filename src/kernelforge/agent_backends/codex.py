@@ -384,6 +384,15 @@ class CodexBackend:
             sandbox_mode=("bypass" if bypass_sandbox is not False else "workspace-write"),
         )
         configured_gateway = self.runtime.options.get("gateway")
+        self.auth_mode = str(self.runtime.options.get("auth_mode", "gateway")).strip().lower()
+        if self.auth_mode not in {"gateway", "native_oauth"}:
+            raise CodexUnavailableError(
+                f"unsupported Codex auth_mode {self.auth_mode!r}; expected 'gateway' or 'native_oauth'"
+            )
+        if self.auth_mode == "native_oauth" and (
+            gateway is not None or (isinstance(configured_gateway, Mapping) and bool(configured_gateway))
+        ):
+            raise CodexUnavailableError("native_oauth Codex mode cannot be combined with a gateway override")
         if gateway is None and isinstance(configured_gateway, Mapping):
             gateway = configured_gateway
         # An empty override is "no override": converting it would yield a
@@ -399,6 +408,18 @@ class CodexBackend:
         self._preflight_done = False
         self._codex_home_owner: Any = None
         self._codex_home = ""
+        if self.auth_mode == "native_oauth":
+            configured_home = str(self.runtime.options.get("home", "")).strip()
+            if not configured_home:
+                raise CodexUnavailableError("native_oauth Codex mode requires a dedicated absolute CODEX_HOME")
+            home_path = Path(configured_home).expanduser()
+            if not home_path.is_absolute():
+                raise CodexUnavailableError("native_oauth CODEX_HOME must be absolute")
+            if home_path.is_symlink():
+                raise CodexUnavailableError("native_oauth CODEX_HOME cannot be a symlink")
+            if not home_path.is_dir():
+                raise CodexUnavailableError("native_oauth CODEX_HOME must already exist as a directory")
+            self._codex_home = str(home_path.resolve())
 
     def _child_environment(
         self,
@@ -425,6 +446,16 @@ class CodexBackend:
         # repository would answer every git command the session runs anywhere.
         env.pop("GIT_DIR", None)
         env.pop("GIT_WORK_TREE", None)
+        if self.auth_mode == "native_oauth":
+            # Native subscription OAuth is owned by CODEX_HOME. Inherited API
+            # gateway variables would silently select a different transport.
+            for name in (
+                "OPENAI_BASE_URL",
+                "OPENAI_API_KEY",
+                "OPENAI_CUSTOM_HEADERS",
+                "CODEX_API_KEY",
+            ):
+                env.pop(name, None)
         return env
 
     def _effective_gateway(self) -> LlmGateway:
@@ -445,7 +476,8 @@ class CodexBackend:
         sdk = _load_codex_sdk()
         if self.codex_bin and (not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK)):
             raise CodexUnavailableError(f"Codex SDK runtime is not executable: {self.codex_bin}")
-        _provider_overrides(self._effective_gateway())
+        if self.auth_mode == "gateway":
+            _provider_overrides(self._effective_gateway())
         if self.codex_bin:
             try:
                 version = subprocess.run(
@@ -585,10 +617,9 @@ class CodexBackend:
 
     def _config_overrides(self, spec: AgentRunSpec | None) -> tuple[str, ...]:
         """Collect process-wide SDK app-server configuration overrides."""
-        overrides = [
-            "features.memories=false",
-            *_provider_overrides(self._effective_gateway()),
-        ]
+        overrides = ["features.memories=false"]
+        if self.auth_mode == "gateway":
+            overrides.extend(_provider_overrides(self._effective_gateway()))
         if spec is not None:
             overrides.extend(self._agent_role_overrides(spec))
             overrides.extend(self._mcp_server_overrides(spec))
@@ -623,14 +654,16 @@ class CodexBackend:
         spec: AgentRunSpec,
     ) -> dict[str, Any]:
         """Build SDK options for one new thread."""
-        return {
+        options = {
             "approval_mode": sdk.ApprovalMode.deny_all,
             "cwd": spec.cwd,
             "developer_instructions": _codex_instructions(spec),
             "model": resolve_codex_model(spec.model),
-            "model_provider": "forge",
             "sandbox": self._sdk_sandbox(sdk, spec),
         }
+        if self.auth_mode == "gateway":
+            options["model_provider"] = "forge"
+        return options
 
     def _turn_options(
         self,

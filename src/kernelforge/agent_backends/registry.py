@@ -219,6 +219,7 @@ def resolve_agent_runtime(
     provider: str,
     *,
     model: str = "",
+    fallback_model: str | None = None,
     executable: str = "",
     timeout_sec: int = 1800,
     reasoning_effort: str = "high",
@@ -229,19 +230,30 @@ def resolve_agent_runtime(
 ) -> AgentRuntimeConfig:
     """Resolve provider defaults into one complete runtime configuration."""
     registration = get_agent_provider(provider)
-    fallback = normalize_provider_name(fallback_provider) if fallback_provider else ""
+    raw_provider_fallback = (fallback_provider or "").strip().lower()
+    fallback = "" if raw_provider_fallback in {"", "none", "off"} else normalize_provider_name(raw_provider_fallback)
     if fallback == registration.name:
         fallback = ""
     if fallback:
         get_agent_provider(fallback)
+    selected_model = model.strip() or registration.default_model
+    model_fallback_enabled = fallback_model is None
+    if fallback_model is None:
+        selected_fallback_model = registration.fallback_model if selected_model != registration.fallback_model else ""
+    else:
+        requested_fallback = fallback_model.strip()
+        model_fallback_enabled = requested_fallback.lower() not in {
+            "",
+            "none",
+            "off",
+        }
+        selected_fallback_model = "" if not model_fallback_enabled else requested_fallback
+        if selected_fallback_model == selected_model:
+            selected_fallback_model = ""
     return AgentRuntimeConfig(
         provider=registration.name,
-        model=model.strip() or registration.default_model,
-        fallback_model=(
-            registration.fallback_model
-            if (model.strip() or registration.default_model) != registration.fallback_model
-            else ""
-        ),
+        model=selected_model,
+        fallback_model=selected_fallback_model,
         executable=executable.strip(),
         timeout_sec=timeout_sec,
         reasoning_effort=reasoning_effort.strip() or "high",
@@ -249,6 +261,7 @@ def resolve_agent_runtime(
         precheck=precheck,
         fallback_provider=fallback,
         options=dict(options or {}),
+        model_fallback_enabled=model_fallback_enabled,
     )
 
 
@@ -278,7 +291,7 @@ def create_registered_backend(
             runtime,
             provider=fallback_registration.name,
             model=fallback_registration.default_model,
-            fallback_model=fallback_registration.fallback_model,
+            fallback_model=(fallback_registration.fallback_model if runtime.model_fallback_enabled else ""),
             executable="",
             fallback_provider="",
             options={},
@@ -319,6 +332,8 @@ def _prepare_with_model_fallback(
             usage=usage,
         )
     except AgentProviderUnavailableError as primary_error:
+        if not runtime.model_fallback_enabled:
+            raise
         fallback_model = (runtime.fallback_model or registration.fallback_model).strip()
         if not fallback_model or fallback_model == runtime.model:
             raise
@@ -381,6 +396,13 @@ def _create_codex_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
     return CodexBackend(runtime=runtime)
 
 
+def _create_hermes_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
+    """Construct the built-in Hermes backend lazily."""
+    from kernelforge.agent_backends.hermes import HermesBackend
+
+    return HermesBackend(runtime=runtime)
+
+
 def _claude_available() -> bool:
     """Return whether the optional Claude SDK is installed."""
     return util.find_spec("claude_agent_sdk") is not None
@@ -389,6 +411,13 @@ def _claude_available() -> bool:
 def _codex_available() -> bool:
     """Return whether the optional Codex Python SDK is installed."""
     return util.find_spec("openai_codex") is not None
+
+
+def _hermes_available() -> bool:
+    """Return whether the Hermes Agent CLI is installed."""
+    import shutil
+
+    return shutil.which("hermes") is not None
 
 
 def _claude_owns_model(model: str) -> bool:
@@ -452,6 +481,22 @@ register_agent_provider(
         ),
         availability=_codex_available,
         owns_model=_codex_owns_model,
+    )
+)
+register_agent_provider(
+    AgentProvider(
+        name="hermes",
+        factory=_create_hermes_backend,
+        default_model="gpt-5.6-sol",
+        fallback_model="",
+        capabilities=AgentCapabilities(
+            writable=True,
+            probe=True,
+            requires_workspace_cwd=True,
+            session_env=True,
+            workspace_guard=True,
+        ),
+        availability=_hermes_available,
     )
 )
 

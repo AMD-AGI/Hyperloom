@@ -32,6 +32,10 @@ def clean_creds_env(monkeypatch):
         "_".join(("DEEPSEEK", "API", "KEY")),
         "DEEPSEEK_BASE_URL",
         _OAUTH_ENV,
+        "HYPERLOOM_AGENT_BACKEND",
+        "HYPERLOOM_HERMES_PROFILE",
+        "HYPERLOOM_HERMES_BIN",
+        "HERMES_HOME",
     ):
         monkeypatch.delenv(var, raising=False)
     return monkeypatch
@@ -84,6 +88,27 @@ def test_validate_credentials_passes_oauth_token_only(clean_creds_env):
     """A Max/Pro subscription token alone is a complete Anthropic-side setup."""
     clean_creds_env.setenv(_OAUTH_ENV, "sk-ant-oat01-fake")
     cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_passes_explicit_hermes_profile(clean_creds_env, tmp_path, monkeypatch):
+    profile = tmp_path / "profiles" / "faithful"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+    clean_creds_env.setenv("HYPERLOOM_AGENT_BACKEND", "hermes")
+    clean_creds_env.setenv("HYPERLOOM_HERMES_PROFILE", "faithful")
+    clean_creds_env.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cli_credentials, "resolve_hermes_executable", lambda: "/usr/bin/hermes")
+    cli_credentials._validate_credentials()
+
+
+def test_validate_credentials_rejects_missing_hermes_profile(clean_creds_env, tmp_path, monkeypatch):
+    clean_creds_env.setenv("HYPERLOOM_AGENT_BACKEND", "hermes")
+    clean_creds_env.setenv("HYPERLOOM_HERMES_PROFILE", "missing")
+    clean_creds_env.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cli_credentials, "resolve_hermes_executable", lambda: "/usr/bin/hermes")
+    with pytest.raises(SystemExit) as exc_info:
+        cli_credentials._validate_credentials()
+    assert exc_info.value.code == 2
 
 
 def test_resolve_llm_endpoints_oauth_only_implies_official_anthropic(clean_creds_env):

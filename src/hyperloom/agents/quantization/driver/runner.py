@@ -1,24 +1,32 @@
-"""One-attempt SDK driver for the quantization-agent.
+"""One-attempt agent-runtime driver for the quantization-agent.
 
-Keyword-only public API with injection seams (``sdk_query_factory`` /
-``sdk_options_cls``) so tests don't need the SDK installed. Runs with
-``cwd = quark_root`` (graceful fallback for older SDK builds), stores SDK
-errors on the result rather than raising, and routes output through a single
-``log`` callable. The agent leans on ``SKILL.md`` as the runtime contract;
-this module just plumbs run context into a templated prompt for the SDK.
+Claude retains its SDK injection seams (``sdk_query_factory`` /
+``sdk_options_cls``); Codex and Hermes are CLI transports. Every provider
+receives the same rendered ``SKILL.md`` prompt and stores runtime errors on the
+result rather than raising. Hermes starts from the writable workspace while the
+read-only Quark root remains pinned in the prompt.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
+from hyperloom.common.hermes_runtime import hermes_external_sandbox_enabled, resolve_hermes_executable
 from hyperloom.common.llm_attribution import sdk_env_overlay
 
 
 DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_HERMES_MODEL = "gpt-5.6-sol"
+SUPPORTED_PROVIDERS = ("claude", "codex", "hermes")
+CODEX_HOME_ENV = "HYPERLOOM_CODEX_HOME"
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
 
@@ -119,6 +127,125 @@ def _quark_py310_compat_env(workspace: Path, base_env: dict[str, str] | None = N
     return env
 
 
+async def _run_cli_attempt(
+    *,
+    provider: str,
+    prompt: str,
+    workspace: Path,
+    quark_root: Path,
+    model: str | None,
+    log: Callable[[str], None] | None,
+) -> AttemptResult:
+    """Run the same skill prompt through Codex or Hermes Agent."""
+
+    env = _quark_py310_compat_env(workspace)
+    env.update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
+    if provider == "codex":
+        executable = shutil.which("codex")
+        selected_model = model or env.get("CODEX_MODEL") or DEFAULT_CODEX_MODEL
+        configured_home = str(env.get(CODEX_HOME_ENV) or "").strip()
+        if configured_home:
+            home_path = Path(configured_home).expanduser()
+            if not home_path.is_absolute():
+                return AttemptResult(workspace=workspace, sdk_error="native OAuth CODEX_HOME must be absolute")
+            if home_path.is_symlink():
+                return AttemptResult(workspace=workspace, sdk_error="native OAuth CODEX_HOME cannot be a symlink")
+            if not home_path.is_dir():
+                return AttemptResult(workspace=workspace, sdk_error="native OAuth CODEX_HOME must already exist")
+            env["CODEX_HOME"] = str(home_path.resolve())
+            for name in (
+                "OPENAI_BASE_URL",
+                "OPENAI_API_KEY",
+                "OPENAI_CUSTOM_HEADERS",
+                "CODEX_API_KEY",
+            ):
+                env.pop(name, None)
+        argv = [
+            executable or "codex",
+            "exec",
+            "--sandbox",
+            "workspace-write",
+            "--ephemeral",
+            "--ignore-rules",
+            "-m",
+            selected_model,
+        ]
+        stdin = prompt
+    else:
+        executable = resolve_hermes_executable()
+        if not hermes_external_sandbox_enabled(env):
+            return AttemptResult(
+                workspace=workspace,
+                sdk_error=(
+                    "Hermes quantization requires a verifiable outer container; "
+                    "set HYPERLOOM_HERMES_EXTERNAL_SANDBOX=1 only inside that boundary"
+                ),
+            )
+        selected_model = model or env.get("HYPERLOOM_HERMES_MODEL") or DEFAULT_HERMES_MODEL
+        profile = env.get("HYPERLOOM_HERMES_PROFILE", "hyperloomfaithful")
+        inference_provider = env.get("HYPERLOOM_HERMES_PROVIDER", "openai-codex")
+        argv = [
+            executable or "hermes",
+            "--profile",
+            profile,
+            "--provider",
+            inference_provider,
+            "--model",
+            selected_model,
+            "--safe-mode",
+            "--toolsets",
+            "terminal,file",
+            "-z",
+            prompt,
+        ]
+        stdin = None
+
+    if executable is None:
+        return AttemptResult(workspace=workspace, sdk_error=f"{provider} executable not found")
+
+    def _invoke() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv,
+            cwd=workspace,
+            env=env,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    if log:
+        log(f"quantization-agent {provider} runner: workspace={workspace} quark_root={quark_root}")
+    try:
+        completed = await asyncio.to_thread(_invoke)
+    except Exception as exc:  # noqa: BLE001
+        return AttemptResult(workspace=workspace, sdk_error=f"{type(exc).__name__}: {exc}")
+
+    def _redact_diagnostic(value: str) -> str:
+        redacted = redact_secret_values(value or "")
+        for key, secret in env.items():
+            if secret and is_secret_shaped_env_name(key):
+                redacted = redacted.replace(secret, "[REDACTED]")
+        return redacted
+
+    raw_text = _redact_diagnostic(completed.stdout or "")
+    stderr_text = _redact_diagnostic(completed.stderr or "")
+    if log:
+        for line in raw_text.splitlines():
+            log(f"[{provider}] {line[:1000]}")
+        for line in stderr_text.splitlines():
+            log(f"[{provider}] {line[:1000]}")
+    sdk_error = ""
+    if completed.returncode != 0:
+        sdk_error = f"{provider} exited rc={completed.returncode}: {stderr_text.strip()[-1000:]}"
+    return AttemptResult(
+        workspace=workspace,
+        sdk_error=sdk_error,
+        raw_text=raw_text,
+        chunks=[raw_text] if raw_text else [],
+    )
+
+
 def build_attempt_prompt(
     *,
     user_prompt: str,
@@ -204,6 +331,7 @@ async def run_one_attempt(
     acceptable_eval_gap: float | None = None,
     interactive: bool | None = None,
     previous_outcome: str | None = None,
+    provider: str = "claude",
     skill_path: Path | None = None,
     model: str | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
@@ -262,6 +390,19 @@ async def run_one_attempt(
         previous_outcome=previous_outcome,
         fix_hypothesis_path=fix_hypothesis_path,
     )
+
+    provider = provider.strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"unsupported quantization-agent provider: {provider}")
+    if provider != "claude":
+        return await _run_cli_attempt(
+            provider=provider,
+            prompt=prompt,
+            workspace=workspace,
+            quark_root=quark_root,
+            model=model,
+            log=log,
+        )
 
     if sdk_query_factory is None or sdk_options_cls is None:
         query, options_cls = _import_sdk()
@@ -339,6 +480,10 @@ __all__ = [
     "DEFAULT_ALLOWED_TOOLS",
     "DEFAULT_MAX_TURNS",
     "DEFAULT_MODEL",
+    "DEFAULT_CODEX_MODEL",
+    "DEFAULT_HERMES_MODEL",
+    "CODEX_HOME_ENV",
+    "SUPPORTED_PROVIDERS",
     "RunOneAttemptFn",
     "build_attempt_prompt",
     "resolve_skill_path",

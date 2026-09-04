@@ -130,6 +130,11 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         prompt=prompt,
         source_model=source_model,
         workspace=workspace,
+        provider=(
+            str(getattr(args, "quantize_provider", None) or "").strip().lower()
+            or os.environ.get("HYPERLOOM_QUANT_PROVIDER", "").strip().lower()
+            or "claude"
+        ),
     )
 
     args.model = Path(quantized_model_dir)

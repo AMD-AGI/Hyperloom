@@ -256,6 +256,21 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     assert "fp8" in calls[0]["prompt"]
     assert calls[0]["interactive"] is False
     assert calls[0]["workspace"] == tmp_path
+    assert calls[0]["provider"] == "claude"
+
+
+def test_adapter_forwards_selected_provider(tmp_path, monkeypatch):
+    calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q")))
+    out = asyncio.run(
+        qrh.run_quantization_prelude_async(
+            prompt="fp8",
+            source_model="/models/src",
+            workspace=tmp_path,
+            provider="hermes",
+        )
+    )
+    assert out == str(tmp_path / "q")
+    assert calls[0]["provider"] == "hermes"
 
 
 def test_adapter_partial_with_model_returns_dir(tmp_path, monkeypatch):
@@ -284,10 +299,11 @@ def test_adapter_failed_exits_3(tmp_path, monkeypatch):
 
 
 class _Args:
-    def __init__(self, *, model, quantize=None, quantize_scheme=None, gpu_type=None):
+    def __init__(self, *, model, quantize=None, quantize_scheme=None, quantize_provider=None, gpu_type=None):
         self.model = Path(model)
         self.quantize = quantize
         self.quantize_scheme = quantize_scheme
+        self.quantize_provider = quantize_provider
         self.gpu_type = gpu_type
 
 
@@ -310,7 +326,7 @@ def test_prelude_rewrites_model_on_success(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
 
-    async def _fake_async(*, prompt, source_model, workspace):
+    async def _fake_async(*, prompt, source_model, workspace, provider=None):
         return str(tmp_path / "out" / "quantized")
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
@@ -321,6 +337,23 @@ def test_prelude_rewrites_model_on_success(tmp_path, monkeypatch):
 
     assert str(args.model) == str(tmp_path / "out" / "quantized")
     assert os.environ["MODEL_PATH"] == str(tmp_path / "out" / "quantized")
+
+
+def test_prelude_provider_flag_overrides_env(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.session.paths as paths
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
+    monkeypatch.setenv("HYPERLOOM_QUANT_PROVIDER", "codex")
+    seen = {}
+
+    async def _fake_async(*, prompt, source_model, workspace, provider):
+        seen["provider"] = provider
+        return str(tmp_path / "q")
+
+    monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
+    args = _Args(model="/models/src", quantize="fp8", quantize_provider="hermes")
+    asyncio.run(cli_quantization._run_quantization_prelude(args))
+    assert seen["provider"] == "hermes"
 
 
 def test_prelude_noop_when_scheme_none(monkeypatch):
@@ -343,7 +376,7 @@ def test_prelude_uses_scheme_enum_when_no_freetext(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     seen = {}
 
-    async def _fake_async(*, prompt, source_model, workspace):
+    async def _fake_async(*, prompt, source_model, workspace, provider=None):
         seen["prompt"] = prompt
         return str(tmp_path / "q")
 
@@ -385,7 +418,7 @@ def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):
     monkeypatch.delenv("GPU_TYPE", raising=False)
     seen = {}
 
-    async def _fake_async(*, prompt, source_model, workspace):
+    async def _fake_async(*, prompt, source_model, workspace, provider=None):
         seen["prompt"] = prompt
         return str(tmp_path / "q")
 
@@ -402,7 +435,7 @@ def test_prelude_freetext_takes_priority_over_scheme(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     seen = {}
 
-    async def _fake_async(*, prompt, source_model, workspace):
+    async def _fake_async(*, prompt, source_model, workspace, provider=None):
         seen["prompt"] = prompt
         return str(tmp_path / "q")
 
@@ -421,7 +454,7 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
 
-    async def _fake_async(*, prompt, source_model, workspace):
+    async def _fake_async(*, prompt, source_model, workspace, provider=None):
         # Mirror the real adapter: export dir basename is always "quantized".
         return str(tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized")
 

@@ -86,11 +86,13 @@ def _build_specialist_executor(
     """
     import shutil
 
+    from hyperloom.common.hermes_runtime import hermes_external_sandbox_enabled, resolve_hermes_executable
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
     from hyperloom.orchestrator.specialists.subprocess_ import (
         AGENT_BACKEND_CODEX,
+        AGENT_BACKEND_HERMES,
         SpecialistSubprocessConfig,
         resolve_codex_executable,
         resolve_specialist_agent_backend,
@@ -107,10 +109,15 @@ def _build_specialist_executor(
     agent_backend = resolve_specialist_agent_backend()
     specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
     selected_model = specialist_override or (
-        str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()
+        os.environ.get("HYPERLOOM_HERMES_MODEL", "").strip() or str(args.codex_model).strip()
+        if agent_backend == AGENT_BACKEND_HERMES
+        else str(args.codex_model).strip()
+        if agent_backend == AGENT_BACKEND_CODEX
+        else str(args.claude_model).strip()
     )
     codex_bin = ""
     claude_bin = ""
+    hermes_bin = ""
     if agent_backend == AGENT_BACKEND_CODEX:
         codex_bin = resolve_codex_executable()
         if dispatch_mode != "inprocess" and not codex_bin:
@@ -122,6 +129,13 @@ def _build_specialist_executor(
                 "specialist task."
             )
         agent_bin = codex_bin
+    elif agent_backend == AGENT_BACKEND_HERMES:
+        hermes_bin = resolve_hermes_executable()
+        if not hermes_bin:
+            raise RuntimeError("Hermes specialists requested but no hermes runtime was found")
+        if dispatch_mode == "inprocess":
+            raise RuntimeError("Hermes specialists use the original subprocess/worktree contract")
+        agent_bin = hermes_bin
     else:
         claude_bin = shutil.which("claude") or ""
         agent_bin = claude_bin
@@ -155,6 +169,10 @@ def _build_specialist_executor(
             "agent_backend": agent_backend,
             "claude_executable": claude_bin or "claude",
             "codex_executable": codex_bin,
+            "hermes_executable": hermes_bin or "hermes",
+            "hermes_profile": os.environ.get("HYPERLOOM_HERMES_PROFILE", "hyperloomfaithful").strip(),
+            "hermes_provider": os.environ.get("HYPERLOOM_HERMES_PROVIDER", "openai-codex").strip(),
+            "hermes_external_sandbox": hermes_external_sandbox_enabled(),
             "model": selected_model,
             "framework_source_roots": framework_source_roots,
             "mcp_config_path": mcp_config_path,

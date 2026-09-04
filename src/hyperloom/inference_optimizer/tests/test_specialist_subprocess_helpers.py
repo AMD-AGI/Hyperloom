@@ -152,6 +152,30 @@ def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) 
     assert "Task" not in agents[LEAF_AGENT_NAME]["tools"]
 
 
+# -- _build_hermes_cmd ----------------------------------------------------
+def test_build_hermes_cmd_is_narrowed_and_uses_configured_binary(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(ss, "running_in_container", lambda: True)
+    binary = tmp_path / "custom-hermes"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    d = _dispatcher(
+        agent_backend="hermes",
+        hermes_executable=str(binary),
+        hermes_profile="isolated",
+        hermes_provider="openai-codex",
+        model="gpt-5.6-sol",
+        hermes_external_sandbox=True,
+    )
+
+    cmd = d._build_hermes_cmd(system_prompt="SYS", user_prompt="USER")
+
+    assert cmd[0] == str(binary)
+    assert "--safe-mode" in cmd
+    assert cmd[cmd.index("--toolsets") + 1] == "terminal,file"
+    assert "--yolo" not in cmd
+    assert cmd[-2] == "-z"
+
+
 # -- _collect_patches ------------------------------------------------------
 def test_collect_patches(tmp_path: Path) -> None:
     wt = tmp_path / "wt"

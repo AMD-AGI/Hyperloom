@@ -282,7 +282,7 @@ PY
 }
 
 check_rocm_toolchain_alignment() {
-  local hip_version="$1" hip_major hipcc_path hipcc_root header
+  local hip_version="$1" hip_major hipcc_path hipcc_root hipconfig_path hipcc_version header
   hip_major="${hip_version%%.*}"
   [ -n "$hip_major" ] || return 0
   hipcc_path="$(command -v hipcc 2>/dev/null || true)"
@@ -290,10 +290,21 @@ check_rocm_toolchain_alignment() {
     warn "hipcc not found; AITER/source builds need a ROCm compiler toolchain."
     return 0
   fi
-  hipcc_root="$(cd "$(dirname "$hipcc_path")/.." 2>/dev/null && pwd)" || return 0
-  log "hipcc: ${hipcc_path}"
+  hipconfig_path="$(dirname "$hipcc_path")/hipconfig"
+  [ -x "$hipconfig_path" ] || hipconfig_path="$(command -v hipconfig 2>/dev/null || true)"
+  hipcc_root=""
+  hipcc_version=""
+  if [ -n "$hipconfig_path" ]; then
+    hipcc_root="$($hipconfig_path --path 2>/dev/null || true)"
+    hipcc_version="$($hipconfig_path --version 2>/dev/null || true)"
+  fi
+  [ -d "$hipcc_root" ] || hipcc_root="$(cd "$(dirname "$hipcc_path")/.." 2>/dev/null && pwd)" || return 0
+  log "hipcc: ${hipcc_path} (sdk=${hipcc_root})"
   if [ -n "${ROCM_PATH:-}" ] && [ "$hipcc_root" != "$(cd "$ROCM_PATH" 2>/dev/null && pwd)" ]; then
-    warn "hipcc root ${hipcc_root} differs from ROCM_PATH=${ROCM_PATH}; JIT builds may use the wrong ROCm headers."
+    case "$hipcc_version" in
+      "$hip_version"*) ;;
+      *) warn "hipcc SDK ${hipcc_root} (${hipcc_version:-unknown}) differs from ROCM_PATH=${ROCM_PATH} and torch hip=${hip_version}." ;;
+    esac
   fi
   if [ "$hip_major" -ge 7 ] 2>/dev/null; then
     header="${hipcc_root}/include/hip/hip_runtime_api.h"
@@ -316,6 +327,7 @@ detect_gpu_label() {
   case "$gfx" in
     gfx942) echo "MI300X" ;;
     gfx950) echo "MI355X" ;;
+    gfx1151) echo "Radeon 8060S" ;;
     *) echo "MI300X" ;;
   esac
 }
@@ -344,8 +356,9 @@ base_preflight() {
   case "$gfx" in
     gfx942) log "GPU: ${DETECTED_GPU} (${gfx})" ;;
     gfx950) log "GPU: ${DETECTED_GPU} (${gfx})" ;;
+    gfx1151) log "GPU: ${DETECTED_GPU} (${gfx})" ;;
     "")     warn "GPU arch: not detected via rocminfo" ;;
-    *)      warn "GPU arch ${gfx} untested (supported: gfx942/gfx950)" ;;
+    *)      warn "GPU arch ${gfx} untested (supported: gfx942/gfx950/gfx1151)" ;;
   esac
 
   local py
