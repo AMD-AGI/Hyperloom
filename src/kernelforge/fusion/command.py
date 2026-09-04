@@ -1555,7 +1555,19 @@ def _run_fusion_autoloop(
         # below then drops the sibling, but the diff is already captured for the
         # keepers that survive.
         patch_name = f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch"
-        arts = export_artifacts(repo_root, recipe.source_file, out, pristine_dir=pristine, patch_name=patch_name)
+        # Scope the export to THIS recipe's own fused module. The loop no longer
+        # early-exits on the first keeper, so an earlier sibling's module is still
+        # present in the shared tree right now; letting the export discover it by
+        # name would put it in this sibling's patch, against a snapshot taken
+        # before it existed -- which the applier rejects outright.
+        arts = export_artifacts(
+            repo_root,
+            recipe.source_file,
+            out,
+            pristine_dir=pristine,
+            patch_name=patch_name,
+            fused_module=fused_module_path(recipe),
+        )
         if not (arts and arts.patch):
             log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
             return None

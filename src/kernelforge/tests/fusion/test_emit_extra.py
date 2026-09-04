@@ -288,3 +288,86 @@ def test_restore_checks_out_tracked_file(tmp_path):
     arts = FusionArtifacts(changes=[{"path": "wired.py"}], patch="/tmp/x.patch")
     restore_exported_changes(str(repo), arts)
     assert f.read_text() == "original\n"  # tracked file checked out
+
+
+def test_export_nongit_scopes_to_this_recipes_fused_module(tmp_path):
+    """Regression: a sibling's leftover module must NOT ride along in this patch.
+
+    The fusion loop no longer early-exits on the first keeper, so when recipe #2
+    exports, recipe #1's authored module is still sitting in the shared tree.
+    Discovering fused modules by directory glob swept it in -- against a pristine
+    snapshot taken before it existed, so the applier refused the whole patch
+    ("snapshot missing content"). Naming this recipe's own module confines the
+    export to it.
+    """
+    repo, src, out = _nongit_pkg(tmp_path)
+    models = repo / "models"
+    earlier_sibling = models / "qwen3_fused_recipe_one.py"
+    earlier_sibling.write_text("def fused_one(): return 1\n", encoding="utf-8")  # not in the snapshot
+    mine = models / "qwen3_fused_recipe_two.py"
+    mine.write_text("def fused_two(): return 2\n", encoding="utf-8")
+    src.write_text("FUSED_TWO = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+
+    arts = export_artifacts(
+        str(repo),
+        str(src),
+        out,
+        pristine_dir=str(out / ".pristine"),
+        patch_name="fusion_two.patch",
+        fused_module=str(mine),
+    )
+
+    paths = {c["path"] for c in arts.changes}
+    assert paths == {"models/qwen3.py", "models/qwen3_fused_recipe_two.py"}
+    patch_text = (out / "fusion_two.patch").read_text()
+    assert "qwen3_fused_recipe_one" not in patch_text, "another recipe's module leaked into this sibling's patch"
+
+
+def test_export_nongit_without_fused_module_still_discovers_by_name(tmp_path):
+    """Salvage / compile-pass callers have no recipe in hand, so the name-based
+    discovery has to stay for them."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    new_mod = repo / "models" / "qwen3_fused_kernel.py"
+    new_mod.write_text("def fused(): return 1\n", encoding="utf-8")
+    arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
+    assert any(c["path"] == "models/qwen3_fused_kernel.py" for c in arts.changes)
+
+
+def test_export_nongit_named_fused_module_absent_is_not_an_error(tmp_path):
+    """A recipe that wired the source without authoring a module still exports."""
+    repo, src, out = _nongit_pkg(tmp_path)
+    src.write_text("WIRED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+    arts = export_artifacts(
+        str(repo),
+        str(src),
+        out,
+        pristine_dir=str(out / ".pristine"),
+        fused_module=str(repo / "models" / "never_written.py"),
+    )
+    assert [c["path"] for c in arts.changes] == ["models/qwen3.py"]
+
+
+def test_export_git_scopes_untracked_modules_to_this_recipe(tmp_path):
+    """Same scoping on the git route: only this recipe's untracked module is added."""
+    repo = tmp_path / "r"
+    (repo / "models").mkdir(parents=True)
+    src = repo / "models" / "qwen3.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    _init_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "src"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "models" / "qwen3_fused_recipe_one.py").write_text("one\n", encoding="utf-8")
+    mine = repo / "models" / "qwen3_fused_recipe_two.py"
+    mine.write_text("two\n", encoding="utf-8")
+    src.write_text("FUSED_TWO = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
+
+    arts = export_artifacts(str(repo), str(src), tmp_path / "out", fused_module=str(mine))
+
+    paths = {c["path"] for c in arts.changes}
+    assert "models/qwen3_fused_recipe_two.py" in paths
+    assert "models/qwen3_fused_recipe_one.py" not in paths
