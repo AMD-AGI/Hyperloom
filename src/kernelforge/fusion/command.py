@@ -819,7 +819,7 @@ def run(
         # validated patch); an author-only run with no validation falls through to
         # the legacy single-pass path below.
         if multi_patch and validate:
-            patches_out, compile_pass_outcome, loop_result = _run_multi_patch_nomination(
+            patches_out, compile_pass_outcome, loop_result, withheld = _run_multi_patch_nomination(
                 claims=claims,
                 authored=authored,
                 framework=framework,
@@ -863,6 +863,9 @@ def run(
                 "candidates_seen": len(recipes),
                 "resolved": len(claims) + len(authored),
                 "selected": len(patches_out),
+                # Resolved targets the lane ceiling never funded, so a starved
+                # round is not read as "everything ran and kept nothing".
+                "withheld": withheld,
             }
         elif top_recipe.candidate_kind == "compile_pass":
             compile_pass_outcome, artifacts = _run_single_compile_pass_claim(
@@ -1231,33 +1234,43 @@ def _run_multi_patch_nomination(
     block_size: int,
     max_model_len: int,
     agent_factory,
-) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult]]:
+) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult], int]:
     """Run BOTH pipelines and collect every keeper as an independent sibling.
 
     Each compile-pass claim is A/B'd and exported as its own patch; the authored
     recipes run through the kernel autoloop (which serving-smokes each keeper and
     exports its sibling). Returns ``(patches, strongest_kept_claim_outcome,
-    loop_result)`` where ``patches`` is ordered so the landing queue's same-file
-    collapse keeps the right winner: authored siblings first (kernel-validated,
-    ranked by microbench speedup, already strongest-first from the loop), then
-    kept claims (ranked by serving A/B speedup). The two use different, unrelated
-    speedup metrics, so they are ranked WITHIN their kind rather than against each
-    other; a claim and an authored recipe on the same file collapse in the queue
-    with the authored one -- listed first -- winning.
+    loop_result, withheld)``.
+
+    ``patches`` is ordered so the landing queue's same-file collapse keeps the
+    right winner: authored siblings first (kernel-validated, ranked by microbench
+    speedup, already strongest-first from the loop), then kept claims (ranked by
+    serving A/B speedup). The two use different, unrelated speedup metrics, so
+    they are ranked WITHIN their kind rather than against each other; a claim and
+    an authored recipe on the same file collapse in the queue with the authored
+    one -- listed first -- winning.
+
+    ``withheld`` is how many discovered targets the lane ceiling never funded.
+    Without it a starved round reads exactly like one where everything ran and
+    kept nothing.
     """
     patches: list[dict[str, Any]] = []
 
-    # One ceiling across both pipelines: a claim and an authored recipe each cost
-    # a full validation. Authored recipes are funded first, as they run first.
-    authored_budget = _recipe_ceiling(len(authored), max_recipes)
-    claims_budget = len(claims) if max_recipes <= 0 else max(0, max_recipes - authored_budget)
-    if len(claims) > claims_budget:
+    # One ceiling across both pipelines, spent in ``rank_recipes`` order: a claim
+    # is a deterministic flip, so an authoring loop must not crowd it out.
+    claims_budget = _recipe_ceiling(len(claims), max_recipes)
+    remaining = max_recipes - claims_budget if max_recipes > 0 else len(authored)
+    authored_budget = min(len(authored), max(0, remaining))
+    withheld = (len(claims) - claims_budget) + (len(authored) - authored_budget)
+    if withheld:
         log.info(
-            "multi-patch: lane ceiling of %d target(s) withholds %d compile-pass claim(s)",
+            "multi-patch: lane ceiling of %d target(s) withholds %d lower-ranked target(s)",
             max_recipes,
-            len(claims) - claims_budget,
+            withheld,
         )
     claims = claims[:claims_budget]
+    # Sliced here: the autoloop reads a ceiling of 0 as uncapped, not as exhausted.
+    authored = authored[:authored_budget]
 
     # Authored recipes first: the autoloop owns the shared git workspace, smokes
     # each keeper, and returns siblings strongest-first.
@@ -1336,7 +1349,7 @@ def _run_multi_patch_nomination(
     kept_claims.sort(key=lambda item: item[0], reverse=True)
     patches.extend(env for _key, env in kept_claims)
 
-    return patches, reported_outcome, loop_result
+    return patches, reported_outcome, loop_result, withheld
 
 
 def _recipe_ceiling(discovered: int, max_recipes: int) -> int:

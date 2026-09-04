@@ -87,19 +87,11 @@ def _nominate(tmp_path: Path, *, authored: list[str], claims: list[str], max_rec
 
 
 def test_the_ceiling_is_shared_between_claims_and_authored_recipes(tmp_path, spied):
-    """Two authored recipes spend two of three, leaving one claim funded."""
+    """Five claims spend the whole ceiling, so the autoloop is not run at all."""
     _nominate(tmp_path, authored=["a1", "a2"], claims=["c1", "c2", "c3", "c4", "c5"], max_recipes=3)
 
-    assert spied["autoloop_ceiling"] == 2
-    assert spied["claims"] == ["c1"]
-
-
-def test_authored_recipes_are_funded_before_claims(tmp_path, spied):
-    """They run first, so the shared ceiling spends on them first."""
-    _nominate(tmp_path, authored=["a1", "a2", "a3", "a4"], claims=["c1", "c2"], max_recipes=3)
-
-    assert spied["autoloop_ceiling"] == 3
-    assert spied["claims"] == []
+    assert spied["claims"] == ["c1", "c2", "c3"]
+    assert spied["autoloop_ceiling"] is None
 
 
 def test_claims_take_the_whole_ceiling_when_nothing_was_authored(tmp_path, spied):
