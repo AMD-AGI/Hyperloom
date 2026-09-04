@@ -47,7 +47,7 @@ CANDIDATE_TIMING_UNPARSEABLE = "candidate_timing_unparseable"
 CANDIDATE_NOT_ISOLATED = "candidate_not_isolated"
 CANDIDATE_SHADOWED = "candidate_shadowed"
 CASE_COVERAGE_MISMATCH = "case_coverage_mismatch"
-DUPLICATE_CASE_TIMINGS = "duplicate_case_timings"
+MALFORMED_CASE_TIMINGS = "malformed_case_timings"
 
 REF_BENCH_FLAG = "--ref-bench-mode"
 BENCH_FLAG = "--bench-mode"
@@ -106,25 +106,27 @@ class DriverReading:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    # Every case the driver timed, including the ones it marked out of the
+    # score. Deliberately unfiltered: the exclusion belongs to the comparison,
+    # not to the reading. Dropping them here would make this side's case set
+    # disagree with a side that kept them -- forge-loop's own best_case_times
+    # keep them -- and an equal-set check would then refuse to score at all.
     case_times: dict[str, float] = field(default_factory=dict)
-    # Cases the driver measured but marked out of the score. Excluded from the
-    # mean for the same reason forge-loop excludes them: a case whose
-    # run-to-run spread swamps a real change lets noise carry the verdict.
+    # Which cases were marked out of the score, carried so the comparison can
+    # exclude them the way forge-loop does: a case whose run-to-run spread
+    # swamps a real change lets noise carry the verdict.
     unscored_cases: tuple[str, ...] = ()
-    # Reported, never resolved. One case printed twice means the ids and the
-    # times describe different things, and no honest score can be built on it.
+    # Reported, never resolved. One case printed twice, or a case whose time is
+    # not a number, means the suite that came back is not the one the task
+    # declared, and keeping the first reading would score a subset.
     duplicate_case_ids: tuple[str, ...] = ()
+    unparseable_case_ids: tuple[str, ...] = ()
     snr_db: float | None = None
     allclose: bool | None = None
 
     @property
     def has_timing(self) -> bool:
         return self.timing_ms is not None
-
-    @property
-    def scored_case_times(self) -> dict[str, float]:
-        excluded = set(self.unscored_cases)
-        return {case: ms for case, ms in self.case_times.items() if case not in excluded}
 
     @property
     def has_correctness_verdict(self) -> bool:
@@ -142,6 +144,7 @@ class PreflightReport:
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
     case_times: dict[str, float] = field(default_factory=dict)
+    unscored_cases: tuple[str, ...] = ()
     warnings: list[str] = field(default_factory=list)
 
 
@@ -168,8 +171,15 @@ def read_driver_output(text: str) -> DriverReading:
     reading.case_times = dict(timings.case_times)
     reading.unscored_cases = tuple(timings.unscored)
     reading.duplicate_case_ids = tuple(timings.duplicates)
+    reading.unparseable_case_ids = tuple(timings.unparseable)
 
+    # A case whose time did not parse still declares coverage, so its id stays
+    # here. Omitting it would let both paths report the same malformed case and
+    # pass the coverage check on the subset that happened to parse.
     case_ids: list[str] = list(timings.case_times)
+    for case_id in timings.unparseable:
+        if case_id not in case_ids:
+            case_ids.append(case_id)
     for case_id in _CASE_COMMENT_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
@@ -198,6 +208,7 @@ CASE_SCORE_INCOMPARABLE = "case_coverage_mismatch"
 def cross_language_mean_case_speedup(
     source_case_times: dict[str, float],
     candidate_case_times: dict[str, float],
+    unscored_cases: set[str] | tuple[str, ...] | list[str] | None = None,
 ) -> tuple[float | None, str]:
     """Score the FlyDSL candidate against the source with equal weight per case.
 
@@ -211,6 +222,12 @@ def cross_language_mean_case_speedup(
     leaving the expensive one alone scores near 1.0 on it while scoring far
     above 1.0 on the mean.
 
+    Both sides must pass their FULL case set, including cases marked out of the
+    score, and name the exclusions in ``unscored_cases``. Pre-filtering one side
+    makes the two sets unequal and the comparison is refused; filtering both
+    without declaring it lets an excluded case's noise into the mean, which is
+    the failure the marker exists to prevent.
+
     The two failure reasons are kept apart because they call for opposite
     handling. No per-case timings means the driver only reported an aggregate,
     and falling back to its ratio is the best available answer. A coverage
@@ -221,9 +238,16 @@ def cross_language_mean_case_speedup(
     if not source_case_times or not candidate_case_times:
         return None, CASE_SCORE_UNAVAILABLE
     try:
-        return calculate_mean_case_speedup(candidate_case_times, source_case_times), ""
+        speedup = calculate_mean_case_speedup(
+            candidate_case_times,
+            source_case_times,
+            unscored_cases or (),
+        )
     except CaseCoverageError:
         return None, CASE_SCORE_INCOMPARABLE
+    if speedup is None:
+        return None, CASE_SCORE_UNAVAILABLE
+    return speedup, ""
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -358,16 +382,23 @@ def _timing_report(reading: DriverReading) -> PreflightReport:
         # contract has to refuse it too; accepting here would let a suite the
         # loop rejects be scored through the rewrite's own path.
         return _failed(
-            DUPLICATE_CASE_TIMINGS,
+            MALFORMED_CASE_TIMINGS,
             "the driver reported more than one timing for "
             f"{', '.join(reading.duplicate_case_ids)}",
+        )
+    if reading.unparseable_case_ids:
+        return _failed(
+            MALFORMED_CASE_TIMINGS,
+            "the driver reported an unparseable timing for "
+            f"{', '.join(reading.unparseable_case_ids)}",
         )
     report = PreflightReport(
         ok=True,
         timing_ms=reading.timing_ms,
         timing_metric=reading.timing_metric,
         case_ids=reading.case_ids,
-        case_times=reading.scored_case_times,
+        case_times=dict(reading.case_times),
+        unscored_cases=reading.unscored_cases,
     )
     if reading.timing_metric == DEPRECATED_TIMING_METRIC:
         report.warnings.append(

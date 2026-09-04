@@ -595,6 +595,7 @@ def _publish_patch(
     mean_case_speedup: float | None,
     source_case_times: dict[str, float] | None,
     flydsl_best_case_times: dict[str, float] | None,
+    unscored_cases: tuple[str, ...] | list[str] | set[str] | None,
     reference_snr_db: float | None,
     patch: str,
     changed_files: list[str],
@@ -661,8 +662,15 @@ def _publish_patch(
             # legitimately disagree with.
             "mean_case_speedup": mean_case_speedup,
             "aggregate_speedup": aggregate_speedup,
+            # Which of the two `speedup` is, stated rather than left to be
+            # inferred from whether mean_case_speedup happens to be null.
+            "speedup_basis": ("mean_case_speedup" if mean_case_speedup is not None else "aggregate_ratio"),
             "baseline_case_times": dict(source_case_times or {}),
             "best_case_times": dict(flydsl_best_case_times or {}),
+            # The exclusions the mean was computed under. A consumer
+            # recomputing it from the case times above needs them, or it
+            # averages in a case the producer kept out and disagrees.
+            "unscored_cases": sorted(unscored_cases or ()),
             "reference_correctness_passed": True,
             "reference_snr_db": reference_snr_db,
             "integration_validation_required": True,
@@ -750,6 +758,7 @@ def generate_applyback_patch(
     mean_case_speedup: float | None = None,
     source_case_times: dict[str, float] | None = None,
     flydsl_best_case_times: dict[str, float] | None = None,
+    unscored_cases: tuple[str, ...] | list[str] | set[str] | None = None,
     reference_snr_db: float | None = None,
     deadline_unix: float | None = None,
     import_modules: list[str] | tuple[str, ...] = (),
@@ -919,6 +928,7 @@ def generate_applyback_patch(
                     mean_case_speedup=mean_case_speedup,
                     source_case_times=source_case_times,
                     flydsl_best_case_times=flydsl_best_case_times,
+                    unscored_cases=unscored_cases,
                     reference_snr_db=reference_snr_db,
                     patch=patch,
                     changed_files=changed_files,

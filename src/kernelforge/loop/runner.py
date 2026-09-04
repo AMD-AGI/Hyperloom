@@ -3358,12 +3358,17 @@ class IterationLoop(AnalysisRuntimeMixin):
         return bench_result.get("median_ms")
 
     def _promote_best(self, result: IterationResult) -> None:
-        """Make a kept candidate's aggregate case medians the new incumbent."""
+        """Make a kept candidate's aggregate case medians the new incumbent.
+
+        The aggregate and the per-case times are replaced together. Keeping the
+        previous iteration's cases behind a newer wall time would leave the two
+        describing different kernels, and anything computing a per-case mean
+        against them -- the rewrite pipeline scores the finished kernel against
+        its original source that way -- would straddle both.
+        """
         self.best_wall_ms = result.wall_ms
         detail = result.bench_detail or {}
-        cases = detail.get("case_times") or {}
-        if cases:
-            self._best_case_times = dict(cases)
+        self._best_case_times = dict(detail.get("case_times") or {})
         self._persist_scoring_state()
 
     def _set_baseline_case_times(self, case_times: dict | None) -> None:

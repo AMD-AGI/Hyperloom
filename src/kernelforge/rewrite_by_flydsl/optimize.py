@@ -37,6 +37,11 @@ _RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
 # later hard-killed. Used to decide whether a --result-json file belongs to THIS run.
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
 
+# Which kernel the worktree holds after OPTIMIZE hands back control.
+RESTORED_BEST = "best"
+RESTORED_FALLBACK = "fallback"
+RESTORED_NOTHING = "nothing"
+
 
 def _announced_experiment_id(stdout_text: str) -> str | None:
     """The experiment_id forge-loop announced on stdout this run, or None."""
@@ -118,8 +123,20 @@ def _restore_best_kernel(
     best_commit: str,
     fallback_content: bytes | None,
     fallback_mode: int | None,
-) -> bool:
-    """Restore the last verified FlyDSL kernel after a clean exit or hard stop."""
+) -> str:
+    """Restore the last verified FlyDSL kernel after a clean exit or hard stop.
+
+    Returns which kernel the worktree ended up holding:
+
+      ``RESTORED_BEST``      the loop's best commit
+      ``RESTORED_FALLBACK``  the content from before OPTIMIZE, i.e. the port
+      ``RESTORED_NOTHING``   neither was available
+
+    The three are not interchangeable to a caller that reports timings. The
+    fallback path leaves the PORT on disk while the loop's result still names
+    its own best, so a caller told only "something was restored" would attribute
+    the loop's best_ms to a file that is not there.
+    """
     kernel = Path(spec.flydsl_kernel)
     workspace = Path(spec.workspace).resolve()
     try:
@@ -150,15 +167,15 @@ def _restore_best_kernel(
                 check=False,
             )
             if restored.returncode == 0:
-                return True
+                return RESTORED_BEST
 
     if fallback_content is None:
-        return False
+        return RESTORED_NOTHING
     kernel.parent.mkdir(parents=True, exist_ok=True)
     kernel.write_bytes(fallback_content)
     if fallback_mode is not None:
         kernel.chmod(fallback_mode)
-    return True
+    return RESTORED_FALLBACK
 
 
 def run_optimize(
@@ -352,5 +369,9 @@ def run_optimize(
     return {
         **result,
         "terminated_for_deadline": terminated_for_deadline,
-        "best_kernel_restored": restored,
+        # True only when the loop's own best is what the worktree holds. The
+        # fallback path also leaves a usable kernel there, but it is the port,
+        # so a caller reporting the loop's timings has to tell the two apart.
+        "best_kernel_restored": restored == RESTORED_BEST,
+        "restored_kernel": restored,
     }

@@ -1926,6 +1926,7 @@ def forge_loop(
             or search_start_ms
         )
         best = getattr(loop_runner, "best_wall_ms", None)
+        best_case_times = dict(getattr(loop_runner.run_state, "best_case_times", {}) or {})
         total_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
         incremental_speedup = (
             float(total_speedup) / float(search_start_mean_case_speedup)
@@ -1948,6 +1949,10 @@ def forge_loop(
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
                 search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
+                # Replaced together with the aggregate, or cleared. Leaving the
+                # run-state cases behind a published warm-start wall time would
+                # hand a caller two numbers from different kernels.
+                best_case_times = dict(published.get("case_times") or {})
                 total_speedup = published.get("mean_case_speedup")
                 search_start_mean_case_speedup = (
                     published.get("search_start_mean_case_speedup") or total_speedup or search_start_mean_case_speedup
@@ -1969,12 +1974,17 @@ def forge_loop(
             "pristine_baseline_ms": pristine_ms,
             "search_start_ms": search_start_ms,
             "best_ms": best,
-            # The per-case medians behind best_ms, for the same kernel. Reported
-            # so a caller scoring this kernel against a DIFFERENT anchor than the
-            # loop's own -- the rewrite pipeline compares it to the original
-            # source, not to the port the loop started from -- can compute an
-            # equal-weight mean over cases instead of dividing two aggregates.
-            "best_case_times": dict(getattr(loop_runner.run_state, "best_case_times", {}) or {}),
+            # The per-case medians behind best_ms, for the same kernel, plus the
+            # cases this loop kept out of its own score. Reported so a caller
+            # scoring this kernel against a DIFFERENT anchor than the loop's own
+            # -- the rewrite pipeline compares it to the original source, not to
+            # the port the loop started from -- can compute an equal-weight mean
+            # over cases instead of dividing two aggregates. The exclusions have
+            # to travel with the times: a caller that cannot see them either
+            # averages in a case this loop refused to score, or filters its own
+            # side and ends up with two case sets that no longer match.
+            "best_case_times": best_case_times,
+            "unscored_cases": sorted(getattr(loop_runner.run_state, "unscored_cases", []) or []),
             "mean_case_speedup": total_speedup,
             "search_start_mean_case_speedup": (search_start_mean_case_speedup),
             "aggregate_regression": aggregate_regression,

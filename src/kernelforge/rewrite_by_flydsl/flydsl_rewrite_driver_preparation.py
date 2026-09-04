@@ -90,8 +90,19 @@ class DriverPreflight:
 
     @property
     def reference_case_times(self) -> dict[str, float]:
-        """The source's per-case timings, which the reported speedup is built on."""
+        """The source's per-case timings, which the reported speedup is built on.
+
+        The full set, including cases the driver marked out of the score. The
+        exclusions are named by ``reference_unscored_cases`` instead of being
+        filtered here, so this side's case set still matches a candidate side
+        that keeps them -- forge-loop's best_case_times do.
+        """
         return dict(self.reference.case_times) if self.reference is not None else {}
+
+    @property
+    def reference_unscored_cases(self) -> tuple[str, ...]:
+        """Cases the source path measured but asked to keep out of the score."""
+        return self.reference.unscored_cases if self.reference is not None else ()
 
 
 @dataclass

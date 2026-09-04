@@ -139,15 +139,24 @@ _CASE_MS_RE = re.compile(r"case_ms:\s*(\S+)\s+([\d.eE+-]+)[ \t]*(\S*)")
 class CaseTimings:
     """The per-case timings read out of one driver invocation's output.
 
-    ``duplicates`` is reported rather than resolved. A driver printing one case
-    twice has measured something the caller cannot name -- two shapes under one
-    id, or the same shape twice with only one kept -- and either way a score
-    built on it is not the suite the task declared.
+    ``duplicates`` and ``unparseable`` are reported rather than resolved. A
+    driver printing one case twice has measured something the caller cannot
+    name -- two shapes under one id, or the same shape twice with only one kept
+    -- and a case whose time is not a number was measured but not reported.
+    Either way the suite that came back is not the one the task declared, and
+    silently keeping the first reading or dropping the case scores a subset.
     """
 
     case_times: dict[str, float] = field(default_factory=dict)
     unscored: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
+    unparseable: list[str] = field(default_factory=list)
+
+    @property
+    def scored(self) -> dict[str, float]:
+        """The timings that enter a score, with the excluded cases removed."""
+        excluded = set(self.unscored)
+        return {case: ms for case, ms in self.case_times.items() if case not in excluded}
 
 
 def parse_case_timings(text: str) -> CaseTimings:
@@ -155,9 +164,11 @@ def parse_case_timings(text: str) -> CaseTimings:
 
     The one parser for this line, shared with the rewrite driver contract, so
     the ids a coverage check accepts and the times a KEEP score is built from
-    can never come from two regexes that agree today. Deliberately NOT anchored
-    to the start of a line: a collectives driver prefixes its output with
-    ``[rank0] ``, and an anchored pattern silently reads no cases at all there.
+    can never come from two regexes that agree today.
+
+    Not anchored to the start of a line, matching the pattern this tool has
+    always used: a driver is free to precede the line with its own prefix, and
+    an anchored pattern would read no cases at all rather than failing.
 
     A case MAY carry a trailing ``unscored`` marker meaning it is measured and
     guarded but kept out of the score. ``[ \\t]*`` keeps that optional field on
@@ -165,10 +176,12 @@ def parse_case_timings(text: str) -> CaseTimings:
     """
     timings = CaseTimings()
     duplicates: set[str] = set()
+    unparseable: set[str] = set()
     for case_id, raw_ms, tag in _CASE_MS_RE.findall(text or ""):
         try:
             value = float(raw_ms)
         except ValueError:
+            unparseable.add(case_id)
             continue
         if case_id in timings.case_times:
             duplicates.add(case_id)
@@ -176,6 +189,7 @@ def parse_case_timings(text: str) -> CaseTimings:
         if tag == "unscored" and case_id not in timings.unscored:
             timings.unscored.append(case_id)
     timings.duplicates = sorted(duplicates)
+    timings.unparseable = sorted(unparseable)
     return timings
 _SWEEP_ECHO_RE = re.compile(rf"{SWEEP_ECHO}:\s*([A-Z][A-Z0-9_]*)\s+(\S+)")
 _CONSTANT_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")

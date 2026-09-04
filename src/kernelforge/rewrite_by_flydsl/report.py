@@ -69,9 +69,16 @@ class RewriteResult:
     flydsl_best_case_times: dict
     # Set when the mean claims an improvement the aggregate contradicts. Both
     # can be true at once and it is not an error: a suite spanning orders of
-    # magnitude can get faster on most cases and slower in total. Naming it is
-    # what stops the pair from reading as an inconsistency; it does not veto the
-    # verdict, because the mean is this layer's authoritative statistic.
+    # magnitude can get faster on most cases and slower in total.
+    #
+    # It does NOT veto `improved`, and that is a deliberate divergence from
+    # forge-loop, which withdraws its own badge in the same situation. The loop
+    # publishes an aggregate wall time as its headline and answers "is this
+    # kernel faster than the one before it?"; this layer answers "is the
+    # rewrite worth adopting?" on the equal-weight mean over cases, which is
+    # also the statistic the search optimized. Letting the aggregate veto here
+    # would reinstate it as the gate, and every consumer reading
+    # `improved is True` would reject exactly the rewrites this route looks for.
     aggregate_regression: str
     experiment_id: str | None
     port_attempts: int
@@ -120,6 +127,9 @@ def build_result(
     optimize_result: dict,
     source_case_times: dict[str, float] | None = None,
     flydsl_best_case_times: dict[str, float] | None = None,
+    unscored_cases: set[str] | tuple[str, ...] | list[str] | None = None,
+    mean_case_speedup: float | None = None,
+    speedup_unavailable_reason: str = "",
     applyback_result: dict | None = None,
     applyback_required: bool = False,
     kb_experience: dict | None = None,
@@ -141,21 +151,27 @@ def build_result(
     candidate_cases = dict(flydsl_best_case_times or {})
     speedup = None
     speedup_basis = SPEEDUP_BASIS_NONE
-    speedup_unavailable_reason = ""
+    reason = speedup_unavailable_reason
     if port_ok:
-        speedup, reason = driver_contract.cross_language_mean_case_speedup(source_cases, candidate_cases)
-        if speedup is not None:
-            speedup_basis = SPEEDUP_BASIS_MEAN_CASE
+        # The caller computes this once and hands it down to every consumer
+        # that decides on it, so recomputing here would be a second derivation
+        # of the same number. Derived only when the caller had no reason to.
+        mean = mean_case_speedup
+        if mean is None and not reason:
+            mean, reason = driver_contract.cross_language_mean_case_speedup(
+                source_cases, candidate_cases, unscored_cases
+            )
+        if mean is not None:
+            speedup, speedup_basis, reason = mean, SPEEDUP_BASIS_MEAN_CASE, ""
         elif reason == driver_contract.CASE_SCORE_INCOMPARABLE:
             # The two paths timed different case sets. Their aggregate ratio
             # would compare different work, so nothing is published and the
             # reason travels in the result instead of a number.
-            speedup_unavailable_reason = reason
+            pass
         elif source_ms and flydsl_best_ms and flydsl_best_ms > 0:
             speedup = source_ms / flydsl_best_ms
-            speedup_basis = SPEEDUP_BASIS_AGGREGATE
-        else:
-            speedup_unavailable_reason = reason
+            speedup_basis, reason = SPEEDUP_BASIS_AGGREGATE, ""
+    speedup_unavailable_reason = reason if speedup is None else ""
 
     # Only meaningful for the mean; the aggregate ratio cannot contradict itself.
     # Reported for the record, NOT used to veto the verdict: for this layer the

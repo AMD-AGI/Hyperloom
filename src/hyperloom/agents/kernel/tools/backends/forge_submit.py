@@ -2350,24 +2350,67 @@ def _validated_commit_lineage_and_timing(
     return best_commit, baseline_ms, best_ms
 
 
+def _positive_number(value: object) -> float | None:
+    """A finite positive number, rejecting bool.
+
+    ``isinstance(True, int)`` is true, so a manifest carrying
+    ``mean_case_speedup: true`` would otherwise become a 1.0 speedup and pass a
+    ``> 1.0`` gate by a hair or fail it silently, depending on the comparison.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
 def _rewrite_micro_speedup(applyback: dict) -> float | None:
     """This route's validated micro gain, on the statistic the producer scored.
 
-    Prefers the producer's equal-weight mean over cases. Its aggregate pair is
-    the fallback for a driver that reported no per-case timings, and only that:
-    a suite whose cases span orders of magnitude has an aggregate set by its
-    largest case, so using the ratio here would grade the rewrite on one shape
-    while the search optimized all of them.
+    Prefers the producer's equal-weight mean over cases, but only after
+    recomputing it from the per-case timings the manifest also carries. The
+    producer is a separate process publishing an artifact this function gates
+    on, so a declared score that its own evidence does not reproduce is not a
+    number to grade against -- and a manifest whose case times were dropped or
+    reordered would otherwise be graded on an unverifiable claim.
+
+    The aggregate pair is the fallback for a driver that reported no per-case
+    timings, and only that: a suite whose cases span orders of magnitude has an
+    aggregate set by its largest case, so using the ratio here would grade the
+    rewrite on one shape while the search optimized all of them.
     """
-    mean = applyback.get("mean_case_speedup")
-    if isinstance(mean, (int, float)) and math.isfinite(float(mean)) and float(mean) > 0:
-        return float(mean)
-    try:
-        baseline_ms = float(applyback["baseline_ms"])
-        best_ms = float(applyback["best_ms"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if baseline_ms <= 0 or best_ms <= 0:
+    from kernelforge.rewrite_by_flydsl import driver_contract  # noqa: PLC0415
+
+    mean = _positive_number(applyback.get("mean_case_speedup"))
+    if mean is not None:
+        baseline_cases = applyback.get("baseline_case_times") or {}
+        best_cases = applyback.get("best_case_times") or {}
+        recomputed, _reason = driver_contract.cross_language_mean_case_speedup(
+            {str(k): float(v) for k, v in baseline_cases.items()},
+            {str(k): float(v) for k, v in best_cases.items()},
+            applyback.get("unscored_cases") or (),
+        )
+        if recomputed is None:
+            log.warning(
+                "forge rewrite: manifest declares mean_case_speedup=%s but carries no "
+                "per-case timings that reproduce it; falling back to the aggregate",
+                mean,
+            )
+        elif not math.isclose(recomputed, mean, rel_tol=1e-6):
+            log.warning(
+                "forge rewrite: manifest declares mean_case_speedup=%s but its own "
+                "per-case timings give %s; grading on the recomputed value",
+                mean,
+                recomputed,
+            )
+            return recomputed
+        else:
+            return mean
+
+    baseline_ms = _positive_number(applyback.get("baseline_ms"))
+    best_ms = _positive_number(applyback.get("best_ms"))
+    if baseline_ms is None or best_ms is None:
         return None
     return baseline_ms / best_ms
 
@@ -2707,8 +2750,11 @@ def _validated_rewrite_applyback_result(
         # because an aggregate ratio on a suite whose cases span orders of
         # magnitude is decided by the largest case alone.
         "mean_case_speedup": manifest.get("mean_case_speedup"),
+        "aggregate_speedup": manifest.get("aggregate_speedup"),
+        "speedup_basis": str(manifest.get("speedup_basis") or ""),
         "baseline_case_times": dict(manifest.get("baseline_case_times") or {}),
         "best_case_times": dict(manifest.get("best_case_times") or {}),
+        "unscored_cases": list(manifest.get("unscored_cases") or []),
         "artifact_kind": _REWRITE_ARTIFACT_KIND,
         "artifact_schema_version": artifact_schema_version,
         "validation_scope": _REWRITE_VALIDATION_SCOPE,
@@ -3558,7 +3604,15 @@ def _run_rewrite_attempt(
     res["pristine_baseline_ms"] = baseline_ms
     res["search_start_ms"] = baseline_ms
     res["best_ms"] = best_ms
-    res["mean_case_speedup"] = micro_speedup
+    # Only populated when the producer really scored a per-case mean. Writing
+    # the aggregate ratio into this key would put the statistic this route
+    # exists to distinguish back under the name of the other one, and every
+    # downstream reader of `mean_case_speedup` would be misinformed by the same
+    # conflation the route just removed. `micro_speedup` carries the graded
+    # value whatever its basis, and `speedup_basis` says which it is.
+    res["speedup_basis"] = applyback.get("speedup_basis") or ""
+    res["micro_speedup"] = micro_speedup
+    res["mean_case_speedup"] = micro_speedup if _positive_number(applyback.get("mean_case_speedup")) else None
     res["search_start_mean_case_speedup"] = 1.0
     res["improved"] = True
     res["total_improved"] = True

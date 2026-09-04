@@ -15,7 +15,7 @@ import pytest
 
 from hyperloom.agents.kernel.tools.backends import forge_submit
 from kernelforge.mcp_server.tools.bench import calculate_mean_case_speedup, parse_case_timings
-from kernelforge.rewrite_by_flydsl import driver_contract, ingest, kb, report, seed
+from kernelforge.rewrite_by_flydsl import driver_contract, ingest, kb, report, runner, seed
 from kernelforge.rewrite_by_flydsl.port_loop import (
     _validation_error_tail,
     check_flydsl_port,
@@ -359,65 +359,114 @@ def test_case_timings_are_read_off_the_driver_not_just_case_ids():
     assert reading.timing_ms == pytest.approx(0.120920)
 
 
-def test_case_timings_survive_a_driver_that_prefixes_its_output():
-    # A collectives driver prefixes every line with its rank. Anchoring the
-    # pattern to the start of a line reads no cases at all there, and the result
-    # silently degrades to the aggregate ratio instead of failing.
-    reading = driver_contract.read_driver_output(
-        "[rank0] case_ms: n_8 1.500\n[rank0] case_ms: n_16 3.000\n[rank0] mean_ms: 2.250\n"
-    )
-    assert reading.case_times == {"n_8": pytest.approx(1.5), "n_16": pytest.approx(3.0)}
-
-
-def test_unscored_cases_are_kept_out_of_the_score():
-    # forge-loop excludes them because their run-to-run spread swamps a real
-    # change; averaging them in lets noise, or a win on a case nobody is
-    # optimizing, carry the verdict.
+def test_unscored_cases_travel_with_the_times_instead_of_being_filtered_out():
+    # Filtering here is what breaks the comparison: forge-loop's own
+    # best_case_times keep the excluded cases, so a reference side that drops
+    # them presents a smaller case set and the equal-set check refuses to score
+    # at all. The exclusion belongs to the comparison, not to the reading.
     reading = driver_contract.read_driver_output(
         "case_ms: a 1.000\ncase_ms: b 2.000 unscored\nmean_ms: 1.500\n"
     )
+    assert reading.case_times == {"a": pytest.approx(1.0), "b": pytest.approx(2.0)}
     assert reading.unscored_cases == ("b",)
-    assert reading.scored_case_times == {"a": pytest.approx(1.0)}
+    assert driver_contract._timing_report(reading).case_times == {
+        "a": pytest.approx(1.0),
+        "b": pytest.approx(2.0),
+    }
 
 
-def test_duplicate_case_timings_are_refused_like_the_bench_tool_refuses_them():
+def test_an_unscored_case_does_not_block_scoring_and_does_not_enter_the_mean():
+    # The suite this route targets has excluded cases, so getting this wrong
+    # takes the intended scenario from "aggregate ratio" to "no score at all".
+    source = {"a": 4.0, "b": 1.0, "noisy": 8.0}
+    candidate = {"a": 2.0, "b": 0.25, "noisy": 1.0}
+
+    speedup, reason = driver_contract.cross_language_mean_case_speedup(source, candidate, {"noisy"})
+    assert reason == ""
+    # mean(4/2, 1/0.25) = 3.0; the 8x on the excluded case is left out.
+    assert speedup == pytest.approx(3.0)
+
+    # Omitting the exclusion averages it in and inflates the verdict.
+    unfiltered, _ = driver_contract.cross_language_mean_case_speedup(source, candidate, ())
+    assert unfiltered == pytest.approx((2.0 + 4.0 + 8.0) / 3)
+
+
+def test_prefiltering_one_side_is_what_refuses_to_score():
+    # Guards the regression this replaced: with the reference side filtered and
+    # the candidate side unfiltered, the sets differ and nothing is published.
+    speedup, reason = driver_contract.cross_language_mean_case_speedup(
+        {"a": 4.0}, {"a": 2.0, "noisy": 1.0}, ()
+    )
+    assert speedup is None
+    assert reason == driver_contract.CASE_SCORE_INCOMPARABLE
+
+
+def test_malformed_case_timings_are_refused_like_the_bench_tool_refuses_them():
     # bench.py fails a measurement with duplicate case timings. Accepting it
     # here would let the rewrite score a suite the loop rejects.
-    reading = driver_contract.read_driver_output(
+    duplicated = driver_contract.read_driver_output(
         "case_ms: a 1.000\ncase_ms: a 9.000\nmean_ms: 5.000\n"
     )
-    assert reading.duplicate_case_ids == ("a",)
-    report_out = driver_contract._timing_report(reading)
-    assert not report_out.ok
-    assert report_out.failure_class == driver_contract.DUPLICATE_CASE_TIMINGS
+    assert duplicated.duplicate_case_ids == ("a",)
+    refused = driver_contract._timing_report(duplicated)
+    assert not refused.ok
+    assert refused.failure_class == driver_contract.MALFORMED_CASE_TIMINGS
+
+    # An unparseable time is the same class of misreport, and its id still has
+    # to declare coverage: dropping it lets both paths report the same
+    # malformed case and pass the coverage check on the subset that parsed.
+    unparseable = driver_contract.read_driver_output("case_ms: a 1.000\ncase_ms: b 1.2.3\n")
+    assert unparseable.unparseable_case_ids == ("b",)
+    assert "b" in unparseable.case_ids
+    assert driver_contract._timing_report(unparseable).failure_class == (
+        driver_contract.MALFORMED_CASE_TIMINGS
+    )
+
+
+def test_malformed_timings_are_fatal_on_both_driver_paths():
+    # Warning on one path and failing on the other decides the run by which
+    # measurement happened to come first.
+    assert driver_contract.MALFORMED_CASE_TIMINGS in runner._FATAL_CANDIDATE_FAILURES
 
 
 def test_one_parser_serves_the_bench_tool_and_the_rewrite_contract():
     # Two regexes that agree today drift; the ids a coverage check accepts and
     # the times a KEEP score is built from have to come from one place.
-    text = "[rank0] case_ms: a 1.000\ncase_ms: b 2.000 unscored\ncase_ms: a 3.000\n"
+    text = "case_ms: a 1.000\ncase_ms: b 2.000 unscored\ncase_ms: a 3.000\ncase_ms: c bad\n"
     shared = parse_case_timings(text)
     reading = driver_contract.read_driver_output(text)
     assert reading.case_times == shared.case_times
     assert list(reading.unscored_cases) == shared.unscored
     assert list(reading.duplicate_case_ids) == shared.duplicates
+    assert list(reading.unparseable_case_ids) == shared.unparseable
+
+
+# Measured aiter a16w16 baseline at n=k=6144 on MI355X; per-case times span 18x.
+_MEASURED_SOURCE_CASE_MS = {
+    "m_1": 0.012818, "m_2": 0.013138, "m_4": 0.013352, "m_8": 0.013153,
+    "m_16": 0.013757, "m_32": 0.015211, "m_64": 0.018329, "m_128": 0.020830,
+    "m_256": 0.039681, "m_512": 0.045687, "m_1024": 0.075407,
+    "m_2048": 0.114414, "m_4096": 0.229021,
+}
+# The eight cases aiter serves with its own FlyDSL kernels, where a port can win.
+_MEASURED_CHEAP_CASES = ("m_1", "m_2", "m_4", "m_8", "m_16", "m_32", "m_64", "m_128")
+
+
+def _measured_candidate_case_ms() -> dict[str, float]:
+    """5x on the cheap cases, 20% slower on the expensive ones.
+
+    The shape a FlyDSL port takes when it beats aiter's own small-M kernels but
+    not hipBLASLt at large M: 3.385x as a mean over cases, 0.955x in aggregate.
+    """
+    return {
+        case: (ms / 5.0 if case in _MEASURED_CHEAP_CASES else ms / 0.8)
+        for case, ms in _MEASURED_SOURCE_CASE_MS.items()
+    }
 
 
 def test_rewrite_speedup_is_the_mean_over_cases_not_the_ratio_of_aggregates():
-    # Measured aiter a16w16 baseline at n=k=6144, whose per-case times span 18x.
-    source = {
-        "m_1": 0.012818, "m_2": 0.013138, "m_4": 0.013352, "m_8": 0.013153,
-        "m_16": 0.013757, "m_32": 0.015211, "m_64": 0.018329, "m_128": 0.020830,
-        "m_256": 0.039681, "m_512": 0.045687, "m_1024": 0.075407,
-        "m_2048": 0.114414, "m_4096": 0.229021,
-    }
-    # A candidate 5x faster on the eight cheap cases and 20% slower on the five
-    # expensive ones: the shape a FlyDSL port takes when it beats aiter's own
-    # small-M kernels but not hipBLASLt at large M.
-    cheap = ("m_1", "m_2", "m_4", "m_8", "m_16", "m_32", "m_64", "m_128")
-    candidate = {
-        case: (ms / 5.0 if case in cheap else ms / 0.8) for case, ms in source.items()
-    }
+    source = dict(_MEASURED_SOURCE_CASE_MS)
+    candidate = _measured_candidate_case_ms()
     source_ms = sum(source.values()) / len(source)
     candidate_ms = sum(candidate.values()) / len(candidate)
 
@@ -462,19 +511,47 @@ def test_rewrite_speedup_matches_the_statistic_forge_loop_keeps_on():
     assert result.speedup == pytest.approx(3.0)  # mean(2x, 4x), not 2.222x
 
 
-def test_the_submission_gate_grades_on_the_mean_not_the_aggregate():
-    # The PR's own example: a candidate the mean scores at 3.385x and the
-    # aggregate calls a 0.955x regression. Grading on the aggregate rejects it,
-    # so publishing the mean in the result while the gate still divides the
-    # aggregates would change nothing that matters.
-    applyback = {
-        "baseline_ms": 0.048061,
-        "best_ms": 0.050326,  # slower in total
-        "mean_case_speedup": 3.385,
+def _measured_applyback() -> dict:
+    """An apply-back the mean scores at 3.385x and the aggregate calls 0.955x."""
+    source, candidate = _MEASURED_SOURCE_CASE_MS, _measured_candidate_case_ms()
+    return {
+        "baseline_ms": sum(source.values()) / len(source),
+        "best_ms": sum(candidate.values()) / len(candidate),
+        "mean_case_speedup": 3.3846153846153846,
+        "baseline_case_times": source,
+        "best_case_times": candidate,
         "best_commit": "c" * 40,
     }
-    assert forge_submit._rewrite_micro_speedup(applyback) == pytest.approx(3.385)
-    assert forge_submit._rewrite_micro_speedup(applyback) > 1.0
+
+
+def test_the_submission_gate_grades_on_the_mean_not_the_aggregate():
+    # Grading on the aggregate rejects this candidate, so publishing the mean in
+    # the result while the gate still divides the aggregates would change
+    # nothing that matters.
+    applyback = _measured_applyback()
+    assert applyback["best_ms"] > applyback["baseline_ms"]  # slower in total
+    assert forge_submit._rewrite_micro_speedup(applyback) == pytest.approx(3.385, abs=1e-3)
+
+
+def test_the_submission_gate_verifies_the_declared_mean_against_its_evidence():
+    # The producer is a separate process publishing an artifact this gate reads.
+    # A declared score its own per-case timings do not reproduce is not a number
+    # to grade against, so the recomputed value wins.
+    overclaimed = _measured_applyback() | {"mean_case_speedup": 99.0}
+    assert forge_submit._rewrite_micro_speedup(overclaimed) == pytest.approx(3.385, abs=1e-3)
+
+    # Without evidence at all, the mean cannot be verified and the aggregate is
+    # the only number left.
+    unevidenced = _measured_applyback() | {"baseline_case_times": {}, "best_case_times": {}}
+    assert forge_submit._rewrite_micro_speedup(unevidenced) == pytest.approx(0.955, abs=1e-3)
+
+
+def test_the_submission_gate_rejects_a_boolean_dressed_as_a_speedup():
+    # isinstance(True, int) is true, so an unvalidated manifest field of `true`
+    # would otherwise be read as a 1.0x speedup.
+    applyback = _measured_applyback() | {"mean_case_speedup": True}
+    # Falls through to the aggregate rather than treating True as 1.0.
+    assert forge_submit._rewrite_micro_speedup(applyback) == pytest.approx(0.955, abs=1e-3)
 
 
 def test_the_submission_gate_falls_back_to_the_aggregate_without_a_mean():

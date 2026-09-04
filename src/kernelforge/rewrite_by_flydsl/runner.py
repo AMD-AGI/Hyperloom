@@ -38,6 +38,7 @@ from kernelforge.rewrite_by_flydsl.kb import (
     try_flydsl_kb_warmstart,
     write_flydsl_kb_solution,
 )
+from kernelforge.rewrite_by_flydsl import optimize
 from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
@@ -61,6 +62,11 @@ _FATAL_CANDIDATE_FAILURES = frozenset(
         driver_contract.CASE_COVERAGE_MISMATCH,
         driver_contract.CANDIDATE_NOT_ISOLATED,
         driver_contract.CANDIDATE_MODE_UNSUPPORTED,
+        # Fatal on the reference path, so fatal here too: a driver whose case
+        # timings do not parse is misreporting its suite on whichever path it
+        # happens to be running, and warning on one side while failing on the
+        # other decides the run by which measurement came first.
+        driver_contract.MALFORMED_CASE_TIMINGS,
     }
 )
 
@@ -478,6 +484,10 @@ def run_rewrite(
         optimize_result={"best_ms": flydsl_baseline_ms},
         source_case_times=preflight.reference_case_times,
         flydsl_best_case_times=flydsl_baseline_case_times,
+        # Both sides are the driver's own reading here, so their exclusions are
+        # the same set; naming it still matters, because leaving it out averages
+        # in a case the driver asked to keep out of the score.
+        unscored_cases=preflight.reference_unscored_cases,
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
         kb_experience={
@@ -538,38 +548,61 @@ def run_rewrite(
     # anchor is the port, so it answers "what did OPTIMIZE add?" rather than
     # "is the finished kernel faster than the source?". Its per-case times are
     # what the cross-language mean needs; the source half comes from preflight.
-    # A best that could not be put back into the worktree describes a kernel
-    # that is no longer there, so everything downstream -- apply-back, the KB
-    # record, the published timing -- would be attributed to a file nobody
-    # measured. Fall back to the port, which is committed and known.
-    if opt.get("best_ms") is not None and opt.get("best_kernel_restored") is False:
+    # A best that is not what the worktree holds describes a kernel that is not
+    # there, so everything downstream -- apply-back, the KB record, the
+    # published timing -- would be attributed to a file nobody measured. The
+    # restore path can legitimately leave the PORT on disk instead (its git
+    # restore failed and it wrote back the pre-OPTIMIZE content), which is a
+    # usable kernel but not the one the loop's numbers describe, so the check
+    # is on which kernel came back rather than on whether anything did.
+    # Absence of the claim is not evidence against it: a result that says
+    # nothing about restoration gets the benefit of the doubt, or every run
+    # would be downgraded on a missing key rather than on a failed restore.
+    restored_kernel = str(opt.get("restored_kernel") or "")
+    restore_is_suspect = (
+        restored_kernel not in ("", optimize.RESTORED_BEST) or opt.get("best_kernel_restored") is False
+    )
+    if opt.get("best_ms") is not None and restore_is_suspect:
         print(
-            "  [forge-rewrite] OPTIMIZE could not restore its best kernel; "
-            "reporting the port instead so the result describes what the "
-            "workspace actually holds",
+            "  [forge-rewrite] OPTIMIZE left the "
+            f"{restored_kernel or 'unknown'} kernel in the workspace, not its best; "
+            "reporting the port so the result describes what is actually there",
             flush=True,
         )
         opt = {**opt, "best_ms": None, "best_case_times": {}, "best_commit": ""}
 
+    # The per-case timings have to describe the SAME kernel as best_ms. There
+    # are exactly two cases and neither needs another driver run: OPTIMIZE
+    # produced a best and forge-loop already measured its per-case medians, or
+    # it produced nothing and the port is the final kernel.
     if opt.get("best_ms") is None:
         opt = {**opt, "best_ms": flydsl_baseline_ms}
         flydsl_best_case_times = flydsl_baseline_case_times
+        candidate_unscored = set(preflight.reference_unscored_cases)
     else:
         # Absent when a resumed loop lost its scoring checkpoint. Left empty
         # rather than filled from the port: reporting the port's per-case times
         # against OPTIMIZE's aggregate would compare two different kernels, so
         # the result falls back to the aggregate ratio and says so.
         flydsl_best_case_times = dict(opt.get("best_case_times") or {})
+        candidate_unscored = {str(case) for case in opt.get("unscored_cases") or ()}
     if not opt.get("best_commit"):
         opt = {**opt, "best_commit": port_commit}
 
+    # Both sides pass their full case set, so the exclusions have to be named
+    # rather than filtered out. Taking the union means a case either side
+    # refused to score stays out of the mean; keeping only one side's list would
+    # let the other's noisy case decide the verdict.
+    unscored_cases = set(preflight.reference_unscored_cases) | candidate_unscored
+
     # The one place this run's cross-language score is computed. Every consumer
     # that decides something on it -- the KB improvement gate, the apply-back
-    # manifest, and through it the submission gate -- is handed this value
-    # rather than re-deriving a ratio of aggregates of its own.
-    mean_case_speedup, _speedup_reason = driver_contract.cross_language_mean_case_speedup(
+    # manifest, and through it the submission gate, plus the result itself --
+    # is handed this value rather than re-deriving one of its own.
+    mean_case_speedup, speedup_reason = driver_contract.cross_language_mean_case_speedup(
         preflight.reference_case_times,
         flydsl_best_case_times,
+        unscored_cases,
     )
 
     if rewrite_kb_enabled:
@@ -603,6 +636,7 @@ def run_rewrite(
         mean_case_speedup=mean_case_speedup,
         source_case_times=preflight.reference_case_times,
         flydsl_best_case_times=flydsl_best_case_times,
+        unscored_cases=unscored_cases,
         reference_snr_db=port.snr_db,
         deadline_unix=deadline_unix,
         import_modules=applyback_import_modules,
@@ -626,6 +660,8 @@ def run_rewrite(
         optimize_result=opt,
         source_case_times=preflight.reference_case_times,
         flydsl_best_case_times=flydsl_best_case_times,
+        mean_case_speedup=mean_case_speedup,
+        speedup_unavailable_reason=speedup_reason,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
         kb_experience={
@@ -639,7 +675,7 @@ def run_rewrite(
     print(
         f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "
         f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'} "
-        f"({result.speedup_basis or 'unavailable'})",
+        f"({result.speedup_basis or result.speedup_unavailable_reason or 'unavailable'})",
         flush=True,
     )
     if result.aggregate_regression:
