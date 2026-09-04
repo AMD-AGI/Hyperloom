@@ -465,7 +465,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         # into ``artifacts`` for exactly this fallback), so a caller that only reads
         # the singular contract still lands the best patch; a nomination-aware caller
         # reads ``patches`` and lands them all. ``nomination`` is a run summary
-        # (candidates_seen / resolved / selected) for reporting only.
+        # for reporting only.
         result["patches"] = [dict(p) for p in patches]
         nomination = m.get("nomination")
         result["nomination"] = dict(nomination) if isinstance(nomination, dict) else None

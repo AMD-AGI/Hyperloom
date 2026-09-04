@@ -84,8 +84,8 @@ def build_manifest(
     ``target_file`` / ``kernel_repo`` / ``snapshot_dir`` / ``base_commit`` /
     ``micro_speedup``. It is present (possibly empty) on the multi-patch path and
     omitted (``None``) on the single-combined-patch (combine) path so a legacy
-    consumer reading only ``artifacts`` is byte-unaffected. ``nomination`` is the
-    round's summary counts (``candidates_seen`` / ``resolved`` / ``selected``).
+    consumer reading only ``artifacts`` is byte-unaffected. ``nomination`` carries
+    the round's summary counts.
     """
     verdict = verdict_override or ("candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity")
     return {
