@@ -52,15 +52,12 @@ class MaintenanceCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    async def _maybe_run_maintenance_tick(
+    async def _run_maintenance(
         self,
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Periodic in-process maintenance (R5 reaper + R4 DB retention)."""
-        every = int(getattr(self, "_maintenance_every_ticks", 0) or 0)
-        if every <= 0 or tick <= 0 or (tick % every) != 0:
-            return None
+        """Periodic in-process maintenance (R5 reaper + R4 DB retention); the coordinator's time gate owns the cadence."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
         try:

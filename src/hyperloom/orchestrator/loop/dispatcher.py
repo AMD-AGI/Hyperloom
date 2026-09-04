@@ -960,7 +960,7 @@ class DispatcherCollaborator:
             await self.bus.append_and_seq(
                 Message.new(
                     "coordinator",
-                    "*",
+                    "robustness",
                     "observation",
                     {
                         "kind": "specialist_progress",
