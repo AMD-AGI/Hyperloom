@@ -49,7 +49,7 @@ def test_no_history_silent():
 
 
 def test_short_history_silent_until_window_full():
-    det = ProgressDetector(ProgressConfig(gain_window_ticks=3))
+    det = ProgressDetector(ProgressConfig(gain_window_actions=3))
     det.evaluate(_ctx(tick=0, cumulative_gain_validated=5.0), SourceData())
     out = det.evaluate(_ctx(tick=1, cumulative_gain_validated=5.0), SourceData())
     assert all(s.name != "gain_plateau" for s in out)
@@ -59,7 +59,7 @@ def test_plateau_with_productive_gain_fires_medium():
     """Productive gain ≥ threshold → flat = "exhausted but shippable" → medium (stack must be > 0)."""
     det = ProgressDetector(
         ProgressConfig(
-            gain_window_ticks=3,
+            gain_window_actions=3,
             gain_epsilon_pct=0.5,
             productive_gain_pct=0.5,
         )
@@ -75,7 +75,7 @@ def test_plateau_with_zero_gain_also_fires_medium():
     """``gain_plateau`` is uniformly MEDIUM advisory."""
     det = ProgressDetector(
         ProgressConfig(
-            gain_window_ticks=3,
+            gain_window_actions=3,
             gain_epsilon_pct=0.5,
             productive_gain_pct=0.5,
         )
@@ -92,7 +92,7 @@ def test_plateau_suppressed_when_stack_empty():
     """Cold-start guard: empty stack must not fire ``gain_plateau`` (``no_levers_found`` owns that case)."""
     det = ProgressDetector(
         ProgressConfig(
-            gain_window_ticks=3,
+            gain_window_actions=3,
             gain_epsilon_pct=0.5,
             productive_gain_pct=0.5,
         )
@@ -106,7 +106,7 @@ def test_plateau_suppressed_when_stack_empty():
 def test_plateau_resets_on_movement():
     det = ProgressDetector(
         ProgressConfig(
-            gain_window_ticks=3,
+            gain_window_actions=3,
             gain_epsilon_pct=0.5,
         )
     )
@@ -117,7 +117,7 @@ def test_plateau_resets_on_movement():
 
 
 def test_gain_plateau_history_resets_on_macro_cycle():
-    det = ProgressDetector(ProgressConfig(gain_window_ticks=2, gain_epsilon_pct=0.5))
+    det = ProgressDetector(ProgressConfig(gain_window_actions=2, gain_epsilon_pct=0.5))
     det.evaluate(_ctx(tick=0, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData())
     out = det.evaluate(
         _ctx(tick=1, macro_cycle=0, cumulative_gain_validated=1.0, optimization_stack_size=1), SourceData()
@@ -130,7 +130,7 @@ def test_gain_plateau_history_resets_on_macro_cycle():
 
 
 def test_closing_phase_short_circuits():
-    det = ProgressDetector(ProgressConfig(gain_window_ticks=2))
+    det = ProgressDetector(ProgressConfig(gain_window_actions=2))
     det.evaluate(_ctx(tick=0, closing_phase=True, cumulative_gain_validated=0.0), SourceData())
     out = det.evaluate(
         _ctx(tick=1, closing_phase=True, cumulative_gain_validated=0.0),
@@ -140,7 +140,7 @@ def test_closing_phase_short_circuits():
 
 
 def test_stop_reason_short_circuits():
-    det = ProgressDetector(ProgressConfig(gain_window_ticks=2))
+    det = ProgressDetector(ProgressConfig(gain_window_actions=2))
     out = det.evaluate(
         _ctx(tick=0, stop_reason="time_exhausted", cumulative_gain_validated=0.0),
         SourceData(),
@@ -152,7 +152,6 @@ def test_no_levers_silent_before_min_elapsed():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(
@@ -166,7 +165,6 @@ def test_no_levers_silent_before_min_ticks():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(
@@ -181,7 +179,6 @@ def test_no_levers_fires_medium_when_quotas_met():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(
@@ -223,7 +220,6 @@ def test_no_levers_silent_when_kernel_opt_attempts_in_progress():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(
@@ -244,7 +240,6 @@ def test_no_levers_silent_when_keep_pending_integrate():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(
@@ -266,7 +261,6 @@ def test_no_levers_silent_before_explore_started():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(
@@ -281,7 +275,6 @@ def test_no_levers_evidence_includes_in_flight_fields():
     det = ProgressDetector(
         ProgressConfig(
             no_levers_min_minutes=45.0,
-            no_levers_min_ticks=8,
         )
     )
     out = det.evaluate(

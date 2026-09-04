@@ -52,14 +52,14 @@ def _build_reactor(
     primary: _FakeSource,
     tmp_path: Path,
     classifier: Classifier | None = None,
-    cooldown_ticks: int = 0,
+    cooldown_sec: float = 0.0,
 ) -> tuple[Reactor, FindingSink]:
     router = DegradeRouter(primary, fail_threshold=2, recheck_interval_s=0.0)
     sink = FindingSink(FindingSinkConfig(session_dir=tmp_path, session_id="sess-1"))
     components = ReactorComponents(
         router=router,
         classifier=classifier or Classifier(configs={"crash": CrashConfig(medium_threshold=2)}),
-        ladder=ActionLadder(config=ActionLadderConfig(cooldown_ticks=cooldown_ticks)),
+        ladder=ActionLadder(config=ActionLadderConfig(cooldown_sec=cooldown_sec)),
         policy=PolicyAware(),
         sink=sink,
     )

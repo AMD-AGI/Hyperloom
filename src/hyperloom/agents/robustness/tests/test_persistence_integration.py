@@ -56,7 +56,7 @@ def _fresh_classifier(
                 min_pending_ticks=ray_min_pending_ticks,
             ),
             "progress": ProgressConfig(
-                gain_window_ticks=3,
+                gain_window_actions=3,
                 gain_epsilon_pct=0.1,
                 no_levers_min_minutes=10_000.0,  # disable no_levers_found in this test
             ),
@@ -219,7 +219,7 @@ async def test_action_ladder_cooldown_persists(tmp_path: Path):
         evidence={},
         source="local",
     )
-    cfg = ActionLadderConfig(cooldown_ticks=5)
+    cfg = ActionLadderConfig(cooldown_sec=5.0)
 
     store1 = DetectorStateStore(session_dir=tmp_path)
     ladder1 = ActionLadder(

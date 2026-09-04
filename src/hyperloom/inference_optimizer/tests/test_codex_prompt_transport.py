@@ -162,7 +162,6 @@ async def test_delta_turn_without_context_tools_names_none(
     coord = _coordinator(session_dir, backend)
 
     await backend.run(await coord._compose_prompt("orchestration"))
-    coord._orchestration_seeded = True
     delta = await coord._compose_prompt("orchestration")
 
     assert "=== Context" in delta
@@ -181,7 +180,6 @@ async def test_delta_turn_with_context_tools_still_names_them(session_dir: Path)
     coord = _coordinator(session_dir, backend)
 
     await coord._compose_prompt("orchestration")
-    coord._orchestration_seeded = True
     delta = await coord._compose_prompt("orchestration")
 
     for tool in CONTEXT_TOOL_NAMES:
