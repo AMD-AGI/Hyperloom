@@ -17,6 +17,7 @@ import pytest
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
 )
+from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
 
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_fusion.py"
@@ -617,6 +618,50 @@ def test_normalize_manifest_multi_patch_missing_strongest_patch_reverts(tmp_path
 
     assert result["kept"] is False
     assert result["error_class"] == "fusion_artifact_missing"
+
+
+def test_salvage_carries_every_sibling_the_manifest_recorded(tmp_path):
+    """A killed wrapper salvages all N nominated siblings, not one singular patch."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    a = Path(output_dir) / "fusion_0.patch"
+    a.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    b = Path(output_dir) / "fusion_1.patch"
+    b.write_text("diff --git a/b.py b/b.py\n", encoding="utf-8")
+    (output_dir / "fusion.patch").write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    patches = [
+        {
+            "kernel_name": "fuse_a",
+            "patch_path": str(a),
+            "target_file": "/fw/a.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.4,
+            "kind": "fusion",
+        },
+        {
+            "kernel_name": "fuse_b",
+            "patch_path": str(b),
+            "target_file": "/fw/b.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.2,
+            "kind": "fusion",
+        },
+    ]
+    manifest = _multi_patch_manifest(output_dir, patches=patches)
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert result["patches"] == patches
+    # The consumer routes salvage through the nomination contract, so an absent
+    # ``patches`` key would queue nothing at all.
+    outcome = parse_outcome(result)
+    assert outcome.schema_error == ""
+    assert [p.kernel_name for p in outcome.patches] == ["fuse_a", "fuse_b"]
+    # Singular slots stay as they were for callers that only read them.
+    assert result["patch"] == str(output_dir / "fusion.patch")
+    assert result["source_file"] == str(output_dir / "top_recipe.py")
+    assert result["kernel_repo"] == "/venv/site-packages"
 
 
 def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:

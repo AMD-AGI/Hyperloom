@@ -104,22 +104,28 @@ def _git_tracks(repo_root: str, source_file: str) -> bool:
     return False
 
 
-def _unified_file_diff(rel: str, old_text: str, new_text: str) -> str:
-    """git-apply-compatible unified diff for one file (empty when unchanged)."""
+def _unified_file_diff(rel: str, old_text: str, new_text: str, *, created: bool) -> str:
+    """git-apply-compatible unified diff for one file (empty when unchanged).
+
+    ``created`` says the file is absent from the base, which an empty ``old_text``
+    does not: an existing empty file declared as a creation fails to apply.
+    """
     if old_text == new_text:
         return ""
     body = "".join(
         difflib.unified_diff(
             old_text.splitlines(keepends=True),
             new_text.splitlines(keepends=True),
-            fromfile=f"a/{rel}",
+            fromfile="/dev/null" if created else f"a/{rel}",
             tofile=f"b/{rel}",
         )
     )
     if not body:
         return ""
-    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`.
-    return f"diff --git a/{rel} b/{rel}\n{body}"
+    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`;
+    # `new file mode` + `--- /dev/null` is how a creation is declared.
+    new_file = "new file mode 100644\n" if created else ""
+    return f"diff --git a/{rel} b/{rel}\n{new_file}{body}"
 
 
 def _export_nongit(
@@ -157,9 +163,10 @@ def _export_nongit(
     if source_file and Path(source_file).is_file():
         rel = _rel(Path(source_file))
         snap = pristine_dir / rel
-        old_text = snap.read_text(encoding="utf-8", errors="replace") if snap.is_file() else ""
+        created = not snap.is_file()
+        old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
         new_text = Path(source_file).read_text(encoding="utf-8", errors="replace")
-        d = _unified_file_diff(rel, old_text, new_text)
+        d = _unified_file_diff(rel, old_text, new_text, created=created)
         if d:
             parts.append(d)
             names.append(rel)
@@ -175,9 +182,10 @@ def _export_nongit(
             continue  # the edited source is handled by (1)
         rel = _rel(f)
         snap = pristine_dir / rel
-        old_text = snap.read_text(encoding="utf-8", errors="replace") if snap.is_file() else ""
+        created = not snap.is_file()
+        old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
         new_text = f.read_text(encoding="utf-8", errors="replace")
-        d = _unified_file_diff(rel, old_text, new_text)
+        d = _unified_file_diff(rel, old_text, new_text, created=created)
         if d:
             parts.append(d)
             names.append(rel)

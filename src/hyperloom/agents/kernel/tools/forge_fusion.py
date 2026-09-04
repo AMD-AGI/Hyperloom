@@ -492,6 +492,7 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
     source_file = ""
     repo_root = ""
     patch = None
+    siblings = None
     if ckpt_path.is_file():
         try:
             ckpt = json.loads(ckpt_path.read_text(encoding="utf-8", errors="replace"))
@@ -520,12 +521,13 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
             if artifacts.get("patch"):
                 patch = artifacts.get("patch")
             repo_root = repo_root or str(artifacts.get("repo_root") or "")
+            siblings = manifest.get("patches")
     if patch_path.is_file():
         patch = str(patch_path)
     if not kept or not patch or not Path(str(patch)).is_file():
         return None
     flags = [f for f in env_flag.split() if f]
-    return {
+    result: dict[str, Any] = {
         "status": "ok",
         "engine": "forge_fusion",
         "micro_decision": "candidate",
@@ -542,6 +544,11 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         "salvaged": True,
         "workspace": str(root),
     }
+    if isinstance(siblings, list):
+        # The consumer reads the nomination contract, so every sibling the
+        # manifest recorded is carried through beside the singular slots.
+        result["patches"] = siblings
+    return result
 
 
 def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutExpired) -> dict[str, Any]:
