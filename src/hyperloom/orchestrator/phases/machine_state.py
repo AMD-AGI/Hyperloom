@@ -212,7 +212,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
-        # Any phase → SWEEP on the way in, then SWEEP → CLOSE on the way out.
+        # A phase after PRELUDE → SWEEP on the way in, SWEEP → CLOSE on the way out.
         "target_reached",
         "time_exhausted",
         "time_exhausted_during_prelude",
@@ -591,10 +591,6 @@ def should_reloop_to_explore(
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     evidence: dict[str, Any] = {"macro_cycle": cycle}
 
-    if target_was_reached(state):
-        evidence["reloop_blocked"] = "target_reached"
-        return False, evidence
-
     # Per-cycle gain since this cycle started → effective no-gain streak. A cycle
     # "gained" only when its validated gain rose by at least the decaying KEEP bar.
     effective_min_gain = decaying_keep_threshold_pct(cycle) if min_gain_pct is None else float(min_gain_pct)
@@ -607,6 +603,10 @@ def should_reloop_to_explore(
     evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
     evidence["cycle_gained"] = cycle_gained
     evidence["no_gain_cycle_streak_effective"] = effective_streak
+
+    if target_was_reached(state):
+        evidence["reloop_blocked"] = "target_reached"
+        return False, evidence
 
     # Safety cap on macro-cycles.
     if (cycle + 1) >= int(max_cycles):
@@ -2609,6 +2609,15 @@ def exit_normal_kernel(
     return None
 
 
+#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
+#: any other reason keeps the ladder's own exit reason.
+_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
+    "global_converged": "global_converged",
+    "max_cycles": "global_converged",
+    "target_reached": "target_reached",
+}
+
+
 def exit_normal_sweep(
     state: Any,
     *,
@@ -2874,8 +2883,8 @@ def compute_next_phase(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
-    Priority (Inv-8.2): a met target's forward jump to SWEEP first, then the
-    global terminal, then the wall-clock closing phase, then exit_terminal >
+    Priority (Inv-8.2): global terminal first, then the wall-clock closing
+    phase, then a met target's forward jump to SWEEP, then exit_terminal >
     exit_normal.
 
     Args:
@@ -2894,12 +2903,6 @@ def compute_next_phase(
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
     overrides = _resolve_plateau_overrides(state)
 
-    # A met target closes through SWEEP so the concurrency curve measures the
-    # configuration it was met on. Not terminal: that would mirror the reason
-    # onto ``stop_reason``, which routes the next tick to CLOSE instead.
-    if target_was_reached(state) and phase_index(current) < phase_index(PHASE_SWEEP):
-        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
-
     # Global terminal stop_reason overrides phase-local judgments.
     terminal = _global_terminal(state)
     if terminal is not None and current != PHASE_CLOSE:
@@ -2910,6 +2913,13 @@ def compute_next_phase(
     if closing is not None and current != PHASE_CLOSE:
         reason, evidence = closing
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
+
+    # A met target ends the optimizing phases early; SWEEP is their normal next
+    # station, and the curve then measures the configuration it was met on.
+    # PRELUDE is excluded: its own terminal guards decide whether the baseline is
+    # one the later phases can compare against at all.
+    if target_was_reached(state) and phase_index(PHASE_PRELUDE) < phase_index(current) < phase_index(PHASE_SWEEP):
+        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
     if current == PHASE_PRELUDE:
         term = exit_terminal_prelude(state)
@@ -2983,10 +2993,6 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # The target names a clean exit. A failed sweep keeps its own name:
-            # its exit code is the signal that the closing curve is missing.
-            if exit_reason == "sweep_done" and target_was_reached(state):
-                return PHASE_CLOSE, "target_reached", {**exit_evidence, "terminal": True}
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
             # reloop is blocked (budget, convergence, or max_cycles).
@@ -3005,10 +3011,11 @@ def compute_next_phase(
             # R7: if looping was blocked by global convergence or the safety cap,
             # terminate with a terminal stop_reason instead of idling in CLOSE.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
-            if blocked in ("global_converged", "max_cycles"):
+            terminal_reason = _RELOOP_BLOCK_TERMINALS.get(blocked)
+            if terminal_reason is not None:
                 return (
                     PHASE_CLOSE,
-                    "global_converged",
+                    terminal_reason,
                     {
                         **exit_evidence,
                         **reloop_ev,

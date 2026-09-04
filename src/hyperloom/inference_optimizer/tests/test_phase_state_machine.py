@@ -476,6 +476,84 @@ def test_compute_next_phase_terminal_overrides_phase():
     assert out[2].get("terminal") is True
 
 
+class TestAMetTargetDoesNotOutrankTheGuards:
+    """The forward jump to SWEEP runs after the terminal checks, never before."""
+
+    def _state(self, phase: str, **kw) -> SimpleNamespace:
+        base = dict(
+            phase=phase,
+            phase_started_unix=0.0,
+            max_minutes=0,
+            phase_budget_pct={},
+            stop_reason="",
+            closing_phase=False,
+            target_reached_at="2026-09-04T00:00:00+00:00",
+            params_no_promote_streak=0,
+            explore_search={},
+            optimization_stack=[],
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_a_coordinator_stop_reason_still_wins(self):
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_KERNEL_AGENT, stop_reason="baseline_failed"),
+            kernel_enabled=True,
+        )
+        assert out is not None
+        assert out[0] == phase_state.PHASE_CLOSE and out[1] == "baseline_failed"
+
+    def test_the_closing_phase_still_wins(self):
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_KERNEL_AGENT, closing_phase=True),
+            kernel_enabled=True,
+        )
+        assert out is not None
+        assert out[0] == phase_state.PHASE_CLOSE and out[1] == "time_exhausted"
+
+    def test_prelude_keeps_its_own_guards(self):
+        """A baseline PRELUDE has not accepted is not one SWEEP can measure."""
+        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_PRELUDE), kernel_enabled=True)
+        assert out is None or out[0] != phase_state.PHASE_SWEEP
+
+    def test_a_later_phase_does_jump(self):
+        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_KERNEL_AGENT), kernel_enabled=True)
+        assert out is not None
+        assert out[0] == phase_state.PHASE_SWEEP and out[1] == "target_reached"
+        assert out[2].get("terminal") is not True
+
+
+def test_a_met_target_renames_a_budget_limited_sweep_exit():
+    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would
+    recover it as ``time_exhausted`` -- a met target reported as a timeout."""
+    state = SimpleNamespace(
+        phase=phase_state.PHASE_SWEEP,
+        phase_started_unix=1.0,
+        max_minutes=60,
+        deadline_unix=2.0,
+        phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
+        stop_reason="",
+        closing_phase=False,
+        target_reached_at="2026-09-04T00:00:00+00:00",
+        last_conc_sweep={},
+        params_no_promote_streak=0,
+        explore_search={},
+        optimization_stack=[],
+        macro_cycle=0,
+        saturated_directions={},
+        cumulative_gain_validated=0.0,
+        gain_at_cycle_start=0.0,
+        no_gain_cycle_streak=0,
+    )
+    raw = phase_state.exit_normal_sweep(state)
+    assert raw is not None and raw[0] in ("sweep_budget_exhausted", "sweep_budget_cap")
+
+    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    assert out is not None
+    assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
+    assert out[2].get("terminal") is True
+
+
 def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""

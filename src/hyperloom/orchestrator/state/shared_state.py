@@ -2115,7 +2115,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if not isinstance(latest, dict):
             return None
         value = latest.get("within_roofline_pct")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not isinstance(value, (int, float)):
             return None
         return float(value)
 
