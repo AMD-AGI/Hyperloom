@@ -5962,7 +5962,6 @@ async def trace_analyze_handler(
         # removed: agent runs TraceLens, while bypass runs its standalone reader.
         _disc_route = analysis_route
         _disc_tool = "bypass" if is_bypass else "tracelens"
-        _disc_source = _disc_tool
         # Surfaced for the caller's SBD V6 roofline event, which records the run
         # as it happens rather than re-deriving it at export time.
         result["analysis_meta"] = _build_analysis_meta(
@@ -5981,7 +5980,7 @@ async def trace_analyze_handler(
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
             instrument.record_kernel_discovery(
                 session_dir,
-                source=_disc_source,
+                source=_disc_tool,
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
