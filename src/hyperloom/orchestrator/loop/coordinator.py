@@ -993,7 +993,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_replace_latest_gemm_tuning_attempt": "phase_kernel",
         "_gemm_e2e_candidates": "phase_kernel",
         "_validate_gemm_tuning_e2e": "phase_kernel",
-        "_run_kernel_opt_nomination": "phase_kernel",
         "_current_tput_from_validated_gain": "phase_kernel",
         "_last_measured_roofline_tput": "phase_kernel",
         "_needs_roofline_for_watermark": "phase_kernel",
