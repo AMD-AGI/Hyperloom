@@ -27,13 +27,12 @@ from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.durable_io import atomic_write_text
 
-# How the reported speedup was obtained. The mean over cases is authoritative;
-# the aggregate ratio is what remains when a driver reports no per-case times,
-# and it is named so a consumer never mistakes one for the other. A coverage
-# mismatch yields neither: the two paths timed different work, so no comparison
-# is published at all.
-SPEEDUP_BASIS_MEAN_CASE = "mean_case_speedup"
-SPEEDUP_BASIS_AGGREGATE = "aggregate_ratio"
+# How the reported speedup was obtained. Re-exported from the one module that
+# resolves it, so a reader comparing a result against a manifest is comparing
+# the same vocabulary. A coverage mismatch yields neither basis: the two paths
+# timed different work, so no comparison is published at all.
+SPEEDUP_BASIS_MEAN_CASE = driver_contract.SPEEDUP_BASIS_MEAN_CASE
+SPEEDUP_BASIS_AGGREGATE = driver_contract.SPEEDUP_BASIS_AGGREGATE
 SPEEDUP_BASIS_NONE = ""
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by
@@ -149,29 +148,26 @@ def build_result(
 
     source_cases = dict(source_case_times or {})
     candidate_cases = dict(flydsl_best_case_times or {})
-    speedup = None
-    speedup_basis = SPEEDUP_BASIS_NONE
-    reason = speedup_unavailable_reason
+    score = driver_contract.CrossLanguageScore()
     if port_ok:
-        # The caller computes this once and hands it down to every consumer
-        # that decides on it, so recomputing here would be a second derivation
-        # of the same number. Derived only when the caller had no reason to.
-        mean = mean_case_speedup
-        if mean is None and not reason:
-            mean, reason = driver_contract.cross_language_mean_case_speedup(
-                source_cases, candidate_cases, unscored_cases
+        if mean_case_speedup is not None:
+            # Already resolved by the caller, which hands the same value to
+            # every other consumer; re-deriving it here would be a second
+            # derivation of one number.
+            score = driver_contract.CrossLanguageScore(speedup=mean_case_speedup, basis=SPEEDUP_BASIS_MEAN_CASE)
+        elif speedup_unavailable_reason == driver_contract.CASE_SCORE_INCOMPARABLE:
+            score = driver_contract.CrossLanguageScore(reason=speedup_unavailable_reason)
+        else:
+            score = driver_contract.resolve_cross_language_score(
+                source_case_times=source_cases,
+                candidate_case_times=candidate_cases,
+                unscored_cases=unscored_cases,
+                source_ms=source_ms,
+                candidate_ms=flydsl_best_ms,
             )
-        if mean is not None:
-            speedup, speedup_basis, reason = mean, SPEEDUP_BASIS_MEAN_CASE, ""
-        elif reason == driver_contract.CASE_SCORE_INCOMPARABLE:
-            # The two paths timed different case sets. Their aggregate ratio
-            # would compare different work, so nothing is published and the
-            # reason travels in the result instead of a number.
-            pass
-        elif source_ms and flydsl_best_ms and flydsl_best_ms > 0:
-            speedup = source_ms / flydsl_best_ms
-            speedup_basis, reason = SPEEDUP_BASIS_AGGREGATE, ""
-    speedup_unavailable_reason = reason if speedup is None else ""
+    speedup = score.speedup
+    speedup_basis = score.basis
+    speedup_unavailable_reason = score.reason
 
     # Only meaningful for the mean; the aggregate ratio cannot contradict itself.
     # Reported for the record, NOT used to veto the verdict: for this layer the

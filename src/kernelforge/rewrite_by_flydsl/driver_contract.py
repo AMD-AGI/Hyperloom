@@ -250,6 +250,71 @@ def cross_language_mean_case_speedup(
     return speedup, ""
 
 
+SPEEDUP_BASIS_MEAN_CASE = "mean_case_speedup"
+SPEEDUP_BASIS_AGGREGATE = "aggregate_ratio"
+
+
+@dataclass(frozen=True)
+class CrossLanguageScore:
+    """How fast the rewrite is, and which statistic says so.
+
+    ``basis`` is empty exactly when ``speedup`` is None, and ``reason`` then
+    names why nothing could be published. Consumers gate on ``publishable``
+    rather than on a number, so a score that could not be computed cannot be
+    mistaken for one that could.
+    """
+
+    speedup: float | None = None
+    basis: str = ""
+    reason: str = ""
+
+    @property
+    def publishable(self) -> bool:
+        return self.speedup is not None
+
+
+def resolve_cross_language_score(
+    *,
+    source_case_times: dict[str, float] | None,
+    candidate_case_times: dict[str, float] | None,
+    unscored_cases: set[str] | tuple[str, ...] | list[str] | None = None,
+    source_ms: float | None = None,
+    candidate_ms: float | None = None,
+) -> CrossLanguageScore:
+    """The ONE place the aggregate ratio may stand in for the per-case mean.
+
+    Every consumer that decides something on the rewrite's speed resolves it
+    here: the result, the apply-back manifest, the submission gate and the KB
+    record. Four sites each writing ``mean if mean is not None else aggregate``
+    is how a path that must refuse ends up publishing instead -- the point of
+    preferring the mean is lost the moment one of them quietly falls back.
+
+    Three outcomes, and only the middle one substitutes a statistic:
+
+      * per-case timings on both sides -> the equal-weight mean over cases
+      * no per-case timings at all -> the aggregate ratio, labelled as such,
+        because it is the only number the driver reported
+      * the two sides timed different case sets -> NOTHING. Their aggregates
+        compare the same mismatched work by another route, so substituting one
+        publishes a comparison that does not exist.
+    """
+    mean, reason = cross_language_mean_case_speedup(
+        dict(source_case_times or {}),
+        dict(candidate_case_times or {}),
+        unscored_cases,
+    )
+    if mean is not None:
+        return CrossLanguageScore(speedup=mean, basis=SPEEDUP_BASIS_MEAN_CASE)
+    if reason == CASE_SCORE_INCOMPARABLE:
+        return CrossLanguageScore(reason=reason)
+    if source_ms and candidate_ms and source_ms > 0 and candidate_ms > 0:
+        return CrossLanguageScore(
+            speedup=source_ms / candidate_ms,
+            basis=SPEEDUP_BASIS_AGGREGATE,
+        )
+    return CrossLanguageScore(reason=reason or CASE_SCORE_UNAVAILABLE)
+
+
 def _terminate(proc: subprocess.Popen) -> None:
     """Stop the driver and anything it spawned."""
     try:

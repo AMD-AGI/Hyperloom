@@ -367,14 +367,28 @@ def write_flydsl_kb_solution(
     # magnitude it is dominated by the largest one, so gating the KB on it
     # discards ports that are faster on most of the shapes the operator serves.
     aggregate_speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
-    speedup = mean_case_speedup if mean_case_speedup is not None else aggregate_speedup
+    if mean_case_speedup is not None:
+        # Resolved once by the caller and handed to every consumer, so the KB
+        # record cannot disagree with the manifest or the result.
+        score = driver_contract.CrossLanguageScore(
+            speedup=mean_case_speedup,
+            basis=driver_contract.SPEEDUP_BASIS_MEAN_CASE,
+        )
+    else:
+        score = driver_contract.resolve_cross_language_score(
+            source_case_times=None,
+            candidate_case_times=None,
+            source_ms=source_ms,
+            candidate_ms=flydsl_best_ms,
+        )
+    speedup = score.speedup
     # Records are ranked against each other for warm-start reuse
     # (knowledge.experience_integration._ranked_speedup reads `speedup`), so the
     # basis has to travel with the value. Two records whose numbers came from
     # different statistics are not comparable, and on suites whose cases span
     # orders of magnitude the mean and the aggregate differ enough to invert the
     # ranking. A reader that ignores this field is no worse off than before.
-    speedup_basis = "mean_case_speedup" if mean_case_speedup is not None else "aggregate_ratio"
+    speedup_basis = score.basis
     if not allow_non_improving and (speedup is None or speedup <= 1.0):
         return {"written": False, "reason": "no_improvement"}
     try:

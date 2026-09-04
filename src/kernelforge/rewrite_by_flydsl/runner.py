@@ -558,8 +558,14 @@ def run_rewrite(
     # Absence of the claim is not evidence against it: a result that says
     # nothing about restoration gets the benefit of the doubt, or every run
     # would be downgraded on a missing key rather than on a failed restore.
+    #
+    # RESTORED_UNCHANGED is the ordinary "OPTIMIZE found no improvement"
+    # outcome: nothing better was named, so the port the loop measured is
+    # already what the worktree holds and its measurement stands. Treating it
+    # as suspect discarded a valid measurement on the most common path.
     restored_kernel = str(opt.get("restored_kernel") or "")
-    restore_is_suspect = restored_kernel not in ("", optimize.RESTORED_BEST) or opt.get("best_kernel_restored") is False
+    trustworthy = ("", optimize.RESTORED_BEST, optimize.RESTORED_UNCHANGED)
+    restore_is_suspect = restored_kernel not in trustworthy or opt.get("best_kernel_restored") is False
     if opt.get("best_ms") is not None and restore_is_suspect:
         print(
             "  [forge-rewrite] OPTIMIZE left the "

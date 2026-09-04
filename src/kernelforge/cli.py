@@ -1931,11 +1931,12 @@ def forge_loop(
         # reports none, because a resume needs them, but then they no longer
         # describe `best` and a consumer scoring a per-case mean against it
         # would straddle two kernels.
-        best_case_times = (
+        run_state_best_case_times = (
             dict(getattr(loop_runner.run_state, "best_case_times", {}) or {})
             if getattr(loop_runner, "_best_case_times_describe_best", True)
             else {}
         )
+        best_case_times = run_state_best_case_times
         total_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
         incremental_speedup = (
             float(total_speedup) / float(search_start_mean_case_speedup)
@@ -1958,10 +1959,16 @@ def forge_loop(
                 pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
                 search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
-                # Replaced together with the aggregate, or cleared. Leaving the
-                # run-state cases behind a published warm-start wall time would
-                # hand a caller two numbers from different kernels.
-                best_case_times = dict(published.get("case_times") or {})
+                # NOT read from `published`: best_result.json is the expected
+                # manifest (loop.reporting), whose schema carries no per-case
+                # timings, so reading them there yields {} every time and every
+                # warm-start campaign falls back to the aggregate ratio.
+                #
+                # The loop maintains them in run state for exactly this path --
+                # _adopt_validated_warm_start records the warm-start bench's
+                # case_times as the incumbent's -- and that is the same
+                # iteration-0 result published here.
+                best_case_times = run_state_best_case_times
                 total_speedup = published.get("mean_case_speedup")
                 search_start_mean_case_speedup = (
                     published.get("search_start_mean_case_speedup") or total_speedup or search_start_mean_case_speedup

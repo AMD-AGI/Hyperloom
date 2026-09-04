@@ -339,6 +339,13 @@ class RunState:
     # Scoring state that decides keep/revert. Incumbent case medians cannot be
     # reconstructed without remeasurement.
     best_case_times: dict = field(default_factory=dict)
+    # Whether ``best_case_times`` were measured on the same iteration as
+    # ``best.wall_ms``. Checkpointed rather than in-memory only: the times are
+    # restored on resume, so a consumer reading them after a resume needs the
+    # same warning the session that recorded them had. Defaults to True for a
+    # checkpoint written before this field existed, matching how those sessions
+    # reported them.
+    best_case_times_describe_best: bool = True
     unscored_cases: list[str] = field(default_factory=list)
     best: BestRecord = field(default_factory=BestRecord)
     stall: StallState = field(default_factory=StallState)

@@ -9,13 +9,15 @@ primitives) is covered by the L1/L2/L3 integration ladder, not here.
 from __future__ import annotations
 
 import textwrap
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.agents.kernel.tools.backends import forge_submit
 from kernelforge.mcp_server.tools.bench import calculate_mean_case_speedup, parse_case_timings
-from kernelforge.rewrite_by_flydsl import driver_contract, ingest, kb, report, runner, seed
+from kernelforge.loop.run_state import RunState
+from kernelforge.rewrite_by_flydsl import driver_contract, ingest, kb, optimize, report, runner, seed
 from kernelforge.rewrite_by_flydsl.port_loop import (
     _validation_error_tail,
     check_flydsl_port,
@@ -413,6 +415,29 @@ def test_malformed_case_timings_are_refused_like_the_bench_tool_refuses_them():
     assert driver_contract._timing_report(unparseable).failure_class == (driver_contract.MALFORMED_CASE_TIMINGS)
 
 
+def test_a_loop_that_found_no_improvement_keeps_its_measurement():
+    # _restore_best_kernel writes the pre-OPTIMIZE content back whenever it has
+    # no best commit to restore, which is the ordinary no-improvement outcome.
+    # Reading that as "the best is not in the worktree" discarded a valid
+    # measurement of the port on the most common path, so the two are named
+    # apart and only a failed restore is suspect.
+    assert optimize.RESTORED_UNCHANGED != optimize.RESTORED_FALLBACK
+    trustworthy = ("", optimize.RESTORED_BEST, optimize.RESTORED_UNCHANGED)
+    assert optimize.RESTORED_UNCHANGED in trustworthy
+    assert optimize.RESTORED_FALLBACK not in trustworthy
+    assert optimize.RESTORED_NOTHING not in trustworthy
+
+
+def test_the_incumbent_case_time_coherence_flag_survives_a_resume():
+    # The flag was in-memory only while the stale times it guards are restored
+    # from run state, so a resumed session reported them as if they described
+    # the incumbent -- the exact case its docstring cites.
+    assert "best_case_times_describe_best" in {f.name for f in fields(RunState)}
+    # Defaults to True so a checkpoint written before the field existed keeps
+    # reporting its times, matching how the session that wrote it behaved.
+    assert RunState().best_case_times_describe_best is True
+
+
 def test_malformed_timings_are_fatal_on_both_driver_paths():
     # Warning on one path and failing on the other decides the run by which
     # measurement happened to come first.
@@ -591,6 +616,65 @@ def test_the_kb_improvement_gate_grades_on_the_mean_not_the_aggregate(monkeypatc
         spec, "driver.py", config, source_ms=2.0, flydsl_best_ms=4.0, mean_case_speedup=None
     )
     assert legacy["reason"] == "no_improvement"
+
+
+def test_one_resolver_owns_every_fall_back_to_the_aggregate():
+    # Four call sites each writing `mean if mean is not None else aggregate` is
+    # how a path that must refuse ends up publishing instead.
+    mean = driver_contract.resolve_cross_language_score(
+        source_case_times={"a": 4.0},
+        candidate_case_times={"a": 2.0},
+        source_ms=4.0,
+        candidate_ms=2.0,
+    )
+    assert (mean.speedup, mean.basis, mean.publishable) == (2.0, driver_contract.SPEEDUP_BASIS_MEAN_CASE, True)
+
+    aggregate = driver_contract.resolve_cross_language_score(
+        source_case_times={},
+        candidate_case_times={},
+        source_ms=4.0,
+        candidate_ms=2.0,
+    )
+    assert (aggregate.speedup, aggregate.basis) == (2.0, driver_contract.SPEEDUP_BASIS_AGGREGATE)
+
+    # A coverage mismatch publishes nothing, and the aggregates it was given
+    # do not change that: they compare the same mismatched work.
+    mismatch = driver_contract.resolve_cross_language_score(
+        source_case_times={"a": 4.0, "b": 4.0},
+        candidate_case_times={"a": 2.0},
+        source_ms=4.0,
+        candidate_ms=2.0,
+    )
+    assert mismatch.publishable is False
+    assert mismatch.basis == ""
+    assert mismatch.reason == driver_contract.CASE_SCORE_INCOMPARABLE
+
+
+def test_the_consumer_refuses_a_producer_that_published_no_speedup():
+    # The producer's refusal has to survive the hand-off, or the consumer
+    # divides the aggregates the manifest still carries and accepts the patch.
+    refused = _measured_applyback() | {
+        "mean_case_speedup": None,
+        "speedup_basis": "",
+        "speedup_unavailable_reason": driver_contract.CASE_SCORE_INCOMPARABLE,
+    }
+    assert forge_submit._rewrite_micro_speedup(refused) is None
+
+
+def test_a_malformed_manifest_is_graded_not_raised_on():
+    # A manifest comes from another process. Casting its fields raises out of
+    # the submission path instead of rejecting the artifact.
+    malformed = _measured_applyback() | {
+        "baseline_case_times": {"a": "not-a-number"},
+        "best_case_times": "not-a-dict",
+        "unscored_cases": 7,
+    }
+    # Unusable evidence means the declared mean cannot be verified, so the
+    # aggregate is used -- the conservative direction -- and nothing raises.
+    assert forge_submit._rewrite_micro_speedup(malformed) == pytest.approx(0.955, abs=1e-3)
+    assert forge_submit._case_times({"a": "x", "b": 2.0}) == {"b": 2.0}
+    assert forge_submit._case_times("nope") == {}
+    assert forge_submit._case_ids(7) == ()
 
 
 def test_aggregate_ratio_is_used_and_named_when_a_driver_reports_no_cases():

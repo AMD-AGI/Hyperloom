@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from kernelforge.llm.git import git
+from kernelforge.rewrite_by_flydsl import driver_contract
 from kernelforge.agent_backends import (
     AgentHook,
     AgentHooks,
@@ -630,14 +631,28 @@ def _publish_patch(
     version_name = f"iter_{iteration:03d}"
     version = best_root / version_name
     relative_dir = version.relative_to(root)
-    # The published speedup is the equal-weight mean over cases when the driver
-    # reported per-case timings, and the ratio of aggregates only when it did
-    # not. The consumer gates publication on this number, so it has to be the
-    # statistic the search optimized: an aggregate ratio on a suite whose cases
-    # span orders of magnitude is set by the largest case alone, and it rejects
-    # a kernel that is faster on most of the shapes the operator serves.
+    # The consumer gates publication on the manifest's `speedup`, so it has to
+    # be the statistic the search optimized and it has to be absent when no
+    # comparison exists. Both decisions belong to one resolver rather than to
+    # this call site: an aggregate ratio substituted here is a number the
+    # consumer cannot tell apart from a mean, and when the two driver paths
+    # timed different case sets it is a comparison of work that was never run.
     aggregate_speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
-    speedup = mean_case_speedup if mean_case_speedup is not None else aggregate_speedup
+    score = driver_contract.resolve_cross_language_score(
+        source_case_times=source_case_times,
+        candidate_case_times=flydsl_best_case_times,
+        unscored_cases=unscored_cases,
+        source_ms=source_ms,
+        candidate_ms=flydsl_best_ms,
+    )
+    # The caller resolves this once for the whole run; trust its verdict when it
+    # produced one so the manifest and the result cannot disagree.
+    if mean_case_speedup is not None:
+        score = driver_contract.CrossLanguageScore(
+            speedup=mean_case_speedup,
+            basis=driver_contract.SPEEDUP_BASIS_MEAN_CASE,
+        )
+    speedup = score.speedup
     manifest = validate_applyback_manifest(
         {
             "schema_version": protocol.ARTIFACT_SCHEMA_VERSION,
@@ -658,11 +673,14 @@ def _publish_patch(
             # Named separately so a consumer can tell which statistic `speedup`
             # is without inferring it, and can see the aggregate it may
             # legitimately disagree with.
-            "mean_case_speedup": mean_case_speedup,
+            "mean_case_speedup": (score.speedup if score.basis == driver_contract.SPEEDUP_BASIS_MEAN_CASE else None),
             "aggregate_speedup": aggregate_speedup,
             # Which of the two `speedup` is, stated rather than left to be
-            # inferred from whether mean_case_speedup happens to be null.
-            "speedup_basis": ("mean_case_speedup" if mean_case_speedup is not None else "aggregate_ratio"),
+            # inferred, and empty when it is neither. The consumer refuses to
+            # grade a manifest that declares no basis rather than dividing the
+            # aggregates it can still see here.
+            "speedup_basis": score.basis,
+            "speedup_unavailable_reason": score.reason,
             "baseline_case_times": dict(source_case_times or {}),
             "best_case_times": dict(flydsl_best_case_times or {}),
             # The exclusions the mean was computed under. A consumer

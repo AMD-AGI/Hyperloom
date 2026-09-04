@@ -3418,6 +3418,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         try:
             self.run_state.baseline_case_times = dict(self._baseline_case_times)
             self.run_state.best_case_times = dict(self._best_case_times)
+            self.run_state.best_case_times_describe_best = self._best_case_times_describe_best
             self.run_state.unscored_cases = sorted(self._unscored_cases)
             self.state_store.save(self.run_state)
         except Exception:  # noqa: BLE001 - persistence is best-effort
@@ -3431,6 +3432,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         state = self.run_state
         if state.best_case_times:
             self._best_case_times = dict(state.best_case_times)
+            # Restored with the times, or a resumed session would report cases
+            # that describe an older kernel as if they described the incumbent.
+            self._best_case_times_describe_best = bool(getattr(state, "best_case_times_describe_best", True))
         if state.unscored_cases:
             self._unscored_cases = {str(case_id) for case_id in state.unscored_cases}
         self._scoring_state_restored = True

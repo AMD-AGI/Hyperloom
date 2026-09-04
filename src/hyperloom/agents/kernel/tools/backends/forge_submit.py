@@ -2365,6 +2365,33 @@ def _positive_number(value: object) -> float | None:
     return number
 
 
+def _case_times(value: object) -> dict[str, float]:
+    """Per-case timings out of a manifest, dropping anything unusable.
+
+    A manifest is produced by another process and may be malformed, so every
+    field it contributes is parsed rather than cast. A bare ``float(v)`` here
+    raises out of the submission path instead of rejecting the artifact, and a
+    consumer that cannot read a timing has to grade as if it were absent -- the
+    declared-mean cross-check then disagrees and the aggregate is used, which is
+    the conservative direction.
+    """
+    if not isinstance(value, dict):
+        return {}
+    parsed: dict[str, float] = {}
+    for case_id, raw in value.items():
+        number = _positive_number(raw)
+        if number is not None:
+            parsed[str(case_id)] = number
+    return parsed
+
+
+def _case_ids(value: object) -> tuple[str, ...]:
+    """Case ids out of a manifest list, ignoring a malformed payload."""
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    return tuple(str(case_id) for case_id in value)
+
+
 def _rewrite_micro_speedup(applyback: dict) -> float | None:
     """This route's validated micro gain, on the statistic the producer scored.
 
@@ -2382,14 +2409,24 @@ def _rewrite_micro_speedup(applyback: dict) -> float | None:
     """
     from kernelforge.rewrite_by_flydsl import driver_contract  # noqa: PLC0415
 
+    # The producer resolved this already and says so. When it declares that no
+    # comparison exists -- its two driver paths timed different case sets --
+    # dividing the aggregates it still published compares the same mismatched
+    # work by another route, so the artifact is refused for want of evidence
+    # rather than accepted on a number that means nothing.
+    if applyback.get("speedup_unavailable_reason"):
+        log.info(
+            "forge rewrite: the producer published no speedup (%s); refusing to substitute one",
+            applyback.get("speedup_unavailable_reason"),
+        )
+        return None
+
     mean = _positive_number(applyback.get("mean_case_speedup"))
     if mean is not None:
-        baseline_cases = applyback.get("baseline_case_times") or {}
-        best_cases = applyback.get("best_case_times") or {}
         recomputed, _reason = driver_contract.cross_language_mean_case_speedup(
-            {str(k): float(v) for k, v in baseline_cases.items()},
-            {str(k): float(v) for k, v in best_cases.items()},
-            applyback.get("unscored_cases") or (),
+            _case_times(applyback.get("baseline_case_times")),
+            _case_times(applyback.get("best_case_times")),
+            _case_ids(applyback.get("unscored_cases")),
         )
         if recomputed is None:
             log.warning(
@@ -2752,9 +2789,13 @@ def _validated_rewrite_applyback_result(
         "mean_case_speedup": manifest.get("mean_case_speedup"),
         "aggregate_speedup": manifest.get("aggregate_speedup"),
         "speedup_basis": str(manifest.get("speedup_basis") or ""),
-        "baseline_case_times": dict(manifest.get("baseline_case_times") or {}),
-        "best_case_times": dict(manifest.get("best_case_times") or {}),
-        "unscored_cases": list(manifest.get("unscored_cases") or []),
+        "speedup_unavailable_reason": str(manifest.get("speedup_unavailable_reason") or ""),
+        # Parsed, not cast: these come from another process's JSON, and a bare
+        # dict()/list() over a malformed payload raises out of the submission
+        # path instead of rejecting the artifact.
+        "baseline_case_times": _case_times(manifest.get("baseline_case_times")),
+        "best_case_times": _case_times(manifest.get("best_case_times")),
+        "unscored_cases": list(_case_ids(manifest.get("unscored_cases"))),
         "artifact_kind": _REWRITE_ARTIFACT_KIND,
         "artifact_schema_version": artifact_schema_version,
         "validation_scope": _REWRITE_VALIDATION_SCOPE,

@@ -38,7 +38,16 @@ _RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
 
 # Which kernel the worktree holds after OPTIMIZE hands back control.
+#
+# UNCHANGED and FALLBACK both leave the pre-OPTIMIZE content on disk, and the
+# difference is whether anything better was supposed to be there. When the loop
+# names no best commit it has nothing to restore, so the port it measured is
+# already what the worktree holds and its numbers describe it. When the loop
+# names one and it could not be put back, the numbers describe a kernel that is
+# not there. Collapsing the two discards every run where the loop simply found
+# no improvement, which is the common outcome.
 RESTORED_BEST = "best"
+RESTORED_UNCHANGED = "unchanged"
 RESTORED_FALLBACK = "fallback"
 RESTORED_NOTHING = "nothing"
 
@@ -128,14 +137,18 @@ def _restore_best_kernel(
 
     Returns which kernel the worktree ended up holding:
 
-      ``RESTORED_BEST``      the loop's best commit
-      ``RESTORED_FALLBACK``  the content from before OPTIMIZE, i.e. the port
-      ``RESTORED_NOTHING``   neither was available
+      ``RESTORED_BEST``       the loop's best commit
+      ``RESTORED_UNCHANGED``  the pre-OPTIMIZE content, and nothing better was
+                              named -- the loop found no improvement, so the
+                              port it measured is what is on disk
+      ``RESTORED_FALLBACK``   the pre-OPTIMIZE content, but a best WAS named and
+                              could not be put back
+      ``RESTORED_NOTHING``    nothing could be written
 
-    The three are not interchangeable to a caller that reports timings. The
-    fallback path leaves the PORT on disk while the loop's result still names
-    its own best, so a caller told only "something was restored" would attribute
-    the loop's best_ms to a file that is not there.
+    These are not interchangeable to a caller that reports timings. Only
+    FALLBACK and NOTHING mean the result's numbers describe a kernel that is not
+    there; UNCHANGED is the ordinary no-improvement outcome and its measurement
+    is valid.
     """
     kernel = Path(spec.flydsl_kernel)
     workspace = Path(spec.workspace).resolve()
@@ -144,7 +157,11 @@ def _restore_best_kernel(
     except ValueError:
         relative = None
 
-    if best_commit and relative is not None:
+    # No best to restore: the loop found no improvement, so the kernel it
+    # measured is the one already in the worktree. Writing the identical bytes
+    # back would report a failed restore for the ordinary outcome.
+    wanted_best = bool(best_commit) and relative is not None
+    if wanted_best:
         exists = git(
             "-C",
             str(workspace),
@@ -175,7 +192,7 @@ def _restore_best_kernel(
     kernel.write_bytes(fallback_content)
     if fallback_mode is not None:
         kernel.chmod(fallback_mode)
-    return RESTORED_FALLBACK
+    return RESTORED_FALLBACK if wanted_best else RESTORED_UNCHANGED
 
 
 def run_optimize(
@@ -369,9 +386,10 @@ def run_optimize(
     return {
         **result,
         "terminated_for_deadline": terminated_for_deadline,
-        # True only when the loop's own best is what the worktree holds. The
-        # fallback path also leaves a usable kernel there, but it is the port,
-        # so a caller reporting the loop's timings has to tell the two apart.
-        "best_kernel_restored": restored == RESTORED_BEST,
+        # True when the worktree holds the kernel the result's numbers describe:
+        # the loop's best when it named one, or the port it measured when it
+        # named none. False only when something better was expected and is not
+        # there.
+        "best_kernel_restored": restored in (RESTORED_BEST, RESTORED_UNCHANGED),
         "restored_kernel": restored,
     }
