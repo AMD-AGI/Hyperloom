@@ -4,8 +4,8 @@
 """Copy enablement round deliverables into ``reports/enablement/<task_id>/``.
 
 The archive collector drops ``runs/`` wholesale and retains ``reports/``, so a
-patch or launch config left in the specialist workspace never reaches the
-archive and the fix cannot be replayed by a later session.
+patch, launch config or server log left in the specialist workspace never
+reaches the archive and the fix cannot be replayed by a later session.
 """
 
 from __future__ import annotations
@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 # eat into the archive's per-session budget.
 _FILE_SIZE_LIMIT = 2 * 1024 * 1024
 
+# Server logs routinely exceed _FILE_SIZE_LIMIT, so they are truncated rather
+# than skipped. Half the patch ceiling still holds tens of thousands of lines of
+# a crash while bounding what a many-round session adds to the archive.
+_SERVER_LOG_TAIL_LIMIT = 1024 * 1024
+
+_LOG_TRUNCATION_NOTE = "[hyperloom] truncated: the first {dropped} bytes are missing; the tail follows.\n"
+
 _LAUNCH_LOG_EXCERPT_CHARS = 1200
 
 
@@ -44,7 +51,43 @@ def _copy(src: Path, dest: Path) -> bool:
     return True
 
 
-def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
+def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -> bool:
+    """Copy at most the last ``limit`` bytes of ``src`` to ``dest``.
+
+    The tail and not the head: a launch failure writes its traceback at the end
+    of the log. What lands never exceeds ``limit`` plus the truncation note.
+
+    Returns:
+        ``True`` when the file landed at ``dest``.
+    """
+    if not src.is_file():
+        return False
+    dropped = max(0, src.stat().st_size - limit)
+    with src.open("rb") as fh:
+        if dropped:
+            fh.seek(dropped)
+        # Bounded here and not by EOF: the stat above can under-report a log
+        # that is still being appended to.
+        raw = fh.read(limit)
+    # The seek lands mid-codepoint, so the decode has to be lenient. It ignores
+    # rather than replaces: U+FFFD is three bytes, so a tail of binary noise
+    # would otherwise write three times ``limit``.
+    text = raw.decode("utf-8", errors="ignore")
+    if dropped:
+        text = _LOG_TRUNCATION_NOTE.format(dropped=dropped) + text
+    atomic_write_text(dest, text, make_parents=True)
+    return True
+
+
+def role_path(files: list[dict[str, str]], role: str) -> str:
+    """The session-relative path recorded for ``role``, or ``""`` when absent.
+
+    For the single-valued roles: ``patch`` repeats and needs the list itself.
+    """
+    return next((entry["path"] for entry in files if entry["role"] == role), "")
+
+
+def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[str, str]]:
     """Archive one enablement round's patches, specialist result and launch config.
 
     Rounds the phase synthesises carry no task id and no deliverables, and are
@@ -53,14 +96,69 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
     Args:
         session_dir: The session root directory.
         res: The ``integrate_patch`` result for an enablement round.
+
+    Returns:
+        One ``{"path", "role"}`` entry per deliverable that landed, ``path``
+        session-relative POSIX. Roles: ``patch`` (any number),
+        ``specialist_result``, ``prompt``, ``launch_config``, ``server_log``.
+        A copy the size ceiling refused is absent rather than listed.
     """
     task_id = str(res.get("specialist_task_id") or "").strip()
     if not task_id:
-        return
-    round_dir = enablement_round_dir(Path(session_dir), task_id)
+        return []
+    root = Path(session_dir)
+    round_dir = enablement_round_dir(root, task_id)
     round_dir.mkdir(parents=True, exist_ok=True)
+    written: list[dict[str, str]] = []
+
+    def _record(role: str, dest: Path) -> None:
+        written.append({"path": dest.relative_to(root).as_posix(), "role": role})
+
+    patches_dir = round_dir / "patches"
+    copied: set[str] = set()
+    for applied in res.get("patches_applied") or []:
+        src = Path(str(applied))
+        dest = patches_dir / src.name
+        if _copy(src, dest):
+            _record("patch", dest)
+        # Marked seen even when refused, so the sweep below does not retry it.
+        copied.add(src.name)
+
+    workspace = runs_dir(root, "specialist", task_id)
+    for name, role in (("specialist_done.json", "specialist_result"), ("prompt.md", "prompt")):
+        dest = round_dir / name
+        if _copy(workspace / name, dest):
+            _record(role, dest)
+
+    # Patches the round did not apply still explain what was attempted.
+    for base in (workspace, workspace / "worktree"):
+        for pattern in ("*.patch", "*.diff"):
+            for src in sorted((base / "patches").glob(pattern)):
+                if src.name in copied:
+                    continue
+                dest = patches_dir / src.name
+                if _copy(src, dest):
+                    _record("patch", dest)
+                copied.add(src.name)
+
+    accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
+    if accepted_config:
+        dest = round_dir / "launch_config.yaml"
+        if _copy(Path(accepted_config), dest):
+            _record("launch_config", dest)
+
+    # Only a round that reached a bench has one: a rejected patch or a broken
+    # build never started a server, so an absent log is normal.
+    bench = res.get("bench_result")
+    server_log = str(bench.get("server_log_path") or "").strip() if isinstance(bench, dict) else ""
+    if server_log:
+        dest = round_dir / "server.log"
+        if _copy_log_tail(Path(server_log), dest):
+            _record("server_log", dest)
 
     launch_log = str(res.get("enablement_launch_log") or "")
+    # Written last so the config path it names is the copy that just landed
+    # under ``reports/``, not the ``runs/`` original the collector drops.
     atomic_write_json(
         round_dir / "round.json",
         {
@@ -82,34 +180,12 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> None:
             "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
             "framework_switch_problems": res.get("framework_switch_problems") or [],
             "after_signature": res.get("after_signature") or {},
-            "enablement_accepted_config_path": res.get("enablement_accepted_config_path") or "",
+            "enablement_accepted_config_path": role_path(written, "launch_config"),
             "enablement_effective_config": res.get("enablement_effective_config") or {},
             "launch_log_excerpt": launch_log[:_LAUNCH_LOG_EXCERPT_CHARS],
         },
     )
-
-    patches_dir = round_dir / "patches"
-    copied: set[str] = set()
-    for applied in res.get("patches_applied") or []:
-        src = Path(str(applied))
-        _copy(src, patches_dir / src.name)
-        copied.add(src.name)
-
-    workspace = runs_dir(Path(session_dir), "specialist", task_id)
-    _copy(workspace / "specialist_done.json", round_dir / "specialist_done.json")
-    _copy(workspace / "prompt.md", round_dir / "prompt.md")
-
-    # Patches the round did not apply still explain what was attempted.
-    for base in (workspace, workspace / "worktree"):
-        for pattern in ("*.patch", "*.diff"):
-            for src in sorted((base / "patches").glob(pattern)):
-                if src.name not in copied:
-                    _copy(src, patches_dir / src.name)
-                    copied.add(src.name)
-
-    accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
-    if accepted_config:
-        _copy(Path(accepted_config), round_dir / "launch_config.yaml")
+    return written
 
 
 def write_setting_script(
@@ -210,4 +286,4 @@ def write_setting_script(
     return str(out.relative_to(session_dir))
 
 
-__all__ = ["snapshot_round", "write_setting_script"]
+__all__ = ["role_path", "snapshot_round", "write_setting_script"]
