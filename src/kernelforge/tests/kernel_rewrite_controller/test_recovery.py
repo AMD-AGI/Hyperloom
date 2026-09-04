@@ -178,3 +178,81 @@ def test_recovery_ignores_uncommitted_workspace_edits(tmp_path: Path) -> None:
     assert recovered.published is False
     assert recovered.reason == "no trusted forge-loop best result"
     assert published_operator_dirs(layout) == ()
+
+
+def test_a_stale_sidecar_does_not_pull_the_published_patch_backwards(tmp_path: Path) -> None:
+    # The two views are not equally attested: a manifest is trusted only once
+    # describes_current_best has confirmed a complete bundle, while the sidecar
+    # needs an improved flag and a commit. Preferring the sidecar whenever the
+    # commits differed let an earlier keep's result.json publish the older patch.
+    layout, task_dir, worktree, older_commit = _prepared_workspace(tmp_path)
+    worktree.kernel_path.write_text("VALUE = 3\n", encoding="utf-8")
+    _git(worktree.workspace, "add", ".")
+    _git(worktree.workspace, "commit", "-m", "optimized again")
+    newer_commit = _git(worktree.workspace, "rev-parse", "HEAD")
+
+    BestResultPublisher(str(worktree.workspace)).publish(
+        campaign_id="campaign",
+        session_index=0,
+        experiment_id="experiment",
+        iteration=5,
+        commit_hash=newer_commit,
+        plan="optimize",
+        baseline_wall_ms=2.0,
+        search_start_ms=2.0,
+        best_wall_ms=0.5,
+        mean_case_speedup=4.0,
+        search_start_mean_case_speedup=1.0,
+        snr_db=100.0,
+        validation_text="PASS\n",
+        benchmark={"success": True},
+        changed_files=["kernel.py"],
+        patch=export_patch_from_base(worktree, best_commit=newer_commit),
+    )
+    (task_dir / "forge-result.json").write_text(
+        json.dumps({"improved": True, "best_commit": older_commit, "best_iteration": 3}),
+        encoding="utf-8",
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is True
+    assert recovered.best_commit == newer_commit
+    assert recovered.patch_dir is not None
+    assert "VALUE = 3" in (recovered.patch_dir / "change.patch").read_text(encoding="utf-8")
+
+
+def test_a_newer_sidecar_still_wins_over_an_older_manifest(tmp_path: Path) -> None:
+    layout, task_dir, worktree, older_commit = _prepared_workspace(tmp_path)
+    worktree.kernel_path.write_text("VALUE = 3\n", encoding="utf-8")
+    _git(worktree.workspace, "add", ".")
+    _git(worktree.workspace, "commit", "-m", "optimized again")
+    newer_commit = _git(worktree.workspace, "rev-parse", "HEAD")
+
+    BestResultPublisher(str(worktree.workspace)).publish(
+        campaign_id="campaign",
+        session_index=0,
+        experiment_id="experiment",
+        iteration=3,
+        commit_hash=older_commit,
+        plan="optimize",
+        baseline_wall_ms=2.0,
+        search_start_ms=2.0,
+        best_wall_ms=1.0,
+        mean_case_speedup=2.0,
+        search_start_mean_case_speedup=1.0,
+        snr_db=100.0,
+        validation_text="PASS\n",
+        benchmark={"success": True},
+        changed_files=["kernel.py"],
+        patch=export_patch_from_base(worktree, best_commit=older_commit),
+    )
+    (task_dir / "forge-result.json").write_text(
+        json.dumps({"improved": True, "best_commit": newer_commit, "best_iteration": 5}),
+        encoding="utf-8",
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is True
+    assert recovered.best_commit == newer_commit

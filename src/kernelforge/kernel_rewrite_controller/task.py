@@ -232,7 +232,13 @@ def discover_task_dirs(layout: ControllerLayout) -> list[Path]:
 
 
 def sort_tasks(tasks: list[KernelRewriteTask]) -> list[KernelRewriteTask]:
-    """Sort by agent priority and canonical identity, dropping duplicate identities."""
+    """Sort by agent priority and canonical identity, keeping one task per identity.
+
+    The scheduler already drops duplicates before calling this, because it holds
+    the task directories and can record a skip reason against the loser, which a
+    list of contracts cannot. The pass here is what makes this helper safe for any
+    other caller rather than a second line of defence for that one.
+    """
     selected: dict[str, KernelRewriteTask] = {}
     for task in sorted(tasks, key=lambda item: (item.priority, item.operator_id)):
         selected.setdefault(task.operator_id, task)

@@ -88,6 +88,44 @@ def _trusted_result_sidecar(task_dir: Path) -> dict[str, Any] | None:
     return {**result, "commit_hash": best_commit}
 
 
+def _iteration_of(payload: dict[str, Any]) -> int | None:
+    """The loop iteration a trusted result belongs to, when it names one."""
+    for key in ("iteration", "best_iteration"):
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        return value
+    return None
+
+
+def _select_trusted_result(
+    manifest: dict[str, Any] | None,
+    sidecar: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Choose between the two trusted views of one workspace's best result.
+
+    They are not equally attested. A manifest is trusted only once
+    ``describes_current_best`` has confirmed a complete bundle behind it, while
+    the sidecar needs an ``improved`` flag and a commit. So the manifest wins
+    whenever both name the same commit, and when they name different ones the
+    newer iteration wins -- a sidecar left from an earlier keep must not pull the
+    published patch backwards, which is what preferring it outright allowed.
+    """
+    if sidecar is None:
+        return manifest, "best manifest"
+    if manifest is None:
+        return sidecar, "forge result sidecar"
+    if str(sidecar.get("commit_hash") or "") == str(manifest.get("commit_hash") or ""):
+        return manifest, "best manifest"
+    manifest_iteration = _iteration_of(manifest)
+    sidecar_iteration = _iteration_of(sidecar)
+    if manifest_iteration is not None and sidecar_iteration is not None and sidecar_iteration > manifest_iteration:
+        return sidecar, "forge result sidecar"
+    # Either the manifest is at least as new, or one of them names no iteration
+    # to compare on. Keep the better-attested view rather than guessing.
+    return manifest, "best manifest"
+
+
 def _already_published(layout: ControllerLayout, operator_id: str, best_commit: str) -> bool:
     metadata = _load_json(layout.patch_dir(operator_id) / PUBLICATION_FILENAME)
     return bool(metadata and str(metadata.get("best_commit") or "") == best_commit)
@@ -112,14 +150,10 @@ def recover_task_result(
             reason="operator workspace does not exist",
         )
 
-    manifest = _trusted_manifest(workspace)
-    sidecar = _trusted_result_sidecar(Path(task_dir))
-    source = "best manifest"
-    if sidecar is not None and (
-        manifest is None or str(sidecar.get("commit_hash") or "") != str(manifest.get("commit_hash") or "")
-    ):
-        manifest = sidecar
-        source = "forge result sidecar"
+    manifest, source = _select_trusted_result(
+        _trusted_manifest(workspace),
+        _trusted_result_sidecar(Path(task_dir)),
+    )
     if manifest is None:
         return RecoveryResult(
             operator_id=task.operator_id,

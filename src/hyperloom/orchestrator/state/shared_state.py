@@ -3421,8 +3421,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-                # Vendor-playbook fields remain part of the trace evidence the
-                # rewrite controller and reporting surfaces consume.
+                # Vendor-playbook fields ride along as reporting detail. Nothing
+                # enforces the gpu_pct floor any more: the controller is handed
+                # kernel_candidates.json as a path and treats its contents as a
+                # hint its analysis may overrule, so these are text for a model
+                # to read rather than a threshold anyone tests.
                 "patch_strategy": entry.get("patch_strategy") or "",
                 "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
                 "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),

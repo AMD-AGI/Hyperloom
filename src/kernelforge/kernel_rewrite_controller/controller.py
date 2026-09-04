@@ -244,7 +244,13 @@ def run_controller(
     budget_minutes: float,
     output_dir: str | Path,
 ) -> ControllerRunState:
-    """Initialize one fresh controller run and emit a no-opportunity result."""
+    """Run one macro cycle's rewrite campaign against a fresh output directory.
+
+    Reads the handoff, runs opportunity analysis, dispatches every task it
+    published, reclaims validated forge-loop results into patches, and records a
+    terminal status. An already-initialized output directory is refused rather
+    than resumed, so each macro cycle brings its own.
+    """
     budget = _validate_budget(budget_minutes)
     handoff_path = Path(handoff_dir).expanduser().resolve()
     layout = ControllerLayout(Path(output_dir))

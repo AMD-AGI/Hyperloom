@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
@@ -85,18 +85,6 @@ def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
             raise ValueError(f"source path is not tracked in repo_root at base_commit: {relative}") from error
 
 
-def _fsync_tree(root: Path) -> None:
-    for directory, _subdirectories, filenames in os.walk(root):
-        current = Path(directory)
-        for filename in filenames:
-            descriptor = os.open(str(current / filename), os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        fsync_directory(current)
-
-
 def publish_staged_task(
     layout: ControllerLayout,
     staged_dir: str | Path,
@@ -158,7 +146,7 @@ def publish_staged_task(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
         )
         shutil.copy2(driver, temporary / "driver.py")
-        _fsync_tree(temporary)
+        fsync_tree(temporary)
         os.replace(temporary, destination)
         fsync_directory(layout.tasks_root)
     finally:

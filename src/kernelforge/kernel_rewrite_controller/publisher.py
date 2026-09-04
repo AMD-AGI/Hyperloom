@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 
@@ -64,18 +64,6 @@ def _version_root(layout: ControllerLayout, operator_id: str) -> Path:
     return layout.patch_versions_root / digest
 
 
-def _fsync_tree(root: Path) -> None:
-    for directory, _subdirectories, filenames in os.walk(root):
-        current = Path(directory)
-        for filename in filenames:
-            descriptor = os.open(str(current / filename), os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        fsync_directory(current)
-
-
 def _validate_version(version: Path, publication: OperatorPublication) -> None:
     required = (PATCH_FILENAME, REPORT_FILENAME, PUBLICATION_FILENAME)
     missing = [name for name in required if not (version / name).is_file()]
@@ -119,7 +107,7 @@ def publish_operator_result(
                 staging / PUBLICATION_FILENAME,
                 json.dumps(publication.metadata(), indent=2, sort_keys=True) + "\n",
             )
-            _fsync_tree(staging)
+            fsync_tree(staging)
             os.replace(staging, version)
             fsync_directory(versions)
         finally:
