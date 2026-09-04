@@ -31,6 +31,7 @@ from hyperloom.common.env import env_bool
 from ._recorder_trace import trace_recording_skipped
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
+    VERDICT_STATUSES,
     clamp_by_budget,
     evict_terminal,
     patch_budget,
@@ -322,13 +323,21 @@ def enqueue_nominated_patch(
     ``_ensure_kernel_task_state`` (evict_terminal keeps non-terminal records; the
     re-queue loop only ADDS). Idempotent on ``(source_file, artifact_path)``.
 
+    The fusion workspace path is a constant, so a re-discovered recipe collapses
+    onto its own earlier record. A ``dispatch_failed`` one is revived for another
+    attempt -- the drain crashed, the patch never got a verdict. A record already
+    ``integrated`` or ``rejected`` is left exactly as it is: reviving a verdict to
+    pending misreports it and, since evict_terminal only reaps terminal records,
+    would keep it in the queue forever.
+
     Args:
         state: SharedState (mutated in place).
         patch: A ``NominatedPatch`` (duck-typed) from ``parse_outcome``.
         keep_threshold_pct: The fusion-specific e2e KEEP bar to carry.
 
     Returns:
-        The queued record, or ``None`` when the patch has no artifact to apply.
+        The queued record, or ``None`` when the patch has no artifact to apply or
+        its record already carries a verdict.
     """
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
@@ -423,6 +432,16 @@ def enqueue_nominated_patch(
         # rewrite re-enqueue would resurrect fusion identity onto its record.
         queued = queue[integration_id]
         if isinstance(queued, dict):
+            if str(queued.get("status") or "") in VERDICT_STATUSES:
+                # A settled verdict is not re-litigated: reviving it to pending
+                # both misreports it and puts it beyond evict_terminal's reach.
+                log.info(
+                    "nomination re-offers %s patch %s (%s); keeping the verdict, not re-queueing",
+                    queued.get("status"),
+                    kernel_name or source_file,
+                    artifact_path,
+                )
+                return None
             queued["status"] = "pending"
             queued["micro_speedup"] = micro_speedup
             if lane == "fusion":

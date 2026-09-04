@@ -44,9 +44,14 @@ DEFAULT_PATCH_BUDGET = 3
 #: without bound.
 TERMINAL_RETENTION_MULTIPLE = 2
 
+#: Terminal statuses that record a settled judgement on the patch itself. The
+#: remaining terminal, ``dispatch_failed``, is a fault: the drain crashed before
+#: any judgement, so that record may be re-offered for another attempt.
+VERDICT_STATUSES = frozenset({"integrated", "rejected"})
+
 #: Statuses that mean the record will never be dispatched again. Pending is the
 #: only live state; everything else is eligible for eviction.
-TERMINAL_STATUSES = frozenset({"integrated", "rejected", "dispatch_failed"})
+TERMINAL_STATUSES = VERDICT_STATUSES | {"dispatch_failed"}
 
 
 def record_source_path(record: Mapping[str, Any]) -> str:
