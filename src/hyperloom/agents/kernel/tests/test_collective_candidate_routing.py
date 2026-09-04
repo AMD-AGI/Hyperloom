@@ -128,3 +128,70 @@ def test_nccl_marker_check_precedes_source_resolution():
     item = _candidate("ncclDevKernel_AllReduce", _AITER_SRC)
     reusable, _reason = tl.classify_patchability(item)
     assert reusable is False
+
+
+# --- A resolved lane verdict outranks the name heuristic ---------------------
+
+
+def _nccl_summary_row(name: str, source_file: str) -> dict:
+    """A row shaped like the one _nccl_summary_candidates.py:266-267 emits."""
+    return _candidate(name, source_file, candidate_source="nccl_summary")
+
+
+def test_lane_resolved_collective_is_not_unresolved_by_its_name():
+    """A name the heuristic reads as single-GPU must not clobber the lane's verdict.
+
+    _nccl_summary_candidates sets is_multigpu=True from TraceLens' nccl_summary
+    table plus a resolved device symbol. Re-deriving from the name flips these
+    rows to False, and is_collective_candidate then refuses them because it
+    gates on candidate_source == "nccl_summary" AND is_multigpu -- the lane
+    rejecting its own output.
+    """
+    for name in ("small_collective", "EpDispatchIntraNodeKernel_bf16", "ncclDevKernel_Generic_1"):
+        assert tl.is_multigpu_kernel(name, "") is False, f"{name} should be a name-heuristic miss"
+        item = _nccl_summary_row(name, "/sgl-workspace/aiter/csrc/include/other.cuh")
+        tl._stamp_candidate_metadata(item, None)
+        assert item["is_multigpu"] is True, name
+        assert item["num_gpus_recommended"] == 2, name
+
+
+def test_the_name_heuristic_still_runs_without_a_lane_verdict():
+    """The override is scoped: only a positive nccl_summary verdict is preserved."""
+    # No candidate_source at all -> derived from the name.
+    item = _candidate("small_collective", "/w/other.cuh")
+    tl._stamp_candidate_metadata(item, None)
+    assert item["is_multigpu"] is False
+    assert item["num_gpus_recommended"] == 1
+
+    # A different lane does not get the same authority.
+    item = _candidate("small_collective", "/w/other.cuh", candidate_source="other_bucket_fallback")
+    tl._stamp_candidate_metadata(item, None)
+    assert item["is_multigpu"] is False
+
+    # nccl_summary that did NOT claim multi-GPU is still derived, not forced True.
+    item = _candidate("plain_gemm_kernel", "/w/gemm.cu", candidate_source="nccl_summary")
+    item["is_multigpu"] = False
+    tl._stamp_candidate_metadata(item, None)
+    assert item["is_multigpu"] is False
+    assert item["num_gpus_recommended"] == 1
+
+    # ...and the derivation still RUNS for such a row rather than being skipped:
+    # the lane left is_multigpu False, but the name is an unmistakable collective,
+    # so the heuristic must be allowed to raise it. Without the is_multigpu
+    # qualifier on `authoritative` this row would stay False.
+    item = _candidate("ncclDevKernel_AllReduce_Sum_bf16_RING_LL", "/w/nccl.cu", candidate_source="nccl_summary")
+    item["is_multigpu"] = False
+    tl._stamp_candidate_metadata(item, None)
+    assert item["is_multigpu"] is True
+    assert item["num_gpus_recommended"] == 2
+
+
+def test_collective_vocabulary_covers_the_undelimited_and_all_to_all_spellings():
+    """reduce_scatter/all_gather had both spellings; reducescatter and all-to-all had none."""
+    for name in ("ReduceScatterFusion", "all_to_all_dispatch", "rccl_AllToAll", "ncclDevKernel_AllToAllv"):
+        assert tl.is_multigpu_kernel(name, "") is True, name
+        assert kernel_name_implies_multigpu(name) is True, f"{name}: sibling disagrees"
+
+    # Still not a collective just because it reduces something.
+    assert tl.is_multigpu_kernel("block_reduce_kernel", "") is False
+    assert tl.is_multigpu_kernel("layernorm_kernel", "") is False
