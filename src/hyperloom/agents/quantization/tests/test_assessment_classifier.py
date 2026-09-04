@@ -82,7 +82,7 @@ def test_blocked_md_eval_gap_accepted_does_not_bypass(build_workspace):
 
 def test_blocked_md_accepts_every_known_non_success_outcome():
     """New known failures are blocked unless explicitly classified as success."""
-    for outcome in OutcomeId:
+    for outcome in list(OutcomeId):
         parsed = _parse_blocked_outcome(f"outcome_id: {outcome.value}\n")
         assert parsed is (None if outcome in SUCCESS_TAGS else outcome)
 

@@ -1059,6 +1059,8 @@ class SpecialistSubprocessDispatcher:
             try:
                 process_log.chmod(0o600)
             except OSError:
+                # Tightening the mode is advisory; the run continues on filesystems
+                # that reject chmod.
                 pass
             stdin_fh: Any = None
             try:

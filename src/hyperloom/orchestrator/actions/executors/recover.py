@@ -499,6 +499,7 @@ class RecoverExecutor:
             try:
                 candidate.unlink()
             except OSError:
+                # Best-effort cleanup: an absent or locked pidfile is not an error.
                 pass
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:

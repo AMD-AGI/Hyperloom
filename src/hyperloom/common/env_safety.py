@@ -480,6 +480,7 @@ def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> 
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
+            # The temp file is already gone or unreachable; nothing left to clean.
             pass
         return
 

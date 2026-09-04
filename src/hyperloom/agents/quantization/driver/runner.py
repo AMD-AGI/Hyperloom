@@ -101,6 +101,7 @@ def _cleanup_quark_py310_compat(compat_dir: Path) -> None:
         compat_dir.chmod(0o755)
         shutil.rmtree(compat_dir)
     except OSError:
+        # Interpreter-exit cleanup; a leftover temp shim must not raise.
         pass
 
 

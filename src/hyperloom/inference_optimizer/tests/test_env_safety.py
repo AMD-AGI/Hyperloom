@@ -197,7 +197,7 @@ def test_redact_secret_values_masks_assignments_and_bearer_tokens():
         "Authorization: abcdef1234567890",
         "authorization: Basic YWJjOmRlZg==",
         "Authorization: Token abc123def456",
-        "Authorization: AWS4-HMAC-SHA256 Credential=abc123def456",
+        "Authorization: AWS4-HMAC-SHA256 Credential=EXAMPLEEXAMPLE",
         "AUTH_KEY=supersecret",
         "AUTHORIZATION=supersecretvalue",
         "X_AUTHORIZATION=supersecretvalue",
