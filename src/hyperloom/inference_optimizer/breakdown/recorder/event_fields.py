@@ -268,11 +268,10 @@ def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
 def analysis_detail(result: Any) -> dict[str, Any]:
     """Project one ``trace_analyze`` result into the shared detail block.
 
-    ``route`` and ``tool`` both come from ``_build_analysis_meta`` and are both
-    kept: the no-LLM TraceLens route reports ``deterministic`` / ``tracelens``
-    while the TraceLens-free reader reports ``bypass`` / ``bypass``, so
-    collapsing them would erase the difference between "TraceLens ran without an
-    LLM" and "TraceLens never ran". Tool-specific output stays in ``route_ext``.
+    ``route`` and ``tool`` both come from ``_build_analysis_meta``: the agent
+    route reports ``agent`` / ``tracelens``, while the TraceLens-free reader
+    reports ``bypass`` / ``bypass``. Keeping both preserves routing policy and
+    tool provenance. Tool-specific output stays in ``route_ext``.
 
     Args:
         result: The analysis tool's result dict.

@@ -87,11 +87,11 @@ def _ta_result(**overrides: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "status": "ok",
         "run_id": "tl-1",
-        "orchestrator_mode": "deterministic",
+        "orchestrator_mode": "claude_agent_sdk",
         "hot_kernels": [{"name": "gemm", "gpu_time_us": 10.0, "gpu_pct": 50.0, "count": 2}],
         "trace_health_warnings": [],
         "analysis_meta": {
-            "route": "deterministic",
+            "route": "agent",
             "tool": "tracelens",
             "steady_state": {"requested_mode": "decode_only", "source": "split_chunk"},
             "preflight": {"trace_input_type": "file", "trace_file_count": 1},
@@ -247,7 +247,7 @@ def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> No
     assert [row["effective"] for row in analysis["runs"]] == [False, True]
     assert analysis["n26_auto_retry"]["to_mode"] == "decode_only"
     effective = analysis["effective_run"]
-    assert effective["route"] == "deterministic"
+    assert effective["route"] == "agent"
     assert effective["tool"] == "tracelens"
     assert effective["hot_kernels"]["count"] == 1
     assert effective["preflight"]["trace_file_count"] == 1
