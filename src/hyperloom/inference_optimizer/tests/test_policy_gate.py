@@ -238,7 +238,7 @@ def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     assert excinfo.value.rule == "request_kind"
 
 
-@pytest.mark.parametrize("kind", ["trace_analyze", "run_optimization", "integrate", "apply_patch"])
+@pytest.mark.parametrize("kind", ["trace_analyze", "integrate", "apply_patch"])
 def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentType
 

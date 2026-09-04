@@ -60,7 +60,6 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
         "run_collective",
         "run_fusion",
         "run_gemm_tuning",
-        "run_optimization",
     }
 )
 

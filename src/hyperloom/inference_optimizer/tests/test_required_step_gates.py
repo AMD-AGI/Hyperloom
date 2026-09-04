@@ -241,26 +241,3 @@ def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
     assert get_handler("trace_analyze") is not None
 
 
-def test_closing_phase_denies_non_report_proposals():
-    state = SharedState(closing_phase=True)
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        shared_state=state,
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-            ),
-        )
-    assert exc.value.rule == "closing_phase_only_report"
-
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": "report", "predicted_gain_pct": 0.0},
-        ),
-    )

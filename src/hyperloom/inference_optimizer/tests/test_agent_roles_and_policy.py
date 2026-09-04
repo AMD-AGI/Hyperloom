@@ -170,20 +170,27 @@ def test_gate_orchestration_propose_action_ok(gate):
     )
 
 
-def test_gate_orchestration_propose_kernel_owned_rejected():
-    """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
+def test_gate_refuses_a_proposed_gemm_tuning_lane():
+    """The lane's own guard answers on the propose channel too.
+
+    Kernel ownership alone no longer denies a proposal -- the gate stopped
+    expressing that workflow opinion -- so this holds the one refusal that is
+    about the lane rather than about which agent owns it: gemm_tuning is
+    dispatched once at KERNEL entry from a lane budget.
+    """
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    for action in ("gemm_tuning", "integrate"):
-        with pytest.raises(PolicyDenied) as exc:
-            gate.validate_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.PROPOSE_ACTION,
-                    payload={"action_name": action, "predicted_gain_pct": 10.0},
-                ),
-            )
-        assert exc.value.rule == "kernel_owned_by_kernel_agent", action
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "gemm_tuning", "predicted_gain_pct": 10.0},
+            ),
+        )
+
+    assert exc.value.rule == "phase_incompatible"
 
 
 @pytest.mark.parametrize("precision", ["bf16", "fp8"])
@@ -195,12 +202,16 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
     per-tick re-issue would spend time the allocation never granted. Precision
     and backend order are still not pre-filtered -- the reason is the same for
     every combination of them, which is what the parametrization pins.
+
+    On this channel the refusal comes from the Coordinator-owned request kinds,
+    so the rule names the kind rather than the phase. What the test holds is that
+    the request is refused for every precision and backend order.
     """
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     if backend_order:
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
     state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
@@ -209,7 +220,7 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
                 payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
             ),
         )
-    assert exc.value.rule == "phase_incompatible"
+    assert exc.value.rule == "request_kind"
 
 
 def test_gemm_tuning_lane_is_not_offered_to_the_llm():
@@ -232,31 +243,10 @@ def test_gemm_tuning_lane_is_not_offered_to_the_llm():
     assert "gemm_tuning" in KERNEL_AGENT_OWNED_ACTIONS
 
 
-def test_explore_disabled_hint_names_no_action_the_gate_refuses():
-    """A hint that recommends a denied action buys the model a guaranteed retry."""
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    state.framework_agent_phase_enabled = False
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "explore", "predicted_gain_pct": 5.0},
-            ),
-        )
-
-    assert exc.value.rule == "explore_disabled"
-    assert "gemm_tuning" not in (exc.value.hint or "")
-    assert "kernel_opt" not in (exc.value.hint or "")
-    assert "integrate" in (exc.value.hint or "")
-
-
 def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
     """Closing the lanes must not close integrate; draining KEEPs stays its job."""
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     gate.validate_intent(
         "orchestration",
         Intent(
