@@ -64,30 +64,27 @@ class MaintenanceCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    async def _maybe_run_maintenance_tick(
+    async def _run_maintenance(
         self,
         *,
         tick: int,
     ) -> dict[str, Any] | None:
         """Periodic in-process maintenance (R5 reaper + R4 DB retention).
 
-        On a fixed tick cadence: actively reap TTL-expired serving + GPU leases
-        and prune the events/tasks DB so a multi-day single-session run never
-        leaks capacity or grows the DB unbounded. Best-effort — every step is
-        independently guarded so one failure never aborts the run loop. Returns
-        a summary dict when it ran, else ``None``.
+        Actively reaps TTL-expired serving + GPU leases and prunes the
+        events/tasks DB so a multi-day single-session run never leaks
+        capacity or grows the DB unbounded. Best-effort — every step is
+        independently guarded so one failure never aborts the run loop.
+        The coordinator's time-based gate owns the cadence; this method
+        just runs when called.
 
         Args:
-            tick: The current coordinator tick; maintenance only runs when it
-                is positive and a multiple of the configured cadence.
+            tick: The current coordinator tick; included in the summary dict.
 
         Returns:
             A summary dict of work performed (leases reaped, tasks reclaimed,
-            rows pruned, disk status) when the cadence fired, else ``None``.
+            rows pruned, disk status).
         """
-        every = int(getattr(self, "_maintenance_every_ticks", 0) or 0)
-        if every <= 0 or tick <= 0 or (tick % every) != 0:
-            return None
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
         try:

@@ -47,67 +47,6 @@ class ConversationCollaborator:
         """
         return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
 
-    def _conversation_progress_signal(self) -> dict[str, Any]:
-        """Compute the no-progress circuit-breaker signal.
-
-        Returns:
-            A dict with ``ticks_without_progress``, ``threshold``,
-            ``severity`` ("ok" or "high"), and ``last_progress_tick``;
-            progress is detected from stack growth, validated gain,
-            current-best signature, or phase change.
-        """
-        state = self.shared_state
-        cur_tick = int(getattr(state, "tick", 0) or 0)
-        try:
-            stack_len = len(state.optimization_stack or [])
-        except Exception:  # noqa: BLE001
-            stack_len = 0
-        validated_gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-        cb = getattr(state, "current_best", None)
-        try:
-            current_best_sig = json.dumps(cb, sort_keys=True, default=str) if cb else ""
-        except Exception:  # noqa: BLE001
-            current_best_sig = str(cb)
-        phase = str(getattr(state, "phase", "") or "")
-
-        marker = self._progress_marker
-        if not marker:
-            self._coord._progress_marker = {
-                "stack_len": stack_len,
-                "validated_gain": validated_gain,
-                "current_best_sig": current_best_sig,
-                "phase": phase,
-                "last_progress_tick": cur_tick,
-            }
-            return {
-                "ticks_without_progress": 0,
-                "threshold": self._no_progress_threshold,
-                "severity": "ok",
-                "last_progress_tick": cur_tick,
-            }
-
-        progressed = (
-            stack_len > int(marker.get("stack_len", 0))
-            or validated_gain > float(marker.get("validated_gain", 0.0)) + 1e-9
-            or current_best_sig != marker.get("current_best_sig", "")
-            or phase != marker.get("phase", "")
-        )
-        if progressed:
-            marker["last_progress_tick"] = cur_tick
-        marker["stack_len"] = stack_len
-        marker["validated_gain"] = validated_gain
-        marker["current_best_sig"] = current_best_sig
-        marker["phase"] = phase
-
-        gap = max(0, cur_tick - int(marker.get("last_progress_tick", cur_tick)))
-        severity = "high" if gap >= self._no_progress_threshold else "ok"
-        return {
-            "ticks_without_progress": gap,
-            "threshold": self._no_progress_threshold,
-            "severity": severity,
-            "last_progress_tick": int(marker.get("last_progress_tick", cur_tick)),
-        }
-
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
         backend = self.backends.get("orchestration")
@@ -490,9 +429,9 @@ class ConversationCollaborator:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
             try:
-                research_block = self._research_scout_seed_block()
+                research_block = self._specialist_findings_seed_block()
             except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: research scout seed render failed")
+                log.exception("Coordinator: specialist findings seed render failed")
                 research_block = ""
             if research_block:
                 sections.append(research_block)
@@ -578,6 +517,15 @@ class ConversationCollaborator:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
 
+            try:
+                discarded_escalate_block = self._discarded_escalate_hint_advisory_block()
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception("Coordinator: discarded escalation hint advisory failed")
+                discarded_escalate_block = ""
+            if discarded_escalate_block:
+                sections.append("=== Discarded escalation hint (advisory) ===")
+                sections.append(discarded_escalate_block)
+
         # NOTE: there is deliberately no "=== Specialist health ===" block.
         # This prompt renders only on an agent's own turn, and a turn only
         # comes around between blocking actions — so a running specialist is
@@ -603,31 +551,6 @@ class ConversationCollaborator:
             if budget_block:
                 sections.append("=== Phase budget telemetry ===")
                 sections.append(budget_block)
-
-            # Conversation no-progress circuit-breaker; Robustness is the external safety net.
-            try:
-                progress = self._conversation_progress_signal()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: conversation progress signal failed")
-                progress = {}
-            if progress:
-                sections.append("=== Conversation progress ===")
-                sections.append(
-                    f"ticks_without_progress={progress.get('ticks_without_progress', 0)} "
-                    f"threshold={progress.get('threshold', 0)} "
-                    f"severity={progress.get('severity', 'ok')} "
-                    f"last_progress_tick={progress.get('last_progress_tick', 0)}"
-                )
-                if progress.get("severity") == "high":
-                    sections.append(
-                        "WARNING: no observable progress (no new KEEP / stack "
-                        "growth / validated-gain bump / phase advance) for "
-                        f">= {progress.get('threshold', 0)} ticks. The "
-                        "Orchestration conversation may be stuck. Consider "
-                        "escalating: signal a wind-down (delegate `report`) or "
-                        "raise a high-severity no_progress observation so the "
-                        "operator can intervene."
-                    )
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
@@ -1075,25 +998,36 @@ class ConversationCollaborator:
                     out.append(variant)
         return out
 
-    def _research_scout_seed_block(self) -> str:
-        """Render the persisted research-scout findings for an Orchestration SEED.
+    def _specialist_findings_seed_block(self) -> str:
+        """Render persisted specialist findings for an Orchestration SEED.
 
-        The scout's executable proposals are not rendered here: they go through
-        ``=== Untested proposals (current cycle) ===`` alongside every other
-        domain's, which also drops the ones already benched.
+        Covers all domains: any specialist_rounds entry with non-empty
+        new_findings or residual_questions is included, ordered by confidence
+        descending (entries without confidence treated as 0).
+
+        The specialist's executable proposals are not rendered here: they go
+        through ``=== Untested proposals (current cycle) ===`` alongside every
+        other domain's, which also drops the ones already benched.
         """
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
-        rounds = [
+        all_rounds = [
             row
             for row in (getattr(self.shared_state, "specialist_rounds", []) or [])
-            if isinstance(row, dict) and row.get("domain") == "research_scout_specialist"
+            if isinstance(row, dict)
+            and (row.get("new_findings") or row.get("residual_questions"))
         ]
-        if not hints and not rounds:
+        # Sort by confidence descending; entries without confidence treated as 0.
+        all_rounds = sorted(
+            all_rounds,
+            key=lambda r: float(r.get("confidence") or 0),
+            reverse=True,
+        )
+        if not hints and not all_rounds:
             return ""
 
-        lines = ["=== Research Scout ==="]
+        lines = ["=== Specialist findings ==="]
         if hints:
             lines.append("Findings:")
             for hint in hints:
@@ -1101,12 +1035,18 @@ class ConversationCollaborator:
 
         questions: list[str] = []
         seen_questions: set[str] = set()
-        for row in rounds:
+        for row in all_rounds:
+            domain_label = str(row.get("domain") or "").strip()
+            findings = row.get("new_findings") or []
+            if findings:
+                lines.append(f"[{domain_label}] findings:")
+                for finding in findings:
+                    lines.append(json.dumps(finding, sort_keys=True) if isinstance(finding, dict) else str(finding))
             for question in row.get("residual_questions") or []:
                 text = str(question).strip()
                 if text and text not in seen_questions:
                     seen_questions.add(text)
-                    questions.append(text)
+                    questions.append(f"[{domain_label}] {text}")
 
         if questions:
             lines.append("Residual questions:")
@@ -1135,3 +1075,22 @@ class ConversationCollaborator:
             )
         except Exception:  # noqa: BLE001 — defensive
             return ""
+
+    def _discarded_escalate_hint_advisory_block(self) -> str:
+        """Render advisory when a pending escalate_strategy_change hint was discarded.
+
+        Fires when a phase transition to a phase other than FRAMEWORK_AGENT
+        consumed the hint before ``exit_normal_optimize`` could read it.
+
+        Returns:
+            The advisory string, or ``""`` when no discarded hint is recorded.
+        """
+        hint = str(getattr(self.shared_state, "last_discarded_escalate_hint", "") or "")
+        ts = str(getattr(self.shared_state, "last_discarded_escalate_hint_ts", "") or "")
+        if not hint:
+            return ""
+        return (
+            f"ADVISORY: your escalate_strategy_change hint '{hint}' (at {ts}) was discarded "
+            "because a phase transition to a phase other than FRAMEWORK_AGENT fired before "
+            "it could be consumed. Re-emit escalate_strategy_change if still needed."
+        )

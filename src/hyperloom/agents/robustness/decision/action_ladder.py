@@ -14,7 +14,7 @@ Three tiers by severity:
    and Orchestration decides.
 
 Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
-cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
+cooldown (``Symptom.dedup_key`` × ``cooldown_sec``) prevents inbox flooding.
 Findings — one record per intent batch — go to :class:`FindingSink`.
 """
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -85,7 +86,7 @@ class Finding:
 class ActionLadderConfig:
     """Tunables for the ladder."""
 
-    cooldown_ticks: int = 5
+    cooldown_sec: float = 300.0
 
 
 @dataclass
@@ -126,18 +127,18 @@ class ActionLadder:
         self._state_view = state_view
         # Cooldown bookkeeping persisted across subprocess restarts.
         loaded = state_view.load() if state_view is not None else {}
-        self._last_emitted_tick: dict[tuple[str, ...], int] = _decode_last_emitted(loaded.get("last_emitted"))
+        self._last_emitted_ts: dict[tuple[str, ...], float] = _decode_last_emitted(loaded.get("last_emitted"))
         # Stamped at the top of decide() so branches can build a stable
         # tick-indexed idempotency_key without threading the tick around.
         self._last_tick_index: int = 0
 
     def _persist_cooldown(self) -> None:
-        """Write the per-key cooldown ticks to the state view, if any."""
+        """Write the per-key cooldown timestamps to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save(
             {
-                "last_emitted": _encode_last_emitted(self._last_emitted_tick),
+                "last_emitted": _encode_last_emitted(self._last_emitted_ts),
             }
         )
 
@@ -180,13 +181,13 @@ class ActionLadder:
                     log.exception("rca_provider.set_tick failed; ignoring")
         for sym in symptoms:
             key = sym.dedup_key()
-            if not self._cooldown_elapsed(key, tick_index):
+            if not self._cooldown_elapsed(key, now_unix):
                 continue
             sym_intents = self._intents_for(sym)
             if not sym_intents:
                 continue
             any_emit = True
-            self._last_emitted_tick[key] = tick_index
+            self._last_emitted_ts[key] = now_unix
             self._persist_cooldown()
             rca_text = await _safe_rca(rca_provider, sym)
             findings.append(
@@ -204,22 +205,21 @@ class ActionLadder:
             intents.append(build_send_message("observation", body_md="ok (robustness-agent)"))
         return _LadderResult(intents=intents, findings=findings)
 
-    def _cooldown_elapsed(self, key: tuple[str, ...], tick_index: int) -> bool:
+    def _cooldown_elapsed(self, key: tuple[str, ...], now_unix: float) -> bool:
         """Report whether a dedup key is outside its cooldown window.
 
         Args:
             key (tuple[str, ...]): The symptom dedup key.
-            tick_index (int): The current tick index.
+            now_unix (float): Current wall-clock time in Unix seconds.
 
         Returns:
-            bool: ``True`` if the key has never fired or enough ticks have
-            elapsed since it last did.
+            bool: ``True`` if the key has never fired or enough wall-clock
+            seconds have elapsed since it last did.
         """
-        cooldown = self._config.cooldown_ticks
-        last = self._last_emitted_tick.get(key)
-        if last is None:
+        last_ts = self._last_emitted_ts.get(key)
+        if last_ts is None:
             return True
-        return (tick_index - last) >= cooldown
+        return (now_unix - last_ts) >= self._config.cooldown_sec
 
     def _intents_for(self, sym: Symptom) -> list[Intent]:
         """Dispatch a symptom to the ladder tier matching its severity.
@@ -419,8 +419,8 @@ _LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strin
 
 
 def _encode_last_emitted(
-    last_emitted: dict[tuple[str, ...], int],
-) -> dict[str, int]:
+    last_emitted: dict[tuple[str, ...], float],
+) -> dict[str, float]:
     """Serialise a tuple-keyed cooldown dict to a JSON-safe dict.
 
     Tuple components are joined with ``_LADDER_KEY_SEP`` so the decoder can
@@ -432,14 +432,14 @@ def _encode_last_emitted(
     Returns:
         A string-keyed dict safe for JSON serialization.
     """
-    out: dict[str, int] = {}
-    for key, tick in last_emitted.items():
+    out: dict[str, float] = {}
+    for key, ts in last_emitted.items():
         try:
             encoded = _LADDER_KEY_SEP.join(str(part) for part in key)
         except Exception:  # noqa: BLE001 — best-effort, skip bad keys
             continue
         try:
-            out[encoded] = int(tick)
+            out[encoded] = float(ts)
         except (TypeError, ValueError):
             continue
     return out
@@ -447,28 +447,28 @@ def _encode_last_emitted(
 
 def _decode_last_emitted(
     payload: Any,
-) -> dict[tuple[str, ...], int]:
+) -> dict[tuple[str, ...], float]:
     """Inverse of :func:`_encode_last_emitted`; tolerant of bad input.
 
     Args:
-        payload (Any): The persisted mapping of encoded keys to ticks.
+        payload (Any): The persisted mapping of encoded keys to timestamps.
 
     Returns:
-        dict[tuple[str, ...], int]: The decoded tuple-keyed cooldown dict;
+        dict[tuple[str, ...], float]: The decoded tuple-keyed cooldown dict;
         empty when ``payload`` is not a dict.
     """
     if not isinstance(payload, dict):
         return {}
-    out: dict[tuple[str, ...], int] = {}
-    for raw_key, raw_tick in payload.items():
+    out: dict[tuple[str, ...], float] = {}
+    for raw_key, raw_ts in payload.items():
         if not isinstance(raw_key, str):
             continue
         try:
-            tick = int(raw_tick)
+            ts = float(raw_ts)
         except (TypeError, ValueError):
             continue
         parts = tuple(raw_key.split(_LADDER_KEY_SEP))
-        out[parts] = tick
+        out[parts] = ts
     return out
 
 

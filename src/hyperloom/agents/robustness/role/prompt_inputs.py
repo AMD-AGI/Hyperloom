@@ -98,6 +98,8 @@ _SCALAR_KEYS = {
     # Aggregated into ``SharedStateSnapshot.explore_started``; ``(none)`` is the never-yet sentinel.
     "last_explore",
     "agent_last_active",
+    # Count of explore/integrate_patch rounds with at least one valid measurement.
+    "gain_gated_action_count",
 }
 
 # Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
@@ -225,6 +227,7 @@ class SharedStateSnapshot:
     kernel_opt_attempts_count: int = 0
     has_keep_pending_integrate: bool = False
     agent_last_active_unix: dict[str, float] = field(default_factory=dict)
+    gain_gated_action_count: int = 0
 
 
 @dataclass
@@ -514,6 +517,7 @@ _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
     "optimization_stack": ("optimization_stack_size", _count_optimization_stack),
     "kernel_opt_attempts_count": ("kernel_opt_attempts_count", lambda head: to_int(head, default=0)),
     "has_keep_pending_integrate": ("has_keep_pending_integrate", lambda head: head.lower() == "true"),
+    "gain_gated_action_count": ("gain_gated_action_count", lambda head: to_int(head, default=0)),
 }
 
 

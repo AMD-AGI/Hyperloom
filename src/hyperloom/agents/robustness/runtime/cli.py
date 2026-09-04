@@ -156,8 +156,6 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
     # ``no_levers_found`` floor knobs override the default window.
     if "progress_no_levers_min_minutes" in options:
         config.progress_no_levers_min_minutes = float(options["progress_no_levers_min_minutes"])
-    if "progress_no_levers_min_ticks" in options:
-        config.progress_no_levers_min_ticks = int(options["progress_no_levers_min_ticks"])
 
     # Advertise session_dir so co-deployed Critic ``prepare-review`` finds the findings jsonl.
     os.environ.setdefault(

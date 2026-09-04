@@ -2572,6 +2572,7 @@ class KernelPhase(PhaseHandler):
                         # promoted to a decision.
                         "keep_threshold_pct": 100.0,
                         "budget_minutes": budget_minutes,
+                        "mode": "env_only",
                     },
                     session_dir=self.session_dir,
                 )
@@ -3622,6 +3623,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": test_envs,
                 "keep_threshold_pct": 3.0,
                 "budget_minutes": per_tuner_budget_minutes,
+                "mode": "env_only",
             }
             for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
                 try:

@@ -762,7 +762,8 @@ allowed action until the patch lands on `optimization_stack`:
 
   request{target_agent: 'kernel_agent', kind: 'integrate',
           params: {kernel_id, patch_path, target_file, base_tput,
-                   extra_server_args, config_path}}
+                   extra_server_args, config_path,
+                   mode (str): "patch" (default) to apply a kernel patch, or "env_only" to validate env/config changes without a patch.}}
 
   Omit `base_tput` / `patch_path` / `source_file` and the Coordinator
   fills them from `current_best.tput` and the per-kernel

@@ -647,6 +647,7 @@ class KernelStackPhase(PhaseHandler):
                         "task_group_key": str(pending.get("task_group_key") or ""),
                         "identity_route": str(pending.get("identity_route") or ""),
                         "source": "auto_integrate_after_kernel_opt",
+                        "mode": "patch",
                     },
                     priority=2,
                 )

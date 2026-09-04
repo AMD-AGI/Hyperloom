@@ -28,17 +28,17 @@ if TYPE_CHECKING:
 class ProgressConfig:
     """Tunables for :class:`ProgressDetector`.
 
-    ``gain_plateau`` only fires once the ``gain_window_ticks`` buffer is
+    ``gain_plateau`` only fires once the ``gain_window_actions`` buffer is
     full; ``gain_epsilon_pct`` is the unchanged-gain window.
     ``no_levers_min_minutes`` (default 45) is the elapsed-time floor so
     cold-start alone doesn't look "empty"; multi-node large-model runs
     should override it higher (host passes 60.0 when ``nodes >= 2``).
+    ``gain_window_actions`` is a count of completed measurements (not ticks).
     """
 
-    gain_window_ticks: int = 6
+    gain_window_actions: int = 6
     gain_epsilon_pct: float = 0.5
     no_levers_min_minutes: float = 45.0
-    no_levers_min_ticks: int = 8
     productive_gain_pct: float = 0.5
 
 
@@ -77,22 +77,22 @@ class ProgressDetector:
         if len(self._gain_history) > 32:
             self._gain_history = self._gain_history[-32:]
         try:
-            self._last_tick: int = int(loaded.get("last_tick", -1))
+            self._last_gated_count: int = int(loaded.get("last_gated_count", 0))
         except (TypeError, ValueError):
-            self._last_tick = -1
+            self._last_gated_count = 0
         try:
             self._macro_cycle: int = int(loaded.get("macro_cycle", 0))
         except (TypeError, ValueError):
             self._macro_cycle = 0
 
     def _persist(self) -> None:
-        """Write the gain history and last tick to the state view, if any."""
+        """Write the gain history and last gated count to the state view, if any."""
         if self._state_view is None:
             return
         self._state_view.save(
             {
                 "gain_history": list(self._gain_history),
-                "last_tick": self._last_tick,
+                "last_gated_count": self._last_gated_count,
                 "macro_cycle": self._macro_cycle,
             }
         )
@@ -124,11 +124,12 @@ class ProgressDetector:
         if snap.macro_cycle != self._macro_cycle:
             self._macro_cycle = snap.macro_cycle
             self._gain_history = []
-        # Append at most one history slot per Coordinator tick.
-        if snap.tick > self._last_tick:
+            self._last_gated_count = 0
+        # Append at most one history slot per completed measurement action.
+        if snap.gain_gated_action_count > self._last_gated_count:
             self._gain_history.append(float(snap.cumulative_gain_validated or 0.0))
-            self._last_tick = int(snap.tick)
-            if len(self._gain_history) > max(self._config.gain_window_ticks, 32):
+            self._last_gated_count = int(snap.gain_gated_action_count)
+            if len(self._gain_history) > max(self._config.gain_window_actions, 32):
                 self._gain_history = self._gain_history[-32:]
             self._persist()
 
@@ -154,13 +155,13 @@ class ProgressDetector:
                 empty, or the gain is still moving.
         """
         cfg = self._config
-        if len(self._gain_history) < cfg.gain_window_ticks:
+        if len(self._gain_history) < cfg.gain_window_actions:
             return None
         # Plateau requires "explored but stalled"; an empty stack is the
         # zero-by-construction case that ``no_levers_found`` owns instead.
         if snap.optimization_stack_size == 0:
             return None
-        window = self._gain_history[-cfg.gain_window_ticks :]
+        window = self._gain_history[-cfg.gain_window_actions :]
         delta = max(window) - min(window)
         if delta > cfg.gain_epsilon_pct:
             return None
@@ -177,11 +178,11 @@ class ProgressDetector:
             severity=SymptomSeverity.MEDIUM,
             summary=(
                 f"cumulative_gain_validated flat at "
-                f"{window[-1]:.2f}% across {cfg.gain_window_ticks} ticks "
+                f"{window[-1]:.2f}% across {cfg.gain_window_actions} completed measurements "
                 f"(delta={delta:.2f}%, epsilon={cfg.gain_epsilon_pct:.2f}%)"
             ),
             evidence={
-                "window_ticks": cfg.gain_window_ticks,
+                "window_actions": cfg.gain_window_actions,
                 "history": [round(v, 3) for v in window],
                 "delta_pct": round(delta, 3),
                 "epsilon_pct": cfg.gain_epsilon_pct,
@@ -224,8 +225,6 @@ class ProgressDetector:
             return None
         if snap.elapsed_minutes < cfg.no_levers_min_minutes:
             return None
-        if snap.tick < cfg.no_levers_min_ticks:
-            return None
         return Symptom(
             name="no_levers_found",
             severity=SymptomSeverity.MEDIUM,
@@ -242,7 +241,6 @@ class ProgressDetector:
                 "kernel_opt_attempts_count": snap.kernel_opt_attempts_count,
                 "has_keep_pending_integrate": snap.has_keep_pending_integrate,
                 "min_observation_minutes": cfg.no_levers_min_minutes,
-                "min_observation_ticks": cfg.no_levers_min_ticks,
             },
             subject={},
             source="local",

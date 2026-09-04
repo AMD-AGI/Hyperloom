@@ -279,11 +279,12 @@ class MachinePhase(PhaseHandler):
             # it as if it were still unclaimed.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
-            # ``exit_normal_optimize`` is the hint's only consumer, so a
-            # transition away from that phase leaves it unclaimable; keeping it
-            # would let an unrelated phase re-evaluate it. A transition *into*
-            # that phase is the opposite case: discarding there would drop the
-            # hint on the doorstep of the one rule that reads it.
+            # Both ``exit_normal_optimize`` and ``exit_normal_kernel`` consume
+            # ``skip_to_sweep``, so a transition to any phase other than
+            # FRAMEWORK_AGENT leaves the hint unclaimable; keeping it would let
+            # an unrelated phase re-evaluate it. A transition *into*
+            # FRAMEWORK_AGENT is the opposite case: discarding there would drop
+            # the hint on the doorstep of the rules that read it.
             discarded_hint = state.discard_pending_escalate_hint()
             log.info(
                 "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
@@ -343,11 +344,38 @@ class MachinePhase(PhaseHandler):
             ),
         )
         if cancelled:
-            log.info(
-                "Coordinator.phase: cancelled %d queued task(s) incompatible with %s",
-                len(cancelled),
-                target,
+            log.info("Coordinator.phase: cancelled %d queued task(s) incompatible with %s", len(cancelled), target)
+            await self._record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "queued_tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "count": len(cancelled),
+                    "detail": (
+                        f"{len(cancelled)} queued task(s) were cancelled because their "
+                        f"kind is not allowed in phase {target}. "
+                        "Re-dispatch them if still needed."
+                    ),
+                },
             )
+            for task_id in cancelled:
+                self.shared_state.record_action_failure(
+                    action="queued_task_cancelled_on_phase_transition",
+                    task_id=task_id,
+                    result={
+                        "status": "cancelled",
+                        "reason": f"phase_transition_{str(prior or '').upper()}_to_{target}",
+                        "error_class": "phase_transition_cancel",
+                        "error": (
+                            f"Task {task_id} was queued when the phase transitioned "
+                            f"from {prior} to {target}; its kind is not allowed in {target}."
+                        ),
+                    },
+                )
         state.record_phase_transition(
             to_phase=target,
             reason=reason,

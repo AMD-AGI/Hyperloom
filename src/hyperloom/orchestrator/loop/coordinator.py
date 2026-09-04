@@ -31,8 +31,8 @@ _SEVERITY_REGRESS: str = "regress"
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention),
-# in coordinator ticks.
-MAINTENANCE_EVERY_TICKS: int = 50
+# in wall-clock seconds.
+MAINTENANCE_INTERVAL_SEC: int = 1800
 
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
@@ -377,7 +377,28 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
                 error = result.get("error")
             raw_notes = result.get("notes")
             if isinstance(raw_notes, list):
-                notes = [n for n in raw_notes if n][:_OUTCOME_NOTES_MAX]
+                # Exclude patch_safety_numeric notes from orchestration view;
+                # they are only relevant for critic-targeted rendering.
+                notes = [
+                    n for n in raw_notes
+                    if n and not str(n).startswith("patch_safety_numeric:")
+                ][:_OUTCOME_NOTES_MAX]
+            # For specialist delegated results, also unpack specialist_done metadata.
+            if kind == "specialist":
+                specialist_done = result.get("specialist_done") or {}
+                if isinstance(specialist_done, dict):
+                    sd_summary = str(specialist_done.get("summary") or "").strip()
+                    if sd_summary:
+                        parts.append(f"summary={sd_summary[:400]!r}")
+                    sd_confidence = specialist_done.get("confidence")
+                    if sd_confidence is not None:
+                        parts.append(f"confidence={sd_confidence}")
+                    new_findings = specialist_done.get("new_findings") or []
+                    if isinstance(new_findings, list) and len(new_findings) > 0:
+                        parts.append(f"findings={len(new_findings)}")
+                    residual_questions = specialist_done.get("residual_questions") or []
+                    if isinstance(residual_questions, list) and len(residual_questions) > 0:
+                        parts.append(f"questions={len(residual_questions)}")
         if error:
             parts.append(f"error={str(error)[:200]!r}")
         if notes:
@@ -695,34 +716,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        # No-progress circuit-breaker telemetry; threshold = high-severity cutoff.
-        self._progress_marker: dict[str, Any] = {}
-        try:
-            self._no_progress_threshold: int = max(
-                1,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_NO_PROGRESS_TICKS",
-                        "15",
-                    )
-                ),
-            )
-        except ValueError:
-            self._no_progress_threshold = 15
 
-        # Periodic maintenance/reaper cadence (lease reaping + DB retention). 0 disables.
-        try:
-            self._maintenance_every_ticks: int = max(
-                0,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS",
-                        str(MAINTENANCE_EVERY_TICKS),
-                    )
-                ),
-            )
-        except ValueError:
-            self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
+        # Periodic maintenance/reaper cadence (lease reaping + DB retention), wall-clock seconds.
+        self._last_maintenance_ts: float = 0.0
+        self._maintenance_interval_sec: int = MAINTENANCE_INTERVAL_SEC
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions
         # apply per cycle. Only takes effect for long/unbounded runs; short
@@ -843,7 +840,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_update_state": "router",
         # recorder (folded into writeback)
         "_aggregate_research_evidence": "writeback",
-        "_harvest_research_scout": "writeback",
+        "_harvest_specialist_findings": "writeback",
         "_record_specialist_result": "writeback",
         "_drain_queued_baselines": "writeback",
         # Phase handlers, grouped in the same call-chain order as
@@ -1020,7 +1017,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_orchestration_conversational": "conversation",
         "_orchestration_context_tools_mounted": "conversation",
         "_orchestration_needs_seed": "conversation",
-        "_conversation_progress_signal": "conversation",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
@@ -1041,6 +1037,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_current_primary_gap": "conversation",
         "_recent_proposed_variants": "conversation",
         "_priors_match_advisory_block": "conversation",
+        "_discarded_escalate_hint_advisory_block": "conversation",
         "_workload_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
         "_extract_kept_best_config": "proposals",
@@ -1110,7 +1107,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
         "_replay_resume_if_needed": "writeback",
-        "_maybe_run_maintenance_tick": "maintenance",
+        "_run_maintenance": "maintenance",
         "_maybe_prune_runs_for_disk": "maintenance",
         "enqueue_targeted_build": "build_lifecycle",
     }
@@ -1718,9 +1715,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             exc=exc,
                             tick=tick_n,
                         )
-                    # Periodic reaper + DB retention; cadence-gated.
+                    # Periodic reaper + DB retention; time-gated.
                     try:
-                        await self._maybe_run_maintenance_tick(tick=tick_n)
+                        now = time.monotonic()
+                        if now - self._last_maintenance_ts >= self._maintenance_interval_sec:
+                            await self._run_maintenance(tick=tick_n)
+                            self._last_maintenance_ts = now
                     except Exception:  # noqa: BLE001
                         log.exception("maintenance tick raised")
                 except (asyncio.CancelledError, KeyboardInterrupt):

@@ -722,6 +722,7 @@ class _RenderMixin:
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"agent_last_active={self._format_agent_last_active()}",
+            f"gain_gated_action_count={int(getattr(self, 'gain_gated_action_count', 0) or 0)}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -962,7 +963,12 @@ class _RenderMixin:
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
-        """Multi-line render of a ``*_search`` dedup ledger; counts on the head line, bodies show the last 5 accepted / 15 rejected.
+        """Multi-line render of a ``*_search`` dedup ledger.
+
+        Head line shows quick counts; body shows every entry in the ``tested``
+        dict (no truncation), KEEPs first then the rest.  The old separate
+        ``accepted`` / ``rejected`` sub-sections are replaced by the unified
+        tested ledger which already carries outcome, gain, and all metadata.
 
         Args:
             search (dict[str, Any] | None): The search ledger to render.
@@ -974,7 +980,7 @@ class _RenderMixin:
             return "(none)"
         accepted = list(search.get("accepted") or [])
         rejected = list(search.get("rejected") or [])
-        tested = search.get("tested") or {}
+        tested: dict[str, Any] = search.get("tested") or {}
         cursor = search.get("cursor", 0)
         head = f"    cursor={cursor}  accepted={len(accepted)}  rejected={len(rejected)}  tested={len(tested)}"
         # Surfaced on the head line because the per-variant bodies are capped,
@@ -984,20 +990,76 @@ class _RenderMixin:
         if n_killed:
             head += f"  killed_overtime(last_round)={n_killed}"
         out: list[str] = ["", head]
-        if accepted:
-            out.append("    accepted:")
-            for entry in accepted[-5:]:
-                if not isinstance(entry, dict):
-                    continue
-                out.append(
-                    "      • " + _RenderMixin._format_variant_line(_RenderMixin._enrich_with_tested_gain(entry, tested))
-                )
-        if rejected:
-            out.append("    rejected (last 15):")
-            for entry in rejected[-15:]:
-                if not isinstance(entry, dict):
-                    continue
-                out.append("      • " + _RenderMixin._format_variant_line(entry))
+
+        if not tested:
+            return "\n".join(out)
+
+        # Sort: KEEP entries first, then everything else (stable within each group).
+        def _tested_sort_key(item: tuple[str, Any]) -> int:
+            entry = item[1]
+            if not isinstance(entry, dict):
+                return 1
+            return 0 if str(entry.get("outcome") or "").upper() == "KEEP" else 1
+
+        sorted_items = sorted(tested.items(), key=_tested_sort_key)
+
+        out.append("    tested:")
+        for fp, entry in sorted_items:
+            if not isinstance(entry, dict):
+                continue
+            fp_s = str(fp)[:16]
+            outcome = str(entry.get("outcome") or "").upper() or "?"
+
+            gain = entry.get("gain_pct")
+            if isinstance(gain, (int, float)):
+                gain_s = f"gain={gain:+.2f}%"
+            else:
+                gain_s = "gain=n/a"
+
+            tput = entry.get("tput")
+            if not isinstance(tput, (int, float)):
+                # Some entries nest tput inside result
+                result_dict = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                tput = (result_dict or {}).get("output_throughput")
+            if isinstance(tput, (int, float)) and tput > 0:
+                tput_s = f"tput={tput:.1f}"
+            else:
+                tput_s = "tput=n/a"
+
+            parts: list[str] = [fp_s, outcome, gain_s, tput_s]
+
+            args = str(entry.get("extra_server_args") or "").strip()
+            if args:
+                parts.append(f"args={args}")
+
+            envs = entry.get("extra_envs") or {}
+            if isinstance(envs, dict) and envs:
+                envs_s = ",".join(f"{k}={v}" for k, v in sorted(envs.items()))
+                parts.append(f"envs={envs_s}")
+
+            remove = entry.get("remove_args")
+            if remove:
+                if isinstance(remove, list):
+                    remove_s = " ".join(str(r) for r in remove)
+                else:
+                    remove_s = str(remove).strip()
+                if remove_s:
+                    parts.append(f"remove={remove_s}")
+
+            error_class = str(entry.get("error_class") or "").strip()
+            if error_class:
+                parts.append(f"err={error_class}")
+
+            provenance = entry.get("provenance")
+            if provenance is not None:
+                parts.append(f"src={provenance}")
+
+            name = entry.get("name")
+            if name is not None:
+                parts.append(f"name={name}")
+
+            out.append("      " + "  ".join(parts))
+
         return "\n".join(out)
 
     def _format_optimization_stack(self) -> str:

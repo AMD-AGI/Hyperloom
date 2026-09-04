@@ -1911,7 +1911,6 @@ class ExplorePhase(CoordinatorCollaborator):
             "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
             "tags": list(tags),
             "gap_canonical_id": str(done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""),
-            "empty": bool(done_payload.get("empty")) or len(proposals) == 0,
             "proposals_total": len(proposals),
             "proposal_set": list(proposals),
             "summary": str(done_payload.get("summary") or "")[:480],

@@ -276,6 +276,11 @@ or budget cap. Roofline is auto-managed.
 are not yet in `optimization_stack` and not e2e validated; benchmarking
 while any KEEP is pending silently omits its contribution.
 
+`integrate` request schema: `{kernel_id, patch_path, target_file, base_tput,
+extra_server_args, config_path, mode}`. `mode` (str): `"patch"` (default) to
+apply a kernel source patch, or `"env_only"` to validate env/config changes
+without applying a patch (used by GEMM tuning E2E validation).
+
 **No actionable kernel lever → `skip_to_sweep`, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain

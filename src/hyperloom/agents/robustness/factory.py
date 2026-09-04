@@ -223,10 +223,9 @@ def build_reactor_components(
             stale_build_persist_ticks=config.aiter_jit_stale_build_persist_ticks,
         ),
         "progress": ProgressConfig(
-            gain_window_ticks=config.progress_gain_window_ticks,
+            gain_window_actions=config.progress_gain_window_actions,
             gain_epsilon_pct=config.progress_gain_epsilon_pct,
             no_levers_min_minutes=config.progress_no_levers_min_minutes,
-            no_levers_min_ticks=config.progress_no_levers_min_ticks,
             productive_gain_pct=config.budget_productive_gain_pct,
         ),
         "repeated_payload": RepeatedPayloadConfig(
@@ -280,7 +279,7 @@ def build_reactor_components(
     classifier = Classifier(configs=signal_configs, state_store=state_store)
 
     ladder = ActionLadder(
-        config=ActionLadderConfig(cooldown_ticks=config.cooldown_ticks),
+        config=ActionLadderConfig(cooldown_sec=config.cooldown_sec),
         state_view=(state_store.view("action_ladder") if state_store else None),
     )
 
