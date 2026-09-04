@@ -6,8 +6,13 @@ covers them via the sdk_error pattern path or the blocked.md outcome-id parser.
 
 from __future__ import annotations
 
-from hyperloom.agents.quantization.driver.assessment import build_assessment, classify_attempt, derive_status
-from hyperloom.agents.quantization.driver.outcomes import OutcomeId
+from hyperloom.agents.quantization.driver.assessment import (
+    _parse_blocked_outcome,
+    build_assessment,
+    classify_attempt,
+    derive_status,
+)
+from hyperloom.agents.quantization.driver.outcomes import SUCCESS_TAGS, OutcomeId
 from hyperloom.agents.quantization.driver.result_collector import collect_artifacts
 
 
@@ -73,6 +78,13 @@ def test_blocked_md_eval_gap_accepted_does_not_bypass(build_workspace):
         include_eval_report=False,
     )
     assert classify_attempt(ws) != OutcomeId.eval_gap_accepted
+
+
+def test_blocked_md_accepts_every_known_non_success_outcome():
+    """New known failures are blocked unless explicitly classified as success."""
+    for outcome in OutcomeId:
+        parsed = _parse_blocked_outcome(f"outcome_id: {outcome.value}\n")
+        assert parsed is (None if outcome in SUCCESS_TAGS else outcome)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

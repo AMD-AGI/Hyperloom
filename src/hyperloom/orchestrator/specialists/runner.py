@@ -138,7 +138,8 @@ _SECRET_ENV_NAMES: tuple[str, ...] = tuple(
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?P<key>\b(?:"
     + "|".join(re.escape(name) for name in _SECRET_ENV_NAMES)
-    + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?P<value>[^\s,'\"\]}]+)(?P=quote)",
+    + r")\b)(?P<sep>\s*(?:=|:)\s*)(?P<quote>['\"]?)(?!\[REDACTED\])"
+    + r"(?P<value>[^\s,'\"\]}]+)(?P=quote)",
     re.IGNORECASE,
 )
 
@@ -250,7 +251,7 @@ def _safe_redact(s: str) -> str:
         lambda m: f"{m.group('key')}{m.group('sep')}{m.group('quote')}[REDACTED]{m.group('quote')}",
         out,
     )
-    return redact_secret_values(out)
+    return out
 
 
 def _redact_transcript_value(value: Any) -> Any:

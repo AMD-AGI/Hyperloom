@@ -36,6 +36,7 @@ def test_safe_redact():
     assert "GITHUB_TOKEN=[REDACTED]" in out
     assert "redact_me" not in out
     assert "redact_me_too" not in out
+    assert "[REDACTED]]" not in out
     assert sr._safe_redact("plain line") == "plain line"
 
 

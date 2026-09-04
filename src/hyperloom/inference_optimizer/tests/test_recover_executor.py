@@ -687,6 +687,31 @@ class TestParseRocmSmiCsvEdgeCases:
 
 
 class TestKillStaleOwnersNoneSignalled:
+    def test_recorded_process_group_is_signalled(self, monkeypatch):
+        """A lifecycle pidfile entry reaps the full server process group."""
+        exe = RecoverExecutor()
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: [
+                {
+                    "pid": 111,
+                    "pgid": 222,
+                    "cmd": "python -m vllm.entrypoints.openai.api_server",
+                    "pattern": "session_pidfile",
+                }
+            ],
+        )
+        sent: list[tuple[int, signal.Signals]] = []
+        monkeypatch.setattr(exe, "_send_group_signal", lambda pgid, sig: sent.append((pgid, sig)) or True)
+        monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: False)
+        monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
+
+        out = exe._kill_stale_owners()
+
+        assert sent == [(222, signal.SIGTERM)]
+        assert out[0]["signal"] == "TERM"
+
     def test_unrecognized_pidfile_owner_is_not_signalled(self, monkeypatch):
         """A recycled PID with an unrelated cmdline is ignored."""
         exe = RecoverExecutor()
@@ -742,6 +767,17 @@ class TestDiscoverStalePidsBranches:
         ex._active_session_dir = tmp_path
         found = ex._discover_stale_pids()
         assert [o["pid"] for o in found] == [5001]
+
+    def test_dead_pidfile_is_removed_during_cleanup(self, tmp_path):
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        pid_file = runs / "dead.pid"
+        pid_file.write_text("2147483646 2147483646\n", encoding="utf-8")
+        ex = RecoverExecutor()
+        ex._active_session_dir = tmp_path
+
+        assert ex._kill_stale_owners() == []
+        assert not pid_file.exists()
 
 
 class TestPidAliveTrue:

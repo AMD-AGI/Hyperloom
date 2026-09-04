@@ -1123,7 +1123,8 @@ def certify_trace_dir(
             "certified_path": selected,
             "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
             "event_total": probe.get("event_total"),
-            "parse_ok": not probe_errors,
+            "parse_ok": not probe_errors and not probe.get("truncated"),
+            "truncated": bool(probe.get("truncated")),
         }
         record["trace_dir_level"]["production_pick_probe"] = production_pick
 
@@ -1138,6 +1139,10 @@ def certify_trace_dir(
     coverage_block = analysis.get("graph_coverage") or {}
     timeline = analysis.get("timeline") or {}
     stream_errors = list(analysis.get("stream_errors") or []) + pass2_errors
+    if analysis.get("truncated"):
+        stream_errors.append(
+            f"trace aggregation truncated at safety cap ({analysis.get('truncation_reason', 'unknown')})"
+        )
 
     ann = annotation_report(sp, framework=framework, min_repeats=min_repeats)
     forecast = forecast_split(sp, num_steps=num_steps, conc=conc, osl=osl, r=r)

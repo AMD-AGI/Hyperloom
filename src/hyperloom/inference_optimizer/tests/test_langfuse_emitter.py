@@ -300,6 +300,7 @@ def test_redact_env_keeps_names_redacts_secret_values():
     snap = lfmap.redact_env(
         {
             "PATH": "/usr/bin",
+            "ROCM_PATH": "/opt/rocm/bin:/usr/local/auth:/usr/bin",
             "HF_TOKEN": "hf_xxx",
             "AWS_SECRET_ACCESS_KEY": "abc",
             "DB_PASSWORD": "pw",
@@ -307,6 +308,7 @@ def test_redact_env_keeps_names_redacts_secret_values():
         }
     )
     assert snap["PATH"] == "/usr/bin"
+    assert snap["ROCM_PATH"] == "/opt/rocm/bin:/usr/local/auth:/usr/bin"
     assert snap["PLAIN"] == "value"
     assert snap["HF_TOKEN"] == "***redacted***"
     assert snap["AWS_SECRET_ACCESS_KEY"] == "***redacted***"
@@ -325,8 +327,8 @@ def test_redact_env_redacts_custom_headers_and_value_shaped_secrets():
     assert snap["ANTHROPIC_CUSTOM_HEADERS"] == "***redacted***"
     assert snap["OPENAI_CUSTOM_HEADERS"] == "***redacted***"
     assert snap["HARMLESS"] == "ok"
-    assert snap["GATEWAY_HDR"] == "***redacted***"
-    assert "deadbeefsecret" not in snap.values()
+    assert snap["GATEWAY_HDR"] == "Ocp-Apim-Subscription-Key: [REDACTED]"
+    assert "anothersecretvalue" not in snap["GATEWAY_HDR"]
 
 
 def test_session_start_is_idempotent(tmp_path, monkeypatch):

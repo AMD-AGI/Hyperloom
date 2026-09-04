@@ -39,17 +39,11 @@ from .outcomes import (
     MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT,
     OutcomeId,
     SUCCESS_TAGS,
-    UNCLASSIFIED_FAILURE,
 )
 from .result_collector import CollectedArtifacts, collect_artifacts
 
 
 _BLOCKED_OUTCOME_RE = re.compile(r"(?:^|\n)\s*outcome_id\s*:\s*([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
-
-#: ``blocked.md`` may only stop the run on a failure/ask id. Success tags
-#: (``eval_gap_accepted``) and other non-blocked vocabulary must not short-
-#: circuit MUST-have / validator checks.
-_BLOCKED_MD_OUTCOMES: frozenset[OutcomeId] = AUTO_FAIL | ASK | AUTO_RECOVER | frozenset({UNCLASSIFIED_FAILURE})
 
 _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are clean success
 
@@ -178,7 +172,7 @@ def _parse_blocked_outcome(text: str | None) -> OutcomeId | None:
         oid = OutcomeId(raw)
     except ValueError:
         return None
-    if oid not in _BLOCKED_MD_OUTCOMES:
+    if oid in SUCCESS_TAGS:
         return None
     return oid
 

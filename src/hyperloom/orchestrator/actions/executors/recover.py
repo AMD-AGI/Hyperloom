@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from ...loop.sub_agent_runner import RunnerContext
+from ._server_lifecycle import _pid_cmdline as _shared_pid_cmdline
 
 
 log = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ class RecoverExecutor:
     FREE_MB_HEALTHY: float = 500.0
     # Owner patterns enforced by ``_kill_stale_owners``.
     OWNER_PATTERNS: tuple[str, ...] = _OWNER_PATTERNS
+    _pid_cmdline = staticmethod(_shared_pid_cmdline)
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the GPU recovery sequence and report the outcome.
@@ -397,9 +399,16 @@ class RecoverExecutor:
                     "recover_executor: pid %d is not a recognized session owner; not signalling",
                     pid,
                 )
+                self._remove_finished_pidfile(entry)
                 continue
             entry["pattern"] = pattern
-            if self._send_signal(pid, signal.SIGTERM):
+            pgid = entry.get("pgid")
+            sent = (
+                self._send_group_signal(int(pgid), signal.SIGTERM) or self._send_signal(pid, signal.SIGTERM)
+                if isinstance(pgid, int)
+                else self._send_signal(pid, signal.SIGTERM)
+            )
+            if sent:
                 entry["signal"] = "TERM"
                 killed.append(entry)
         if not killed:
@@ -408,20 +417,89 @@ class RecoverExecutor:
         time.sleep(self.SERVER_KILL_WAIT_S)
         for entry in killed:
             pid = entry["pid"]
-            current_cmd = self._pid_cmdline(pid)
-            still_owned = any(marker in current_cmd for marker in self.OWNER_PATTERNS)
-            if self._pid_alive(pid) and still_owned and self._send_signal(pid, signal.SIGKILL):
+            pgid = entry.get("pgid")
+            if isinstance(pgid, int):
+                still_owned = bool(self._process_group_owner_cmd(pgid))
+                alive = self._process_group_alive(pgid)
+                if alive and still_owned:
+                    sent = self._send_group_signal(pgid, signal.SIGKILL)
+                else:
+                    current_cmd = self._pid_cmdline(pid)
+                    pid_owned = any(marker in current_cmd for marker in self.OWNER_PATTERNS)
+                    sent = self._pid_alive(pid) and pid_owned and self._send_signal(pid, signal.SIGKILL)
+            else:
+                current_cmd = self._pid_cmdline(pid)
+                still_owned = any(marker in current_cmd for marker in self.OWNER_PATTERNS)
+                sent = self._pid_alive(pid) and still_owned and self._send_signal(pid, signal.SIGKILL)
+            if sent:
                 entry["signal"] = "KILL"
+            self._remove_finished_pidfile(entry, force=bool(sent))
         return killed
 
-    @staticmethod
-    def _pid_cmdline(pid: int) -> str:
-        """Best-effort cmdline from ``/proc``; empty when the pid is gone."""
+    def _send_group_signal(self, pgid: int, sig: signal.Signals) -> bool:
+        """Signal an owned process group without touching our own group."""
+        if os.name != "posix" or pgid <= 0 or pgid == os.getpgrp():
+            return False
         try:
-            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+            os.killpg(pgid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            log.warning("recover_executor: cannot signal pgid=%d sig=%s: %s", pgid, sig.name, exc)
+            return False
+
+    @staticmethod
+    def _process_group_alive(pgid: int) -> bool:
+        """Return whether a POSIX process group still has members."""
+        if os.name != "posix":
+            return False
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _process_group_owner_cmd(self, pgid: int) -> str:
+        """Return a recognized owner cmdline from ``pgid``, if one exists."""
+        try:
+            entries = list(Path("/proc").iterdir())
         except OSError:
             return ""
-        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8")
+                entry_pgid = int(stat.rsplit(")", 1)[1].split()[2])
+            except (IndexError, OSError, ValueError):
+                continue
+            if entry_pgid != pgid:
+                continue
+            cmd = self._pid_cmdline(int(entry.name))
+            if any(marker in cmd for marker in self.OWNER_PATTERNS):
+                return cmd
+        return ""
+
+    def _remove_finished_pidfile(self, entry: dict[str, Any], *, force: bool = False) -> None:
+        """Remove a pidfile after its recorded process group has exited."""
+        pid_file = entry.get("pid_file")
+        if not isinstance(pid_file, str):
+            return
+        pgid = entry.get("pgid")
+        alive = self._pid_alive(entry["pid"])
+        if isinstance(pgid, int):
+            alive = alive or self._process_group_alive(pgid)
+        if alive and not force:
+            return
+        path = Path(pid_file)
+        for candidate in (path, path.with_suffix(".json")):
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
         """Return unique PIDs from this session's ``runs/**/*.pid`` files.
@@ -453,8 +531,20 @@ class RecoverExecutor:
                 continue
             if pid == own_pid:
                 continue
-            cmd = self._pid_cmdline(pid) or str(pid_file)
-            seen[pid] = {"pid": pid, "cmd": cmd, "pattern": "session_pidfile"}
+            try:
+                pgid = int(parts[1]) if len(parts) > 1 else pid
+            except ValueError:
+                pgid = pid
+            cmd = self._pid_cmdline(pid)
+            if not cmd and pgid != own_pid:
+                cmd = self._process_group_owner_cmd(pgid)
+            seen[pid] = {
+                "pid": pid,
+                "pgid": pgid,
+                "pid_file": str(pid_file),
+                "cmd": cmd,
+                "pattern": "session_pidfile",
+            }
         return list(seen.values())
 
     def _send_signal(self, pid: int, sig: signal.Signals) -> bool:

@@ -9,7 +9,6 @@ capture directories, and has a dry-run path that works without TraceLens install
 """
 
 import argparse
-import ast
 import asyncio
 import contextlib
 import csv
@@ -90,6 +89,8 @@ from tracelens_skill_runner import (
 )
 
 from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from _literal_utils import safe_literal_eval as _safe_literal_eval
 from _nccl_summary_candidates import extract_collective_candidates
 
 # Standalone-tool workspace-root resolver (cannot import hyperloom.inference_optimizer.session.paths; see _paths.py).
@@ -440,6 +441,8 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
         import _bypass_trace_reader as _reader
 
         analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
+        if analyze.get("truncated"):
+            return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
     except Exception:  # noqa: BLE001 - guard is advisory; never block on it
@@ -4010,17 +4013,6 @@ def _format_trace_shape(dims: Any, dtype: Any) -> str | None:
     shape = f"({body},)" if len(dims) == 1 else f"({body})"
     suffix = _TRACE_DTYPE_SUFFIX.get(str(dtype or "").strip().lower())
     return f"{shape} {suffix}" if suffix else shape
-
-
-_LITERAL_EVAL_MAX_CHARS = 8192
-_LITERAL_EVAL_ERRORS = (ValueError, SyntaxError, RecursionError, MemoryError, TypeError)
-
-
-def _safe_literal_eval(text: str) -> Any:
-    """Parse a short Python literal; fail the cell rather than the process."""
-    if len(text) > _LITERAL_EVAL_MAX_CHARS:
-        raise ValueError("literal too large")
-    return ast.literal_eval(text)
 
 
 def _resolve_shapes_from_ops_unique_args_csv(

@@ -82,25 +82,38 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
-            r"(?i)\b(authorization\s*:\s*(?:(?:bearer|basic)\s+)?)"
+            r"(?i)\b(authorization\s*:\s*)"
+            r"(?:(?P<authorization_scheme>[A-Za-z][A-Za-z0-9._~+/-]*[ \t]+)"
+            r"(?=[^\s,;'\"\\]+))?"
             r"[^\s,;'\"\\]+"
         ),
-        r"\1[REDACTED]",
+        r"\1\g<authorization_scheme>[REDACTED]",
     ),
-    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
-    (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
+    (re.compile(r"\b(gh[pousr]_)[A-Za-z0-9_]{3,}"), r"\1[REDACTED]"),
+    (re.compile(r"\b(github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
     # AWS access-key id and compact JWT. Same two shapes the specialist
     # transcript redactor already matches; kept here so a command that
     # carries either form is masked whether it went through an assignment
     # or not.
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
-    (re.compile(r"(?i)(ocp-apim-subscription-key\s*:\s*)\S+"), r"\1[REDACTED]"),
+    (
+        re.compile(r"(?i)(ocp-apim-subscription-key\s*:\s*)[^\s,;'\"\\]+"),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(r"(?i)(?<![A-Z0-9_./-])(authorization\s*=\s*)[^\s,;'\"\\]+"),
+        r"\1[REDACTED]",
+    ),
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*CUSTOM_HEADERS\s*[=:]\s*)"
-            r"(\\?[\"'])?(?:[^\s,;'\"\\]+:[ \t]*)?[^\s,;'\"\\]+"
+            r"(\\?[\"'])?"
+            r"(?:[A-Z0-9_-]+:[ \t]*[^\r\n,;'\"\\]+"
+            r"(?:,[ \t]*[A-Z0-9_-]+:[ \t]*[^\r\n,;'\"\\]+)*|"
+            r"[^\s,;'\"\\]+)"
         ),
         r"\1\2[REDACTED]",
     ),
@@ -124,9 +137,11 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # quoting stays balanced) while ``PASSWORD=C:\foo`` is still masked whole.
     (
         re.compile(
-            r"(?i)\b([A-Z0-9_]*"
-            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|"
-            r"AUTH(?:_[A-Z0-9]+)?|TOKEN(?:_\d+)?)"
+            r"(?i)(?<![A-Z0-9_./-])("
+            r"(?:[A-Z0-9_]*(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|"
+            r"AUTH(?:_[A-Z0-9_]+)?|"
+            r"[A-Z0-9_]+_AUTH(?:ORIZATION)?(?:_[A-Z0-9_]+)?|"
+            r"(?:[A-Z0-9_]+_)?TOKEN(?:_\d+)?)"
             r"\s*[=:]\s*)"
             r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),

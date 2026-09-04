@@ -36,6 +36,8 @@ from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _capture_shapes import is_capture_dir_name  # noqa: E402
 from _io_utils import safe_float  # noqa: E402
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS  # noqa: E402
+from _literal_utils import safe_literal_eval as _safe_literal_eval  # noqa: E402
 from _task_group_contract import (  # noqa: E402
     build_operator_identity,
     build_task_group_shape_cases,
@@ -1309,17 +1311,6 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
         "unknown",
     }
 )
-
-
-_LITERAL_EVAL_MAX_CHARS = 8192
-_LITERAL_EVAL_ERRORS = (ValueError, SyntaxError, RecursionError, MemoryError, TypeError)
-
-
-def _safe_literal_eval(text: str) -> Any:
-    """Parse a short Python literal; fail the cell rather than the process."""
-    if len(text) > _LITERAL_EVAL_MAX_CHARS:
-        raise ValueError("literal too large")
-    return ast.literal_eval(text)
 
 
 def _launcher_frame_from_dict(obj: dict) -> str | None:

@@ -1111,8 +1111,10 @@ class SpecialistSubprocessDispatcher:
         finally:
             if log_fh is not None:
                 log_fh.close()
-            await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
-            clear_wall_budget_extension(task_id)
+            try:
+                await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
+            finally:
+                clear_wall_budget_extension(task_id)
 
         # Patches: harvest from the worktree via git diff first; fall back to disk scan.
         patches, collected_patch_roots = self._collect_patches(worktree, workspace, worktree_base)

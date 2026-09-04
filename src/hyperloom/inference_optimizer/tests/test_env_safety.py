@@ -196,7 +196,12 @@ def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     (
         "Authorization: abcdef1234567890",
         "authorization: Basic YWJjOmRlZg==",
+        "Authorization: Token abc123def456",
+        "Authorization: AWS4-HMAC-SHA256 Credential=abc123def456",
         "AUTH_KEY=supersecret",
+        "AUTHORIZATION=supersecretvalue",
+        "X_AUTHORIZATION=supersecretvalue",
+        "PROXY_AUTHORIZATION: abc12345678",
     ),
 )
 def test_redact_secret_values_masks_authorization_forms(text):
@@ -220,6 +225,18 @@ def test_redact_secret_values_spares_unauthorized_status_text():
     text = "401 Unauthorized: invalid API key"
 
     assert common_env_safety.redact_secret_values(text) == text
+
+
+def test_redact_secret_values_masks_base64_bearer_token():
+    """Bearer token characters include the standard base64 alphabet."""
+    out = common_env_safety.redact_secret_values("Bearer abc+def/ghi=jkl")
+
+    assert out == "Bearer [REDACTED]"
+
+
+def test_redact_secret_values_masks_short_legacy_github_token_shape():
+    """Legacy runner coverage masks gh-prefixed token-shaped values."""
+    assert common_env_safety.redact_secret_values("ghp_abc") == "ghp_[REDACTED]"
 
 
 def test_redact_secret_values_masks_quoted_assignments():
@@ -297,3 +314,19 @@ def test_redact_secret_values_masks_spaced_custom_header_before_newline():
 
     assert "deadbeefsecret" not in out
     assert out.endswith("next line\n")
+
+
+def test_redact_secret_values_masks_every_custom_header():
+    """Comma-separated custom headers are redacted as one bounded value."""
+    text = "ANTHROPIC_CUSTOM_HEADERS=k1: v1,k2: secret2"
+
+    assert common_env_safety.redact_secret_values(text) == "ANTHROPIC_CUSTOM_HEADERS=[REDACTED]"
+
+
+def test_redact_secret_values_preserves_json_around_ocp_header():
+    """OCP header redaction stops at the enclosing JSON delimiters."""
+    text = '{"h":"Ocp-Apim-Subscription-Key: deadbeefsecret", "ok":true}'
+
+    out = common_env_safety.redact_secret_values(text)
+
+    assert json.loads(out) == {"h": "Ocp-Apim-Subscription-Key: [REDACTED]", "ok": True}

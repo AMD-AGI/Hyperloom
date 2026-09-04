@@ -199,7 +199,7 @@ Read and follow the FULL runtime contract in this skill file:
 {skill_path}
 
 ## Run context (passed in via prompt; SKILL.md tells you what to do with these)
-- Workspace (write all your artifacts here): {workspace}
+- Workspace (WRITE only here; quantized_model_dir must resolve inside this path after Path.resolve(); see SKILL.md §1.1): {workspace}
 - Quark project root (READ-ONLY; never edit files under this path): {quark_root}
 - Attempt number: {attempt_number}
 - Acceptable eval gap: {threshold_str}

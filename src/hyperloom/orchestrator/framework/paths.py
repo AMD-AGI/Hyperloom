@@ -130,7 +130,6 @@ _ROCM_HIP_WRITE_SUFFIXES: frozenset[str] = frozenset(
         ".in",
         ".py",
         ".s",
-        ".S",
         ".asm",
         ".inc",
         ".inl",

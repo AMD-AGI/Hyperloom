@@ -397,10 +397,8 @@ def redact_env(environ: Mapping[str, str]) -> dict[str, str]:
             or any(marker in upper for marker in _SENSITIVE_ENV_MARKERS)
         ):
             out[key] = _REDACTED
-        elif value and redact_secret_values(value) != value:
-            out[key] = _REDACTED
         else:
-            out[key] = value
+            out[key] = redact_secret_values(value) if value else value
     return out
 
 

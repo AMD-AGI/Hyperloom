@@ -160,3 +160,18 @@ def test_quantized_dir_relative_escape(tmp_path):
     art = collect_artifacts(ws)
     assert art.quantized_model_dir is None
     assert art.manifest_parse_error == "quantized_model_dir_outside_workspace"
+
+
+def test_quantized_dir_symlink_escape(tmp_path):
+    pytest.importorskip("yaml")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (ws / "out").symlink_to(outside, target_is_directory=True)
+    (ws / "run_manifest.yaml").write_text("outputs:\n  quantized_model_dir: out\n", encoding="utf-8")
+
+    art = collect_artifacts(ws)
+
+    assert art.quantized_model_dir is None
+    assert art.manifest_parse_error == "quantized_model_dir_outside_workspace"
