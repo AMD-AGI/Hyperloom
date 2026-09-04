@@ -141,9 +141,7 @@ def test_non_patch_artifact_is_untouched(repo, tmp_path):
     """Legacy full-source mode (``patch_path`` is a .py) must not be rerouted."""
     src = tmp_path / "optimized.py"
     src.write_text("x = 1\n", encoding="utf-8")
-    assert (
-        _final_content_snapshot(patch_path=str(src), snapshot_dir=None, repo_root=str(repo)) is None
-    )
+    assert _final_content_snapshot(patch_path=str(src), snapshot_dir=None, repo_root=str(repo)) is None
 
 
 def test_unmaterializable_patch_falls_back_to_the_original(repo, tmp_path, pristine):
@@ -192,14 +190,11 @@ def test_materializes_when_the_snapshot_dir_is_inside_a_git_checkout(repo, patch
     session_patch = enclosing / "session" / "runs" / "fusion" / patch_file.name
     session_patch.parent.mkdir(parents=True)
     session_patch.write_text(patch_file.read_text(encoding="utf-8"), encoding="utf-8")
-    assert (
-        subprocess.run(
-            ["git", "-C", str(session_patch.parent), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        == str(enclosing)
-    ), "fixture precondition: the snapshot dir must sit inside a checkout"
+    assert subprocess.run(
+        ["git", "-C", str(session_patch.parent), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == str(enclosing), "fixture precondition: the snapshot dir must sit inside a checkout"
 
     resolved = _final_content_snapshot(
         patch_path=str(session_patch),

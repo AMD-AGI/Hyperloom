@@ -171,10 +171,6 @@ def test_gate_orchestration_propose_action_ok(gate):
     )
 
 
-
-
-
-
 @pytest.mark.parametrize("precision", ["bf16", "fp8"])
 @pytest.mark.parametrize("backend_order", [None, "forge"])
 def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
