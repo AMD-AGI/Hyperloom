@@ -4065,6 +4065,23 @@ class KernelPhase(PhaseHandler):
             from .machine_state import mark_kernel_auto_pass_complete
 
             mark_kernel_auto_pass_complete(self.shared_state)
+        # Queued on this instance, which is the one saved below. The handler reads
+        # the envelope but owns no state: a record written to a second instance is
+        # lost the moment this full save runs.
+        if isinstance(result, dict) and result.get("nominated_patches"):
+            from dataclasses import asdict, is_dataclass
+
+            from ..kernel.request_handlers import queue_nominated_siblings
+
+            queued = queue_nominated_siblings(self.shared_state, result["nominated_patches"])
+            result["queued"] = queued
+            log.info("KERNEL entry: queued %d nominated rewrite sibling(s)", queued)
+            # The bus serialises its payload as JSON, so the siblings travel as
+            # plain rows once the landing that needs the typed form is done.
+            result["nominated_patches"] = [
+                asdict(patch) if is_dataclass(patch) and not isinstance(patch, type) else patch
+                for patch in result["nominated_patches"]
+            ]
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
@@ -4080,16 +4097,9 @@ class KernelPhase(PhaseHandler):
                 priority=1,
             )
         )
-        # Queued on this instance, which is the one saved below. The handler reads
-        # the envelope but owns no state: a record written to a second instance is
-        # lost the moment this full save runs.
-        if isinstance(result, dict) and result.get("nominated_patches"):
-            from ..kernel.request_handlers import queue_nominated_siblings
-
-            queued = queue_nominated_siblings(self.shared_state, result["nominated_patches"])
-            result["queued"] = queued
-            log.info("KERNEL entry: queued %d nominated rewrite sibling(s)", queued)
-        if isinstance(result, dict):
+        # Batch mode already streamed each sub-result; re-recording the aggregate
+        # would double-count its winner's attempts and retire it early.
+        if isinstance(result, dict) and not result.get("batch_mode"):
             self.shared_state.record_kernel_opt(result)
         self.shared_state.save(self.session_dir)
 

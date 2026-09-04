@@ -28,10 +28,13 @@ _AUTO_ENV = "HYPERLOOM_FORGE_NOMINATION_AUTO"
 
 
 class _Bus:
+    """Serialises the row like the real bus, which is where a payload is rejected."""
+
     def __init__(self) -> None:
         self.sent: list[Any] = []
 
     async def append_and_seq(self, message: Any) -> None:
+        message.to_db_row()
         self.sent.append(message)
 
 
