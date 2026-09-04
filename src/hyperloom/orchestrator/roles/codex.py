@@ -114,8 +114,8 @@ class CodexBackend:
     writable_roots: tuple[Path, ...] = ()
     sandbox_mode: str = ""
     codex_bin: str = ""
-    # An agent turn carries a tool loop, so it needs the conversational budget the Claude orchestration path also
-    # floors at, not a completion's 120s.
+    # An agent turn carries a tool loop, so it needs the orchestration budget,
+    # not a completion's 120s.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -130,9 +130,11 @@ class CodexBackend:
     name: str = "codex"
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    # Every turn runs on one held SDK thread, so the Coordinator's delta gating and checkpoint compaction both apply.
-    conversational = True
-    # Which prompt modules describe a surface this backend actually has.
+    # Every turn runs on one held SDK thread, so the Coordinator's delta gating
+    # and checkpoint compaction both apply.
+    # Which prompt modules describe a surface this backend actually has. Read
+    # by the prompt builder, which cannot infer it from the role: the
+    # orchestration role is Claude on paper and Codex in an OpenAI-only run.
     transport = TRANSPORT_STRUCTURED_OUTPUT
 
     _session: CodexSession | None = field(default=None, init=False, repr=False)
@@ -251,26 +253,19 @@ class CodexBackend:
     # ------------------------------------------------------------------
     @property
     def needs_seed(self) -> bool:
-        """True when the open conversation has no history to build a delta on."""
-        return not self._thread_seeded
+        """True when the open conversation has no history to build a delta on.
 
-    def needs_seed_for(self, system_prompt: str | None) -> bool:
-        """True when the turn about to run will start on an empty thread."""
-        if not self._thread_seeded:
-            return True
-        return self._instructions_for(system_prompt) != self._thread_instructions
+        The caller decides between a full push and a delta, but only this
+        backend knows when the thread underneath was replaced — by a reset, by
+        a re-scoped system prompt, or by a turn that never landed.
+        """
+        return not self._thread_seeded
 
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
             part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
         )
-
-    def reset_conversation(self) -> None:
-        """Start the next turn on a fresh conversation."""
-        self._thread_seeded = False
-        if self._session is not None:
-            self._session.reset_thread()
 
     async def aclose(self) -> None:
         """Release the held session: SDK client, child process, ``CODEX_HOME``."""

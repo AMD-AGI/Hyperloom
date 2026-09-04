@@ -38,39 +38,9 @@ class ConversationCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    def _orchestration_conversational(self) -> bool:
-        """True when the orchestration backend runs in persistent-conversation mode."""
-        backend = self.backends.get("orchestration")
-        return bool(getattr(backend, "conversational", False))
-
     def _orchestration_context_tools_mounted(self) -> bool:
         """True when the orchestration backend really exposes the pull tools."""
         return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
-
-    def _orchestration_needs_seed(self, system_prompt: str | None = None) -> bool:
-        """True when the orchestration backend lost the history a delta assumes."""
-        backend = self.backends.get("orchestration")
-        ask = getattr(backend, "needs_seed_for", None)
-        if callable(ask):
-            return bool(ask(system_prompt))
-        return bool(getattr(backend, "needs_seed", False))
-
-    def _reset_orchestration_conversation(self) -> None:
-        """Force the next orchestration turn to re-seed a fresh conversation."""
-        backend = self.backends.get("orchestration")
-        reset = getattr(backend, "reset_conversation", None)
-        if callable(reset):
-            try:
-                reset()
-            except Exception:  # noqa: BLE001
-                log.exception("Coordinator: orchestration reset_conversation failed")
-        self._coord._orchestration_seeded = False
-
-    def _count_prompt_mode(self, mode: str) -> None:
-        """Tally one orchestration prompt push as SEED or DELTA."""
-        census = dict(self.shared_state.orchestration_prompt_modes or {})
-        census[mode] = int(census.get(mode, 0)) + 1
-        self.shared_state.orchestration_prompt_modes = census
 
     def _conversation_progress_signal(self) -> dict[str, Any]:
         """Compute the no-progress circuit-breaker signal."""
@@ -364,46 +334,19 @@ class ConversationCollaborator:
             sections.append("=== Phase ===")
             sections.append(phase_block)
 
-        # Conversational delta gating: first turn gets full SEED, later turns thin DELTA.
-        push_full = True
-        if agent_name == "orchestration":
-            push_full = (
-                not self._orchestration_conversational()
-                or not self._orchestration_seeded
-                or self._orchestration_needs_seed(system_prompt)
-            )
-            if self._orchestration_conversational():
-                log.info(
-                    "orchestration prompt mode=%s seeded=%s tick=%s",
-                    "SEED" if push_full else "DELTA",
-                    self._orchestration_seeded,
-                    getattr(self.shared_state, "tick", 0),
-                )
-                self._count_prompt_mode("seed" if push_full else "delta")
-
-        # On a full SEED push, inject recovered working memory.
-        if (
-            agent_name == "orchestration"
-            and push_full
-            and self._orchestration_conversational()
-            and self._orchestration_seed_memory
-        ):
-            sections.append(self._orchestration_seed_memory)
-
         if agent_name == "orchestration":
             # Refresh before any section renders it.
             obj = self._current_objective
             self.shared_state.target_gap_pct = obj.gap_pct(self.shared_state) if obj is not None else 0.0
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
-            if push_full:
-                try:
-                    cycle_strategy_block = self._cycle_strategy_seed_block()
-                except Exception:  # noqa: BLE001 — advisory only
-                    log.exception("Coordinator: cycle strategy seed render failed")
-                    cycle_strategy_block = ""
-                if cycle_strategy_block:
-                    sections.append(cycle_strategy_block)
+            try:
+                cycle_strategy_block = self._cycle_strategy_seed_block()
+            except Exception:  # noqa: BLE001 — advisory only
+                log.exception("Coordinator: cycle strategy seed render failed")
+                cycle_strategy_block = ""
+            if cycle_strategy_block:
+                sections.append(cycle_strategy_block)
             if self._run_deadline is not None and self._run_started_monotonic is not None:
                 remaining_min = max(
                     0.0,
@@ -439,21 +382,17 @@ class ConversationCollaborator:
                 f"closing_phase={self.shared_state.closing_phase}"
             )
 
-        # Shared session state; omitted on orchestration DELTA turns.
-        if push_full:
-            sections.append("=== Shared session state ===")
-            sections.append(self.shared_state.to_prompt_summary())
-            # Resource pools are orchestration-only; robustness cannot schedule GPU work.
-            if agent_name != "robustness":
-                sections.append("=== Resource pools ===")
-                sections.append(self.shared_state.to_resource_pools_summary())
+        # Shared session state.
+        sections.append("=== Shared session state ===")
+        sections.append(self.shared_state.to_prompt_summary())
+        # Resource pools are orchestration-only; robustness cannot schedule GPU work.
+        if agent_name != "robustness":
+            sections.append("=== Resource pools ===")
+            sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
-            # Advisory/ledger blocks below are part of the full SEED push only.
-            if push_full:
-                denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
-                if denial_summary:
-                    sections.append(denial_summary)
-            # Outside the SEED gate: a queue seen once is the amnesia it fixes.
+            denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
+            if denial_summary:
+                sections.append(denial_summary)
             if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
                 untested_block = self.shared_state.to_untested_proposals_summary()
                 if untested_block:
@@ -461,7 +400,7 @@ class ConversationCollaborator:
                     sections.append(untested_block)
 
         # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
-        if agent_name == "orchestration" and push_full:
+        if agent_name == "orchestration":
             try:
                 warm_block = self.shared_state.to_warm_start_summary()
             except Exception:  # noqa: BLE001 — defensive
@@ -566,31 +505,6 @@ class ConversationCollaborator:
             if accept_block:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
-
-        # Conversational DELTA turn: tell the agent verbose state was not re-pushed.
-        if agent_name == "orchestration" and not push_full:
-            preamble = (
-                "This is a continuation of our ongoing conversation; the "
-                "full session state was NOT re-pasted. The Phase, Mission "
-                "progress, Time budget, and new inbox events above are the "
-                "delta since your last turn. "
-            )
-            if self._orchestration_context_tools_mounted():
-                tool_list = ", ".join(_CONTEXT_TOOL_NAMES)
-                sections.append("=== Context (pull on demand) ===")
-                sections.append(
-                    preamble + "Pull anything else you need "
-                    f"with the read-only context tools: {tool_list} "
-                    "(and `Read` for sandboxed files). Reason "
-                    "from your own running plan; do not re-derive it from scratch."
-                )
-            else:
-                sections.append("=== Context (delta turn) ===")
-                sections.append(
-                    preamble + "Everything omitted was pushed earlier in this "
-                    "same conversation; re-read it above. Reason from your own "
-                    "running plan; do not re-derive it from scratch."
-                )
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
 

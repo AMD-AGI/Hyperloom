@@ -5,92 +5,17 @@ from __future__ import annotations
 import functools
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
 
-# Default checkpoint cadence.
-DEFAULT_CHECKPOINT_EVERY_TICKS: int = 20
-DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
-# Prompt+reply chars forcing a checkpoint regardless of cadence.
-DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
-
-# Context-token guardrail, as a fraction of the model's window.
-DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION: float = 0.70
-# Minimum ticks between two token-triggered compactions, so a re-seeded conversation is not compacted again before it
-# reports a fresh level.
-DEFAULT_CHECKPOINT_MIN_TICK_GAP: int = 3
-# Conservative fallback window for an unknown model id.
-DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
-# Keys must be lower-case with ``-`` separators; lookups are folded to that form.
-MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    "claude-opus-5": 200_000,
-    "claude-opus-4-8": 200_000,
-    "claude-opus-4-7": 200_000,
-    "claude-opus-4-6": 200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-haiku-4-5-20251001": 200_000,
-}
-
-
-def context_window_for_model(model: str) -> int:
-    """Context-window size (tokens) for a model id; conservative fallback if unknown."""
-    key = (model or "").strip().lower().replace(".", "-").replace("_", "-")
-    return MODEL_CONTEXT_WINDOWS.get(key, DEFAULT_MODEL_CONTEXT_WINDOW)
-
-
-# List threads that carry forward when a checkpoint reply omits them (``learnings`` accumulates separately).
+# List threads that carry forward when a checkpoint reply omits them
+# (``learnings`` accumulates separately).
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
-
 
 # seconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = functools.partial(now_iso, "seconds")
-
-
-@dataclass
-class CheckpointPolicy:
-    """When to take an orchestration-memory checkpoint."""
-
-    every_ticks: int = DEFAULT_CHECKPOINT_EVERY_TICKS
-    every_minutes: float = DEFAULT_CHECKPOINT_EVERY_MINUTES
-    char_budget: int = DEFAULT_CHECKPOINT_CHAR_BUDGET
-    # Context-token soft budget (absolute token count; 0 disables).
-    context_token_soft: int = 0
-    # Anti-thrash floor on the token trigger only (0 disables).
-    min_tick_gap: int = DEFAULT_CHECKPOINT_MIN_TICK_GAP
-    # Always checkpoint on a phase boundary.
-    on_phase_boundary: bool = True
-
-    def adopt_context_window(self, window: int, fraction: float) -> None:
-        """Recompute the soft budget from a window the provider itself reported."""
-        if window > 0:
-            self.context_token_soft = int(window * fraction)
-
-    def should_checkpoint(
-        self,
-        *,
-        ticks_since_last: int,
-        minutes_since_last: float,
-        chars_since_last: int,
-        phase_changed: bool,
-        context_tokens_now: int = 0,
-    ) -> bool:
-        """Decide whether a checkpoint is due under this policy."""
-        token_trigger_allowed = self.min_tick_gap <= 0 or ticks_since_last >= self.min_tick_gap
-        if token_trigger_allowed and self.context_token_soft > 0 and context_tokens_now >= self.context_token_soft:
-            return True
-        if phase_changed and self.on_phase_boundary:
-            return True
-        if self.every_ticks > 0 and ticks_since_last >= self.every_ticks:
-            return True
-        if self.every_minutes > 0 and minutes_since_last >= self.every_minutes:
-            return True
-        if self.char_budget > 0 and chars_since_last >= self.char_budget:
-            return True
-        return False
-
 
 # Max byte length for next_cycle_directive before truncation.
 _DIRECTIVE_MAX_LEN: int = 1500
@@ -105,7 +30,6 @@ _DIRECTIVE_POLICY_BLACKLIST: tuple[str, ...] = (
     "override policy",
     "ignore policy",
 )
-
 
 # Appended as the next user turn to elicit the compact summary (parsed as JSON).
 CHECKPOINT_REQUEST_PROMPT: str = """\
@@ -232,78 +156,13 @@ def build_memory_record(
     return record
 
 
-def render_memory_for_seed(memory: dict[str, Any]) -> str:
-    """Render an ``orchestration_memory`` record into prompt text."""
-    if not memory:
-        return ""
-    lines: list[str] = ["=== Your working memory (recovered) ==="]
-    plan = str(memory.get("current_plan") or "").strip()
-    if plan:
-        lines.append(f"current_plan: {plan}")
-
-    def _block(label: str, key: str) -> None:
-        """Append a labeled bullet block for a memory list field."""
-        items = memory.get(key) or []
-        if items:
-            lines.append(f"{label}:")
-            lines.extend(f"  - {str(x)}" for x in items)
-
-    _block("hypotheses", "hypotheses")
-    _block("tried_and_why", "tried_and_why")
-    _block("pending", "pending")
-    _block("learnings", "learnings")
-    cnt = memory.get("checkpoint_count")
-    if cnt:
-        lines.append(f"(checkpoint #{cnt})")
-    return "\n".join(lines)
-
-
-@dataclass
-class CheckpointTracker:
-    """Mutable bookkeeping of progress since the last checkpoint."""
-
-    last_tick: int = 0
-    last_minute_mark: float = 0.0
-    chars_since_last: int = 0
-    last_phase: str = ""
-    # Largest single request (tokens) in the latest backend turn: an absolute water level, set each turn, never
-    # accumulated.
-    context_tokens_now: int = 0
-
-    def chars_add(self, n: int) -> None:
-        """Accumulate characters produced since the last checkpoint."""
-        self.chars_since_last += max(0, int(n))
-
-    def set_context_tokens(self, n: int) -> None:
-        """Record the current context size in tokens (absolute water level)."""
-        self.context_tokens_now = max(0, int(n))
-
-    def reset(self, *, tick: int, minute_mark: float, phase: str) -> None:
-        """Reset the tracker after a checkpoint lands."""
-        self.last_tick = int(tick)
-        self.last_minute_mark = float(minute_mark)
-        self.chars_since_last = 0
-        self.last_phase = phase
-        self.context_tokens_now = 0
-
-
 __all__ = [
     "CHECKPOINT_REQUEST_PROMPT",
-    "CheckpointPolicy",
-    "CheckpointTracker",
-    "DEFAULT_CHECKPOINT_CHAR_BUDGET",
-    "DEFAULT_CHECKPOINT_EVERY_MINUTES",
-    "DEFAULT_CHECKPOINT_EVERY_TICKS",
-    "DEFAULT_CHECKPOINT_MIN_TICK_GAP",
-    "DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION",
-    "DEFAULT_MODEL_CONTEXT_WINDOW",
-    "MODEL_CONTEXT_WINDOWS",
     "_DIRECTIVE_MAX_LEN",
     "_DIRECTIVE_POLICY_BLACKLIST",
+    "_MEMORY_LIST_KEYS",
     "_sanitize_cycle_directive",
     "build_memory_record",
-    "context_window_for_model",
     "is_degenerate_checkpoint",
     "parse_checkpoint_reply",
-    "render_memory_for_seed",
 ]

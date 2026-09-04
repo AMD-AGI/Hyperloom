@@ -610,16 +610,10 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class OrchestrationContext(TypedDict, total=False):
-    """Health of the orchestration conversation's compaction loop."""
+    """Summary of orchestration turns for this session."""
 
-    seed_prompts: int
-    delta_prompts: int
-    compactions: int
-    degenerate_compactions: int
     tick_count: int
-    compactions_per_tick: float
-    delta_ratio: float
-    context_tokens_at_compaction: dict[str, int]
+
 
 
 class Telemetry(TypedDict, total=False):
