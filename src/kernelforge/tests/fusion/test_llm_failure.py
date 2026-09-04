@@ -48,7 +48,14 @@ class _Status(Exception):
         (RuntimeError("missing subscription key"), AUTH),
         (RuntimeError("prompt is too long for this model"), CONTEXT_LENGTH),
         (RuntimeError("request timed out"), TIMEOUT),
-        (_Status("Bad Request", 400), API_ERROR),
+        (
+            _Status(
+                "Error code: 400 - litellm.BadRequestError: AnthropicException - "
+                "Prediction on deployed model failed with error: Bad Request",
+                400,
+            ),
+            API_ERROR,
+        ),
         (_Status("overloaded", 529), API_ERROR),
         (ConnectionError("connection reset by peer"), API_ERROR),
     ],
@@ -141,6 +148,7 @@ def test_a_launch_bound_model_with_no_recipe_is_still_no_opportunity():
 
 def test_an_unreachable_llm_is_not_reported_as_no_opportunity():
     diagnosis = _launch_bound_diagnosis()
+    assert diagnosis.is_candidate, "the incident's precondition: the trace WAS a candidate"
     error = LlmUnavailableError("gateway 400 x4", kind=API_ERROR, attempts=4)
     manifest = build_manifest(
         framework="sglang",
@@ -167,6 +175,20 @@ def test_the_wider_verdict_enum_declares_itself_as_schema_v2():
     )
     assert FUSION_MANIFEST_SCHEMA_VERSION == 2
     assert manifest["schema_version"] == 2
+    for key in (
+        "tool",
+        "version",
+        "verdict",
+        "framework",
+        "model",
+        "diagnosis",
+        "fusion",
+        "fusion_candidates",
+        "validation",
+        "fusion_loop",
+        "artifacts",
+    ):
+        assert key in manifest, key
     assert manifest["error"] is None
 
 

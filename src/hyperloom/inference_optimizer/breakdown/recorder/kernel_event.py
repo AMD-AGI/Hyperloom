@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The SBD V6 ``kernel`` event: one fragment per fact, assembled at close.
+"""The SBD V6 ``kernel`` event: one row per fact, assembled at the close.
 
-A KERNEL entry produces facts over minutes to hours, including re-profile and
-GEAK campaign rows. The assembler also keeps reading forge lane, trace-analysis,
-and forge-rebench fragments written by older sessions, but their unused writer
-APIs are deliberately absent. Keeping compatibility in the reader avoids
-carrying dead production surfaces solely to manufacture historical data.
+A KERNEL entry produces facts over minutes to hours -- lane runs, rebench
+verdicts, GEAK's whole delegated campaign -- and the reason they are written as
+one fragment per row rather than accumulated in memory is not write volume. It
+is that the row is the unit that gets updated: a lane run is recorded when it
+starts and again when its rebench settles, and a fragment keyed by that run
+merges the two without anyone reading the first write back. Held in memory, the
+same two-stage arrival needs a mutable object that only the writing process
+has, so a resumed process either loses the first half or re-derives it.
 
-Recording and assembly are separate halves of this module, and only assembly
-ever sees a whole event. :class:`KernelEventRecorder` writes current rows and
-knows nothing about arrays; :func:`assemble_kernel_ext` reads current and
-historical rows back and decides every wire position, ordering and count. The
-split lets finalize rebuild the event of a session that was killed mid-phase
-through the same projection used for a normal close.
+Recording and assembly are therefore separate halves of this module, and only
+assembly ever sees a whole event. :class:`KernelEventRecorder` writes rows and
+knows nothing about arrays; :func:`assemble_kernel_ext` reads the rows back and
+decides every wire position, ordering and count. The split is what lets
+finalize rebuild the event of a session that was killed mid-phase from exactly
+the same rows, through exactly the same code, rather than through a second
+projection that agrees with this one only until one of them is edited.
 
 Two derivations stay in assembly for the same reason. Settlement -- which
 candidate was adopted -- is a join between a lane row and the rebench row that
@@ -32,8 +36,10 @@ from typing import Any
 
 from .assembler import EVENT_SECTIONS, event_parts
 from .event_fields import (
+    analysis_detail as _analysis_detail,
     as_dict as _as_dict,
     as_list as _as_list,
+    clip as _clip,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
@@ -75,7 +81,9 @@ SECTION_GEAK_ATTEMPT = "kernel_geak_attempt"
 SECTION_GEAK_DISCOVERY = "kernel_geak_discovery"
 SECTION_GEAK_ACCEPTANCE = "kernel_geak_acceptance"
 
+ROW_LANE_RUN = "lane_run"
 ROW_REBENCH = "rebench"
+ROW_TRACE_ANALYZE = "trace_analyze"
 ROW_GEAK_ATTEMPT = "geak_attempt"
 ROW_GEAK_DISCOVERY = "geak_discovery"
 ROW_GEAK_ACCEPTANCE = "geak_acceptance"
@@ -206,6 +214,54 @@ def kernel_event_id(macro_cycle: Any) -> str:
 def _empty_by_source() -> dict[str, dict[str, int]]:
     """Zeroed per-source counters for every producer the phase can adopt from."""
     return {kind: {"attempted": 0, "adopted": 0, "needs_review": 0, "rejected": 0} for kind in _SOURCE_KINDS}
+
+
+def _lane_row(
+    *,
+    source_kind: str,
+    run_id: str,
+    status: str,
+    started_at: str | None,
+    ended_at: str | None,
+    duration_sec: float | None,
+    micro_decision: str | None,
+    rebench_ref: str | None,
+    failure_reason: str | None,
+) -> dict[str, Any]:
+    """Build the fields every candidate lane row carries.
+
+    ``outcome`` is left at its unsettled value rather than accepted from the
+    caller: a row is adopted or rejected by the rebench that re-measured it, and
+    that verdict is a different row which may not have been written yet. It is
+    resolved at assembly, once both halves are on disk.
+
+    Args:
+        source_kind (str): One of the six producers.
+        run_id (str): Lane-stable identifier for this candidate.
+        status (str): How the candidate's own run ended.
+        started_at (str | None): ISO timestamp the candidate started.
+        ended_at (str | None): ISO timestamp the candidate ended.
+        duration_sec (float | None): Wall-clock seconds the candidate took.
+        micro_decision (str | None): The candidate layer's verdict on its own
+            output.
+        rebench_ref (str | None): The rebench attempt id that re-measured it.
+        failure_reason (str | None): Normalized failure reason.
+
+    Returns:
+        dict[str, Any]: The shared lane-row block.
+    """
+    return {
+        "source_kind": str(source_kind),
+        "run_id": str(run_id or ""),
+        "status": str(status or ""),
+        "started_at": _text(started_at),
+        "ended_at": _text(ended_at),
+        "duration_sec": _float_or_none(duration_sec),
+        "micro_decision": _text(micro_decision),
+        "rebench_ref": _text(rebench_ref),
+        "outcome": OUTCOME_IN_FLIGHT if str(status or "") == "in_flight" else OUTCOME_NEEDS_REVIEW,
+        "failure_reason": _text(failure_reason),
+    }
 
 
 def _rebench_row(
@@ -549,6 +605,387 @@ class KernelEventRecorder:
             },
         )
 
+    def record_trace_analyze_run(
+        self,
+        *,
+        run_id: str,
+        trigger: str,
+        status: str,
+        result: Any,
+        requested_by: str = "",
+        request_msg_id: str = "",
+        trace_input: str = "",
+        top_k: Any = None,
+        snapshot: dict[str, Any] | None = None,
+        cache_hit: bool = False,
+    ) -> None:
+        """Record an analysis the phase requested for itself.
+
+        This section is normally empty. The entry re-profile dispatches a
+        ``roofline`` task by default, which analyses the trace it just captured,
+        so the phase's own request is skipped as cached. A non-empty section
+        therefore marks the case where the analysis behind a rewrite has no
+        roofline event of its own -- previously that request bumped the snapshot
+        counter and replaced the cache with nothing on the timeline to explain
+        the increment.
+
+        ``reusable_native_kernel_ids`` is recorded because it is the only legal
+        source of a ``kernel_id``: the hot-kernel ranking includes vendor
+        binaries that dispatch rejects as ``non_reusable_kernel``, so without
+        the admitted set there is no way to check afterwards whether the kernel
+        the phase went on to rewrite was ever a legitimate target.
+
+        Args:
+            run_id (str): Entry-stable identifier for this analysis.
+            trigger (str): ``pre_run_optimization`` or ``llm_explicit``.
+            status (str): ``ok`` or ``failed``.
+            result (Any): The analysis tool's result dict.
+            requested_by (str): The role that requested it.
+            request_msg_id (str): The bus request message id.
+            trace_input (str): The trace the run analysed.
+            top_k (Any): The requested ranking depth.
+            snapshot (dict[str, Any] | None): The ``last_trace_analyze`` cache
+                the run produced.
+            cache_hit (bool): Whether a cached result served the request.
+        """
+        produced = _as_dict(snapshot)
+        self._sink.record(
+            SECTION_TRACE_ANALYZE,
+            {
+                "run_id": str(run_id or ""),
+                "trigger": _text(trigger),
+                "requested_by": _text(requested_by),
+                "request_msg_id": _text(request_msg_id),
+                "ts": _now_iso(),
+                "status": str(status or ""),
+                "cache_hit": bool(cache_hit),
+                "trace_input": _text(trace_input),
+                "top_k": _int_or_none(top_k),
+                "roofline_snapshot_id": _int_or_none(produced.get("roofline_snapshot_id")),
+                "roofline_baseline_gain_at_snapshot": _float_or_none(
+                    produced.get("roofline_baseline_gain_at_snapshot")
+                ),
+                "steady_state_trace": _text(produced.get("steady_state_trace")),
+                "analysis_md_path": _text(produced.get("analysis_md_path")),
+                "reusable_native_kernel_ids": [
+                    str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))
+                ],
+                "trace_validate_ref": None,
+                **_analysis_detail(result),
+            },
+            row_type=ROW_TRACE_ANALYZE,
+            natural_ids=str(run_id or ""),
+        )
+
+    def _record_lane_run(self, row: Mapping[str, Any]) -> None:
+        """Write one lane row, keyed by the run it describes.
+
+        Args:
+            row (Mapping[str, Any]): The lane row, carrying its ``source_kind``
+                and ``run_id``.
+        """
+        self._sink.record(
+            SECTION_LANE_RUN,
+            row,
+            row_type=ROW_LANE_RUN,
+            natural_ids=(str(row.get("source_kind") or ""), str(row.get("run_id") or "")),
+        )
+
+    def record_kernel_rewrite(
+        self,
+        *,
+        run_id: str,
+        kernel_id: str,
+        status: str,
+        kernel_name: str = "",
+        dispatched: bool = True,
+        backends_tried: Any = None,
+        adopted_backend: str = "",
+        skip_reason: str = "",
+        task_group: str = "",
+        speedup: Any = None,
+        baseline_us: Any = None,
+        candidate_us: Any = None,
+        compile_status: str = "",
+        correctness: Any = None,
+        artifact_path: str = "",
+        micro_decision: str = "",
+        rebench_ref: str = "",
+        trace_analyze_ref: str = "",
+        e2e: dict[str, Any] | None = None,
+        started_at: str = "",
+        ended_at: str = "",
+        duration_sec: Any = None,
+        failure_reason: str = "",
+    ) -> None:
+        """Record one forge source-level kernel rewrite.
+
+        ``adopted_backend`` and ``run_id`` are stated rather than derived. The
+        projection had to guess the backend from a speedup plus an artifact path
+        and to synthesize an identifier from ``kernel_id:backend:sequence``
+        whenever the real attempt id had been lost.
+
+        Args:
+            run_id (str): The real attempt id for this rewrite.
+            kernel_id (str): The kernel the rewrite targeted.
+            status (str): How the rewrite's own run ended.
+            kernel_name (str): Human-readable kernel name.
+            dispatched (bool): Whether a backend was actually dispatched.
+            backends_tried (Any): The backends attempted.
+            adopted_backend (str): The backend whose output was taken.
+            skip_reason (str): Why dispatch was skipped, when it was.
+            task_group (str): The dispatch task group.
+            speedup (Any): Micro-benchmark speedup.
+            baseline_us (Any): Micro-benchmark baseline microseconds.
+            candidate_us (Any): Micro-benchmark candidate microseconds.
+            compile_status (str): Compilation outcome.
+            correctness (Any): Correctness verdict.
+            artifact_path (str): The produced artifact.
+            micro_decision (str): The candidate layer's own verdict.
+            rebench_ref (str): The rebench attempt that re-measured it.
+            trace_analyze_ref (str): The analysis that nominated this kernel.
+            e2e (dict[str, Any] | None): The end-to-end integration sub-result.
+            started_at (str): ISO timestamp the rewrite started.
+            ended_at (str): ISO timestamp the rewrite ended.
+            duration_sec (Any): Wall-clock seconds the rewrite took.
+            failure_reason (str): Normalized failure reason.
+        """
+        integration = _as_dict(e2e)
+        self._record_lane_run(
+            {
+                **_lane_row(
+                    source_kind=SOURCE_KERNEL_REWRITE,
+                    run_id=run_id,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_sec=duration_sec,
+                    micro_decision=micro_decision,
+                    rebench_ref=rebench_ref,
+                    failure_reason=failure_reason,
+                ),
+                "kernel_id": str(kernel_id or ""),
+                "kernel_name": _text(kernel_name),
+                "dispatched": bool(dispatched),
+                "backends_tried": [str(item) for item in _as_list(backends_tried)],
+                "adopted_backend": _text(adopted_backend),
+                "skip_reason": _text(skip_reason),
+                "task_group": _text(task_group),
+                "speedup": _float_or_none(speedup),
+                "baseline_us": _float_or_none(baseline_us),
+                "candidate_us": _float_or_none(candidate_us),
+                "compile_status": _text(compile_status),
+                "correctness": correctness if isinstance(correctness, bool) else None,
+                "artifact_path": _text(artifact_path),
+                "trace_analyze_ref": _text(trace_analyze_ref),
+                "e2e": {
+                    "integrated": bool(integration.get("integrated")),
+                    "e2e_gain_pct": _float_or_none(integration.get("e2e_gain_pct")),
+                    "validated": integration.get("validated")
+                    if isinstance(integration.get("validated"), bool)
+                    else None,
+                    "decision": _text(integration.get("decision")),
+                    "patch_path": _text(integration.get("patch_path")),
+                    "target_file": _text(integration.get("target_file")),
+                }
+                if integration
+                else None,
+            }
+        )
+
+    def record_fusion_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        pattern: str = "",
+        target_module: str = "",
+        applied: bool = False,
+        gain_pct: Any = None,
+        patch_path: str = "",
+        micro_decision: str = "",
+        rebench_ref: str = "",
+        started_at: str = "",
+        ended_at: str = "",
+        duration_sec: Any = None,
+        failure_reason: str = "",
+    ) -> None:
+        """Record one forge-fusion run.
+
+        Args:
+            run_id (str): Lane-stable identifier for this run.
+            status (str): How the run ended.
+            pattern (str): The fusion pattern attempted.
+            target_module (str): The module the fusion targeted.
+            applied (bool): Whether the fusion was applied.
+            gain_pct (Any): The gain the run claimed.
+            patch_path (str): The produced patch.
+            micro_decision (str): The candidate layer's own verdict.
+            rebench_ref (str): The rebench attempt that re-measured it.
+            started_at (str): ISO timestamp the run started.
+            ended_at (str): ISO timestamp the run ended.
+            duration_sec (Any): Wall-clock seconds the run took.
+            failure_reason (str): Normalized failure reason.
+        """
+        self._record_lane_run(
+            {
+                **_lane_row(
+                    source_kind=SOURCE_FUSION,
+                    run_id=run_id,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_sec=duration_sec,
+                    micro_decision=micro_decision,
+                    rebench_ref=rebench_ref,
+                    failure_reason=failure_reason,
+                ),
+                "pattern": _text(pattern),
+                "target_module": _text(target_module),
+                "applied": bool(applied),
+                "gain_pct": _float_or_none(gain_pct),
+                "patch_path": _text(patch_path),
+            }
+        )
+
+    def record_gemm_tuning_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        shapes_total: Any = None,
+        shapes_tuned: Any = None,
+        config_path: str = "",
+        gain_pct: Any = None,
+        tuner: str = "",
+        micro_decision: str = "",
+        rebench_ref: str = "",
+        started_at: str = "",
+        ended_at: str = "",
+        duration_sec: Any = None,
+        failure_reason: str = "",
+    ) -> None:
+        """Record one GEMM shape-table tuning run.
+
+        Args:
+            run_id (str): Lane-stable identifier for this run.
+            status (str): How the run ended.
+            shapes_total (Any): Shapes the run considered.
+            shapes_tuned (Any): Shapes the run tuned.
+            config_path (str): The produced shape-table.
+            gain_pct (Any): The gain the run claimed.
+            tuner (str): The tuner that ran.
+            micro_decision (str): The candidate layer's own verdict.
+            rebench_ref (str): The rebench attempt that re-measured it.
+            started_at (str): ISO timestamp the run started.
+            ended_at (str): ISO timestamp the run ended.
+            duration_sec (Any): Wall-clock seconds the run took.
+            failure_reason (str): Normalized failure reason.
+        """
+        self._record_lane_run(
+            {
+                **_lane_row(
+                    source_kind=SOURCE_GEMM_TUNING,
+                    run_id=run_id,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_sec=duration_sec,
+                    micro_decision=micro_decision,
+                    rebench_ref=rebench_ref,
+                    failure_reason=failure_reason,
+                ),
+                "shapes_total": _int_or_none(shapes_total),
+                "shapes_tuned": _int_or_none(shapes_tuned),
+                "config_path": _text(config_path),
+                "gain_pct": _float_or_none(gain_pct),
+                "tuner": _text(tuner),
+            }
+        )
+
+    def record_collective_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        op: str = "",
+        algo: str = "",
+        size_bytes: Any = None,
+        world_size: Any = None,
+        gain_pct: Any = None,
+        withheld: bool = False,
+        withhold_reason: str = "",
+        micro_decision: str = "",
+        rebench_ref: str = "",
+        started_at: str = "",
+        ended_at: str = "",
+        duration_sec: Any = None,
+        failure_reason: str = "",
+    ) -> None:
+        """Record one collective-tuning run.
+
+        Args:
+            run_id (str): Lane-stable identifier for this run.
+            status (str): How the run ended.
+            op (str): The collective operation tuned.
+            algo (str): The algorithm selected.
+            size_bytes (Any): The message size tuned for.
+            world_size (Any): The participating rank count.
+            gain_pct (Any): The gain the run claimed.
+            withheld (bool): Whether the candidate was withheld from adoption.
+            withhold_reason (str): Why it was withheld.
+            micro_decision (str): The candidate layer's own verdict.
+            rebench_ref (str): The rebench attempt that re-measured it.
+            started_at (str): ISO timestamp the run started.
+            ended_at (str): ISO timestamp the run ended.
+            duration_sec (Any): Wall-clock seconds the run took.
+            failure_reason (str): Normalized failure reason.
+        """
+        self._record_lane_run(
+            {
+                **_lane_row(
+                    source_kind=SOURCE_COLLECTIVE,
+                    run_id=run_id,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_sec=duration_sec,
+                    micro_decision=micro_decision,
+                    rebench_ref=rebench_ref,
+                    failure_reason=failure_reason,
+                ),
+                "op": _text(op),
+                "algo": _text(algo),
+                "size_bytes": _int_or_none(size_bytes),
+                "world_size": _int_or_none(world_size),
+                "gain_pct": _float_or_none(gain_pct),
+                "withheld": bool(withheld),
+                "withhold_reason": _text(withhold_reason),
+            }
+        )
+
+    def record_rebench_attempt(self, **fields: Any) -> None:
+        """Record one forge rebench attempt.
+
+        A dispatch and the verdict that lands minutes later are two calls on one
+        ``attempt_id`` describing one attempt, and keying the fragment by that id
+        is what keeps them one row instead of two. Both calls state the whole
+        row, so the later one wins field by field -- a caller that knows only
+        the verdict should pass the dispatch fields through rather than letting
+        them default, because a stated ``None`` is a value like any other.
+
+        Args:
+            **fields: The :func:`_rebench_row` fields.
+        """
+        fields.setdefault("ledger", LEDGER_FORGE)
+        row = _rebench_row(**fields)
+        self._sink.record(
+            SECTION_REBENCH,
+            row,
+            row_type=ROW_REBENCH,
+            natural_ids=(LEDGER_FORGE, row["attempt_id"]),
+        )
+
     # ---- geak ------------------------------------------------------------
 
     def record_geak_handoff(self, handoff: dict[str, Any] | None) -> None:
@@ -593,6 +1030,68 @@ class KernelEventRecorder:
                     "gpu_ids": _text(payload.get("gpu_ids")),
                     "exp_root": _text(payload.get("exp_root")),
                     "eval_dir": _text(payload.get("eval_dir")),
+                }
+            },
+        )
+
+    def record_geak_delegation(
+        self,
+        *,
+        runner_status: str,
+        started_at: str = "",
+        ended_at: str = "",
+        duration_sec: Any = None,
+        error_class: str = "",
+        error: str = "",
+        returncode: Any = None,
+        runner_timeout_sec: Any = None,
+        kill_timeout_sec: Any = None,
+        exp_root: str = "",
+        eval_dir: str = "",
+        report_path: str = "",
+        versions: dict[str, Any] | None = None,
+        recovered_from_disk: bool = False,
+        stages_reached: Any = None,
+    ) -> None:
+        """Record how the delegated runner itself ended.
+
+        Args:
+            runner_status (str): The runner's own status.
+            started_at (str): ISO timestamp the runner started.
+            ended_at (str): ISO timestamp the runner ended.
+            duration_sec (Any): Wall-clock seconds the runner took.
+            error_class (str): The failure class, on a miss.
+            error (str): The failure message, on a miss.
+            returncode (Any): The runner's exit code.
+            runner_timeout_sec (Any): The runner's budget.
+            kill_timeout_sec (Any): The runner's hard kill budget.
+            exp_root (str): The runner's experiment root.
+            eval_dir (str): The macro-cycle-scoped eval dir.
+            report_path (str): The human report the runner wrote.
+            versions (dict[str, Any] | None): Tool version provenance.
+            recovered_from_disk (bool): Whether the result was reconstructed
+                on-disk.
+            stages_reached (Any): Stages a crashed run reached.
+        """
+        self._sink.record(
+            SECTION_EVENT,
+            {
+                "geak_delegation": {
+                    "runner_status": str(runner_status or ""),
+                    "started_at": _text(started_at),
+                    "ended_at": _text(ended_at),
+                    "duration_sec": _float_or_none(duration_sec),
+                    "error_class": _text(error_class),
+                    "error": _clip(error) or None,
+                    "returncode": _int_or_none(returncode),
+                    "runner_timeout_sec": _int_or_none(runner_timeout_sec),
+                    "kill_timeout_sec": _int_or_none(kill_timeout_sec),
+                    "exp_root": _text(exp_root),
+                    "eval_dir": _text(eval_dir),
+                    "report_path": _text(report_path),
+                    "versions": _as_dict(versions),
+                    "recovered_from_disk": bool(recovered_from_disk),
+                    "stages_reached": [str(item) for item in _as_list(stages_reached)],
                 }
             },
         )
@@ -780,6 +1279,32 @@ class KernelEventRecorder:
         )
         if max_attempts is not None:
             self._sink.record(SECTION_EVENT, {"geak_rebench": {"max_attempts": _int_or_none(max_attempts)}})
+
+    def record_geak_rebench_conclusion(
+        self,
+        *,
+        final_status: str = "",
+        final_error_class: str = "",
+        final_error: str = "",
+    ) -> None:
+        """Record the terminal revalidation state of the GEAK candidate.
+
+        Args:
+            final_status (str): The revalidation status the result was stamped
+                with.
+            final_error_class (str): The revalidation failure class.
+            final_error (str): The revalidation failure message.
+        """
+        self._sink.record(
+            SECTION_EVENT,
+            {
+                "geak_rebench": {
+                    "final_status": _text(final_status),
+                    "final_error_class": _text(final_error_class),
+                    "final_error": _clip(final_error) or None,
+                }
+            },
+        )
 
     # ---- conclusion ------------------------------------------------------
 

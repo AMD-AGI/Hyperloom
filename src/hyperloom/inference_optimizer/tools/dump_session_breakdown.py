@@ -140,6 +140,8 @@ def _summary_line(breakdown: dict) -> str:
     lifecycle = breakdown.get("kernel_lifecycle") or {}
     sweep = breakdown.get("sweep") or {}
     warnings = breakdown.get("warnings") or []
+    dj_n = len(breakdown.get("decision_journal") or [])
+    kp_n = len(breakdown.get("kernel_profiling") or [])
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "
@@ -149,6 +151,7 @@ def _summary_line(breakdown: dict) -> str:
         f"detected={len(lifecycle.get('detected') or [])}  "
         f"adopted={len(lifecycle.get('adopted') or [])}  "
         f"sweep={len(sweep.get('all_variants') or [])}  "
+        f"decision_journal={dj_n}  kernel_profiling={kp_n}  "
         f"warnings={len(warnings)}"
     )
 

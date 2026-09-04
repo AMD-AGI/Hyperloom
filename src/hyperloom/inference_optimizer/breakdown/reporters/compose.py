@@ -26,13 +26,17 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
     capability_summary as _r_capability_summary,
     phase_timeline as _r_phase_timeline,
     kernel_lifecycle as _r_kernel_lifecycle,
+    kernel_profiling as _r_kernel_profiling,
+    kernel_decision_path as _r_kernel_decision_path,
     roofline as _r_roofline,
     invocations as _r_invocations,
     param_search as _r_param_search,
+    decision_journal as _r_decision_journal,
     critic_robustness as _r_critic_robustness,
     attribution as _r_attribution,
     optimizations as _r_optimizations,
     source_files as _r_source_files,
+    data_provenance as _r_data_provenance,
 )
 
 
@@ -43,7 +47,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
         "Performance Results",
         ["baseline", "final", "roofline", "optimizations", "attribution"],
     ),
-    ("Capability Search", ["capability_summary", "param_search"]),
+    ("Capability Search", ["capability_summary", "param_search", "decision_journal"]),
     (
         "Kernel Optimization",
         [
@@ -53,11 +57,13 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
             # adopted while showing none of the attempts behind the number.
             "geak_invocations",
             "forge_invocations",
+            "kernel_profiling",
+            "kernel_decision_path",
             "critic_robustness",
         ],
     ),
     ("Run Trace", ["phase_timeline"]),
-    ("Source Artifacts", ["source_files"]),
+    ("Source Artifacts", ["source_files", "data_provenance"]),
 ]
 
 __all__ = [
@@ -72,13 +78,17 @@ __all__ = [
     "_r_capability_summary",
     "_r_phase_timeline",
     "_r_kernel_lifecycle",
+    "_r_kernel_profiling",
+    "_r_kernel_decision_path",
     "_r_roofline",
     "_r_invocations",
     "_r_param_search",
+    "_r_decision_journal",
     "_r_critic_robustness",
     "_r_attribution",
     "_r_optimizations",
     "_r_source_files",
+    "_r_data_provenance",
 ]
 
 

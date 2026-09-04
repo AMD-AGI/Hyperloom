@@ -6090,6 +6090,15 @@ async def run_optimization_handler(
     Returns:
         A ``HandlerResult`` describing the optimization outcome.
     """
+    if "kernel_budget_min" in payload or os.environ.get("KERNEL_OPT_KERNEL_BUDGET_MIN", "").strip():
+        return {
+            "status": "failed",
+            "error_class": "unsupported_option",
+            "error": (
+                "kernel_budget_min / KERNEL_OPT_KERNEL_BUDGET_MIN belonged to the removed "
+                "multi-backend ladder; use budget_minutes / KERNEL_OPT_BACKEND_BUDGET_MIN instead"
+            ),
+        }
     data_guard = _validate_trace_analyze_inputs(payload, session_dir=session_dir)
     if data_guard is not None:
         return data_guard

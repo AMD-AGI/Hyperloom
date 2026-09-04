@@ -1696,10 +1696,21 @@ def test_source_files_renderer_skips_empty_entries() -> None:
     assert "a, b, c" in sec.markdown_block
 
 
-def test_retired_decision_journal_renderer_is_not_registered() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
+def test_decision_journal_standard_caps_rounds() -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers import decision_journal
 
-    assert "decision_journal" not in {section_id for section_id, _render in REGISTRY}
+    rounds = [
+        {
+            "phase": "explore",
+            "round_id": f"r{i}",
+            "variants": [{"name": f"v{i}", "outcome": "tested", "gain_pct_vs_base": i}],
+            "round_decision": {"outcome": "discarded"},
+        }
+        for i in range(35)
+    ]
+    sec = decision_journal.render({"decision_journal": rounds})
+    assert "Showing last 20 of 35 rounds" in sec.markdown_block
+    assert any(d.kind == "rejected" for d in sec.decisions)
 
 
 def test_roofline_and_workload_render_minimal_inputs() -> None:

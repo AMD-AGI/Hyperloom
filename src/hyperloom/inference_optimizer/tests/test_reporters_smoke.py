@@ -119,14 +119,18 @@ def test_all_renderers_register_in_stable_order() -> None:
         "capability_summary",
         "phase_timeline",
         "kernel_lifecycle",
+        "kernel_profiling",
+        "kernel_decision_path",
         "roofline",
         "geak_invocations",
         "forge_invocations",
         "param_search",
+        "decision_journal",
         "critic_robustness",
         "attribution",
         "optimizations",
         "source_files",
+        "data_provenance",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 

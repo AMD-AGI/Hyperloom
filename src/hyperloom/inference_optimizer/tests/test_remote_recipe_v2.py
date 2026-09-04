@@ -2778,8 +2778,6 @@ def test_obsolete_remote_contract_exports_are_removed() -> None:
     # patch_roots could never survive publication, so the surface is gone.
     assert not hasattr(PatchKB, "read_patch_roots")
     assert not hasattr(RemoteRecipeClient, "read_champion")
-    assert not hasattr(kb_store_client, "record_id")
-    assert not hasattr(KBStoreClient, "download_archive")
 
 
 def test_vendored_sdk_exposes_view_and_identity_search() -> None:
@@ -2792,9 +2790,9 @@ def test_vendored_sdk_exposes_view_and_identity_search() -> None:
 
 def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
-    content = path.read_bytes().replace(b"\r\n", b"\n")
+    content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "b2c506dd7dbf4c21fb1114c2aa30dfcc35390737"
+    assert digest == "3402092b4cac1e85e9ad9baae77b8b0020259158"
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:

@@ -146,10 +146,20 @@ def test_removed_backend_ladder_helpers_stay_removed():
     assert not hasattr(krh, "_kernel_ladder_budget_sec")
 
 
-def test_legacy_ladder_budget_payload_does_not_override_forge_budget(monkeypatch):
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_BUDGET_MIN", raising=False)
-    expected = krh._optimization_wrapper_timeout_sec({})
-    assert krh._optimization_wrapper_timeout_sec({"kernel_budget_min": 1}) == expected
+@pytest.mark.asyncio
+async def test_removed_ladder_budget_is_rejected_instead_of_silently_ignored(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("KERNEL_OPT_KERNEL_BUDGET_MIN", raising=False)
+    result = await krh.run_optimization_handler({"kernel_budget_min": 1}, session_dir=tmp_path)
+    assert result["status"] == "failed"
+    assert result["error_class"] == "unsupported_option"
+
+
+@pytest.mark.asyncio
+async def test_removed_ladder_budget_env_is_rejected(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("KERNEL_OPT_KERNEL_BUDGET_MIN", "1")
+    result = await krh.run_optimization_handler({}, session_dir=tmp_path)
+    assert result["status"] == "failed"
+    assert result["error_class"] == "unsupported_option"
 
 
 @pytest.mark.asyncio

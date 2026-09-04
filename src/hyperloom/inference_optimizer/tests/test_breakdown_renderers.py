@@ -6,10 +6,8 @@ renderers."""
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.breakdown.reporters import render_session_report
-from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
-from hyperloom.inference_optimizer.breakdown.reporters.compose import SECTION_GROUPS
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
+    data_provenance as dp,
     kernel_lifecycle as kl,
     optimizations as opt,
 )
@@ -153,24 +151,51 @@ def test_a_ledger_that_disagrees_with_the_run_is_reported():
     assert "no accuracy gate having ruled on them" in joined
 
 
-# ---- retired data_provenance ---------------------------------------------
-def test_data_provenance_is_not_registered():
-    assert "data_provenance" not in {section_id for section_id, _render in REGISTRY}
+# ---- data_provenance ------------------------------------------------------
+def test_data_provenance_skipped_when_empty():
+    out = dp.render({})
+    assert out.skipped is True
 
 
-def test_data_provenance_is_not_in_report_layout():
-    grouped = {section_id for _title, section_ids in SECTION_GROUPS for section_id in section_ids}
-    assert "data_provenance" not in grouped
+def test_sources_summary_variants():
+    assert dp._sources_summary([]) == "—"
+    summ = dp._sources_summary(
+        [
+            {"found": True, "required": True},
+            {"found": False, "required": True},
+            {"found": True, "required": False},
+        ]
+    )
+    assert "found" in summ and "required" in summ
 
 
-def test_historical_data_provenance_payload_is_ignored():
-    report = render_session_report(
+def test_data_provenance_full_table():
+    out = dp.render(
         {
-            "session": {"session_id": "legacy"},
-            "data_provenance": [{"section": "dead-source", "status": "partial"}],
+            "data_provenance": [
+                {
+                    "section": "roofline",
+                    "status": "empty",
+                    "populated": False,
+                    "sources": [{"found": False, "required": True}],
+                    "missing_required": ["trace.json"],
+                },
+                {
+                    "section": "sweep",
+                    "status": "partial",
+                    "populated": True,
+                    "sources": [{"found": True, "required": True}],
+                    "missing_required": [],
+                },
+                {"section": "kernels", "status": "ok", "populated": True, "sources": []},
+                "not-a-dict",
+            ]
         }
-    ).markdown
-    assert "dead-source" not in report
+    )
+    assert out.skipped is False
+    assert "roofline" in out.markdown_block
+    assert any("empty" in f for f in out.key_facts)
+    assert any("partial" in f for f in out.key_facts)
 
 
 # ---- kernel_lifecycle -----------------------------------------------------

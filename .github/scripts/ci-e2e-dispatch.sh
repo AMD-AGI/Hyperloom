@@ -13,6 +13,7 @@
 #   MODEL             HF repo id                       (default Qwen/Qwen3-0.6B)
 #   MODEL_CLASS       dense|moe_mla|moe_swa|moe_mla_nsa|"" (default dense; "" -> auto-infer)
 #   CI_E2E_CLAUDE_MODEL orchestration model             (default claude-opus-5)
+#   CI_E2E_ALLOW_CUSTOM_ORCH_MODEL allow a non-standard explicit model override
 #   GPUS              physical GPUs per replica        (default 1)
 #   TP                tensor-parallel degree           (default 1)
 #   MAX_HOURS         optimizer time budget (hours)    (default 0.5)
@@ -42,7 +43,17 @@ set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MODEL_CLASS="${MODEL_CLASS:-dense}"
+if [ -n "${CI_E2E_CLAUDE_MODEL:-}" ]; then
+  _CI_E2E_MODEL_WAS_EXPLICIT=1
+else
+  _CI_E2E_MODEL_WAS_EXPLICIT=0
+fi
 CI_E2E_CLAUDE_MODEL="${CI_E2E_CLAUDE_MODEL:-claude-opus-5}"
+CI_E2E_ALLOW_CUSTOM_ORCH_MODEL="${CI_E2E_ALLOW_CUSTOM_ORCH_MODEL:-${_CI_E2E_MODEL_WAS_EXPLICIT}}"
+case "$CI_E2E_ALLOW_CUSTOM_ORCH_MODEL" in
+  0|1) ;;
+  *) echo "CI_E2E_ALLOW_CUSTOM_ORCH_MODEL must be 0 or 1" >&2; exit 2 ;;
+esac
 GPUS="${GPUS:-1}"
 TP="${TP:-1}"
 MAX_HOURS="${MAX_HOURS:-0.5}"
@@ -210,13 +221,14 @@ body="$(jq -n \
   --arg kb_store_url "${KB_STORE_URL:-}" \
   --arg kb_store_token "${KB_STORE_TOKEN:-}" \
   --arg claude_model "$CI_E2E_CLAUDE_MODEL" \
+  --arg allow_custom_orch_model "$CI_E2E_ALLOW_CUSTOM_ORCH_MODEL" \
   --argjson gpus "$GPUS" --argjson params "$params" \
   '{name:$name, infra_type:$itype, kind:"hyperloom", replicas:1,
     gpu_per_replica:$gpus,
     template:{params:$params, env:
       ({HL_CI_E2E:"1", KNOWLEDGE_STORE_MODE:$knowledge_mode,
         CLAUDE_MODEL:$claude_model,
-        INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL:"0"}
+        INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL:$allow_custom_orch_model}
        + (if $knowledge_mode == "remote"
           then {KB_STORE_URL:$kb_store_url, KB_STORE_TOKEN:$kb_store_token}
           else {}

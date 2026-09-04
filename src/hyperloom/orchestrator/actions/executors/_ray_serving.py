@@ -114,7 +114,6 @@ class ManagedServerProcess:
     """
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
-    _cmd: list[str] = field(default_factory=list, init=False, repr=False)
 
     def start(
         self,

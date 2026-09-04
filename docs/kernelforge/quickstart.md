@@ -83,11 +83,8 @@ export ANTHROPIC_BASE_URL=https://your-gateway.example/api/v1/llm-proxy
 export ANTHROPIC_AUTH_TOKEN=...
 ```
 
-Fusion discovery runs through the agent harness, so it uses whichever line the
-selected provider reads — the Anthropic one above for a Claude model. Callers
-that use `default_llm_fn` directly instead of the CLI get a plain completion,
-and that path speaks whichever protocol is configured: the OpenAI line when both
-halves are set, otherwise the Anthropic one natively.
+Fusion discovery runs through the registered agent harness, so it uses whichever
+line the selected provider reads — the Anthropic one above for a Claude model.
 
 The Codex supervisor speaks the OpenAI-compatible protocol, which is a separate
 line. Set it only if you use it. Both halves are required here — KernelForge
