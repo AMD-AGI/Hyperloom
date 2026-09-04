@@ -2757,12 +2757,6 @@ class WritebackCollaborator:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: gap seeding failed")
-        compacted = await self._coord._maybe_checkpoint_orchestration(
-            tick=int(getattr(self.shared_state, "tick", 0) or 0),
-            force=True,
-        )
-        if not compacted:
-            self._coord._reset_orchestration_conversation()
         log.info(
             "research-scout harvested: hints_added=%d seen_pr_ids=%d",
             added,

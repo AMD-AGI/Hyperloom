@@ -30,6 +30,11 @@ from ..specialists.runner import SpecialistFailureType
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
+from ..state.orchestration_memory import (
+    CHECKPOINT_REQUEST_PROMPT,
+    parse_checkpoint_reply,
+    build_memory_record,
+)
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
     FORCE_STALLED_SPECIALIST_ROUNDS,
@@ -420,22 +425,32 @@ class ExplorePhase(CoordinatorCollaborator):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the cycle's conversation into durable memory, re-focus the
-        # orchestration prompt for the new cycle, then reset.
+        # 1) Ask the orchestration LLM to produce its working-memory JSON, then
+        # rebuild the system prompt for the new cycle.
         try:
-            compacted = await self._maybe_checkpoint_orchestration(
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                phase_changed=True,
-                force=True,
-            )
-            summary["memory_compacted"] = bool(compacted)
+            try:
+                backend = (getattr(self, "backends", {}) or {}).get("orchestration")
+                if backend is not None:
+                    _mem_result = await backend.run(
+                        CHECKPOINT_REQUEST_PROMPT,
+                        tools=[],
+                        max_turns=0,
+                        allow_no_intent=True,
+                    )
+                    _parsed = parse_checkpoint_reply(getattr(_mem_result, "raw_text", "") or "")
+                    _prior = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
+                    _tick = int(getattr(self.shared_state, "tick", 0) or 0)
+                    _record = build_memory_record(_parsed, seq=0, tick=_tick, previous=_prior)
+                    self.shared_state.orchestration_memory = _record
+                    _history = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
+                    _history.append(_record)
+                    self.shared_state.orchestration_memory_history = _history[-10:]
+            except Exception:  # noqa: BLE001 — best-effort
+                log.exception("cycle soft-restart: orchestration memory capture failed")
             try:
                 summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
             except Exception:  # noqa: BLE001 — reseed is best-effort
                 log.exception("cycle soft-restart: orchestration prompt reseed failed")
-            # Reset unconditionally so a no-op checkpoint still reseeds next turn.
-            self._reset_orchestration_conversation()
-            summary["conversation_reset"] = True
         except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
             log.exception("cycle soft-restart: conversation reset failed")
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.

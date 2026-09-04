@@ -17,8 +17,8 @@ object, so the payload arrives as a JSON string; decoding it and handing the
 result to :func:`validate_envelope` keeps payload checking identical to the
 Claude path.
 
-One :class:`CodexSession` is held across ticks, which is what makes the
-backend honestly ``conversational``: the Coordinator can then push a thin
+One :class:`CodexSession` is held across ticks, which keeps the
+backend stateful: the Coordinator can push a thin
 delta instead of the full session state every turn, and compaction has a
 conversation to compact. The session owns a child process and a private state
 directory, so the Coordinator closes it (:meth:`aclose`) when the run ends.
@@ -165,11 +165,9 @@ class CodexBackend:
     One behaviour differs from the Claude path and cannot be made to match. A
     thread's developer instructions are fixed when it starts, so a phase re-scope
     has to open a new thread, and the model's own reasoning and plan go with the
-    old one. :meth:`needs_seed_for` makes the Coordinator push a full SEED across
-    that seam, and the seam checkpoint that normally runs first carries the
-    distilled memory over -- but that checkpoint is skipped when checkpointing is
-    disabled or the conversation was never seeded, and then only SharedState
-    survives. Claude resumes by ``session_id`` and keeps everything.
+    old one. The seam checkpoint that normally runs first carries the distilled
+    memory over — but that checkpoint is skipped when checkpointing is disabled
+    or the conversation was never seeded, and then only SharedState survives.
 
     Args:
         allowed_intents: The emitting role's intent set; becomes the enforced
@@ -201,8 +199,8 @@ class CodexBackend:
     writable_roots: tuple[Path, ...] = ()
     sandbox_mode: str = ""
     codex_bin: str = ""
-    # An agent turn carries a tool loop, so it needs the conversational budget
-    # the Claude orchestration path also floors at, not a completion's 120s.
+    # An agent turn carries a tool loop, so it needs the orchestration budget,
+    # not a completion's 120s.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -218,9 +216,7 @@ class CodexBackend:
     calls: list[dict[str, Any]] = field(default_factory=list)
 
     # Every turn runs on one held SDK thread, so the Coordinator's delta gating
-    # and checkpoint compaction both apply. Not a dataclass field: a
-    # session-scoped backend has no stateless mode to fall back to.
-    conversational = True
+    # and checkpoint compaction both apply.
     # Which prompt modules describe a surface this backend actually has. Read
     # by the prompt builder, which cannot infer it from the role: the
     # orchestration role is Claude on paper and Codex in an OpenAI-only run.
@@ -395,43 +391,14 @@ class CodexBackend:
         The caller decides between a full push and a delta, but only this
         backend knows when the thread underneath was replaced — by a reset, by
         a re-scoped system prompt, or by a turn that never landed.
-
-        This is the question a backend can answer without knowing what the turn
-        will carry. The Coordinator reads it only from backends that cannot
-        answer :meth:`needs_seed_for`, so this backend's own answer is never the
-        one used; it stays because the attribute is the fallback half of that
-        protocol, and a backend implementing only this half must still work.
         """
         return not self._thread_seeded
-
-    def needs_seed_for(self, system_prompt: str | None) -> bool:
-        """True when the turn about to run will start on an empty thread.
-
-        :attr:`needs_seed` can only describe the thread as it stands, but the
-        caller has to choose SEED or DELTA *before* the turn, and a re-scoped
-        system prompt replaces the thread inside the turn itself. Answering for
-        the prompt that is about to be sent is what keeps a thin delta out of a
-        thread that holds none of the state the delta omits.
-        """
-        if not self._thread_seeded:
-            return True
-        return self._instructions_for(system_prompt) != self._thread_instructions
 
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
             part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
         )
-
-    def reset_conversation(self) -> None:
-        """Start the next turn on a fresh conversation.
-
-        The conversation is the SDK thread; the client and its private state
-        directory stay up, so a compaction cannot leak a child process.
-        """
-        self._thread_seeded = False
-        if self._session is not None:
-            self._session.reset_thread()
 
     async def aclose(self) -> None:
         """Release the held session: SDK client, child process, ``CODEX_HOME``."""

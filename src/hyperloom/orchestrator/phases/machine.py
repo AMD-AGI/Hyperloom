@@ -408,16 +408,6 @@ class MachinePhase(PhaseHandler):
             reason: The transition reason, recorded as the left phase's exit
                 reason when that phase owns a timeline event.
         """
-        # Orchestration checkpoint at the phase seam.
-        try:
-            await self._maybe_checkpoint_orchestration(
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                phase_changed=True,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("Coordinator: phase-boundary checkpoint failed")
-        # Cache-safe here only because the checkpoint above already re-seeded
-        # the conversation, so the cached prefix is rebuilt regardless.
         try:
             self._reseed_orch_prompt_for_phase(to_phase)
         except Exception:  # noqa: BLE001 — prompt scoping is best-effort

@@ -695,72 +695,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        # Orchestration prompt mode: first turn full SEED, later turns DELTA.
-        self._orchestration_seeded: bool = False
-        # Orchestration working-memory checkpoint policy + tracker.
-        from ..state import orchestration_memory as _orch_mem
-
-        # Context-token guardrail: derive soft/hard budgets from the
-        # orchestration model's window × fraction (env-overridable). 0 budgets
-        # disable token triggers (char/tick/time cadence still applies).
-        def _ckpt_fraction(env_key: str, default: float) -> float:
-            try:
-                v = float(os.environ.get(env_key, "").strip() or default)
-            except (TypeError, ValueError):
-                v = default
-            return v if 0.0 < v <= 1.0 else default
-
-        _orch_model = str(getattr(self.backends.get("orchestration"), "model", "") or "")
-        _ctx_window = _orch_mem.context_window_for_model(_orch_model)
-        _soft_frac = _ckpt_fraction(
-            "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
-            _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
-        )
-        self._checkpoint_policy = _orch_mem.CheckpointPolicy(
-            context_token_soft=int(_ctx_window * _soft_frac),
-        )
-        # Kept so a provider that reports its own window per turn can replace the
-        # table's guess without re-deriving the operator's fraction.
-        self._checkpoint_soft_fraction = _soft_frac
-        self._checkpoint_tracker = _orch_mem.CheckpointTracker(
-            last_phase=str(getattr(self.shared_state, "phase", "") or ""),
-        )
-        # Consecutive degenerate checkpoint replies; resets on a good one.
-        self._consec_degenerate_ckpt: int = 0
-        # Disable checkpointing entirely via env.
-        self._checkpoint_enabled: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
-        # Seed memory rendered into the next full SEED push (resume recovery).
-        # INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n> re-seeds from the
-        # n-th-from-newest history snapshot instead of the live memory.
-        _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-        _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
-        if _rollback_raw:
-            try:
-                _n = int(_rollback_raw)
-                _hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
-                if _n >= 1 and len(_hist) >= _n:
-                    _seed_memory = dict(_hist[-_n])
-                    self.shared_state.orchestration_memory = _seed_memory
-                    log.warning(
-                        "Coordinator: orchestration memory rolled back to history[-%d] (of %d snapshots)",
-                        _n,
-                        len(_hist),
-                    )
-                else:
-                    log.warning(
-                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); using live memory",
-                        _rollback_raw,
-                        len(_hist),
-                    )
-            except (TypeError, ValueError):
-                log.warning(
-                    "Coordinator: invalid ORCH_MEMORY_ROLLBACK=%r; using live memory",
-                    _rollback_raw,
-                )
-        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
         # No-progress circuit-breaker telemetry; threshold = high-severity cutoff.
         self._progress_marker: dict[str, Any] = {}
         try:
@@ -1086,7 +1020,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_orchestration_conversational": "conversation",
         "_orchestration_context_tools_mounted": "conversation",
         "_orchestration_needs_seed": "conversation",
-        "_reset_orchestration_conversation": "conversation",
         "_conversation_progress_signal": "conversation",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
@@ -1179,7 +1112,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_replay_resume_if_needed": "writeback",
         "_maybe_run_maintenance_tick": "maintenance",
         "_maybe_prune_runs_for_disk": "maintenance",
-        "_maybe_checkpoint_orchestration": "maintenance",
         "enqueue_targeted_build": "build_lifecycle",
     }
 
@@ -1766,14 +1698,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                                 lambda n=name: self._reactor_pass(n),
                                 stage=f"reactor:{name}",
                             )
-                        # Orchestration checkpoint/compaction; cadence-based.
-                        if not self._stop.is_set():
-                            try:
-                                await self._maybe_checkpoint_orchestration(
-                                    tick=tick_n,
-                                )
-                            except Exception:  # noqa: BLE001
-                                log.exception("Coordinator.run: orchestration checkpoint raised")
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
@@ -2018,31 +1942,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        # Context-token water level. Only a per-request figure is comparable to
-        # the window; a backend reporting none leaves the level at 0 and the
-        # char ledger carries the growth signal alone.
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                md = getattr(result, "metadata", None) or {}
-                self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
-                self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
-            except Exception:  # noqa: BLE001 — accounting must never break routing
-                pass
-        # Kept out of the ledger's try above: that one exists so a missing token
-        # figure still leaves the char ledger updating, and a throw from here
-        # would stop it too.
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                md = getattr(result, "metadata", None) or {}
-                self._checkpoint_policy.adopt_context_window(
-                    int(md.get("model_context_window") or 0),
-                    self._checkpoint_soft_fraction,
-                )
-            except Exception:  # noqa: BLE001 — accounting must never break routing
-                pass
-        # Completed orchestration turn means SEED delivered; later turns send DELTA.
-        if agent_name == "orchestration":
-            self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)

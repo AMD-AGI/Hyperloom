@@ -1121,31 +1121,10 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class OrchestrationContext(TypedDict, total=False):
-    """Health of the orchestration conversation's compaction loop.
+    """Summary of orchestration turns for this session."""
 
-    Attributes:
-        seed_prompts (int): Full state pushes to the orchestration backend.
-        delta_prompts (int): Thin delta pushes.
-        compactions (int): ``orchestration_checkpoint`` events recorded.
-        degenerate_compactions (int): Compactions skipped on an unusable summary.
-        tick_count (int): Ticks executed, for the per-tick rates below.
-        compactions_per_tick (float): ``compactions / tick_count``; near 1.0
-            means the conversation is re-seeded every tick.
-        delta_ratio (float): ``delta_prompts / (seed + delta)``; near 0 means
-            the persistent conversation is buying nothing.
-        context_tokens_at_compaction (dict[str, int]): ``min`` / ``median`` /
-            ``max`` water level recorded on the compaction events. A ``min``
-            above the soft budget means compacting cannot un-trip the trigger.
-    """
-
-    seed_prompts: int
-    delta_prompts: int
-    compactions: int
-    degenerate_compactions: int
     tick_count: int
-    compactions_per_tick: float
-    delta_ratio: float
-    context_tokens_at_compaction: dict[str, int]
+
 
 
 class Telemetry(TypedDict, total=False):

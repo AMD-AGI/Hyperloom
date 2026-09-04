@@ -11,138 +11,17 @@ from __future__ import annotations
 import functools
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
-
-
-# Default checkpoint cadence. A checkpoint fires when ANY trigger crosses its
-# threshold.
-DEFAULT_CHECKPOINT_EVERY_TICKS: int = 20
-DEFAULT_CHECKPOINT_EVERY_MINUTES: float = 30.0
-# Prompt+reply chars forcing a checkpoint regardless of cadence.
-DEFAULT_CHECKPOINT_CHAR_BUDGET: int = 400_000
-
-# Context-token guardrail, as a fraction of the model's window. The compared
-# quantity is one request's input side, never a per-call sum over the internal
-# agentic turns (that sum can exceed the window itself).
-DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION: float = 0.70
-# Minimum ticks between two token-triggered compactions, so a re-seeded
-# conversation is not compacted again before it reports a fresh level.
-DEFAULT_CHECKPOINT_MIN_TICK_GAP: int = 3
-# Conservative fallback window for an unknown model id.
-DEFAULT_MODEL_CONTEXT_WINDOW: int = 200_000
-# Keys must be lower-case with ``-`` separators; lookups are folded to that form.
-# These drive the compaction trigger (window * soft fraction), so they stay at
-# the 200k every Claude model serves without an extended-window opt-in, even
-# where a gateway advertises 1M. Listing a model explicitly keeps it pinned to
-# that value if DEFAULT_MODEL_CONTEXT_WINDOW ever moves.
-MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    "claude-opus-5": 200_000,
-    "claude-opus-4-8": 200_000,
-    "claude-opus-4-7": 200_000,
-    "claude-opus-4-6": 200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-haiku-4-5-20251001": 200_000,
-}
-
-
-def context_window_for_model(model: str) -> int:
-    """Context-window size (tokens) for a model id; conservative fallback if unknown.
-
-    Args:
-        model: The model id (e.g. ``"claude-opus-5"``); matched
-            case-insensitively with ``.`` / ``_`` folded to ``-``, so gateway
-            spellings such as ``"Claude-Opus-5"`` resolve. Blank/unknown ids
-            fall back to :data:`DEFAULT_MODEL_CONTEXT_WINDOW`.
-
-    Returns:
-        The window size in tokens.
-    """
-    key = (model or "").strip().lower().replace(".", "-").replace("_", "-")
-    return MODEL_CONTEXT_WINDOWS.get(key, DEFAULT_MODEL_CONTEXT_WINDOW)
 
 
 # List threads that carry forward when a checkpoint reply omits them
 # (``learnings`` accumulates separately).
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
 
-
 # seconds + ``+00:00`` (canonical helper; kept importable for callers).
 _now_iso = functools.partial(now_iso, "seconds")
-
-
-@dataclass
-class CheckpointPolicy:
-    """When to take an orchestration-memory checkpoint."""
-
-    every_ticks: int = DEFAULT_CHECKPOINT_EVERY_TICKS
-    every_minutes: float = DEFAULT_CHECKPOINT_EVERY_MINUTES
-    char_budget: int = DEFAULT_CHECKPOINT_CHAR_BUDGET
-    # Context-token soft budget (absolute token count; 0 disables).
-    context_token_soft: int = 0
-    # Anti-thrash floor on the token trigger only (0 disables).
-    min_tick_gap: int = DEFAULT_CHECKPOINT_MIN_TICK_GAP
-    # Always checkpoint on a phase boundary.
-    on_phase_boundary: bool = True
-
-    def adopt_context_window(self, window: int, fraction: float) -> None:
-        """Recompute the soft budget from a window the provider itself reported.
-
-        :data:`MODEL_CONTEXT_WINDOWS` covers the models this project pins, and
-        everything else falls back to a conservative default. A provider that
-        states its own window per turn knows better than that fallback, and
-        compacting against a window smaller than the real one fires early --
-        which costs the conversation, because compaction resets it.
-
-        Args:
-            window: Window size the provider reported; 0 or less leaves the
-                current budget untouched.
-            fraction: Share of the window at which to compact.
-        """
-        if window > 0:
-            self.context_token_soft = int(window * fraction)
-
-    def should_checkpoint(
-        self,
-        *,
-        ticks_since_last: int,
-        minutes_since_last: float,
-        chars_since_last: int,
-        phase_changed: bool,
-        context_tokens_now: int = 0,
-    ) -> bool:
-        """Decide whether a checkpoint is due under this policy.
-
-        Only the token trigger is gated by :attr:`min_tick_gap`; the cadence
-        triggers are unaffected by that floor.
-
-        Args:
-            ticks_since_last: Ticks elapsed since the last checkpoint.
-            minutes_since_last: Minutes elapsed since the last checkpoint.
-            chars_since_last: Characters accumulated since the last checkpoint.
-            phase_changed: Whether a phase boundary was just crossed.
-            context_tokens_now: Current size of a single request's input side in
-                tokens; 0 when unavailable.
-
-        Returns:
-            ``True`` when any enabled trigger (context-token budget, phase
-            boundary, tick, time, or char budget) is met.
-        """
-        token_trigger_allowed = self.min_tick_gap <= 0 or ticks_since_last >= self.min_tick_gap
-        if token_trigger_allowed and self.context_token_soft > 0 and context_tokens_now >= self.context_token_soft:
-            return True
-        if phase_changed and self.on_phase_boundary:
-            return True
-        if self.every_ticks > 0 and ticks_since_last >= self.every_ticks:
-            return True
-        if self.every_minutes > 0 and minutes_since_last >= self.every_minutes:
-            return True
-        if self.char_budget > 0 and chars_since_last >= self.char_budget:
-            return True
-        return False
-
 
 # Max byte length for next_cycle_directive before truncation.
 _DIRECTIVE_MAX_LEN: int = 1500
@@ -157,7 +36,6 @@ _DIRECTIVE_POLICY_BLACKLIST: tuple[str, ...] = (
     "override policy",
     "ignore policy",
 )
-
 
 # Appended as the next user turn to elicit the compact summary (parsed as JSON).
 CHECKPOINT_REQUEST_PROMPT: str = """\
@@ -346,113 +224,13 @@ def build_memory_record(
     return record
 
 
-def render_memory_for_seed(memory: dict[str, Any]) -> str:
-    """Render an ``orchestration_memory`` record into prompt text.
-
-    Used for compaction re-seed and resume rebuild. Returns "" when memory
-    is empty (fresh session).
-
-    Args:
-        memory: An ``orchestration_memory`` record.
-
-    Returns:
-        The rendered prompt text, or ``""`` when ``memory`` is empty.
-    """
-    if not memory:
-        return ""
-    lines: list[str] = ["=== Your working memory (recovered) ==="]
-    plan = str(memory.get("current_plan") or "").strip()
-    if plan:
-        lines.append(f"current_plan: {plan}")
-
-    def _block(label: str, key: str) -> None:
-        """Append a labeled bullet block for a memory list field.
-
-        Args:
-            label: Section heading to render.
-            key: Memory key whose list items are rendered as bullets.
-        """
-        items = memory.get(key) or []
-        if items:
-            lines.append(f"{label}:")
-            lines.extend(f"  - {str(x)}" for x in items)
-
-    _block("hypotheses", "hypotheses")
-    _block("tried_and_why", "tried_and_why")
-    _block("pending", "pending")
-    _block("learnings", "learnings")
-    cnt = memory.get("checkpoint_count")
-    if cnt:
-        lines.append(f"(checkpoint #{cnt})")
-    return "\n".join(lines)
-
-
-@dataclass
-class CheckpointTracker:
-    """Mutable bookkeeping of progress since the last checkpoint.
-
-    Lives on the Coordinator; ``reset`` is called after a checkpoint lands.
-    """
-
-    last_tick: int = 0
-    last_minute_mark: float = 0.0
-    chars_since_last: int = 0
-    last_phase: str = ""
-    # Largest single request (tokens) in the latest backend turn: an absolute
-    # water level, set each turn, never accumulated.
-    context_tokens_now: int = 0
-
-    def chars_add(self, n: int) -> None:
-        """Accumulate characters produced since the last checkpoint.
-
-        Args:
-            n: Number of characters to add (negatives are clamped to 0).
-        """
-        self.chars_since_last += max(0, int(n))
-
-    def set_context_tokens(self, n: int) -> None:
-        """Record the current context size in tokens (absolute water level).
-
-        Args:
-            n: Current context token count (negatives are clamped to 0).
-        """
-        self.context_tokens_now = max(0, int(n))
-
-    def reset(self, *, tick: int, minute_mark: float, phase: str) -> None:
-        """Reset the tracker after a checkpoint lands.
-
-        Clears the water level too: the compacted conversation no longer holds
-        the context that reading described.
-
-        Args:
-            tick: Current tick to record as the last checkpoint tick.
-            minute_mark: Current minute mark to record.
-            phase: Current phase to record.
-        """
-        self.last_tick = int(tick)
-        self.last_minute_mark = float(minute_mark)
-        self.chars_since_last = 0
-        self.last_phase = phase
-        self.context_tokens_now = 0
-
-
 __all__ = [
     "CHECKPOINT_REQUEST_PROMPT",
-    "CheckpointPolicy",
-    "CheckpointTracker",
-    "DEFAULT_CHECKPOINT_CHAR_BUDGET",
-    "DEFAULT_CHECKPOINT_EVERY_MINUTES",
-    "DEFAULT_CHECKPOINT_EVERY_TICKS",
-    "DEFAULT_CHECKPOINT_MIN_TICK_GAP",
-    "DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION",
-    "DEFAULT_MODEL_CONTEXT_WINDOW",
-    "MODEL_CONTEXT_WINDOWS",
     "_DIRECTIVE_MAX_LEN",
     "_DIRECTIVE_POLICY_BLACKLIST",
+    "_MEMORY_LIST_KEYS",
     "_sanitize_cycle_directive",
     "build_memory_record",
-    "context_window_for_model",
     "is_degenerate_checkpoint",
     "parse_checkpoint_reply",
-    "render_memory_for_seed",
 ]
