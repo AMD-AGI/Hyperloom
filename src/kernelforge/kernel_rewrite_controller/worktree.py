@@ -155,6 +155,10 @@ def changed_files_from_base(
     if not best:
         return ()
     output = git(
+        # Without this Git renders a path holding any non-ASCII byte as a quoted,
+        # escaped string, and the consumer stages what the name says.
+        "-c",
+        "core.quotePath=false",
         "diff",
         "--name-only",
         f"{worktree.base_commit}..{best}",

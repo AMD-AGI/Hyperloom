@@ -67,10 +67,15 @@ async def inline_step_heartbeat(
     try:
         yield
     finally:
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        if clear is not None:
-            with contextlib.suppress(Exception):
-                clear()
+        # Retiring the stamp gets a finally of its own: awaiting the cancelled beat
+        # re-raises anything it died of, and a beat that died is exactly the case
+        # where a stamp is left behind.
+        try:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            if clear is not None:
+                with contextlib.suppress(Exception):
+                    clear()

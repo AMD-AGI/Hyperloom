@@ -26,6 +26,22 @@ def test_a_reusable_kernel_is_resolved() -> None:
     assert _classify("", reusable=True) == ksc.CLASS_RESOLVED
 
 
+@pytest.mark.parametrize("reusable", [True, 1, "true", "True", " 1 "])
+def test_a_verdict_that_is_not_a_python_bool_still_reads_as_reusable(reusable: Any) -> None:
+    """The field reaches here from JSON several producers write, not all as bools.
+
+    A strict identity check downgrades a dispatchable kernel to a class a consumer
+    will spend a search budget re-resolving.
+    """
+    assert _classify("", reusable=reusable) == ksc.CLASS_RESOLVED
+
+
+@pytest.mark.parametrize("reusable", [False, 0, "false", "", "  ", None, [], "yes", 2])
+def test_anything_else_is_not_taken_as_a_reusable_verdict(reusable: Any) -> None:
+    """Unrecognized means not reusable: the costly mistake is the other direction."""
+    assert _classify("vendor binary (no rewritable source)", reusable=reusable) == ksc.CLASS_VENDOR_BINARY
+
+
 @pytest.mark.parametrize(
     ("skip_reason", "expected"),
     [

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Callable
@@ -151,7 +152,15 @@ def dispatch_prepared_tasks(
         )
 
     def _report() -> None:
-        if on_progress is not None:
+        if on_progress is None:
+            return
+        # Suppressed on purpose. The callback exists so a campaign's accounting
+        # survives being killed, and its own work -- scanning the patch directory
+        # and rewriting two files on a shared filesystem -- can fail on its own.
+        # Letting that failure out would abort a campaign that is making progress
+        # and may already hold published patches, which is the opposite of what
+        # recording the accounting is for.
+        with contextlib.suppress(Exception):
             on_progress(_snapshot())
 
     for index, task in enumerate(tasks):

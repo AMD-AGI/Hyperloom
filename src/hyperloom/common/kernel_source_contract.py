@@ -127,6 +127,24 @@ REQUIRED_ENTRY_KEYS = (
 )
 
 
+def _reusable_verdict(value: Any) -> bool:
+    """Read the gate's ``reusable_native_kernel`` verdict without trusting its type.
+
+    Normalized rather than compared with ``is True`` because this arrives from
+    JSON written by several producers, one of which stores the field as an empty
+    string. An unrecognized value reads as not reusable: calling a kernel resolved
+    when it is not sends a search budget after something nothing can rewrite,
+    while the opposite mistake only costs it a re-resolution.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1"}
+    return False
+
+
 def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = "") -> str:
     """Reduce a candidate's routing verdict to one judgeable class.
 
@@ -141,7 +159,7 @@ def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = 
     Returns:
         One of :data:`KNOWN_REASON_CLASSES`.
     """
-    if reusable is True:
+    if _reusable_verdict(reusable):
         return CLASS_RESOLVED
     text = str(skip_reason or "").strip().lower()
     if not text:
@@ -223,19 +241,21 @@ def make_entry(
 
 
 def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Count located kernels and group the rest by why they are undispatchable.
+    """Count dispatchable kernels and group the rest by why they are not.
 
-    A bare located/total count cannot say whether the unlocated kernels were
-    worth chasing, so this also reports the GPU share behind them and splits it
-    into what a search could still rescue and what nothing can.
+    A bare count cannot say whether the rest were worth chasing, so this also
+    reports the GPU share behind them and splits it into what a search could
+    still rescue and what nothing can.
 
     Args:
         entries: Source-resolution entries, as written to the artifact.
 
     Returns:
-        ``total`` / ``located`` counts, per-class counts, the GPU share behind
-        undispatchable kernels, and its ``recoverable`` / ``unsalvageable``
-        split.
+        ``total`` and ``located`` counts, per-class counts, the GPU share behind
+        undispatchable kernels, and its ``recoverable`` / ``unsalvageable`` split.
+        ``located`` counts :data:`CLASS_RESOLVED` alone -- kernels the routing gate
+        will dispatch -- so a resolved path the gate still refuses, such as a
+        vendor binary, is outside it despite having been found.
     """
     by_class: dict[str, int] = {}
     located = 0

@@ -101,6 +101,31 @@ async def test_the_stamp_is_retired_even_when_the_step_raises() -> None:
     assert cleared == [True]
 
 
+async def test_the_stamp_is_retired_even_when_the_beat_died() -> None:
+    """A beat that raised is precisely the case that leaves a stamp behind.
+
+    Awaiting the cancelled beat re-raises what it died of, so a retirement sharing
+    that finally would be skipped exactly when it is needed.
+    """
+    beats: list[float] = []
+    cleared: list[bool] = []
+
+    def _stamp(when: float) -> None:
+        beats.append(when)
+        if len(beats) > 1:
+            raise RuntimeError("beat failed")
+
+    with pytest.raises(RuntimeError, match="beat failed"):
+        async with inline_step_heartbeat(
+            stamp=_stamp,
+            interval_sec=0.01,
+            now=lambda: 1.0,
+            clear=lambda: cleared.append(True),
+        ):
+            await asyncio.sleep(0.05)
+    assert cleared == [True]
+
+
 async def test_a_failing_clear_does_not_mask_the_step() -> None:
     """The step is already over; a stamp left behind goes stale on its own."""
 

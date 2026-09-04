@@ -5338,7 +5338,11 @@ def write_source_resolution_artifact(
         path = Path(out_path)
         atomic_write_json(path, doc)
         summary = _KSC.summarize_resolution(doc.get("entries") or [])
-        line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) located -> {path.name}"
+        # "dispatchable", not "located": the count is CLASS_RESOLVED only, so a
+        # kernel whose file was found but whose body nothing can rewrite -- a
+        # vendor binary, a dispatch shim -- is not in it. Reading it as "located"
+        # sends an operator back to re-resolve paths that are already correct.
+        line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) dispatchable -> {path.name}"
         # A count alone cannot say whether the unlocated kernels were worth
         # chasing, so report the GPU share behind each class next to it.
         if summary["undispatchable_gpu_pct"] > 0.0:

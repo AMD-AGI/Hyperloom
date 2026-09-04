@@ -143,6 +143,43 @@ def test_progress_is_reported_after_every_task(
     assert all(pins == {str(repo): "a" * 40} for _count, pins in seen)
 
 
+def test_a_failing_progress_report_does_not_end_the_campaign(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Recording the accounting must not be able to abort what it records.
+
+    The callback scans the patch directory and rewrites two files on a shared
+    filesystem, and it now runs at every task boundary, so its own failure is a
+    real event -- and letting it out would abandon patches already published.
+    """
+    layout = ControllerLayout(tmp_path / "output")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _publish_task(layout, repo_root=repo, kernel_name="first", priority=0)
+    _publish_task(layout, repo_root=repo, kernel_name="second", priority=1)
+
+    def _dispatch(task_dir, **_kwargs):
+        task = scheduler.load_task(task_dir, record_state=False).task
+        assert task is not None
+        return _result(task, "succeeded")
+
+    def _explode(_partial) -> None:
+        raise OSError("stale NFS file handle")
+
+    monkeypatch.setattr(scheduler, "dispatch_single_task", _dispatch)
+
+    result = scheduler.dispatch_prepared_tasks(
+        layout,
+        controller_deadline_unix=20_000,
+        clock=lambda: 10_000,
+        on_progress=_explode,
+    )
+
+    assert result.succeeded_count == 2
+    assert result.task_count == 2
+
+
 def test_a_superseded_duplicate_is_recorded_rather_than_dropped(
     tmp_path: Path,
     monkeypatch,
