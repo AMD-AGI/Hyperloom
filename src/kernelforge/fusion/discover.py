@@ -91,6 +91,7 @@ _DEFAULT_MAX_FUSIONS = 4
 # ceiling is -- so it is set where exploring a large model tree fits under it.
 DEFAULT_DISCOVERY_TURNS = 60
 
+
 def _resolve_max_fusions(value: Optional[int] = None) -> int:
     if value is not None:
         return max(1, int(value))

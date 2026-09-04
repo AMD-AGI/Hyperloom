@@ -39,7 +39,6 @@ from .event_fields import (
     analysis_detail as _analysis_detail,
     as_dict as _as_dict,
     as_list as _as_list,
-    clip as _clip,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
@@ -848,122 +847,6 @@ class KernelEventRecorder:
             }
         )
 
-    def record_gemm_tuning_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        shapes_total: Any = None,
-        shapes_tuned: Any = None,
-        config_path: str = "",
-        gain_pct: Any = None,
-        tuner: str = "",
-        micro_decision: str = "",
-        rebench_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-    ) -> None:
-        """Record one GEMM shape-table tuning run.
-
-        Args:
-            run_id (str): Lane-stable identifier for this run.
-            status (str): How the run ended.
-            shapes_total (Any): Shapes the run considered.
-            shapes_tuned (Any): Shapes the run tuned.
-            config_path (str): The produced shape-table.
-            gain_pct (Any): The gain the run claimed.
-            tuner (str): The tuner that ran.
-            micro_decision (str): The candidate layer's own verdict.
-            rebench_ref (str): The rebench attempt that re-measured it.
-            started_at (str): ISO timestamp the run started.
-            ended_at (str): ISO timestamp the run ended.
-            duration_sec (Any): Wall-clock seconds the run took.
-            failure_reason (str): Normalized failure reason.
-        """
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_GEMM_TUNING,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    rebench_ref=rebench_ref,
-                    failure_reason=failure_reason,
-                ),
-                "shapes_total": _int_or_none(shapes_total),
-                "shapes_tuned": _int_or_none(shapes_tuned),
-                "config_path": _text(config_path),
-                "gain_pct": _float_or_none(gain_pct),
-                "tuner": _text(tuner),
-            }
-        )
-
-    def record_collective_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        op: str = "",
-        algo: str = "",
-        size_bytes: Any = None,
-        world_size: Any = None,
-        gain_pct: Any = None,
-        withheld: bool = False,
-        withhold_reason: str = "",
-        micro_decision: str = "",
-        rebench_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-    ) -> None:
-        """Record one collective-tuning run.
-
-        Args:
-            run_id (str): Lane-stable identifier for this run.
-            status (str): How the run ended.
-            op (str): The collective operation tuned.
-            algo (str): The algorithm selected.
-            size_bytes (Any): The message size tuned for.
-            world_size (Any): The participating rank count.
-            gain_pct (Any): The gain the run claimed.
-            withheld (bool): Whether the candidate was withheld from adoption.
-            withhold_reason (str): Why it was withheld.
-            micro_decision (str): The candidate layer's own verdict.
-            rebench_ref (str): The rebench attempt that re-measured it.
-            started_at (str): ISO timestamp the run started.
-            ended_at (str): ISO timestamp the run ended.
-            duration_sec (Any): Wall-clock seconds the run took.
-            failure_reason (str): Normalized failure reason.
-        """
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_COLLECTIVE,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    rebench_ref=rebench_ref,
-                    failure_reason=failure_reason,
-                ),
-                "op": _text(op),
-                "algo": _text(algo),
-                "size_bytes": _int_or_none(size_bytes),
-                "world_size": _int_or_none(world_size),
-                "gain_pct": _float_or_none(gain_pct),
-                "withheld": bool(withheld),
-                "withhold_reason": _text(withhold_reason),
-            }
-        )
-
     def record_rebench_attempt(self, **fields: Any) -> None:
         """Record one forge rebench attempt.
 
@@ -1030,68 +913,6 @@ class KernelEventRecorder:
                     "gpu_ids": _text(payload.get("gpu_ids")),
                     "exp_root": _text(payload.get("exp_root")),
                     "eval_dir": _text(payload.get("eval_dir")),
-                }
-            },
-        )
-
-    def record_geak_delegation(
-        self,
-        *,
-        runner_status: str,
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        error_class: str = "",
-        error: str = "",
-        returncode: Any = None,
-        runner_timeout_sec: Any = None,
-        kill_timeout_sec: Any = None,
-        exp_root: str = "",
-        eval_dir: str = "",
-        report_path: str = "",
-        versions: dict[str, Any] | None = None,
-        recovered_from_disk: bool = False,
-        stages_reached: Any = None,
-    ) -> None:
-        """Record how the delegated runner itself ended.
-
-        Args:
-            runner_status (str): The runner's own status.
-            started_at (str): ISO timestamp the runner started.
-            ended_at (str): ISO timestamp the runner ended.
-            duration_sec (Any): Wall-clock seconds the runner took.
-            error_class (str): The failure class, on a miss.
-            error (str): The failure message, on a miss.
-            returncode (Any): The runner's exit code.
-            runner_timeout_sec (Any): The runner's budget.
-            kill_timeout_sec (Any): The runner's hard kill budget.
-            exp_root (str): The runner's experiment root.
-            eval_dir (str): The macro-cycle-scoped eval dir.
-            report_path (str): The human report the runner wrote.
-            versions (dict[str, Any] | None): Tool version provenance.
-            recovered_from_disk (bool): Whether the result was reconstructed
-                on-disk.
-            stages_reached (Any): Stages a crashed run reached.
-        """
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_delegation": {
-                    "runner_status": str(runner_status or ""),
-                    "started_at": _text(started_at),
-                    "ended_at": _text(ended_at),
-                    "duration_sec": _float_or_none(duration_sec),
-                    "error_class": _text(error_class),
-                    "error": _clip(error) or None,
-                    "returncode": _int_or_none(returncode),
-                    "runner_timeout_sec": _int_or_none(runner_timeout_sec),
-                    "kill_timeout_sec": _int_or_none(kill_timeout_sec),
-                    "exp_root": _text(exp_root),
-                    "eval_dir": _text(eval_dir),
-                    "report_path": _text(report_path),
-                    "versions": _as_dict(versions),
-                    "recovered_from_disk": bool(recovered_from_disk),
-                    "stages_reached": [str(item) for item in _as_list(stages_reached)],
                 }
             },
         )
@@ -1279,32 +1100,6 @@ class KernelEventRecorder:
         )
         if max_attempts is not None:
             self._sink.record(SECTION_EVENT, {"geak_rebench": {"max_attempts": _int_or_none(max_attempts)}})
-
-    def record_geak_rebench_conclusion(
-        self,
-        *,
-        final_status: str = "",
-        final_error_class: str = "",
-        final_error: str = "",
-    ) -> None:
-        """Record the terminal revalidation state of the GEAK candidate.
-
-        Args:
-            final_status (str): The revalidation status the result was stamped
-                with.
-            final_error_class (str): The revalidation failure class.
-            final_error (str): The revalidation failure message.
-        """
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_rebench": {
-                    "final_status": _text(final_status),
-                    "final_error_class": _text(final_error_class),
-                    "final_error": _clip(final_error) or None,
-                }
-            },
-        )
 
     # ---- conclusion ------------------------------------------------------
 

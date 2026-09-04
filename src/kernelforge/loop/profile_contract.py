@@ -3,7 +3,6 @@
 
 """Shared contract for driver-owned kernel profiling."""
 
-
 PROFILE_RUN_FLAG = "--profile-run"
 
 __all__ = ["PROFILE_RUN_FLAG"]

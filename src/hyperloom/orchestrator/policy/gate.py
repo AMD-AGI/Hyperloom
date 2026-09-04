@@ -138,9 +138,6 @@ SPECIALIST_ACTION_NAME: str = "specialist"
 # Orchestrator-side patch integration step (gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
-# Merged explore action.
-EXPLORE_ACTION_NAME: str = "explore"
-
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2

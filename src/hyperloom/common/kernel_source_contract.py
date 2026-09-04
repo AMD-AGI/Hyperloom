@@ -280,8 +280,3 @@ def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
         except ValueError:
             continue
     return ""
-
-
-def path_is_acceptable(path: str, roots: tuple[str, ...]) -> bool:
-    """Whether a rewriting tier may write ``path`` as a resolved location."""
-    return bool(canonical_source_path(path, roots))

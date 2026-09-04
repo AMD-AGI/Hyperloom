@@ -926,21 +926,6 @@ def _check_selected_chunk_has_gpu_events_quality(
     }
 
 
-KERNEL_HINTS = (
-    "kernel",
-    "triton",
-    "hip",
-    "cuda",
-    "rocblas",
-    "hipblas",
-    "aiter",
-    "fmha",
-    "gemm",
-    "attention",
-    "moe",
-    "rmsnorm",
-    "layernorm",
-)
 RUNTIME_API_NAMES = {
     "hipeventsynchronize",
     "hipdevicesynchronize",

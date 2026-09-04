@@ -25,19 +25,16 @@ async def test_backend_sequence_stamps_task_group_identity(tmp_path, monkeypatch
         },
     }
 
-    async def fake_ladder(*_args, **_kwargs):
-        return (
-            {
-                "status": "ok",
-                "kernel_id": "k002",
-                "proposal": {"decision": "REVERT"},
-                "verification": {"micro_speedup": 0.0},
-            },
-            [],
-        )
+    async def fake_single(*_args, **_kwargs):
+        return {
+            "status": "ok",
+            "kernel_id": "k002",
+            "proposal": {"decision": "REVERT"},
+            "verification": {"micro_speedup": 0.0},
+        }
 
-    monkeypatch.setattr(krh, "_backend_order", lambda _payload: ["forge"])
-    monkeypatch.setattr(krh, "_run_backend_ladder", fake_ladder)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    monkeypatch.setattr(krh, "_run_optimization_single", fake_single)
 
     result = await krh._run_kernel_backend_sequence(
         {},
@@ -844,7 +841,7 @@ async def test_single_candidate_handler_preserves_task_group(tmp_path, monkeypat
     }
     captured: dict = {}
 
-    async def fake_single(payload, *, session_dir, timeout_override_sec=None):
+    async def fake_single(payload, *, session_dir):
         captured.update(payload)
         return {"status": "ok", "kernel_id": payload["kernel_id"]}
 

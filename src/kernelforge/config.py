@@ -91,9 +91,6 @@ class Config:
     # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)
 
-    # Kernel-specific benchmark harness injected into the kernel backend prompt.
-    bench_setup: str = ""
-
     # Bounded scratch measurement for the read-only planning specialists (see
     # orchestrator.specialists.SpecialistProbeConfig). On by default: a
     # specialist that can only argue about a dispatch constant is the failure

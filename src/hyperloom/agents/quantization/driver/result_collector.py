@@ -68,7 +68,6 @@ class CollectedArtifacts:
     # SHOULD-have planning artifacts
     model_analysis_present: bool
     quant_plan_present: bool
-    session_context_present: bool
 
     # MUST-have on quantized_model_dir
     quantized_dir_exists: bool
@@ -81,8 +80,6 @@ class CollectedArtifacts:
     validation_steps: ValidationSteps
 
     # Eval
-    source_eval_present: bool
-    quantized_eval_present: bool
     eval_report_present: bool
     eval_report_data: dict | None  # parsed eval_report.json (or None)
     eval_skipped_reason: str | None  # contents of eval_skipped.txt if present
@@ -332,15 +329,12 @@ def collect_artifacts(
         quantized_model_dir=qdir,
         model_analysis_present=(workspace / "model_analysis.json").is_file(),
         quant_plan_present=(workspace / "quant_plan.json").is_file(),
-        session_context_present=(workspace / "session_context.json").is_file(),
         quantized_dir_exists=quantized_dir_exists,
         has_config_json=has_config,
         has_weights=has_weights,
         has_tokenizer=has_tokenizer,
         validation_report_present=validation_present,
         validation_steps=validation_steps,
-        source_eval_present=(workspace / "source_eval.md").is_file(),
-        quantized_eval_present=(workspace / "quantized_eval.md").is_file(),
         eval_report_present=(workspace / "eval_report.json").is_file(),
         eval_report_data=eval_data,
         eval_skipped_reason=_read_text(workspace / "eval_skipped.txt"),

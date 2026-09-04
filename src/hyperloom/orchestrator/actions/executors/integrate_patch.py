@@ -891,7 +891,7 @@ def _git_apply_collect_feedback(
 
     # All levels failed; retry with -3.
     if not three_way:
-        ok3, err3, fb3 = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
+        ok3, err3, _ = _git_apply_collect_feedback(framework_root, patch_path, three_way=True)
         if ok3:
             return True, "", None
         # Still nothing. Distinguish "does not apply" from "already applied":

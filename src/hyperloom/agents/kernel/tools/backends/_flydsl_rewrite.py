@@ -400,7 +400,7 @@ def _source_entry_hint(candidate: Mapping[str, Any] | None) -> str:
     return str(symbol).strip() if isinstance(symbol, str) else ""
 
 
-def _rewritable_source(language: str, kind: str, accepted: "Container[str]") -> str:
+def _rewritable_source(language: str, kind: str, accepted: Container[str]) -> str:
     """Resolve which rewrite source a candidate is, kind first then language.
 
     A traced Triton kernel reports its *language* as ``python`` and records that

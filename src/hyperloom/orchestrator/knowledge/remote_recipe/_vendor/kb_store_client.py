@@ -458,6 +458,7 @@ class KBStoreClient:
         with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
             return list(pool.map(fetch, files))
 
+
 #: Where a sectioned document keeps its per-section maps. The service treats
 #: ``knowledge`` as opaque, so this is a producer-side convention rather than
 #: part of the record schema; it is fixed because documents already in the

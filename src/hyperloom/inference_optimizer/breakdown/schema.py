@@ -1552,47 +1552,6 @@ class RooflineProgress(TypedDict, total=False):
     snapshots: list[RooflineSnapshot]
 
 
-# Optimization stack — raw KEEP ledger passthrough
-class OptimizationStackEntry(TypedDict, total=False):
-    """One KEEP from ``state.optimization_stack[]`` exposed verbatim.
-
-    Always-present fields: ``action`` / ``variant_name`` /
-    ``candidate_extra_server_args`` / ``extra_envs`` / ``tput`` / ``ts`` /
-    ``workspace``. GEMM-tuning entries add ``engine`` / ``tuned_file`` /
-    ``final_report_path`` / ``source``. Other optionals: ``gain_pct`` /
-    ``kernel_id`` / ``fingerprint`` / ``provenance`` / ``task_id`` /
-    ``validated`` (within the last full-stack rebench).
-    """
-
-    action: str
-    variant_name: str
-    candidate_extra_server_args: str
-    extra_envs: dict[str, str]
-    tput: float | None
-    ts: str
-    workspace: str | None
-    validated: bool
-    # gemm_tuning evidence; engine is the tuning provenance ("geak" / "forge").
-    engine: str
-    tuned_file: str
-    final_report_path: str
-    source: str
-    # generic optionals
-    gain_pct: float | None
-    kernel_id: str
-    fingerprint: str
-    provenance: str
-    task_id: str
-    source_phase: str
-    # filter label for the kind of optimization (backend / param / env on
-    # explore KEEPs); specialist dial.
-    operation_kind: str
-    scope: str
-    accepted_heads: list[Any]
-    extra_server_args_is_invariant: bool
-    candidate_flags: Any
-
-
 # Canonical optimizations — single downstream read model
 OptimizationSource = Literal[
     "warm_replay",
@@ -1879,24 +1838,6 @@ class GemmTuningRun(TypedDict, total=False):
     parameters: dict[str, Any]
     candidates: list[dict[str, Any]]
     shapes: list[dict[str, Any]]
-
-
-class GemmTuning(TypedDict, total=False):
-    """Top-level GEMM-tuning section envelope.
-
-    Attributes:
-        runs (list[GemmTuningRun]): Every GEMM-tuning run this session
-            recorded, newest-last, across engines.
-        adopted_engine (str): Engine of the KEEP that won (``""`` if none).
-        adopted_tuned_file (str): ``tuned_file`` of the adopted KEEP.
-        total_gain_pct (float): Summed gain of adopted runs; mirrors
-            ``attribution.phase_breakdown.gemm_tuning`` for convenience.
-    """
-
-    runs: list[GemmTuningRun]
-    adopted_engine: str
-    adopted_tuned_file: str
-    total_gain_pct: float
 
 
 # Collective — multi-rank communication campaigns run at KERNEL entry. Kept as
