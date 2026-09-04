@@ -751,6 +751,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         # them have run. The incumbent case medians are required for both normal
         # scoring and resume.
         self._best_case_times: dict[str, float] = {}
+        # Whether ``_best_case_times`` were measured on the same iteration as
+        # ``best_wall_ms``. Only false when a kept candidate reported no
+        # per-case timings, which leaves the retained ones describing an older
+        # kernel; see _promote_best.
+        self._best_case_times_describe_best: bool = True
         # Pairs this process selected and could not stage. Whether two archived
         # diffs clash is a property of two immutable files, so nothing about a
         # later stall changes the answer -- and because the selector returns the
@@ -3360,15 +3365,26 @@ class IterationLoop(AnalysisRuntimeMixin):
     def _promote_best(self, result: IterationResult) -> None:
         """Make a kept candidate's aggregate case medians the new incumbent.
 
-        The aggregate and the per-case times are replaced together. Keeping the
-        previous iteration's cases behind a newer wall time would leave the two
-        describing different kernels, and anything computing a per-case mean
-        against them -- the rewrite pipeline scores the finished kernel against
-        its original source that way -- would straddle both.
+        Both of this loop's own invariants have to hold, and they pull in
+        opposite directions when an iteration reports no per-case timings:
+        ``best_wall_ms`` always advances to the kept candidate, and
+        ``_best_case_times`` is never cleared, because a checkpoint carrying an
+        incumbent commit with no per-case timings cannot restore the scoring
+        rules that produced it and ``_validate_resume_scoring_state`` refuses to
+        resume from one.
+
+        What cannot hold as well is that the two describe the same kernel, so
+        say when they do not. A consumer computing a per-case mean against
+        ``best_wall_ms`` -- the rewrite pipeline scores the finished kernel
+        against its original source that way -- would otherwise straddle two
+        kernels with no way to tell.
         """
         self.best_wall_ms = result.wall_ms
         detail = result.bench_detail or {}
-        self._best_case_times = dict(detail.get("case_times") or {})
+        cases = detail.get("case_times") or {}
+        if cases:
+            self._best_case_times = dict(cases)
+        self._best_case_times_describe_best = bool(cases)
         self._persist_scoring_state()
 
     def _set_baseline_case_times(self, case_times: dict | None) -> None:

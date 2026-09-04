@@ -636,9 +636,7 @@ def _publish_patch(
     # statistic the search optimized: an aggregate ratio on a suite whose cases
     # span orders of magnitude is set by the largest case alone, and it rejects
     # a kernel that is faster on most of the shapes the operator serves.
-    aggregate_speedup = (
-        source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
-    )
+    aggregate_speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
     speedup = mean_case_speedup if mean_case_speedup is not None else aggregate_speedup
     manifest = validate_applyback_manifest(
         {

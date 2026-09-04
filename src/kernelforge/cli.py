@@ -1926,7 +1926,16 @@ def forge_loop(
             or search_start_ms
         )
         best = getattr(loop_runner, "best_wall_ms", None)
-        best_case_times = dict(getattr(loop_runner.run_state, "best_case_times", {}) or {})
+        # Reported only when they were measured on the same iteration as `best`.
+        # The loop retains the previous iteration's cases when a kept candidate
+        # reports none, because a resume needs them, but then they no longer
+        # describe `best` and a consumer scoring a per-case mean against it
+        # would straddle two kernels.
+        best_case_times = (
+            dict(getattr(loop_runner.run_state, "best_case_times", {}) or {})
+            if getattr(loop_runner, "_best_case_times_describe_best", True)
+            else {}
+        )
         total_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
         incremental_speedup = (
             float(total_speedup) / float(search_start_mean_case_speedup)

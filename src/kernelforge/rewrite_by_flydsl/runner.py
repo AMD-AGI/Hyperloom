@@ -559,9 +559,7 @@ def run_rewrite(
     # nothing about restoration gets the benefit of the doubt, or every run
     # would be downgraded on a missing key rather than on a failed restore.
     restored_kernel = str(opt.get("restored_kernel") or "")
-    restore_is_suspect = (
-        restored_kernel not in ("", optimize.RESTORED_BEST) or opt.get("best_kernel_restored") is False
-    )
+    restore_is_suspect = restored_kernel not in ("", optimize.RESTORED_BEST) or opt.get("best_kernel_restored") is False
     if opt.get("best_ms") is not None and restore_is_suspect:
         print(
             "  [forge-rewrite] OPTIMIZE left the "

@@ -3604,15 +3604,19 @@ def _run_rewrite_attempt(
     res["pristine_baseline_ms"] = baseline_ms
     res["search_start_ms"] = baseline_ms
     res["best_ms"] = best_ms
-    # Only populated when the producer really scored a per-case mean. Writing
-    # the aggregate ratio into this key would put the statistic this route
-    # exists to distinguish back under the name of the other one, and every
-    # downstream reader of `mean_case_speedup` would be misinformed by the same
-    # conflation the route just removed. `micro_speedup` carries the graded
-    # value whatever its basis, and `speedup_basis` says which it is.
+    # `mean_case_speedup` stays populated with the graded value whatever its
+    # basis. It is a required number in the forge-loop-compatible result view:
+    # kernel_optimization reads it through `float()`, so publishing None where
+    # the producer had no per-case timings raises in the consumer instead of
+    # informing it. `speedup_basis` is what disambiguates, the same way the KB
+    # record carries it next to `speedup`.
+    #
+    # This leaves the key's name broader than its content when the basis is the
+    # aggregate. Narrowing it means migrating every reader of the key first,
+    # which is a larger change than this one and does not belong here.
     res["speedup_basis"] = applyback.get("speedup_basis") or ""
     res["micro_speedup"] = micro_speedup
-    res["mean_case_speedup"] = micro_speedup if _positive_number(applyback.get("mean_case_speedup")) else None
+    res["mean_case_speedup"] = micro_speedup
     res["search_start_mean_case_speedup"] = 1.0
     res["improved"] = True
     res["total_improved"] = True

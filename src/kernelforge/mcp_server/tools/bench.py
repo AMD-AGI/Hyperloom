@@ -191,6 +191,8 @@ def parse_case_timings(text: str) -> CaseTimings:
     timings.duplicates = sorted(duplicates)
     timings.unparseable = sorted(unparseable)
     return timings
+
+
 _SWEEP_ECHO_RE = re.compile(rf"{SWEEP_ECHO}:\s*([A-Z][A-Z0-9_]*)\s+(\S+)")
 _CONSTANT_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _CONSTANT_VALUE_RE = re.compile(r"^[A-Za-z0-9_.,:=+-]+$")

@@ -383,14 +383,12 @@ def _timing_report(reading: DriverReading) -> PreflightReport:
         # loop rejects be scored through the rewrite's own path.
         return _failed(
             MALFORMED_CASE_TIMINGS,
-            "the driver reported more than one timing for "
-            f"{', '.join(reading.duplicate_case_ids)}",
+            f"the driver reported more than one timing for {', '.join(reading.duplicate_case_ids)}",
         )
     if reading.unparseable_case_ids:
         return _failed(
             MALFORMED_CASE_TIMINGS,
-            "the driver reported an unparseable timing for "
-            f"{', '.join(reading.unparseable_case_ids)}",
+            f"the driver reported an unparseable timing for {', '.join(reading.unparseable_case_ids)}",
         )
     report = PreflightReport(
         ok=True,

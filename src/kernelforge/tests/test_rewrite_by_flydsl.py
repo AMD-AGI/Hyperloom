@@ -351,9 +351,7 @@ def test_speedup_only_when_port_ok_and_both_times():
 def test_case_timings_are_read_off_the_driver_not_just_case_ids():
     # The aggregate cannot reconstruct them: a ratio of two sums is dominated by
     # the largest case, so the per-case values have to survive parsing.
-    reading = driver_contract.read_driver_output(
-        "case_ms: m_1 0.012818\ncase_ms: m_4096 0.229021\nmean_ms: 0.120920\n"
-    )
+    reading = driver_contract.read_driver_output("case_ms: m_1 0.012818\ncase_ms: m_4096 0.229021\nmean_ms: 0.120920\n")
     assert reading.case_ids == ("m_1", "m_4096")
     assert reading.case_times == {"m_1": pytest.approx(0.012818), "m_4096": pytest.approx(0.229021)}
     assert reading.timing_ms == pytest.approx(0.120920)
@@ -364,9 +362,7 @@ def test_unscored_cases_travel_with_the_times_instead_of_being_filtered_out():
     # best_case_times keep the excluded cases, so a reference side that drops
     # them presents a smaller case set and the equal-set check refuses to score
     # at all. The exclusion belongs to the comparison, not to the reading.
-    reading = driver_contract.read_driver_output(
-        "case_ms: a 1.000\ncase_ms: b 2.000 unscored\nmean_ms: 1.500\n"
-    )
+    reading = driver_contract.read_driver_output("case_ms: a 1.000\ncase_ms: b 2.000 unscored\nmean_ms: 1.500\n")
     assert reading.case_times == {"a": pytest.approx(1.0), "b": pytest.approx(2.0)}
     assert reading.unscored_cases == ("b",)
     assert driver_contract._timing_report(reading).case_times == {
@@ -394,9 +390,7 @@ def test_an_unscored_case_does_not_block_scoring_and_does_not_enter_the_mean():
 def test_prefiltering_one_side_is_what_refuses_to_score():
     # Guards the regression this replaced: with the reference side filtered and
     # the candidate side unfiltered, the sets differ and nothing is published.
-    speedup, reason = driver_contract.cross_language_mean_case_speedup(
-        {"a": 4.0}, {"a": 2.0, "noisy": 1.0}, ()
-    )
+    speedup, reason = driver_contract.cross_language_mean_case_speedup({"a": 4.0}, {"a": 2.0, "noisy": 1.0}, ())
     assert speedup is None
     assert reason == driver_contract.CASE_SCORE_INCOMPARABLE
 
@@ -404,9 +398,7 @@ def test_prefiltering_one_side_is_what_refuses_to_score():
 def test_malformed_case_timings_are_refused_like_the_bench_tool_refuses_them():
     # bench.py fails a measurement with duplicate case timings. Accepting it
     # here would let the rewrite score a suite the loop rejects.
-    duplicated = driver_contract.read_driver_output(
-        "case_ms: a 1.000\ncase_ms: a 9.000\nmean_ms: 5.000\n"
-    )
+    duplicated = driver_contract.read_driver_output("case_ms: a 1.000\ncase_ms: a 9.000\nmean_ms: 5.000\n")
     assert duplicated.duplicate_case_ids == ("a",)
     refused = driver_contract._timing_report(duplicated)
     assert not refused.ok
@@ -418,9 +410,7 @@ def test_malformed_case_timings_are_refused_like_the_bench_tool_refuses_them():
     unparseable = driver_contract.read_driver_output("case_ms: a 1.000\ncase_ms: b 1.2.3\n")
     assert unparseable.unparseable_case_ids == ("b",)
     assert "b" in unparseable.case_ids
-    assert driver_contract._timing_report(unparseable).failure_class == (
-        driver_contract.MALFORMED_CASE_TIMINGS
-    )
+    assert driver_contract._timing_report(unparseable).failure_class == (driver_contract.MALFORMED_CASE_TIMINGS)
 
 
 def test_malformed_timings_are_fatal_on_both_driver_paths():
@@ -443,10 +433,19 @@ def test_one_parser_serves_the_bench_tool_and_the_rewrite_contract():
 
 # Measured aiter a16w16 baseline at n=k=6144 on MI355X; per-case times span 18x.
 _MEASURED_SOURCE_CASE_MS = {
-    "m_1": 0.012818, "m_2": 0.013138, "m_4": 0.013352, "m_8": 0.013153,
-    "m_16": 0.013757, "m_32": 0.015211, "m_64": 0.018329, "m_128": 0.020830,
-    "m_256": 0.039681, "m_512": 0.045687, "m_1024": 0.075407,
-    "m_2048": 0.114414, "m_4096": 0.229021,
+    "m_1": 0.012818,
+    "m_2": 0.013138,
+    "m_4": 0.013352,
+    "m_8": 0.013153,
+    "m_16": 0.013757,
+    "m_32": 0.015211,
+    "m_64": 0.018329,
+    "m_128": 0.020830,
+    "m_256": 0.039681,
+    "m_512": 0.045687,
+    "m_1024": 0.075407,
+    "m_2048": 0.114414,
+    "m_4096": 0.229021,
 }
 # The eight cases aiter serves with its own FlyDSL kernels, where a port can win.
 _MEASURED_CHEAP_CASES = ("m_1", "m_2", "m_4", "m_8", "m_16", "m_32", "m_64", "m_128")
@@ -459,8 +458,7 @@ def _measured_candidate_case_ms() -> dict[str, float]:
     not hipBLASLt at large M: 3.385x as a mean over cases, 0.955x in aggregate.
     """
     return {
-        case: (ms / 5.0 if case in _MEASURED_CHEAP_CASES else ms / 0.8)
-        for case, ms in _MEASURED_SOURCE_CASE_MS.items()
+        case: (ms / 5.0 if case in _MEASURED_CHEAP_CASES else ms / 0.8) for case, ms in _MEASURED_SOURCE_CASE_MS.items()
     }
 
 
