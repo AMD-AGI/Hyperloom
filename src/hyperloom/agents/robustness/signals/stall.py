@@ -1,7 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Agent-stall detection."""
+"""Agent-stall detection from coordinator-stamped ``agent_last_active_unix``.
+
+Silence is only evidence of a stall when nothing else is moving: a phase whose
+work is one multi-hour deterministic task has no LLM turn to emit. While an
+agent's own dispatched work still reports units, the accusation is withheld as
+``agent_quiet_work_progressing``. That suppression has no wall-clock ceiling on
+purpose -- a single warmup runs 3941s, so any ceiling would fire on exactly the
+healthy runs this exists to stay quiet about; what bounds it is the freshness of
+the evidence. Elapsed silence therefore sets an accusation's severity, not
+whether one is made.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +19,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
-
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
-from .event_view import EventRow, build_event_view
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -45,8 +52,7 @@ def evaluate_stall_signals(
 ) -> list[Symptom]:
     """Report each tracked agent that has gone silent past the stall timeout."""
     cfg = config or StallConfig()
-    view = build_event_view(ctx.inbox, data.coordinator_events)
-    last_seen = _collect_last_seen(view)
+    last_seen = dict(ctx.shared_state.agent_last_active_unix or {})
     out: list[Symptom] = []
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
@@ -176,23 +182,6 @@ def _quiet_sibling_evidence(
         "quiet_in_flight_work": task,
         "quiet_in_flight_work_idle_seconds": int(idle_s),
     }
-
-
-def _collect_last_seen(
-    view: list[EventRow],
-) -> dict[str, float]:
-    """Compute the latest activity timestamp per tracked agent."""
-    last: dict[str, float] = {}
-    for ev in view:
-        if ev.agent not in _TRACKED_AGENTS:
-            continue
-        ts = to_unix(ev.ts)
-        if ts is None:
-            continue
-        prev = last.get(ev.agent)
-        if prev is None or ts > prev:
-            last[ev.agent] = ts
-    return last
 
 
 __all__ = ["StallConfig", "evaluate_stall_signals"]

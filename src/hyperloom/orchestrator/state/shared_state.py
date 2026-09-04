@@ -510,6 +510,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     compute_partition: dict[str, Any] = field(default_factory=dict)
     # ``--nodes``, feeding the robustness defaults and the IR-8 check.
     nodes: int = 1
+    # Per-agent Unix timestamp of the most recent completed reactor pass.
+    agent_last_active: dict[str, float] = field(default_factory=dict)
     # Resolved robustness-agent ``request.options``; a resume layers its own flags on top, per-key.
     robustness_options: dict[str, Any] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).

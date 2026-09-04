@@ -221,14 +221,6 @@ class PolicyViolation(ValueError):
 # Intent builders
 
 
-def build_heartbeat(body_md: str = "ok (robustness-agent)") -> Intent:
-    """Default tick-end fallback when no symptom warrants an emit."""
-    return Intent(
-        type=IntentType.SEND_MESSAGE,
-        payload={"topic": "heartbeat", "body_md": body_md},
-    )
-
-
 def build_send_message(
     topic: str,
     *,
