@@ -129,10 +129,10 @@ class MockBackend:
             return self.plan.turns[-1]
         if self.plan.default_intent is not None:
             return MockTurn(intents=[self.plan.default_intent])
-        # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
+        # Out of script and no fallback → emit an observation so the reactor keeps ticking.
         return MockTurn(
             intents=[
-                Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+                Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"}),
             ]
         )
 
@@ -223,7 +223,7 @@ class MockRowScanBackend:
             intents.append(
                 Intent(
                     type=IntentType.SEND_MESSAGE,
-                    payload={"topic": "heartbeat", "body_md": self._heartbeat_body},
+                    payload={"topic": "observation", "body_md": self._heartbeat_body},
                 )
             )
         return BackendTurnResult(intents=intents, raw_text=self._raw_text)
@@ -258,7 +258,7 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
         name=name,
         row_regex=_PROPOSAL_RE,
         intent_builder=_approve,
-        heartbeat_body="ok (mock critic)",
+        heartbeat_body="ok (mock critic, no proposals)",
         raw_text="(mock critic)",
     )
 

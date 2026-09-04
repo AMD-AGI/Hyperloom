@@ -3,10 +3,9 @@
 
 """Agent-stall detection.
 
-Computes each agent's last-activity timestamp from
-:attr:`SourceData.coordinator_events` (plus inbox tail) and alerts when
-idle past the threshold. Any event counts as activity, including
-heartbeats.
+Evaluates each agent's last-activity timestamp from the coordinator-stamped
+``agent_last_active_unix`` field on the shared-state snapshot and alerts when
+idle past the threshold.
 
 Silence is only evidence of a stall when nothing else is moving. A phase whose
 work is one multi-hour deterministic task — a baseline pair, a profile and its
@@ -41,11 +40,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
-
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
-from .event_view import EventRow, build_event_view
 from .symptom import Symptom, SymptomSeverity
 
 
@@ -106,8 +102,7 @@ def evaluate_stall_signals(
             symptom per silent agent, possibly empty.
     """
     cfg = config or StallConfig()
-    view = build_event_view(ctx.inbox, data.coordinator_events)
-    last_seen = _collect_last_seen(view)
+    last_seen = dict(ctx.shared_state.agent_last_active_unix or {})
     out: list[Symptom] = []
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)
@@ -291,31 +286,6 @@ def _quiet_sibling_evidence(
         "quiet_in_flight_work": task,
         "quiet_in_flight_work_idle_seconds": int(idle_s),
     }
-
-
-def _collect_last_seen(
-    view: list[EventRow],
-) -> dict[str, float]:
-    """Compute the latest activity timestamp per tracked agent.
-
-    Args:
-        view: Shared event view for this tick.
-
-    Returns:
-        dict[str, float]: Mapping of agent name to its latest activity unix
-            timestamp.
-    """
-    last: dict[str, float] = {}
-    for ev in view:
-        if ev.agent not in _TRACKED_AGENTS:
-            continue
-        ts = to_unix(ev.ts)
-        if ts is None:
-            continue
-        prev = last.get(ev.agent)
-        if prev is None or ts > prev:
-            last[ev.agent] = ts
-    return last
 
 
 __all__ = ["StallConfig", "evaluate_stall_signals"]

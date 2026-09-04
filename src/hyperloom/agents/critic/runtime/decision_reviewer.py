@@ -34,10 +34,10 @@ from .errors import (
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
     ALLOWED_VERDICTS,
+    DEFAULT_HEARTBEAT_BODY,
     Intent,
     build_advice_intent,
     build_envelope,
-    build_heartbeat_intent,
     build_review_verdict_intent,
 )
 from .kb_client import KBClient
@@ -987,9 +987,9 @@ class DecisionReviewer:
                 continue
             intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
 
-        # Heartbeat fallback when nothing to review.
+        # Fallback when nothing to review.
         if not intents:
-            intents.append(build_heartbeat_intent())
+            intents.append(Intent(intent_type="send_message", payload={"topic": "observation", "body_md": DEFAULT_HEARTBEAT_BODY}))
 
         outcome.intent_envelope = build_envelope(intents).to_dict()
 

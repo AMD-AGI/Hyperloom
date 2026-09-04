@@ -102,7 +102,6 @@ def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
-    heartbeat = _json.dumps({"topic": "heartbeat", "body_md": "ok"})
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
@@ -117,8 +116,6 @@ Tool input shape:
   }}
 
 - Required keys per intent_type: {contract}.{constraints_line}
-- If you have nothing to say, call once with intent_type=send_message and
-  payload={heartbeat}.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only

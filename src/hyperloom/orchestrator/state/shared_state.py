@@ -776,6 +776,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
+    # Per-agent Unix timestamp of the most recent completed reactor pass.
+    agent_last_active: dict[str, float] = field(default_factory=dict)
     # Resolved robustness-agent ``request.options``; a resume layers its own flags
     # on top, per-key. Stored resolved because the resolution folds in
     # multi-node / scriptable policy that the individual flags do not carry.

@@ -552,7 +552,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "sequence. Read the dynamic SharedState section and decide:",
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
-        "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
+        "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
         "3. **Stack-aware grids**: route every grid attempt through",
@@ -610,7 +610,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   PHASE CONTRACT for the skip_to_close exception).",
             "",
             "If you cannot move forward, emit",
-            "`send_message{topic='heartbeat', body_md='blocked: <reason>'}` and let",
+            "`send_message{topic='observation', body_md='blocked: <reason>'}` and let",
             "Robustness escalate. NEVER stay silent.",
         ]
     )
@@ -670,7 +670,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     lines.extend(
         [
             "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; heartbeat 'blocked: …' and let Robustness"
+            " → stop retrying baseline; send observation 'blocked: …' and let Robustness"
             " intervene. Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
@@ -716,7 +716,7 @@ def _idea_generation_lines() -> list[str]:
         "five moves above are for topping the grid up to its target of 4",
         "(hard maximum 6) once the queue is drained of anything worth running.",
         "",
-        "An explore round that produces zero new ideas is a bug — heartbeat",
+        "An explore round that produces zero new ideas is a bug — send an observation",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
     ]
 

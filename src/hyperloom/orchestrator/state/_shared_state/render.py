@@ -721,6 +721,7 @@ class _RenderMixin:
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
+            f"agent_last_active={self._format_agent_last_active()}",
             f"tick={int(self.tick or 0)}  target_gap_pct={float(self.target_gap_pct or 0.0):.2f}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -729,6 +730,28 @@ class _RenderMixin:
             f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def _format_agent_last_active(self) -> str:
+        """Render per-agent last-active timestamps as human-readable relative ages.
+
+        Returns:
+            str: A comma-separated string like ``orchestration=2s ago, critic=45s ago``,
+                or ``(none)`` when no agent has been seen.
+        """
+        import time as _time
+
+        mapping = getattr(self, "agent_last_active", None) or {}
+        if not mapping:
+            return "(none)"
+        now = _time.time()
+        parts = []
+        for agent in sorted(mapping):
+            ts = mapping[agent]
+            if not isinstance(ts, (int, float)) or ts <= 0:
+                continue
+            age_s = int(max(0.0, now - ts))
+            parts.append(f"{agent}={age_s}s ago")
+        return ", ".join(parts) if parts else "(none)"
 
     # Audit-trail renderers (per-action attempts + global failure log).
     @staticmethod

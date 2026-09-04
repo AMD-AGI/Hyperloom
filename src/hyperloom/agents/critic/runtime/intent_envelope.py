@@ -67,9 +67,6 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
     }
 )
 
-
-# Default content for the heartbeat fallback.
-DEFAULT_HEARTBEAT_TOPIC = "heartbeat"
 DEFAULT_HEARTBEAT_BODY = "ok (critic)"
 DEFAULT_ADVICE_TOPIC = "advice"
 
@@ -221,21 +218,6 @@ def build_review_verdict_intent(
     return Intent(intent_type="review_verdict", payload=payload)
 
 
-def build_heartbeat_intent(body_md: str = DEFAULT_HEARTBEAT_BODY) -> Intent:
-    """Build the heartbeat ``send_message`` intent.
-
-    Args:
-        body_md (str): Message body; defaults to :data:`DEFAULT_HEARTBEAT_BODY`.
-
-    Returns:
-        Intent: A ``send_message`` intent on the heartbeat topic.
-    """
-    return Intent(
-        intent_type="send_message",
-        payload={"topic": DEFAULT_HEARTBEAT_TOPIC, "body_md": body_md},
-    )
-
-
 def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = None) -> Intent:
     """Build a devil's-advocate ``advice`` ``send_message`` intent.
 
@@ -272,7 +254,7 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     """
     materialised = list(intents)
     if not materialised:
-        materialised = [build_heartbeat_intent()]
+        materialised = [Intent(intent_type="send_message", payload={"topic": "observation", "body_md": DEFAULT_HEARTBEAT_BODY})]
     env = IntentEnvelope()
     for intent in materialised:
         env.append(intent)
@@ -287,13 +269,11 @@ __all__ = [
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
     "DEFAULT_HEARTBEAT_BODY",
-    "DEFAULT_HEARTBEAT_TOPIC",
     "ENVELOPE_SCHEMA_VERSION",
     "Intent",
     "IntentEnvelope",
     "build_advice_intent",
     "build_envelope",
-    "build_heartbeat_intent",
     "build_review_verdict_intent",
     "validate_envelope",
 ]

@@ -97,6 +97,7 @@ _SCALAR_KEYS = {
     "has_keep_pending_integrate",
     # Aggregated into ``SharedStateSnapshot.explore_started``; ``(none)`` is the never-yet sentinel.
     "last_explore",
+    "agent_last_active",
 }
 
 # Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
@@ -223,6 +224,7 @@ class SharedStateSnapshot:
     closing_phase: bool = False
     kernel_opt_attempts_count: int = 0
     has_keep_pending_integrate: bool = False
+    agent_last_active_unix: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -386,6 +388,8 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         SharedStateSnapshot: Populated snapshot with defaults for any
         field whose line was absent.
     """
+    import time as _time
+
     snapshot = SharedStateSnapshot()
     for raw in body.splitlines():
         line = raw.strip()
@@ -402,6 +406,9 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         if key not in _SCALAR_KEYS:
             continue
         head = _split_double_space(value)
+        if key == "agent_last_active":
+            snapshot.agent_last_active_unix = _parse_agent_last_active(head, now_unix=_time.time())
+            continue
         spec = _SCALAR_FIELD_TABLE.get(key)
         if spec is not None:
             attr, coerce = spec
@@ -411,6 +418,40 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
             if head and head != "(none)":
                 snapshot.explore_started = True
     return snapshot
+
+
+def _parse_agent_last_active(text: str, *, now_unix: float) -> dict[str, float]:
+    """Parse the rendered ``agent_last_active`` value back into Unix timestamps.
+
+    Rendered as ``orchestration=2s ago, critic=45s ago`` (or ``(none)``).
+
+    Args:
+        text (str): The rendered agent_last_active value.
+        now_unix (float): Current time used to reconstruct timestamps.
+
+    Returns:
+        dict[str, float]: Mapping of agent name to its estimated Unix timestamp.
+    """
+    if not text or text == "(none)":
+        return {}
+    result: dict[str, float] = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        agent, sep, rest = part.partition("=")
+        if not sep:
+            continue
+        agent = agent.strip()
+        rest = rest.strip()
+        # rest looks like "2s ago"
+        age_str = rest.rstrip(" ago").strip().rstrip("s")
+        try:
+            age_s = float(age_str)
+            result[agent] = now_unix - age_s
+        except (ValueError, TypeError):
+            continue
+    return result
 
 
 def _count_optimization_stack(head: str) -> int:

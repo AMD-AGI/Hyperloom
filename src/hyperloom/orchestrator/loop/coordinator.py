@@ -2046,6 +2046,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
+        self.shared_state.agent_last_active[agent_name] = time.time()
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

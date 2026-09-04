@@ -31,7 +31,6 @@ from ..role.envelope import (
     Intent,
     build_alert,
     build_delegate,
-    build_heartbeat,
     build_prune_branch,
     build_send_message,
 )
@@ -202,7 +201,7 @@ class ActionLadder:
             intents.extend(sym_intents)
 
         if not any_emit:
-            intents.append(build_heartbeat())
+            intents.append(build_send_message("observation", body_md="ok (robustness-agent)"))
         return _LadderResult(intents=intents, findings=findings)
 
     def _cooldown_elapsed(self, key: tuple[str, ...], tick_index: int) -> bool:
