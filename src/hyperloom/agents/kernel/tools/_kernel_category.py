@@ -1,15 +1,17 @@
-"""Canonical kernel-category display vocabulary shared across trace routes.
+"""Canonical kernel-category display vocabulary for rendered reports.
 
-The two trace-analysis backends (bypass and TraceLens) carry route-native
-category taxonomies that overlap on common kernels but diverge at the margins
-and in casing. This module maps BOTH vocabularies onto ONE canonical display
-label so ``analysis.md`` shows a consistent category regardless of route.
+Category values reach a report with inconsistent casing and near-synonyms
+("Others" / "other", "LayerNorm" / "rmsnorm"), because the taxonomy is written
+by whichever backend produced the candidates. This module maps those spellings
+onto ONE canonical display label so ``analysis.md`` reads consistently. The
+bypass report renderer is the only caller today, but the vocabulary stays wide
+enough for TraceLens-authored candidate files.
 
 Display-only: this does NOT rewrite the ``kernel_category`` /
 ``tracelens_category`` fields in ``kernel_candidates.json`` / ``kernel_roofline.json``,
 which downstream GEAK skill-routing consumes with its own taxonomy.
 
-Kept dependency-free (stdlib only) so both routes can import it freely.
+Kept dependency-free (stdlib only) so any renderer can import it freely.
 """
 
 from __future__ import annotations

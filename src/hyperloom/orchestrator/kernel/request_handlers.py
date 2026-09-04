@@ -5826,10 +5826,14 @@ async def trace_analyze_handler(
     # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
     # is the explicit route via payload ``analysis_route`` /
     # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
+    # Only an absent or blank payload value defers to the env var. A non-blank
+    # value is kept even when unrecognized, so it reaches the check below rather
+    # than silently overriding the env with the ``agent`` default.
     raw_route = payload.get("analysis_route")
-    if raw_route is None or raw_route == "":
-        raw_route = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")
-    explicit_route = str(raw_route).strip().lower()
+    route_text = "" if raw_route is None else str(raw_route).strip()
+    if not route_text:
+        route_text = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
+    explicit_route = route_text.lower()
     # An explicit unknown route is a configuration error. Falling back to
     # ``agent`` could turn a no-LLM request into a paid model session.
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
@@ -5985,7 +5989,7 @@ async def trace_analyze_handler(
                     "trace_dir": str(trace_input),
                     "candidates_path": str(result.get("candidates_path") or ""),
                     "trace_report_path": str(result.get("trace_report_path") or ""),
-                    "analysis_route": _disc_source,
+                    "analysis_route": _disc_route,
                 },
                 duration_sec=_disc_duration_sec,
                 error=(str(result.get("error") or "") or None if str(result.get("status") or "") == "failed" else None),

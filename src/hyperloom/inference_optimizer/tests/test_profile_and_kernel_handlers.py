@@ -2951,7 +2951,14 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     monkeypatch,
 ):
     """The LLM/agent route keeps source="tracelens" (regression guard for the
-    bypass relabel)."""
+    bypass relabel), while the scan still names the route the caller asked for.
+
+    ``source`` is the toolchain label the dashboard groups by, so ``agent``
+    reports as ``tracelens``. ``scan["analysis_route"]`` is the route id, which
+    has to stay in the ``agent`` / ``bypass`` vocabulary the handler accepts --
+    recording ``tracelens`` there put a value in the field that no caller could
+    ever pass.
+    """
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2980,7 +2987,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     out = assemble_parts(session_dir)
     run = out["kernel_journey"]["discovery_runs"][0]
     assert run["source"] == "tracelens"
-    assert run["scan"]["analysis_route"] == "tracelens"
+    assert run["scan"]["analysis_route"] == "agent"
 
 
 @pytest.mark.asyncio

@@ -2573,6 +2573,10 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
+    # The bypass trace reader ships inside this distribution, like forge below:
+    # there is no checkout to ``git rev-parse``, so its version is Hyperloom's.
+    # Without this entry a bypass run mints an all-empty ``versions["bypass"]``.
+    "bypass": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
     # and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},

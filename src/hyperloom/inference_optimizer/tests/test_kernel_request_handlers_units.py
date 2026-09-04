@@ -5970,7 +5970,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="sglang",
             target_platform="",
             analysis_mode="inference",
-            analysis_route="bypass",
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"

@@ -5639,8 +5639,8 @@ def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
 _GPU_TIMELINE_MS_COLUMNS = ("time ms", "time (ms)", "time_ms", "ms")
 
 
-def _gpu_timeline_cell(row: dict[str, str], columns: tuple[str, ...]) -> float | None:
-    """Read one numeric cell from a gpu_timeline row, or ``None`` if unusable.
+def _gpu_timeline_duration_ms(row: dict[str, str]) -> float | None:
+    """Read the duration cell (ms) from a gpu_timeline row, ``None`` if unusable.
 
     Absent, blank and unparseable all collapse to ``None`` rather than to a
     number. A defaulted ``0`` is not a neutral answer here: the trace total time
@@ -5651,13 +5651,13 @@ def _gpu_timeline_cell(row: dict[str, str], columns: tuple[str, ...]) -> float |
 
     Args:
         row: A parsed ``gpu_timeline.csv`` row.
-        columns: Accepted column spellings, in priority order.
 
     Returns:
-        The cell value, or ``None`` when no accepted column carries a number.
+        The duration in ms, or ``None`` when no accepted column carries a
+        number.
     """
     lowered = {str(k).strip().lower(): v for k, v in row.items() if k}
-    for column in columns:
+    for column in _GPU_TIMELINE_MS_COLUMNS:
         if column not in lowered:
             continue
         raw = lowered[column]
@@ -5685,7 +5685,7 @@ def _extract_total_time_us_from_gpu_timeline(output_dir: Path) -> float | None:
     """
     for row in _load_gpu_timeline_rows(output_dir):
         if (row.get("type") or "").strip().lower() == "total_time":
-            ms = _gpu_timeline_cell(row, _GPU_TIMELINE_MS_COLUMNS)
+            ms = _gpu_timeline_duration_ms(row)
             return None if ms is None else ms * 1000.0
     return None
 

@@ -2435,14 +2435,22 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
 
-    # The skill runs in-process, so the trace path never reaches a subprocess
-    # argv the way the splitter's does. Intercepting the call is the only place
-    # the decision is observable; raising ends the run right after it.
+    # The skill runs in-process, so the analysed trace never reaches a
+    # subprocess argv the way the splitter's does -- the skill's own arguments
+    # are the only place the promotion is observable. ``seen`` is filled before
+    # the sentinel is raised, so the assertions below read state captured while
+    # the run was still healthy and do not depend on how main unwinds. Raising
+    # only avoids standing up the analysis.md fixtures the remainder of the run
+    # would demand, which this test asserts nothing about; main records the
+    # sentinel as an orchestrator failure and refuses the retired CSV parsers.
+    class _StopAfterSkillDispatch(Exception):
+        """Ends the run once the skill's input trace has been recorded."""
+
     seen: list[Path] = []
 
     async def fake_skill(*, trace_path, **_kw):
         seen.append(trace_path)
-        raise RuntimeError("stop once the analysed trace is observable")
+        raise _StopAfterSkillDispatch(trace_path.name)
 
     with patch.object(tla, "run_tracelens_skill", fake_skill):
         captured = _drive_main_over_capture_dir(
