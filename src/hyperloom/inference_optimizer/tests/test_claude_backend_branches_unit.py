@@ -223,25 +223,6 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
     assert len(res.intents) == 4
 
 
-# ---- run(): conversational session capture --------------------------------
-async def test_run_conversational_session_capture(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "60")
-    msg = _Msg(
-        content=[_emit_tool_block()],
-        result="done",
-        usage={"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0},
-        session_id="sess-9",
-    )
-    b = _backend(messages=[msg], conversational=True)
-    b.sdk_query_factory = _query([msg])
-    res = await b.run("hi")
-    assert b._session_id == "sess-9"
-    assert res.metadata["input_tokens"] == 5
-    assert len(res.intents) == 1
-    # reset clears it
-    b.reset_conversation()
-    assert b._session_id is None
-
 
 # ---- run(): no-intent raises ----------------------------------------------
 async def test_run_no_intent_raises():

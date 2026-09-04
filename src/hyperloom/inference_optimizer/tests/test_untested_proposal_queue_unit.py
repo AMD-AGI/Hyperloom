@@ -223,7 +223,6 @@ async def test_the_block_survives_a_delta_turn(coord, monkeypatch):
     seed = await coord._compose_prompt("orchestration")
 
     monkeypatch.setattr(type(coord.conversation), "_orchestration_conversational", lambda self: True)
-    coord._orchestration_seeded = True
     delta = await coord._compose_prompt("orchestration")
 
     assert "=== Shared session state ===" in seed

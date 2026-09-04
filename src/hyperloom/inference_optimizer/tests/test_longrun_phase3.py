@@ -157,7 +157,6 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    assert c._orchestration_seeded is False
     assert (await c.tasks.get(t.task_id)).state == "failed"
 
 

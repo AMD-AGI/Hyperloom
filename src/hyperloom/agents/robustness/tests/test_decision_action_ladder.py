@@ -954,7 +954,7 @@ async def test_idempotency_replay_falls_to_medium_diagnose_tier():
 
 async def test_recover_unsuccessful_cooldown_fires_twice():
     """Post-cooldown re-fires of recover_unsuccessful each produce a fresh alert."""
-    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=1))
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_sec=1.0))
     sym = _sym(
         "recover_unsuccessful",
         SymptomSeverity.HIGH,
@@ -982,7 +982,7 @@ async def test_no_symptoms_falls_back_to_heartbeat():
 
 
 async def test_cooldown_suppresses_duplicate_within_window():
-    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=3))
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_sec=3.0))
     sym = _sym("crash_count_rising", SymptomSeverity.MEDIUM, subject={"k": "1"})
     first = await ladder.decide([sym], tick_index=0, now_unix=1.0)
     suppressed = await ladder.decide([sym], tick_index=1, now_unix=2.0)
@@ -993,7 +993,7 @@ async def test_cooldown_suppresses_duplicate_within_window():
 
 
 async def test_cooldown_releases_after_window():
-    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=3))
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_sec=3.0))
     sym = _sym("crash_count_rising", SymptomSeverity.MEDIUM, subject={"k": "1"})
     await ladder.decide([sym], tick_index=0, now_unix=1.0)
     out = await ladder.decide([sym], tick_index=3, now_unix=4.0)
@@ -1121,8 +1121,8 @@ async def test_gpu_memory_leaked_does_not_emit_prune_branch():
 
 
 async def test_gpu_memory_leaked_cooldown_dedups_within_window():
-    """Same dedup_key suppressed within ``cooldown_ticks``."""
-    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=5))
+    """Same dedup_key suppressed within ``cooldown_sec``."""
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_sec=5.0))
     first = await ladder.decide(
         [_gpu_leak_symptom()],
         tick_index=0,
@@ -1143,7 +1143,7 @@ async def test_gpu_memory_leaked_cooldown_dedups_within_window():
 
 async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
     """After cooldown elapses, the next emit carries a fresh tick-indexed key."""
-    ladder = ActionLadder(config=ActionLadderConfig(cooldown_ticks=3))
+    ladder = ActionLadder(config=ActionLadderConfig(cooldown_sec=3.0))
     first = await ladder.decide(
         [_gpu_leak_symptom()],
         tick_index=0,
