@@ -163,15 +163,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if stack_changed:
         warnings.append(
             "stack_changed_after_validation = true — optimization_stack grew "
-            "after the last successful validate_stack run, so the reported "
-            "cumulative_gain_pct_validated may be stale relative to the "
-            "current best."
+            "after validation completed, so cumulative_gain_pct_validated "
+            "may be stale relative to the current best."
         )
     if gain_v is None and not is_provisional and (final_tput or base_tput):
         warnings.append(
             "cumulative_gain_pct_validated is null while baseline/final "
-            "throughput are set — validate_stack never ran or the snapshot "
-            "predates V2."
+            "throughput are set — no validation run completed."
         )
 
     md_kv = md_kv_list(

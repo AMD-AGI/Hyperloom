@@ -18,10 +18,11 @@ from typing import Any
 from ..agent_ownership import UNATTRIBUTED, patch_author
 
 
-#: Matches the major version of the breakdown envelope
-#: (``hyperloom.session_breakdown.v5.0``), so one number answers both
-#: questions. ``5`` means the recorder-first shape: ``attempts``,
-#: ``summary_by_agent``, and the reconciliation fields under ``validation``.
+#: ``5`` means the recorder-first shape: ``attempts``, ``summary_by_agent``,
+#: and the reconciliation fields under ``validation``. This tracked the
+#: envelope's major version until the envelope went to v6.0 for the recorded
+#: timeline, which reshaped nothing here -- so the two numbers now differ, and
+#: a consumer has to read this one for this section rather than infer it.
 OPTIMIZATIONS_SCHEMA_VERSION = 5
 
 _SOURCES = (

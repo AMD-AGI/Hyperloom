@@ -57,7 +57,7 @@ def _expected_requestable_kinds() -> frozenset[str]:
     """Request kinds an LLM may emit in KERNEL_AGENT, per the ownership tables."""
     kinds = set(KERNEL_ACTION_REQUEST_KINDS.values()) | set(KERNEL_REQUEST_KIND_ALIASES)
     kinds -= set(COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
-    proposable = set(_ps.llm_proposable_actions_for(_ps.PHASE_KERNEL_AGENT))
+    proposable = set(_ps.allowed_actions_for(_ps.PHASE_KERNEL_AGENT))
     kinds = {k for k in kinds if REQUEST_KIND_TO_OWNED_ACTION[k] in proposable}
     return frozenset(kinds | _UNOWNED_REQUESTABLE_KINDS)
 

@@ -245,6 +245,58 @@ def test_collapse_keeps_two_unmeasured_rows_that_share_a_gain() -> None:
     assert sorted(r["name"] for r in out) == ["kernel_a", "kernel_b"]
 
 
+def _acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    return KernelPhase._geak_acceptance_specs(result)
+
+
+def test_acceptance_specs_collapse_the_alias_twin_onto_the_kernel_symbol() -> None:
+    result = {
+        "accepted_kernels": [_spec("c0_triton", 12.31, op_kind="prefill_attn")],
+        "accepted_heads": [_spec("_dsa_prefill_kernel", 12.31, op_kind="prefill_attn")],
+    }
+    out = _acceptance_specs(result)
+    assert [geak_spec_name(row) for row in out] == ["_dsa_prefill_kernel"]
+    assert out[0]["alias_collapsed"] is True
+
+
+def test_acceptance_specs_keep_two_rows_that_merely_both_lack_a_delta() -> None:
+    """No measured delta is no evidence of twinning.
+
+    Reading the delta as ``float(x or 0.0)`` mapped absent and zero onto the
+    same number, so two unrelated env selections on one op_kind collapsed into
+    one acceptance for carrying no measurement at all.
+    """
+    result = {
+        "accepted_heads": [
+            {"short_name": "ck_gemm_a8w8", "kind": "env", "op_kind": "gemm"},
+            {"short_name": "hipblaslt_gemm", "kind": "env", "op_kind": "gemm"},
+        ]
+    }
+    assert sorted(geak_spec_name(row) for row in _acceptance_specs(result)) == [
+        "ck_gemm_a8w8",
+        "hipblaslt_gemm",
+    ]
+
+
+def test_acceptance_specs_keep_a_row_whose_delta_is_not_a_number() -> None:
+    """An unreadable delta is a row with no delta, not an absent acceptance."""
+    result = {"accepted_heads": [_spec("odd_kernel", "n/a", op_kind="gemm")]}  # type: ignore[arg-type]
+    out = _acceptance_specs(result)
+    assert [geak_spec_name(row) for row in out] == ["odd_kernel"]
+
+
+def test_acceptance_specs_still_distinguish_a_measured_zero_from_an_absent_delta() -> None:
+    result = {
+        "accepted_heads": [
+            _spec("measured_zero", 0.0, op_kind="gemm"),
+            {"short_name": "no_delta", "op_kind": "gemm"},
+        ]
+    }
+    assert len(_acceptance_specs(result)) == 2
+
+
 def test_cand_tag_recognises_slot_tags_only() -> None:
     assert geak_is_cand_tag("c0_triton")
     assert geak_is_cand_tag("cand_c1_flydsl")

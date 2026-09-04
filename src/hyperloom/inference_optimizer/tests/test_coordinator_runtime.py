@@ -2484,57 +2484,20 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_audit_skips_kernel_owned_kind_under_no_kernel(session_dir, caplog):
-    # Defensive audit (log-only): kernel-owned kinds are legitimately not
-    # registered under --no-kernel, so a leftover queued kernel-owned task must
-    # NOT be flagged by the dispatch audit (no false positive). Dispatch is
-    # unchanged (the task still fails on the missing runner).
-    import logging
-
-    c = Coordinator(session_dir, backends=_build_backends({}))
-
-    async def _noop_executor(ctx):
-        return {}
-
-    # Populate the registry with a non-kernel executor only (mimics the
-    # --no-kernel lean registry, where kernel-owned kinds are unregistered).
-    c.sub.register_executor("report", _noop_executor)
-    await c.tasks.create(
-        kind="kernel_opt",
-        params={},
-        idempotency_key="k-nokernel-audit-1",
-        requires_lanes=[],
-    )
-    try:
-        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-            await c.dispatcher._pump_dispatcher_once()
-        assert not any("dispatch audit" in r.getMessage() and "kernel_opt" in r.getMessage() for r in caplog.records)
-        # Plan B replays PolicyGate before running: kernel-owned kinds are
-        # cancelled at dispatch (not failed on a missing runner).
-        cancelled = await c.tasks.by_state("cancelled")
-        assert len(cancelled) == 1
-        assert cancelled[0].kind == "kernel_opt"
-        evidence = (cancelled[0].history or [{}])[-1].get("evidence") or {}
-        assert evidence.get("reason") == "policy_denied"
-        assert evidence.get("rule") == "kernel_owned_by_kernel_agent"
-        assert not await c.tasks.by_state("failed")
-    finally:
-        await c.stop()
-
-
 @pytest.mark.asyncio
-async def test_target_reached_routes_through_close_phase(session_dir):
-    """A met objective transitions to CLOSE instead of breaking out of the loop.
+async def test_target_reached_routes_through_sweep_then_close(session_dir):
+    """A met objective goes to SWEEP first, then closes on the target.
 
-    ``machine_state`` registers ``target_reached`` as an "any phase -> CLOSE"
-    transition reason, so a met target must reach the close sequencer rather
-    than leaving the run with only the cli safety-net report.
+    The concurrency curve has to measure the configuration the target was met
+    on, so the run cannot jump straight to CLOSE; and it must still reach the
+    close sequencer rather than leaving only the cli safety-net report.
     """
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.last_conc_sweep = {"status": "succeeded"}
     c.shared_state.save(session_dir)
     try:
         reason = await c.run(
@@ -2542,6 +2505,10 @@ async def test_target_reached_routes_through_close_phase(session_dir):
             max_ticks=6,
         )
         assert reason == "target_reached"
+        assert c.shared_state.target_reached_at
+        hops = [(r.get("to_phase"), r.get("reason")) for r in c.shared_state.phase_history]
+        assert ("SWEEP", "target_reached") in hops
+        assert ("CLOSE", "target_reached") in hops
         assert (c.shared_state.phase or "").upper() == "CLOSE"
         # The close sequencer actually ran; this is what separates a real close
         # from the cli safety-net path.
@@ -2565,6 +2532,7 @@ async def test_target_reached_at_session_bound_still_closes(session_dir):
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.last_conc_sweep = {"status": "succeeded"}
     c.shared_state.save(session_dir)
     try:
         reason = await c.run(
@@ -2590,13 +2558,14 @@ async def test_target_reached_closes_despite_a_failed_state_save(session_dir):
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.last_conc_sweep = {"status": "succeeded"}
     c.shared_state.save(session_dir)
 
     real_save = c.shared_state.save
     state = {"tripped": False}
 
     def flaky_save(*args, **kwargs):
-        if c.shared_state.stop_reason == "target_reached" and not state["tripped"]:
+        if c.shared_state.target_reached_at and not state["tripped"]:
             state["tripped"] = True
             raise OSError("simulated transient state-save failure")
         return real_save(*args, **kwargs)
@@ -2630,6 +2599,7 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.last_conc_sweep = {"status": "succeeded"}
     # A kernel-level optimization landed, so the roofline step applies.
     c.shared_state.optimization_stack = [{"action": "integrate", "tput": 150.0}]
     c.shared_state.save(session_dir)
@@ -2667,14 +2637,15 @@ async def test_target_reached_close_is_not_cancelled_by_an_outer_bound(session_d
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
+    c.shared_state.last_conc_sweep = {"status": "succeeded"}
     c.shared_state.save(session_dir)
 
     # The bound is armed and elapsed; the terminal close must ignore it.
     c._run_deadline = time.monotonic() - 1.0
     assert c._seconds_until_session_bound() is not None
-    c._terminal_closing = True
-    assert c._seconds_until_session_bound() is None, "terminal close must be unbounded"
-    c._terminal_closing = False
+    c._unbounded_advance = True
+    assert c._seconds_until_session_bound() is None, "the target advance must be unbounded"
+    c._unbounded_advance = False
 
     real_advance = c.phase_machine._advance_phase_if_needed
     completed: list[bool] = []

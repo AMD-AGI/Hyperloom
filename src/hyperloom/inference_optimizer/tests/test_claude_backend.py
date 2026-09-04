@@ -136,6 +136,15 @@ async def test_cancellation_is_not_marked_as_an_llm_failure():
             },
             id="review_verdict_full",
         ),
+        pytest.param(
+            {
+                "__unparsedToolInput": {
+                    "raw": '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}',
+                    "len": 62,
+                }
+            },
+            id="unparsed_wrapper_fallback",
+        ),
     ],
 )
 def test_validate_emit_intent_input_accepts_well_formed(payload):
@@ -491,6 +500,86 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
     # 2 tool_blocks counted, but only 1 valid intent
     assert res.metadata["tool_blocks"] == 2
     assert len(res.intents) == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
+    """Claude Code retries the same wrapped JSON; keep one validated intent."""
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+    other = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=dict(wrapped)),
+            ToolUseBlock(name=tool_name, input=dict(wrapped)),
+            ToolUseBlock(
+                name=tool_name,
+                input={"__unparsedToolInput": {"raw": other, "len": len(other)}},
+            ),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+        capture_turn_diagnostics=True,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert backend.get_turn_diagnostic()["deduped_fallback_intents"] == 1
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
+    """Native Claude objects keep every emit_intent call, even duplicates."""
+    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=dict(native)),
+            ToolUseBlock(name=tool_name, input=dict(native)),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 2
+
+
+@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
+@pytest.mark.asyncio
+async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
+    """A wrapper block and a native block are two tool_use events.
+
+    The coordinator executes every intent with no merge. After the MCP
+    handler acks the wrapper, the model should not retry; if both still
+    appear in one query they are kept rather than dropping a real second
+    emit.
+    """
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
+    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=tool_name, input=dict(wrapped)),
+            ToolUseBlock(name=tool_name, input=dict(native)),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 2
 
 
 @pytest.mark.asyncio

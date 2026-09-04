@@ -52,9 +52,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.inference_optimizer.breakdown.collectors import (
-    collect_capability_summary,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -1893,32 +1890,6 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     res = await sub.run_task(task)
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
-
-
-def test_capability_summary_has_explore_row_with_legacy_aliases():
-    state = {
-        "explore_search": {
-            "tested": {"aabbccdd11223344": {"name": "v1", "outcome": "KEEP"}},
-            "accepted": [{"name": "v1", "gain_pct": 4.2, "fingerprint": "aabbccdd11223344"}],
-            "rejected": [{"name": "v2", "reason": "stack_unstable", "fingerprint": "deadbeefdeadbeef"}],
-            "winners_history": [{"round_id": "explore-001"}],
-        },
-        "optimization_stack": [
-            {"action": "explore", "variant_name": "v1"},
-        ],
-    }
-    cap = collect_capability_summary(state, [], [], [])
-    assert "explore" in cap
-    assert cap["explore"]["status"] == "kept"
-    assert cap["explore"]["best_gain_pct"] == 4.2
-    assert cap["explore"]["keep_unstable_count"] == 1
-    assert cap["explore"]["winners_history"] == 1
-    # Legacy compat rows stay emitted so archived sessions render.
-    assert "backends" in cap
-    assert "params" in cap
-    assert "validate_stack" in cap
-    assert cap["backends"]["status"] == "not_attempted"
-    assert cap["params"]["status"] == "not_attempted"
 
 
 def _names(variants):

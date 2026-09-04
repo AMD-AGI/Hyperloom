@@ -5722,7 +5722,7 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
         assert called["n"] == 1  # self-heal was attempted
@@ -5749,7 +5749,7 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
@@ -5773,7 +5773,7 @@ class TestTracelensRootResolution:
         )
         out = asyncio.run(
             krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
             )
         )
         assert out["status"] == "failed"
@@ -6025,8 +6025,7 @@ class TestBuildTraceAnalyzeCmd:
             model_name="Qwen",
             framework="sglang",
             target_platform="MI300X",
-            analysis_mode="deterministic",
-            analysis_route="deterministic",
+            analysis_mode="inference",
         )
         assert cmd == [
             "python3",
@@ -6046,7 +6045,7 @@ class TestBuildTraceAnalyzeCmd:
             "--target-platform",
             "MI300X",
             "--analysis-mode",
-            "deterministic",
+            "inference",
             # splitter hints: payload override wins over workload metadata.
             "--split-conc",
             "64",
@@ -6054,8 +6053,6 @@ class TestBuildTraceAnalyzeCmd:
             "1024",
             "--split-r",
             "0.5",
-            "--analysis-route",
-            "deterministic",
         ]
         assert steady == ""
 
@@ -6079,7 +6076,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="sglang",
             target_platform="MI355X",
             analysis_mode="default",
-            analysis_route="agent",
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
@@ -6109,7 +6105,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="",
             target_platform="",
             analysis_mode="",
-            analysis_route="bypass",
         )
         # bypass tool name; no --tracelens-root and no --skip-split.
         assert cmd[1] == "/tools/bypass_trace_analysis.py"
@@ -6120,12 +6115,32 @@ class TestBuildTraceAnalyzeCmd:
         assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
         assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
         assert "--split-conc" not in cmd
-        # bypass takes no analysis-route flag.
-        assert "--analysis-route" not in cmd
         assert "--runtime-config" not in cmd
         assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
         assert cmd[-1] == "--dry-run"
         assert steady == "auto"
+
+    def test_agentx_bypass_requires_single_rank(self, monkeypatch, tmp_path):
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        state.benchmark_mode = "agentx"
+        state.tp = 8
+        cmd, _steady = krh._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace-dir"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace-dir",
+            tracelens_root=None,
+            is_bypass=True,
+            scriptable=False,
+            workload={},
+            model_name="",
+            framework="sglang",
+            target_platform="",
+            analysis_mode="inference",
+        )
+        assert "--require-single-rank" in cmd
+        assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
 
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
@@ -6144,7 +6159,6 @@ class TestBuildTraceAnalyzeCmd:
             framework="",
             target_platform="",
             analysis_mode="",
-            analysis_route="agent",
         )
         assert steady == "median"
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"

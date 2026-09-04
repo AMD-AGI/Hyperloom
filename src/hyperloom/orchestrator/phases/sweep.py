@@ -46,10 +46,10 @@ class SweepPhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     async def _on_enter_sweep(self, *, from_phase: str) -> None:
-        """Auto-enqueue a ``conc_sweep`` task on SWEEP entry.
+        """Auto-enqueue the ``conc_sweep`` task on SWEEP entry.
 
-        The automatic phase path runs the baseline-vs-current concurrency curve
-        directly; the full workload ``sweep`` remains a manual executor.
+        It is the phase's only action: the baseline-vs-current concurrency
+        curve, on the ladder this workload sweeps.
 
         Args:
             from_phase: The phase being left, used only for logging.
@@ -101,7 +101,7 @@ class SweepPhase(PhaseHandler):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001 — a failed enqueue must still close the phase
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
@@ -111,27 +111,23 @@ class SweepPhase(PhaseHandler):
                 auto_conc_sweep_error=repr(exc)[:240],
             )
             return
+        # The only None is the helper's own budget decline, which records its
+        # terminal skip before returning.
         if task is None:
-            # The enqueue helper declines with its own terminal skip when the
-            # session clock leaves nothing to spend; don't overwrite that reason.
-            last = getattr(state, "last_conc_sweep", None) or {}
-            if not str(last.get("status") or "").strip():
-                self._record_terminal_conc_sweep_skip(
-                    skip_reason="enqueue_returned_none",
-                    auto_conc_sweep_error="enqueue_returned_none",
-                )
             return
         log.info(
             "SWEEP entry (from=%s): auto-enqueued conc_sweep task=%s (concs=%s total_budget_sec=%s)",
             from_phase or "<unknown>",
             task.task_id,
-            task.params.get("concs") or [],
+            task.params.get("concs"),
             task.params.get("total_budget_sec"),
         )
         self._record_phase_entry_evidence(
             auto_conc_sweep_enqueued=True,
             auto_conc_sweep_task_id=task.task_id,
-            auto_conc_sweep_concs=list(task.params.get("concs") or []),
+            # Verbatim: None records "the workload picks", which is not the
+            # same statement as an empty ladder.
+            auto_conc_sweep_concs=task.params.get("concs"),
         )
 
     async def _enqueue_internal_conc_sweep_task(
@@ -139,7 +135,7 @@ class SweepPhase(PhaseHandler):
         *,
         reason: str,
     ) -> Task | None:
-        """Build + enqueue a Coordinator-internal ``conc_sweep`` task; returns None on error.
+        """Build + enqueue a Coordinator-internal ``conc_sweep`` task.
 
         Idempotency key + PolicyGate singleton ensure at most one per SWEEP.
 
@@ -147,8 +143,10 @@ class SweepPhase(PhaseHandler):
             reason: Tag used in the task's idempotency key and logging.
 
         Returns:
-            The created (or existing) ``conc_sweep`` task, or ``None`` on
-            enqueue error.
+            The created (or existing) ``conc_sweep`` task, or ``None`` when the
+            session clock leaves nothing to spend -- which records its own
+            terminal skip. An enqueue failure raises to the phase hook, which
+            records the error text a swallowed one would have lost.
         """
         state = self.shared_state
         configured_budget = int(state.conc_sweep_total_budget_sec or 0)
@@ -180,23 +178,19 @@ class SweepPhase(PhaseHandler):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
-            "concs": list(state.conc_sweep_concs or []),
+            # None, not [], when the state carries no ladder: the executor reads
+            # [] as a deliberate "no concs" and skips, while None lets it fall
+            # back to the ladder for this workload.
+            "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
             "total_budget_sec": clamped_budget,
         }
-        try:
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind="conc_sweep",
-                params=params,
-                idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
-                lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
-            )
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.exception(
-                "conc_sweep: failed to enqueue internal task: %r",
-                exc,
-            )
-            return None
+        task, was_existing = await self.tasks.create_or_return_existing(
+            kind="conc_sweep",
+            params=params,
+            idempotency_key=f"internal-conc_sweep-{reason}{self._cycle_idem_suffix()}",
+            lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
+        )
         if was_existing:
             log.info(
                 "internal-conc_sweep task already exists (idempotent: task_id=%s, state=%s)",
@@ -211,9 +205,6 @@ class SweepPhase(PhaseHandler):
                 params["concs"],
                 params["total_budget_sec"],
             )
-        # Stamp evidence so PolicyGate's sweep_phase_singleton denies a later
-        # LLM full-workload ``sweep`` (conc_sweep already ran on SWEEP entry).
-        self._record_phase_entry_evidence(auto_conc_sweep_task_id=task.task_id)
         return task
 
     def _record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:

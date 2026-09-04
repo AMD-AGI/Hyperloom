@@ -99,9 +99,9 @@ def _recorder(session_dir: Path | str, producer: str):
     Returns:
         The process-cached recorder for the ``(session_dir, producer)`` pair.
     """
-    from .recorder import get_recorder
+    from .recorder import recorder_for
 
-    return get_recorder(session_dir, producer=producer)
+    return recorder_for(session_dir, producer=producer)
 
 
 def _rel(path: Path, session_dir: Path | str) -> str:
@@ -199,7 +199,6 @@ _AGENT_BY_ACTION = {
     "sweep": "coordinator",
     "conc_sweep": "coordinator",
     "validate": "coordinator",
-    "validate_stack": "coordinator",
     "trace_analyze": "coordinator",
     "critic": "critic",
     "robustness": "robustness",
@@ -2574,6 +2573,10 @@ _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 #   * ("dist", names)-> importlib.metadata version of the first matching dist
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
+    # The bypass trace reader ships inside this distribution, like forge below:
+    # there is no checkout to ``git rev-parse``, so its version is Hyperloom's.
+    # Without this entry a bypass run mints an all-empty ``versions["bypass"]``.
+    "bypass": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
     # and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
@@ -2806,8 +2809,9 @@ def record_kernel_discovery(
 
     ``source`` is the discovery *route* label the dashboard groups by. ``tool``
     is the underlying tool whose authoritative version lands in the top-level
-    ``versions`` map; it defaults to ``source`` but is decoupled because routes
-    can share one toolchain (e.g. ``bypass`` reuses the TraceLens toolchain).
+    ``versions`` map; it defaults to ``source`` but is decoupled because a route
+    can run on a different toolchain (e.g. the GEAK backend reports
+    ``source="bypass"`` with ``tool="geak"``).
 
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is

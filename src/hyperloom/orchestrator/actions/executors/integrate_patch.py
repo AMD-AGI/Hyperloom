@@ -20,7 +20,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.env_safety import (
+    filter_untrusted_env_mapping,
+    is_allowed_variant_env_key,
+    redact_secret_values,
+)
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
@@ -113,6 +117,14 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"(?:python3?|uv)\s+-m\s+pip\s+install\b",
     r"uv\s+pip\s+install\b",
     r"pip3?\s+uninstall\s+-y\b",
+    # Creating an isolated environment to install INTO. Without these the only
+    # spelling that survived the allowlist was installing into the system
+    # interpreter (``PIP_BREAK_SYSTEM_PACKAGES=1 pip install``), so the gate was
+    # steering repairs toward the less safe of the two options it had to choose
+    # between. Creating a venv directory is bounded; breaking the system's
+    # package manager is not.
+    r"uv\s+venv\b",
+    r"(?:python3?|uv)\s+-m\s+venv\b",
     r"apt(?:-get)?\s+(?:install|update)\b",
     r"npm\s+(?:install|i|ci)\b",
     r"npm\s+install\s+-g\b",
@@ -121,6 +133,26 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"conda\s+install\b",
     r"mamba\s+install\b",
 )
+#: Directory prefixes whose basename may stand in for the whole path when the
+#: allowlist is matched. Absolute and system-owned on purpose: the replay runs
+#: the ORIGINAL command string, so anything a specialist can write to -- a
+#: relative ``./pip``, a path under its own workspace -- must not be able to
+#: borrow an allowlisted name. ``/opt/venv`` is the canonical ROCm stack this
+#: repository installs into; the rest are the standard system bindirs.
+#: ``..`` is excluded from the segment class on purpose. With a plain
+#: ``[A-Za-z0-9._-]+`` the traversal form ``/usr/bin/../../tmp/x/pip install foo``
+#: matches, normalises to an allowlisted ``pip install foo``, and then
+#: ``_run_setup_commands`` executes the ORIGINAL string -- running /tmp/x/pip,
+#: which is exactly the workspace-owned binary the prefix list exists to keep out.
+_TRUSTED_BIN_PREFIX_RE = re.compile(
+    r"^(?:/opt/(?!\.\.?/)[A-Za-z0-9._-]+|/usr(?:/local)?|/bin|/sbin)"
+    r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)*/"
+)
+
+#: Per-command clip in the rejection summary. Long enough to recognise the
+#: command, short enough that twelve of them cannot bury the round's own reason.
+_SKIPPED_CMD_CHARS = 160
+
 _SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 _SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 # Two-sided band, in percent of the pre-patch base, that a switch-off parity leg
@@ -200,12 +232,58 @@ def _parse_framework_switches(
     return _switch_manifest.parse_manifest(raw, reserved_env=reserved)
 
 
+def _with_skipped_setup_reason(reason: str, setup_result: dict[str, Any]) -> str:
+    """Append the allowlist rejections to a round's ``reason``.
+
+    A rejected setup command was only ever a ``log.warning``. Downstream saw the
+    round's outcome with no link to the cause, so the same authoring attempt was
+    re-dispatched until the budget ran out -- each round proposing the same fix
+    and each round having it silently dropped. Naming the rejection in the reason
+    is what lets the next round (or an operator) see that the proposal was never
+    the problem.
+
+    Args:
+        reason: The round's existing reason text.
+        setup_result: The :func:`_run_setup_commands` result.
+
+    Returns:
+        ``reason`` unchanged when nothing was rejected, else ``reason`` with a
+        one-line summary of the rejected commands appended.
+    """
+    # ``_run_setup_commands`` already stores the sanitised form, so for every
+    # production caller this is a no-op. Applied again anyway: the lesson of the
+    # gap this closes is that a safety step placed at the call sites protects
+    # the call sites that exist, and the sanitiser is idempotent.
+    skipped = [_sanitize_setup_command(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
+    if not skipped:
+        return reason
+    listed = "; ".join(skipped[:_SETUP_CMD_MAX])
+    if len(skipped) > _SETUP_CMD_MAX:
+        listed += f"; (+{len(skipped) - _SETUP_CMD_MAX} more)"
+    note = f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
+    return f"{reason} ({note})" if reason else note
+
+
+def _sanitize_setup_command(cmd: str) -> str:
+    """A rejected command in the form it is safe to store and hand back.
+
+    Rejected commands are LLM-written text. They reach the journal, the report
+    and the KB, and are read back into the next round's mandate, so a bearer
+    token or a credentialed URL in one would outlive the round that produced it.
+    Clipped as well, so a single rejected install naming a hundred packages
+    cannot crowd out the reason it is reported alongside.
+    """
+    text = redact_secret_values(str(cmd).strip())
+    return text if len(text) <= _SKIPPED_CMD_CHARS else text[:_SKIPPED_CMD_CHARS] + "..."
+
+
 def _is_allowlisted_setup_command(cmd: str) -> bool:
     """True when ``cmd`` is an install-only command safe to replay.
 
-    Strips a leading ``sudo`` and any ``KEY=VALUE`` env-assignment prefixes, then
-    requires the remainder to start with a known package/tool installer. Rejects
-    anything with shell control operators that could chain an arbitrary payload.
+    Strips a leading ``sudo``, any ``KEY=VALUE`` env-assignment prefixes and the
+    executable's directory, then requires the remainder to start with a known
+    package/tool installer. Rejects anything with shell control operators that
+    could chain an arbitrary payload.
     """
     text = (cmd or "").strip()
     if not text:
@@ -233,6 +311,22 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     # Strip a leading sudo and leading KEY=VALUE env assignments.
     text = re.sub(r"^\s*sudo\s+", "", text)
     text = re.sub(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", text)
+    # Match on the executable's basename, but ONLY for an absolute path under a
+    # system prefix. The patterns below are anchored, so without any
+    # normalisation ``/opt/venv/bin/uv pip install X`` was REJECTED while
+    # ``uv pip install X`` -- the same operation -- was allowed. Measured: two
+    # sessions hit one missing dependency and got opposite outcomes, decided by
+    # nothing but how the specialist happened to spell the path.
+    #
+    # The allowlist is checked against this normalised text, but
+    # ``_run_setup_commands`` executes the ORIGINAL string under ``shell=True``.
+    # So a blanket basename strip would let any binary in: ``./pip install foo``
+    # normalises to an allowlisted ``pip install foo`` while running a script
+    # the specialist just wrote into its own workspace. Restricting the strip to
+    # absolute system prefixes keeps "which KIND of operation may replay" intact
+    # -- the property line 105 promises -- while still treating a venv's own
+    # interpreter as the interpreter it is.
+    text = _TRUSTED_BIN_PREFIX_RE.sub("", text, count=1)
     return any(re.match(pat, text) for pat in _SETUP_CMD_ALLOWLIST)
 
 
@@ -312,8 +406,20 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     for cmd in commands:
         if not _is_allowlisted_setup_command(cmd):
-            skipped.append(cmd)
-            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", cmd)
+            # Sanitised HERE, not at the reporting sites. This list is copied
+            # verbatim into every result payload that carries
+            # ``setup_commands_skipped``, and a rejected command is LLM-written
+            # text that can hold a bearer token or a credentialed URL. Doing it
+            # at the four call sites protects those four; doing it at the source
+            # protects the fifth as well.
+            safe_cmd = _sanitize_setup_command(cmd)
+            skipped.append(safe_cmd)
+            # Also carried into the round's ``reason`` by
+            # _with_skipped_setup_reason: a warning alone left the caller with an
+            # outcome and no link to the cause, so the same proposal was
+            # re-authored and re-dropped until the budget ran out. The log is a
+            # disk-backed surface too, so it gets the sanitised form as well.
+            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
             continue
         log.info("integrate_patch: enablement setup replay: %s", cmd)
         try:
@@ -2362,10 +2468,12 @@ class IntegratePatchExecutor:
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
                 "setup_commands_applied": list(setup_result.get("applied") or []),
-                "reason": (
+                "setup_commands_skipped": list(setup_result.get("skipped") or []),
+                "reason": _with_skipped_setup_reason(
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
-                    "this specialist task"
+                    "this specialist task",
+                    setup_result,
                 ),
             }
             if params.get("enablement"):
@@ -2977,14 +3085,16 @@ class IntegratePatchExecutor:
                         "advanced": True,
                         "runnable": False,
                         "correctness_verified": False,
-                        "reason": (
+                        "reason": _with_skipped_setup_reason(
                             f"enablement progressed: {run_reason}; boot advanced "
                             f"to a new gap ({after_signature.kind}) — patch recorded "
-                            f"as a base for the next round"
+                            f"as a base for the next round",
+                            setup_result,
                         ),
                         "after_signature": after_signature.to_dict(),
                         "enablement_launch_log": new_log,
                         "setup_commands_applied": list(setup_result.get("applied") or []),
+                        "setup_commands_skipped": list(setup_result.get("skipped") or []),
                         "bench_result": bench_result,
                         "workspace": str(output_root),
                         **eval_provenance,
@@ -3017,7 +3127,13 @@ class IntegratePatchExecutor:
                     "enablement": True,
                     "runnable": False,
                     "correctness_verified": correctness_ok is True,
-                    "reason": f"enablement not runnable: {run_reason}",
+                    # The round ran and the boot still did not come up. When the
+                    # specialist's own setup commands were dropped on the way in,
+                    # that is the likeliest reason -- and the one the next round
+                    # needs, since re-authoring the same proposal cannot help.
+                    "reason": _with_skipped_setup_reason(f"enablement not runnable: {run_reason}", setup_result),
+                    "setup_commands_applied": list(setup_result.get("applied") or []),
+                    "setup_commands_skipped": list(setup_result.get("skipped") or []),
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                     **eval_provenance,
@@ -3051,8 +3167,9 @@ class IntegratePatchExecutor:
             "runnable": True,
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
-            "reason": reason,
+            "reason": _with_skipped_setup_reason(reason, setup_result),
             "setup_commands_applied": list(setup_result.get("applied") or []),
+            "setup_commands_skipped": list(setup_result.get("skipped") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
             # Base YAML only; the env/arg layers live in enablement_effective_config.

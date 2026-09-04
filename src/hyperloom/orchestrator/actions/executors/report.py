@@ -32,6 +32,7 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
+from ...phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ...state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import db_path_for
 
@@ -351,7 +352,7 @@ def _build_failure_summary(
 
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Terminal reasons the coordinator loop sets directly.
-    "target_reached": "Target reached: the requested --target-gain / --target-tput was met.",
+    "target_reached": "Target reached: a requested --target-gain / --target-tput / --target-roofline was met.",
     "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
     "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",
@@ -425,6 +426,14 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
     "enablement_stalled": "The enablement loop made no forward progress for several consecutive rounds and stopped instead of re-deriving the same fix.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
+    AGENTX_PREFLIGHT_STOP_REASON: (
+        "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "
+        "AIPERF_REF build, and the automatic install did not resolve it. This is an environment gap, "
+        "not something a framework patch can close, so the run stopped on the first occurrence rather "
+        "than spending its budget in the enablement lane. Fix: run "
+        "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
+        "the real cause), or point AIPERF_BIN at an existing pinned build."
+    ),
 }
 
 
@@ -1181,11 +1190,9 @@ def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     lines.append("## Concurrency Sweep — Throughput vs Interactivity")
     lines.append("")
-    lines.append(
-        "Efficiency (tok/s/GPU) vs Interactivity (tok/s/user) across the "
-        "post-optimization concurrency ladder.  "
-        "Red = baseline, orange = optimized."
-    )
+    # The PNG draws its own axis labels, and they differ by workload; naming
+    # them here too drifts from the chart.
+    lines.append("The post-optimization concurrency ladder.  Red = baseline, orange = optimized.")
     lines.append("")
     lines.append(f"![Concurrency sweep curve]({png_md_rel})")
     lines.append("")
@@ -1200,7 +1207,8 @@ def _render_conc_sweep_curve_for_report(
     """Render the concurrency-sweep curve PNG into the reports directory.
 
     Loads the full ``conc_sweep_summary.json`` (not the slim pointer), calls
-    :func:`render_conc_sweep_curve`, and returns the path on success.
+    :func:`render_conc_sweep_curve`, and returns the path on success. The
+    renderer drops a payload with nothing plottable on its own axes.
 
     Args:
         session_dir: Session directory used to locate
@@ -1213,33 +1221,19 @@ def _render_conc_sweep_curve_for_report(
         Path to the written PNG, or ``None`` when the chart cannot be
         produced (missing data, missing matplotlib, IO error).
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
     from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
-    if not json_path.exists():
-        return None
     try:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
         return None
 
-    # The axis the chart is drawn on differs by mode, so probe the one this
-    # payload will actually use.
-    axis_key = "total_token_throughput" if is_agentx_mode(payload.get("benchmark_mode")) else "output_throughput"
-
-    def _has_data(arm_key: str) -> bool:
-        pts = (payload.get(arm_key) or {}).get("points") or []
-        return any(p.get(axis_key) is not None for p in pts)
-
-    if not _has_data("baseline") and not _has_data("optimized"):
-        log.debug("report_executor: conc_sweep_summary has no %s data — skipping plot", axis_key)
-        return None
-
     png_path = output_dir / "conc_sweep_curve.png"
     tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
+
     model_label = str(getattr(state, "model_name", "") or "")
     gpu_label = str(getattr(state, "gpu_type", "") or "").upper()
     isl = int(payload.get("isl") or 0)

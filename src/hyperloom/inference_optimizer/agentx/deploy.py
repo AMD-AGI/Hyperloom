@@ -4,9 +4,9 @@
 """Runtime deployment of AgentX assets into the InferenceX benchmarks dir.
 
 Magpie resolves ``benchmark_script`` by name from ``<inferencex>/benchmarks/``.
-Because Magpie re-checks-out InferenceX per run, the AgentX client + mapper are
-copied in at runtime (idempotent) rather than at install time, keeping the
-InferenceX checkout free of permanent modifications.
+Because Magpie re-checks-out InferenceX per run, the AgentX client, phase gate,
+and mapper are copied in at runtime (idempotent) rather than at install time,
+keeping the InferenceX checkout free of permanent modifications.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-_ASSET_FILES = ("aiperf_client.sh", "map_aiperf.py")
+_ASSET_FILES = ("aiperf_client.sh", "map_aiperf.py", "aiperf_phase_gate.py")
 
 
 def agentx_asset_dir() -> Path:

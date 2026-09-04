@@ -233,6 +233,27 @@ def test_resolve_trace_file_prefers_merged(tmp_path):
     assert resolved is not None and resolved.name == "merged-all.trace.json.gz"
 
 
+def test_agentx_directory_prefers_rank0_over_merged(tmp_path):
+    d = tmp_path / "torch_trace"
+    d.mkdir()
+    rank0 = _write_trace(d / "900-TP-0-DECODE.trace.json.gz")
+    _write_trace(d / "900-TP-1-DECODE.trace.json.gz")
+    _write_trace(d / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(d, require_single_rank=True) == rank0
+
+
+def test_agentx_directory_refuses_merged_only_input(tmp_path):
+    d = tmp_path / "torch_trace"
+    d.mkdir()
+    _write_trace(d / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(d, require_single_rank=True) is None
+
+
+def test_agentx_explicit_merged_file_is_rejected(tmp_path):
+    merged = _write_trace(tmp_path / "merged-all.trace.json.gz")
+    assert reader.resolve_trace_file(merged, require_single_rank=True) is None
+
+
 def test_analyze_reports_rank_provenance(tmp_path):
     d = tmp_path / "torch_trace"
     _write_ranked(d, 0)
@@ -268,8 +289,7 @@ def _write_capture_fragment(capture_dir: Path, batch_size: int, rank: int = 0) -
 
 
 def _write_main_tp_trace(d: Path, name: str = "1783387979.6664605-TP-0.trace.json.gz") -> Path:
-    # The content-rich main sglang profiler trace; not rank-tagged (``-TP-0``
-    # does not match the rank regex).
+    # The content-rich main sglang profiler trace, tagged with TP rank 0.
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     with gzip.open(p, "wb") as f:
@@ -301,7 +321,7 @@ def test_capture_fragment_dir_selects_main_trace_content(tmp_path):
     assert out["status"] == "ok"
     assert {k["name"] for k in out["kernels"]} == {"Cijk_Alik_Bljk_HHS", "paged_attention_v1"}
     assert out["rank_count"] == 1
-    assert out["analyzed_rank"] is None
+    assert out["analyzed_rank"] == 0
 
 
 def test_resolve_trace_file_falls_back_when_only_capture_fragments(tmp_path):
@@ -666,6 +686,29 @@ def test_complete_malformed_object_resyncs_to_later_event():
     assert events == [good]
     assert len(errors) == 1
     assert "malformed after 0 event(s)" in errors[0]
+
+
+def test_brace_inside_a_string_split_across_chunks_is_not_an_object_end():
+    """A refill must resume mid-string rather than close on a quoted brace.
+
+    The decoder reports this partial object as an error positioned at the
+    opening quote, well before the buffer end, so "the failure is not at the
+    end" cannot be used to conclude the input is corrupt.
+    """
+    good = {"cat": "kernel", "name": "a}b", "ts": 1}
+    payload = json.dumps({"traceEvents": [good]}).encode("utf-8")
+    errors: list[str] = []
+    assert list(reader.stream_events(io.BytesIO(payload), bufsize=payload.index(b"a}b") + 1, errors=errors)) == [good]
+    assert errors == []
+
+
+def test_unterminated_string_at_eof_reports_truncation_not_corruption():
+    """An object cut off inside a string is truncated, not malformed."""
+    payload = b'{"traceEvents": [{"cat": "kernel", "name": "abc'
+    errors: list[str] = []
+    assert list(reader.stream_events(io.BytesIO(payload), bufsize=8, errors=errors)) == []
+    assert len(errors) == 1
+    assert "truncated after 0 event(s)" in errors[0]
 
 
 def test_trace_prefix_growth_is_bounded(monkeypatch):

@@ -82,8 +82,9 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
   `--conc`, `--max-model-len`, `--profile-osl`.
-- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
-  `--target-tput`, `--compare-against-gpu`.
+- **Goal / budget:** `--target-gain`, `--target-roofline`, `--max-hours`,
+  `--target-summary`, `--target-tput`, `--compare-against-gpu`. The roofline
+  target composes with the others: whichever is met first ends the run.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -314,9 +315,9 @@ consumers and triage read a contract rather than candidate internals.
 
 ### Candidate review
 
-One agent session may audit the finished candidate table when
-`--analysis-route agent` is used. The `deterministic` route never runs it, and
-keeps its no-model guarantee by not reaching the stage at all.
+One agent session may audit the finished candidate table on the `agent`
+analysis route. The `bypass` route never runs it, and keeps its no-model
+guarantee by not reaching the stage at all.
 
 The stage is tool-enabled rather than a completion call because the deterministic
 tiers' real failure mode is not coming up empty but coming up confidently wrong,
@@ -967,6 +968,16 @@ degrade is never silent and never one-sided.
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Interactivity veto band in percent: a candidate whose intvty p90 sits more than this below the anchor is rejected before it is graded. The default is the top of the 1–5% run-to-run noise upstream records for this workload, so the veto does not fire on movement upstream would call noise. Not subtracted from the objective — that would stack with `keep_threshold_pct` and silently raise the bar. An unparseable value falls back to the default. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
+
+AgentX profiling starts when AIPerf reports its measured phase. The legacy
+`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
+the capture window and defaults to 20 seconds; phase waiting is bounded by the
+materialized benchmark timeout. Capture lifecycle status is
+written to a per-invocation `capture-status.json`; the adjacent
+`trace-manifest.json` records the selected primary and per-rank traces.
+Benchmark measurement success and trace-capture success are reported
+independently. AgentX multi-node profiling is currently rejected because its
+legacy fixed-delay capture is not aligned with the AIPerf phase signal.
 
 ---
 

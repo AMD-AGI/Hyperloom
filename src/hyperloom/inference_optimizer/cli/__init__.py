@@ -99,7 +99,7 @@ from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
-from hyperloom.orchestrator.state.objective import Objective, build_objective
+from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
@@ -350,7 +350,9 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
 
     Inspects the objective for the first recognised target attribute
     (``target_gain_pct`` → float, ``target_tput_per_gpu`` → float,
-    ``baseline_dir`` → str) and pairs it with the objective's ``kind()``.
+    ``target_within_pct`` → float, ``baseline_dir`` → str) and pairs it with the
+    objective's ``kind()``. A composite objective has no single value, so its
+    members' descriptions stand in for one.
 
     Args:
         objective (Objective): The run objective to summarise.
@@ -360,11 +362,15 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
         objective's numeric / string target, or ``None`` when none is present.
     """
     kind = objective.kind()
+    if isinstance(objective, AnyObjective):
+        return kind, objective.describe()
     value: float | str | None = None
     if hasattr(objective, "target_gain_pct"):
         value = float(getattr(objective, "target_gain_pct"))
     elif hasattr(objective, "target_tput_per_gpu"):
         value = float(getattr(objective, "target_tput_per_gpu"))
+    elif hasattr(objective, "target_within_pct"):
+        value = float(getattr(objective, "target_within_pct"))
     elif hasattr(objective, "baseline_dir"):
         value = str(getattr(objective, "baseline_dir"))
     return kind, value
@@ -1241,13 +1247,15 @@ def _reset_state_file(session_dir: Path) -> None:
 # layering (see AGENTX_EXPLORE_TIMEOUT_CEILING_SEC), which is the real fix.
 #
 # The total is that measured round times the ladder: seven agentic rungs on each
-# of the baseline and optimized arms, so fourteen. It is a ceiling rather than a
-# reservation -- the SWEEP phase clamps it to the session's own remaining time
-# before the task is enqueued, and an exhausted budget skips the rungs it cannot
-# pay for rather than failing the sweep. Sizing it below the ladder would instead
-# truncate every run by default.
+# of the baseline and optimized arms, so fourteen runs. It is a ceiling rather
+# than a reservation -- the SWEEP phase clamps it to the session's own remaining
+# time before the task is enqueued, and an exhausted budget skips the rungs it
+# cannot pay for rather than failing the sweep. Sizing it below the ladder would
+# instead truncate every run by default. The per-variant cap above stays higher
+# than the measured round: it bounds a hung one, it does not predict a healthy
+# one.
 _AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
-_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 93600  # 26 h: ~111 min x 14 rungs
+_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 93600  # 26 h: ~111 min x 14 runs
 
 
 def _preflight_agentx_backend(args: argparse.Namespace) -> None:
@@ -2609,6 +2617,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             "TARGET_GAIN_PCT": str(args.target_gain) if args.target_gain else "",
             "TARGET_TPUT_PER_GPU": str(args.target_tput) if args.target_tput else "",
             "TARGET_DIR": args.target_baseline_dir or "",
+            "TARGET_WITHIN_ROOFLINE_PCT": str(args.target_roofline) if args.target_roofline else "",
         }
     )
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
@@ -2738,11 +2747,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
     # Production: enable strict PolicyGate path-containment (escaping intents land as policy_denied).
     os.environ["INFERENCE_OPTIMIZER_STRICT_PATHS"] = "1"
-    # PolicyGate R1 phase_incompatible enforcement for production runs (env affects cli boot path only).
-    if getattr(args, "strict_phase", True):
-        os.environ["INFERENCE_OPTIMIZER_STRICT_PHASE"] = "1"
-    else:
-        os.environ.pop("INFERENCE_OPTIMIZER_STRICT_PHASE", None)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
         _reset_state_file(session_dir)

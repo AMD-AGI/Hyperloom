@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     tokenize_server_args_preserving_json,
 )
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
@@ -56,6 +57,7 @@ from ..phases import machine_state as _phase_state
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
@@ -95,19 +97,6 @@ from .coordinator_helpers import (
 
 
 log = logging.getLogger(__name__)
-
-
-# Audit-trail kinds (must match shared_state._AUDIT_ACTIONS).
-_AUDIT_ACTIONS: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "profile",
-        "sweep",
-        "explore",
-        # Composite roofline runs profile + trace_analyze atomically.
-        "roofline",
-    }
-)
 
 
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
@@ -597,6 +586,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
+        # Bind the session for the SBD V6 recorders once, here, so no recorder
+        # entry point below has to be handed a path. It is bound on the
+        # Coordinator's own context, which is deliberately not inherited by the
+        # Ray actors the phases dispatch into: a subprocess that tried to write
+        # a fragment would find no session and decline, and two processes
+        # upserting one fragment lose a side of the merge.
+        bind_session(self.session_dir)
         self.role_registry = role_registry or default_role_registry()
         # KnowledgePlane owns RecipeKB. Keep the explicit parameter as a
         # compatibility injection path for library callers during Phase 1.
@@ -869,12 +865,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: float | None = None
-        # Set while a success terminal (a met objective) is being routed into
-        # CLOSE. Distinct from ``closing_phase``, which means the wall clock ran
-        # out and the sequencer should shed expensive work; a met target has to
-        # produce the full set of artifacts. ``True`` lifts the session bound for
-        # that routing without claiming a rescue is under way.
-        self._terminal_closing: bool = False
+        # Set while a met objective's transition is forced. Distinct from
+        # ``closing_phase``, which means the wall clock ran out and CLOSE should
+        # shed expensive work; a met target has to produce the full set of
+        # artifacts. ``True`` lifts the session bound for that one advance.
+        self._unbounded_advance: bool = False
         # Latest objective wired by run(); refreshes target_gap_pct each tick. None outside a run.
         self._current_objective: Objective | None = None
 
@@ -986,6 +981,14 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_geak_enabled": "phase_kernel",
         "_collective_required_before_kernel_opt": "phase_kernel",
         "_on_enter_kernel": "phase_kernel",
+        "_open_kernel_timeline": "phase_kernel",
+        "_close_kernel_timeline": "phase_kernel",
+        "_kernel_timeline": "phase_kernel",
+        "_run_bf16_dense_gemm_fallback": "phase_kernel",
+        "_should_run_bf16_dense_gemm_fallback": "phase_kernel",
+        "_bf16_dense_gemm_fallback_pending": "phase_kernel",
+        "_bf16_dense_gemm_fallback_attempted": "phase_kernel",
+        "_is_bf16_dense_gemm_fallback_attempt": "phase_kernel",
         "_resolve_bench_protocol": "phase_kernel",
         "_geak_timeouts": "phase_kernel",
         "_run_geak_kernel_phase": "phase_kernel",
@@ -1634,16 +1637,15 @@ class Coordinator(metaclass=_CoordinatorMeta):
         During CLOSE the session deadline has already passed, so the bound
         switches to ``_closing_deadline`` and CLOSE work is not skipped.
 
-        A success terminal is unbounded here: the sequencer's own per-step
-        timeouts (``CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC`` is 600s on its own)
-        are the budget. An outer bound short enough to matter would cancel the
-        step mid-flight and drop the run onto the safety net -- the very outcome
-        routing into CLOSE exists to avoid.
+        A met target's forced advance is unbounded here: the phases' own
+        per-step timeouts (``CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC`` is 600s on
+        its own) are the budget, and an outer bound short enough to matter would
+        cancel a step mid-flight.
 
         Returns:
             Remaining seconds, or ``None`` when no bound is armed.
         """
-        if self._terminal_closing:
+        if self._unbounded_advance:
             return None
         if bool(getattr(self.shared_state, "closing_phase", False)):
             bound = self._closing_deadline
@@ -1696,7 +1698,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (via the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, target_reached (routed through SWEEP, then the CLOSE phase sequencer), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         Args:
             objective: Stop objective; ``None`` uses a :class:`TimeOnlyObjective`.
@@ -1835,53 +1837,51 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     stop_reason = self.shared_state.stop_reason
                     break
                 if objective.reached(self.shared_state):
-                    # Route the terminal through CLOSE. ``machine_state``
-                    # registers ``target_reached`` as an "any phase -> CLOSE"
-                    # transition reason, but nothing ever produced it, so a met
-                    # target skipped the 7-step close sequencer and left only
-                    # the cli safety-net report.
-                    #
-                    # The transition runs in THIS tick rather than the next one.
-                    # Every ``_advance_phase_if_needed`` in the tick body sits
-                    # behind ``_await_within_session_bound``, which skips the
-                    # step once the session bound has elapsed -- so a target met
-                    # at or after the deadline would never get another advance,
-                    # and deferring the close would silently fall back to the
-                    # safety net.
-                    if not self.shared_state.stop_reason:
-                        self.shared_state.set_stop_reason("target_reached")
-                        # Best-effort: the terminal is already set in memory and
-                        # CLOSE persists state itself, so a failed write must not
+                    if not self.shared_state.target_reached_at:
+                        self.shared_state.target_reached_at = now_iso()
+                        # The marker is already set in memory and the phases
+                        # persist state themselves, so a failed write must not
                         # cost the run its close sequence.
                         try:
                             self.shared_state.save(self.session_dir)
                         except Exception:  # noqa: BLE001
-                            log.exception(
-                                "Coordinator: persisting target_reached failed; closing anyway",
-                            )
-                        # Lift the session bound for this one advance so the
-                        # elapsed run deadline cannot skip it. ``closing_phase``
-                        # is deliberately NOT set: that flag means the wall clock
-                        # ran out, and CLOSE reads it to shed expensive work --
-                        # ``_maybe_run_close_post_opt_roofline`` returns early on
-                        # it, which would drop the very artifact this routing
-                        # exists to produce. The sequencer's own per-step
-                        # timeouts bound the work.
-                        self._terminal_closing = True
-                        try:
-                            await self._await_within_session_bound(
-                                self._advance_phase_if_needed,
-                                stage="advance_phase_target_reached",
-                            )
-                        except Exception:  # noqa: BLE001
-                            log.exception(
-                                "Coordinator: close transition on target_reached failed",
-                            )
-                        finally:
-                            self._terminal_closing = False
-                    stop_reason = self.shared_state.stop_reason or "target_reached"
-                    break
-                if deadline is not None and time.monotonic() >= deadline and not in_closing:
+                            log.exception("Coordinator: persisting target_reached_at failed; routing anyway")
+                    # In this tick, not the next: every advance in the tick body
+                    # sits behind ``_await_within_session_bound``, so a target
+                    # met at or after the deadline would never get another one.
+                    # ``closing_phase`` stays unset -- CLOSE reads it to shed
+                    # expensive work, including the post-opt roofline this
+                    # routing exists to produce.
+                    routed_to_sweep = _phase_state.phase_index(
+                        str(self.shared_state.phase or "")
+                    ) < _phase_state.phase_index(_phase_state.PHASE_SWEEP)
+                    self._unbounded_advance = True
+                    try:
+                        await self._await_within_session_bound(
+                            self._advance_phase_if_needed,
+                            stage="advance_phase_target_reached",
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("Coordinator: target_reached transition failed")
+                    finally:
+                        self._unbounded_advance = False
+                    # The SWEEP hop leaves through the stop_reason check instead,
+                    # once SWEEP names the exit.
+                    if not routed_to_sweep:
+                        if not self.shared_state.stop_reason:
+                            self.shared_state.set_stop_reason("target_reached")
+                        stop_reason = self.shared_state.stop_reason
+                        break
+                # A met target outranks the wall clock for the hops it needs.
+                # conc_sweep clamps to the remaining session budget and declines
+                # when nothing is left, so SWEEP cannot run past --max-hours;
+                # max_ticks, emergency and signal still bound the loop.
+                if (
+                    deadline is not None
+                    and time.monotonic() >= deadline
+                    and not in_closing
+                    and not self.shared_state.target_reached_at
+                ):
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break

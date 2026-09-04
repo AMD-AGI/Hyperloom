@@ -68,14 +68,20 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 )
 
 
-# Request kinds the Coordinator dispatches itself at KERNEL entry; PolicyGate
-# rejects them from an LLM, which would bypass the lane's gate and accounting.
-# Unlike ``COORDINATOR_INTERNAL_ACTIONS`` these are request kinds, not actions:
-# they have no executor and no prompt entry.
+# Request kinds an LLM may address to the kernel agent.
+LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(KERNEL_ACTION_REQUEST_KINDS.values()) | {
+    "trace_analyze",
+    "apply_patch",
+}
+
+# Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and
+# once their own gate passes. A direct request would skip that gate. An
+# unregistered kind is not listed here: the handler lookup auto-rejects it with
+# the valid-kind vocabulary, which is the better answer for a typo.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
-        "run_fusion",
         "run_collective",
+        "run_fusion",
         # Dispatched once at phase entry from a nomination and a lane budget. An
         # LLM re-issuing either per tick would spend budget the allocation never
         # granted and pick targets the nomination did not choose.
@@ -422,12 +428,13 @@ __all__ = [
     "ACTION_CATALOGUE",
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
-    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
+    "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KERNEL_REQUEST_KIND_ALIASES",
+    "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",

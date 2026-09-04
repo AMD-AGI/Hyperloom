@@ -1982,8 +1982,7 @@ async def test_no_recipe_after_loaded_kernel_clears_stale_pending(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_combined_threshold_uses_environment_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "2.5")
+async def test_combined_threshold_uses_decaying_curve(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe={})
 
     async def _prepare():
@@ -1998,7 +1997,8 @@ async def test_combined_threshold_uses_environment_override(tmp_path, monkeypatc
     coord.phase_prelude._prepare_warm_kernel_kb = _prepare  # type: ignore[method-assign]
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
 
-    assert task.params["combined_keep_threshold_pct"] == 2.5
+    # macro_cycle=0 → decaying curve yields 1.0%.
+    assert task.params["combined_keep_threshold_pct"] == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio
@@ -2365,7 +2365,7 @@ def test_current_contract_threshold_preserves_local_legacy_positive_gain(tmp_pat
     assert legacy.shared_state.warm_replay_outcome["status"] == "reproduced"
 
 
-def test_zero_and_nonfinite_combined_thresholds(tmp_path, monkeypatch):
+def test_zero_and_nonfinite_combined_thresholds(tmp_path):
     zero = _make_coord(tmp_path / "zero", warm_start_recipe=_warm_recipe_t1())
     zero.shared_state.baseline_tput = 600.0
     zero.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -2383,7 +2383,6 @@ def test_zero_and_nonfinite_combined_thresholds(tmp_path, monkeypatch):
     assert zero.shared_state.warm_replay_outcome["status"] == "reproduced"
     assert zero.shared_state.warm_replay_outcome["keep_threshold_pct"] == 0.0
 
-    monkeypatch.setenv("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "nan")
     nonfinite = _make_coord(
         tmp_path / "nan",
         warm_start_recipe=_warm_recipe_t1(),

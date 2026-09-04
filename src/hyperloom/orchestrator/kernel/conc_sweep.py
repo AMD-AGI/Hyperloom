@@ -23,7 +23,7 @@ from typing import Any, Mapping
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
@@ -192,13 +192,20 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         conc = int(envs.get("CONC", "0"))
     except (TypeError, ValueError):
         conc = 0
+    # aiperf reports the total; the other parsers pass through whatever the
+    # framework named, leaving it null on a run that measured both halves. The
+    # sum is the same identity ``perf_snapshot_from_mapping`` applies, and a
+    # session graded on the total axis fails outright without it.
+    total = v.total_token_throughput
+    if total is None and v.input_throughput is not None and v.output_throughput is not None:
+        total = v.input_throughput + v.output_throughput
     return {
         "arm": arm,
         "conc": conc,
         "status": v.status,
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
-        "total_token_throughput": v.total_token_throughput,
+        "total_token_throughput": total,
         "input_throughput": v.input_throughput,
         "intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
@@ -1182,7 +1189,9 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
         b_pts.sort(key=lambda p: p["conc"])
         o_pts.sort(key=lambda p: p["conc"])
 
-        comparison, summary = conc_pair_comparison(b_pts, o_pts)
+        comparison, summary = conc_pair_comparison(
+            b_pts, o_pts, metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+        )
         p: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "status": "in_progress" if partial else "unknown",
@@ -1526,7 +1535,11 @@ async def run_conc_sweep(
     baseline_points.sort(key=lambda p: p["conc"])
     optimized_points.sort(key=lambda p: p["conc"])
 
-    comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
+    comparison, summary = conc_pair_comparison(
+        baseline_points,
+        optimized_points,
+        metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or "")),
+    )
     budget_limited_no_pair = _budget_limited_without_valid_pair(
         budget_exhausted=budget_exhausted,
         summary=summary,

@@ -7,10 +7,114 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **AgentX installs its own benchmark client instead of letting an agent guess
+  at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
+  dependency and `install.sh` already owned that install, but it was gated on a
+  *runtime* mode flag being true in the *installer's* process — provision
+  without `HYPERLOOM_AGENTX`/`INSTALL_AIPERF`, turn AgentX on later, and the box
+  has no aiperf. Both halves behaved as designed; the combination did not.
+  Measured: the runtime preflight caught it and printed exactly the right fix,
+  but that sentence is written for an operator and on that path there is no
+  operator — so a supply gap was handed to an LLM specialist as if it were a
+  framework bug, and the run's budget went to re-deriving an install this
+  repository already had. Measured on that cluster: 11 of 13 provisioning runs
+  logged `aiperf (AgentX) skipped` and left a box that could not run AgentX.<br/>
+  **Install time** now keys on something it can actually know. A build that
+  ships `assets/agentx/` is a build whose boxes may be asked to run AgentX, so
+  the client is installed on that signal rather than on a runtime mode flag
+  nobody sets while provisioning. The pre-warm is deliberately timid: a failure
+  only warns, and an aiperf already on `PATH` is left alone even when its
+  recorded ref is stale, because replacing it takes `pip --force-reinstall`
+  (deliberately not `--no-deps`) and that rebuilds a dependency tree on a box
+  which may run nothing but the synthetic path.<br/>
+  **Run time** repairs what is still missing — once per process, when the
+  preflight finds aiperf absent or off the pinned `AIPERF_REF`. This is where a
+  stale client is upgraded, because here AgentX is demonstrably in use. A failed
+  repair is folded into the preflight error alongside the original diagnosis,
+  never swallowed. Two verdicts do not trigger an install: a corpus pin the
+  scenario does not admit (reinstalling the same build cannot change it), and a
+  build named by `AIPERF_BIN` (no install can replace an operator's override —
+  the error says so and names the variable).<br/>
+  **Operator note**: a default install now pays one pinned aiperf install
+  (measured ~30s; `ensure_aiperf` records the ref and skips on every later run).
+  Set `AIPERF_BIN` to an existing build to skip it, or `AGENTX_ASSET_DIR` to
+  point the check elsewhere. `install.sh` also gains `--only-aiperf`, which
+  installs just the client and exits — use it to add AgentX support to a box
+  provisioned without it. And when AgentX is asked for **by name**
+  (`INSTALL_AIPERF`, `HYPERLOOM_AGENTX` or `--only-aiperf`), a failed install is
+  FATAL rather than a warning: the caller named the dependency, so leaving it
+  absent with a warning in a log nobody reads is what produced the incident.
+
+- **A missing AgentX client stops the run instead of opening an enablement
+  round.** The enablement lane diagnoses things nobody knew about in advance;
+  a dependency AgentX declares for itself, that the runtime has already tried to
+  install, is not one of them. Measured: routed as an ordinary launch failure it
+  cost a full 24h budget — the specialist could not tell a supply gap from a
+  framework bug, its commands were rejected by the setup allowlist, and
+  PolicyGate's `enablement_round_in_flight` then blocked the baseline for the
+  rest of the run. The failure now stops on the first occurrence with the new
+  `agentx_client_unavailable` stop reason, and the report names the fix.
+  The grid runner also stops filing this abort as `no_benchmark_workspace`:
+  no workspace exists because Magpie never ran, and the generic class erased the
+  one fact that decides what to do next. A grid that hits it abandons its
+  remaining points rather than re-attempting each one — the client is missing
+  for the whole grid, and the stop above is baseline-scoped so nothing else
+  would have halted it. Nothing about the enablement channel itself changes.
+
+- **Enablement setup commands are judged by what they do, not how they are
+  spelled.** The install-only allowlist matched from the start of the command
+  and normalised only `sudo` and `KEY=VALUE` prefixes, so
+  `/opt/venv/bin/uv pip install X` was rejected while `uv pip install X` — the
+  same operation — was allowed. Measured: two sessions hit one missing
+  dependency and got opposite outcomes, decided by nothing but how the
+  specialist happened to spell the path. The executable's directory is now
+  stripped before matching — but only when it is an absolute system prefix
+  (`/opt/<name>`, `/usr`, `/usr/local`, `/bin`, `/sbin`). The allowlist is
+  matched on a normalised copy while the replay executes the original string, so
+  a blanket strip would let `./pip install foo` borrow an allowlisted name and
+  run a script the specialist had just written; `/opt/venv/bin/uv pip install`
+  normalises, `./pip`, `bin/pip` and `/tmp/pip` do not.
+  `uv venv` / `python -m venv` are also allowed now: without them the only
+  spelling that survived was installing into the system interpreter
+  (`PIP_BREAK_SYSTEM_PACKAGES=1`), so the gate was steering repairs toward the
+  less safe of its two options. `rm`, `systemctl`, `./configure` and `uv run`
+  stay rejected with or without a path.<br/>
+  Rejected commands also reach the conclusion now, as `setup_commands_skipped`
+  and a named clause in the round's `reason` — redacted and length-bounded,
+  since they are LLM-written text that lands in the journal, the report and the
+  KB. They were a lone log warning, so downstream saw an outcome with no link to
+  the cause and re-authored the same proposal until the budget ran out.
+
+- **BREAKING — the `deterministic` trace-analysis route is gone.**
+  `HYPERLOOM_TRACE_ANALYSIS_ROUTE` and the `analysis_route` payload key now take
+  `agent` or `bypass`, and `tracelens_analysis.py` no longer accepts
+  `--analysis-route` at all. The route reached hot kernels without a model by
+  driving the TraceLens Python toolchain directly (perf report,
+  `orchestrator_prepare`, the per-category analysis scripts,
+  `generate_priority_data`) and extracting candidates from `priority_data.json`
+  — a second extraction pipeline maintained beside the one `analysis.md` already
+  defines, and the only caller of the category-script fan-out. `bypass` serves
+  the same no-LLM intent by reading the profiler trace directly and needs no
+  TraceLens checkout to do it. A request still naming `deterministic` is rejected
+  with `invalid_analysis_route` before TraceLens or an LLM is started, and the
+  error points to `bypass`. Only an omitted route defaults to `agent`; explicit
+  unknown values no longer fall back to a route that may spend an LLM session.
+
 - **Codex sandbox bypass uses a single env var.** Set
   `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
   enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
   Hyperloom and KernelForge.
+
+- **AgentX profiling now follows AIPerf's measured phase.** Trace capture opens
+  from the pinned client's progress API instead of a fixed warmup delay, records
+  an independent capture status, and keeps single-rank TraceLens analysis off
+  merged multi-rank traces. `AGENTX_PROFILE_WARMUP_S` is now ignored;
+  `AGENTX_PROFILE_WINDOW_S` remains the capture bound. Each invocation gets an
+  explicit capture ID and writes `capture-status.json` plus
+  `trace-manifest.json` under its task-owned artifact directory. Capture failure
+  fails the profile action while preserving benchmark measurement status.
+  Multi-node AgentX profiling fails explicitly until it can use the same
+  phase-gated lifecycle.
 
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP
@@ -185,17 +289,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
   measured at one concurrency under-budgets every higher one (measured on
   Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
-  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
-  lives in one function that both consumers call: this process derives the
-  subprocess cap from it, and `apply_agentx_switch` exports its result into the
-  benchmark env so the client's `--warmup-grace-period` — the thing that
+  The grace can now be scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the
+  scaling lives in one function that both consumers call: this process derives
+  the subprocess cap from it, and `apply_agentx_switch` exports its result into
+  the benchmark env so the client's `--warmup-grace-period` — the thing that
   actually stops the warmup — cannot disagree with the cap.<br/>
-  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
-  grace was measured at and defaults to 8, so every existing configuration
-  derives exactly what it derived before. Declare it when you measured
-  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
-  passed in without the anchor is read as an 8-anchored number and doubled.
-  The floor only ever raises a bound.
+  **Operator note**: the scaling is **opt-in**. `AGENTX_WARMUP_GRACE_CONC`
+  declares the concurrency the grace was measured at, and with no anchor
+  declared the grace is used flat — a ratio needs two numbers, and assuming the
+  second one made the same value mean different things depending on whether it
+  was typed (an explicit `AGENTX_WARMUP_GRACE_PERIOD=1800` yielded a 23400s cap
+  at CONC=64 while leaving it unset yielded 10800s, and the conc sweep then
+  priced every rung against the inflated number). So declare the anchor whenever
+  you run above the concurrency you measured at: without it, a 3600s grace
+  measured at conc=8 stays 3600s at CONC=32, where the warmup needs roughly
+  three times that — and the round does not fail, it reports a prefix-reuse
+  figure taken before the cache filled. When the anchor is declared the scaling
+  only ever raises the bound, and stays identity at or below the anchor.<br/>
+  A conc sweep bounds each rung by **its own** concurrency, not the session's:
+  the grace, the inner Magpie cap and the variant subprocess cap all derive from
+  the rung's `CONC`, and the budget gates that admit a rung price it at the same
+  number, so admission and grant cannot disagree. Raising only the client's
+  grace would be strictly worse than leaving all three alone — the round would
+  wait inside a bound its own caps do not cover and be killed mid-warmup.
 
 - **Budget admission prices a variant at the cap it will actually be granted.**
   Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the

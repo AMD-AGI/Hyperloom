@@ -79,6 +79,24 @@ def total_tput_grading_enabled(*, benchmark_mode: str = "") -> bool:
     return is_agentx_mode(benchmark_mode)
 
 
+GRADED_TOTAL = "total_throughput"
+GRADED_OUTPUT = "output_throughput"
+
+
+def graded_metric_key(*, benchmark_mode: str = "") -> str:
+    """The curve-row field a session's speedups are measured on.
+
+    Follows :func:`total_tput_grading_enabled`, so a summary is computed on
+    whatever axis the KEEP verdicts were taken on -- including when
+    ``HYPERLOOM_PERF_METRIC`` overrides the workload's default in either
+    direction. Curve rows name the total ``total_token_throughput``, unlike
+    the ``total_throughput`` a perf snapshot carries.
+    """
+    if total_tput_grading_enabled(benchmark_mode=benchmark_mode):
+        return "total_token_throughput"
+    return GRADED_OUTPUT
+
+
 def total_tput_serving_grading_enabled(*, scriptable: bool = False, benchmark_mode: str = "") -> bool:
     """Total-token-throughput grading, limited to non-scriptable serving runs.
 
@@ -137,10 +155,6 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         if value is not None:
             snap[key] = value
     return snap
-
-
-GRADED_TOTAL = "total_throughput"
-GRADED_OUTPUT = "output_throughput"
 
 
 def output_tput_of(source: Mapping[str, Any] | None) -> float:
@@ -258,6 +272,7 @@ __all__ = [
     "GRADED_OUTPUT",
     "GRADED_TOTAL",
     "graded_axes_of",
+    "graded_metric_key",
     "is_agentx_mode",
     "output_tput_of",
     "parse_intvty_noise_pct",

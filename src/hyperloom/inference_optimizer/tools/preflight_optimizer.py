@@ -17,11 +17,22 @@ import sys
 from hyperloom.common import rocm_smi
 
 
+#: Command-line fragments that identify a leftover optimizer or serving
+#: process. Both frameworks are matched twice over: by the module path an older
+#: launch used, and by the ``setproctitle`` name the current one rewrites argv
+#: to. Magpie launches the server as ``vllm serve``, and vLLM then renames its
+#: own processes to ``VLLM::APIServer`` / ``VLLM::EngineCore`` /
+#: ``VLLM::Worker_TP<n>``, so a scan for ``vllm.entrypoints`` alone sees
+#: nothing. That blind spot is not covered by the VRAM check either: an orphan
+#: that is still reading weights holds no VRAM yet and reads as idle.
 STALE_PROCESS_PATTERNS = (
     "hyperloom.inference_optimizer.cli",
     "Magpie",
     "sglang.launch_server",
+    "sglang::",
     "vllm.entrypoints",
+    "vllm serve",
+    "VLLM::",
 )
 
 VRAM_BUSY_FRACTION = 0.01

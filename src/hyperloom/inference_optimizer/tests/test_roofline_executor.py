@@ -313,6 +313,74 @@ async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_primary_rank_missing_is_not_retried(tmp_path):
+    calls = 0
+
+    async def fake_profile(_ctx):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "failed",
+            "error_class": "primary_rank_trace_missing",
+            "error": "no rank-0 trace",
+            "trace_input_ready": False,
+            "trace_files": ["/tmp/merged.trace.json.gz"],
+        }
+
+    state = _state()
+    executor = RooflineExecutor(shared_state=state)
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            side_effect=AssertionError("trace_analyze must not run"),
+        ),
+    ):
+        result = await executor(_ctx(tmp_path))
+
+    assert calls == 1
+    assert result["status"] == "failed"
+    assert "no rank-0 trace" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "api_port_allocation_failed",
+        "capture_status_missing",
+        "profiler_output_unconfigured",
+    ],
+)
+async def test_deterministic_capture_failures_are_not_retried(tmp_path, reason):
+    calls = 0
+
+    async def fake_profile(_ctx):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "failed",
+            "error_class": "profile_capture_failed",
+            "error": reason,
+            "trace_input_ready": False,
+            "trace_capture": {"status": "failed", "reason": reason},
+        }
+
+    executor = RooflineExecutor(shared_state=_state())
+    with patch(
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        new=fake_profile,
+    ):
+        result = await executor(_ctx(tmp_path))
+
+    assert calls == 1
+    assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_profile_no_trace_path(tmp_path):
     """Profile succeeded but result lacks main_trace_path / trace_files."""
     state = _state()
@@ -418,6 +486,15 @@ def test_extract_trace_path_falls_back_to_first_trace_file():
     assert _extract_trace_path(r) == "/first.gz"
 
 
+def test_extract_trace_path_refuses_explicitly_unready_trace():
+    r = {
+        "trace_input_ready": False,
+        "main_trace_path": "/merged.gz",
+        "trace_files": ["/merged.gz"],
+    }
+    assert _extract_trace_path(r) == ""
+
+
 def test_extract_trace_path_empty_when_both_missing():
     assert _extract_trace_path({}) == ""
     assert _extract_trace_path({"trace_files": []}) == ""
@@ -489,10 +566,7 @@ from hyperloom.orchestrator.roles import (
     MockRobustnessBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import (
-    _AUDIT_ACTIONS as COORDINATOR_AUDIT_ACTIONS,
-    Coordinator,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
@@ -552,9 +626,12 @@ def test_shared_state_has_roofline_audit_fields_by_default():
     assert {"roofline_attempts", "last_roofline"} <= set(s.to_dict())
 
 
-def test_audit_actions_includes_roofline_in_both_modules():
+def test_audit_actions_includes_roofline():
+    """One set gates both the recorder and writeback's failed-attempt row."""
+    from hyperloom.orchestrator.loop import writeback as wb
+
     assert "roofline" in SHARED_STATE_AUDIT_ACTIONS
-    assert "roofline" in COORDINATOR_AUDIT_ACTIONS
+    assert wb._AUDIT_ACTIONS is SHARED_STATE_AUDIT_ACTIONS
 
 
 def test_key_metric_map_has_roofline_snapshot_id():
@@ -1459,6 +1536,61 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
         "profile_compute_bound",
         "trace_analyze_compute_bound",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path, monkeypatch):
+    """An attempt that raises must still appear in the event's ``runs``.
+
+    The fail-soft handler wrapping this branch only narrates the outcome into a
+    reason string, so an unrowed attempt leaves ``attempt_count`` short of what
+    actually ran -- and the main retry loop does row its raising attempts.
+    """
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import PROFILE_ATTEMPT_COMPUTE_BOUND
+
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    host_bound = _ta_ok(report_md=md)
+    host_bound["trace_health_warnings"] = [{"code": "high_gpu_idle_pct", "severity": "warning"}]
+    profile_calls = {"n": 0}
+
+    async def fake_profile(ctx):
+        profile_calls["n"] += 1
+        if profile_calls["n"] == 1:
+            return _profile_ok()
+        raise RuntimeError("server boot failed on the compute-bound retry")
+
+    async def fake_ta(payload, *, session_dir):
+        return host_bound
+
+    monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: True)
+
+    executor = RooflineExecutor(shared_state=_state())
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            new=fake_ta,
+        ),
+    ):
+        result = await executor(_n26_ctx(tmp_path))
+
+    # Fail-soft is preserved: the host-bound analysis remains the outcome.
+    assert result["status"] == "succeeded"
+
+    event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
+    action = event["ext"]["actions"][0]
+    profile = action["profile"]
+    assert profile["attempt_count"] == 2
+    raised = profile["runs"][-1]
+    assert raised["attempt_reason"] == PROFILE_ATTEMPT_COMPUTE_BOUND
+    assert raised["status"] == "failed"
+    assert "server boot failed" in raised["failure"]["message"]
+    assert action["analysis"]["compute_bound_reprofile"]["adopted"] is False
 
 
 @pytest.mark.asyncio

@@ -242,13 +242,6 @@ def _data_quality_flags(
     if notes:
         for n in notes:
             _push(f"[attribution] {n}")
-    cap = as_dict(breakdown.get("capability_summary"))
-    val = as_dict(cap.get("validate_stack"))
-    if val.get("status") == "not_attempted":
-        _push(
-            "[legacy validate_stack] never ran — cumulative_gain_pct_validated "
-            "comes from state, not a final archived-action re-run."
-        )
     return flags
 
 
