@@ -168,3 +168,44 @@ def test_unmaterializable_patch_falls_back_to_the_original(repo, tmp_path, prist
         snapshot_dir=str(pristine),
         repo_root=str(repo),
     ) == str(pristine)
+
+
+def test_materializes_when_the_snapshot_dir_is_inside_a_git_checkout(repo, patch_file, tmp_path):
+    """Regression: a session dir living INSIDE a repo must still materialize.
+
+    ``git apply`` resolves paths against the enclosing repository, so with the
+    snapshot dir under a checkout every hunk is "Skipped patch ..." while git
+    still exits 0 -- the snapshot comes back empty and the real complaint
+    ("snapshot missing final content") points nowhere useful. Observed for real:
+    the PR #1366 session dir sits under the Hyperloom checkout itself.
+    """
+    enclosing = tmp_path / "hyperloom_checkout"
+    enclosing.mkdir()
+    subprocess.run(["git", "-C", str(enclosing), "init", "-q"], check=True, capture_output=True)
+    (enclosing / "README.md").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(enclosing), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(enclosing), "-c", "user.email=t@t.local", "-c", "user.name=t", "commit", "-qm", "b"],
+        check=True,
+        capture_output=True,
+    )
+    session_patch = enclosing / "session" / "runs" / "fusion" / patch_file.name
+    session_patch.parent.mkdir(parents=True)
+    session_patch.write_text(patch_file.read_text(encoding="utf-8"), encoding="utf-8")
+    assert (
+        subprocess.run(
+            ["git", "-C", str(session_patch.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == str(enclosing)
+    ), "fixture precondition: the snapshot dir must sit inside a checkout"
+
+    resolved = _final_content_snapshot(
+        patch_path=str(session_patch),
+        snapshot_dir=None,
+        repo_root=str(repo),
+    )
+
+    assert resolved, "materialization silently produced nothing"
+    assert set(_writes(resolved)) == {f"{MODELS}/qwen3.py", FUSED_MODULE}

@@ -1254,6 +1254,18 @@ def materialize_unified_patch_snapshot(
     # normalized in-memory copy so materialization is tolerant without mutating
     # the content-addressed downloaded artifact.
     normalized_patch_text = patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
+    # Pin the work tree to ``snap``. Without this, ``git apply`` resolves paths
+    # against whatever repository encloses ``snap`` -- and when the session dir
+    # lives INSIDE a checkout (a session under the Hyperloom repo itself), every
+    # hunk is reported "Skipped patch ..." while git still exits 0. The snapshot
+    # then comes back empty and the failure surfaces later as the far more
+    # confusing "snapshot missing final content".
+    apply_env = {
+        **os.environ,
+        "GIT_DIR": str(snap / ".git_materialize"),
+        "GIT_WORK_TREE": str(snap),
+        "GIT_CEILING_DIRECTORIES": str(snap.parent),
+    }
     proc = subprocess.run(
         ["git", "apply", "--unsafe-paths", "-"],
         cwd=snap,
@@ -1261,6 +1273,7 @@ def materialize_unified_patch_snapshot(
         capture_output=True,
         text=True,
         timeout=60,
+        env=apply_env,
     )
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip()
