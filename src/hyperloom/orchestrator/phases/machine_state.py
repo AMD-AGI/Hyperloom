@@ -199,6 +199,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "kernel_phase_budget_exhausted",
         "optimize_budget_cap",  # OPTIMIZE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
+        "kernel_controller_done",  # KERNEL_AGENT → SWEEP after the phase-level rewrite controller
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",  # SWEEP → CLOSE when the concurrency ladder settles
         "sweep_failed",  # SWEEP → CLOSE when the ladder reaches a failed terminal result
@@ -1775,6 +1776,36 @@ def _geak_phase_terminal(state: Any) -> bool:
     return str(result.get("status") or "").strip().lower() in GEAK_TERMINAL_STATUSES
 
 
+#: Every status the rewrite controller can end on. All of them are terminal for
+#: the phase: the controller is not re-run inside one macro cycle, so a failure
+#: is as final as a published patch.
+CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "completed",
+        "failed",
+        "no_opportunity",
+        "no_result",
+        "partial",
+    }
+)
+
+
+def _controller_phase_terminal(state: Any) -> bool:
+    """Return true when this macro cycle's rewrite controller has stopped."""
+    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "forge":
+        return False
+    result = getattr(state, "kernel_rewrite_controller_result", None) or {}
+    if not isinstance(result, dict):
+        return False
+    try:
+        result_cycle = int(result.get("macro_cycle", -1))
+        current_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    return result_cycle == current_cycle and status in CONTROLLER_TERMINAL_STATUSES
+
+
 # Ledger subfields that change when a kernel attempt actually advances. Listed
 # explicitly rather than digesting whole entries so incidental churn (a
 # re-rendered field, a refreshed timestamp) cannot masquerade as forward
@@ -1851,6 +1882,8 @@ def compute_kernel_progress_fingerprint(
         last_collective = {}
     if not isinstance(last_collective, dict):
         raise ValueError("last_collective must be a mapping")
+    controller = getattr(state, "kernel_rewrite_controller_result", None)
+    controller = controller if isinstance(controller, dict) else {}
     payload = {
         "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
@@ -1870,6 +1903,12 @@ def compute_kernel_progress_fingerprint(
                 "integration_revert_status",
                 "integration_finalize_status",
             )
+        ],
+        "rewrite_controller": [
+            str(controller.get("macro_cycle", "")),
+            str(controller.get("status", "")),
+            str(controller.get("patch_count", "")),
+            str(controller.get("finished_at", "")),
         ],
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1906,16 +1945,28 @@ def kernel_work_pending(state: Any) -> bool:
 
     Short-circuits in order: a pending collective integration keeps the phase
     open; ``collective_only_mode`` then answers False because no other lane may
-    run; a terminal GEAK phase answers on its own (True only while an ``ok``
-    result has an ``awaiting_rebench`` pending with a revalidation task, else
-    False); then the optional ``has_keep_pending_integrate`` and
-    ``untried_hot_reusable_kernels`` capability probes, whose failures are
+    run; an accepted-but-unintegrated KEEP answers next, ahead of the terminal
+    probes, so neither of them can strand one; a terminal rewrite controller
+    then answers False, because it owns operator selection and has stopped; a
+    terminal GEAK phase answers on its own (True only while an ``ok`` result has
+    an ``awaiting_rebench`` pending with a revalidation task, else False); then
+    the ``untried_hot_reusable_kernels`` capability probe, whose failure is
     treated as 'not available'; then the kernel_opt attempt ledger, filtered by
     task group, source file, integration status and rejected kernel ids.
     """
     if collective_integration_pending(state):
         return True
     if bool(getattr(state, "collective_only_mode", False)):
+        return False
+
+    try:
+        if bool(getattr(state, "has_keep_pending_integrate", False)):
+            return True
+    except Exception:
+        # Optional capability probe; treat a failure as 'not available'.
+        pass
+
+    if _controller_phase_terminal(state):
         return False
     if _geak_phase_terminal(state):
         result = getattr(state, "geak_result", None) or {}
@@ -1929,13 +1980,6 @@ def kernel_work_pending(state: Any) -> bool:
         ):
             return True
         return False
-
-    try:
-        if bool(getattr(state, "has_keep_pending_integrate", False)):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
 
     try:
         untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
@@ -2516,6 +2560,18 @@ def exit_normal_kernel(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the KERNEL
         exit, or ``None`` when KERNEL should continue.
     """
+    # ``kernel_work_pending`` answers for both outstanding integrations before it
+    # short-circuits on a terminal Controller, so asking it here keeps this exit
+    # from stepping over a pending collective or an unintegrated KEEP. The idle
+    # streak below still bounds the phase if that work can never be drained.
+    if _controller_phase_terminal(state) and not kernel_work_pending(state):
+        result = getattr(state, "kernel_rewrite_controller_result", None) or {}
+        return "kernel_controller_done", {
+            "controller_status": result.get("status"),
+            "patch_count": int(result.get("patch_count") or 0),
+            "task_count": int(result.get("task_count") or 0),
+            "reason": str(result.get("reason") or ""),
+        }
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         if not kernel_work_pending(state):
             return "kernel_no_more_leverage", {

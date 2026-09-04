@@ -16,7 +16,6 @@ import logging
 import os
 import sys
 import time
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -62,48 +61,6 @@ def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
         if sep and key.strip():
             pins[key.strip()] = value
     return pins
-
-
-#: Default for the KERNEL-entry kernel_opt dispatch when neither spelling of the
-#: flag is passed. Both parser dests default to ``None`` so "not passed" stays
-#: distinguishable from an explicit value, which is what lets the deprecated
-#: alias be honoured without letting it override the current flag.
-AUTO_KERNEL_OPT_DEFAULT: bool = True
-
-
-def resolve_auto_kernel_opt(args: argparse.Namespace) -> bool:
-    """Resolve the KERNEL-entry auto-dispatch switch across both spellings.
-
-    ``--auto-kernel-opt`` is the current flag; ``--continue-kernel-after-gemm``
-    is its deprecated spelling, kept working because dropping it outright would
-    turn a launcher's opt-out into a silent opt-in. The current flag wins when
-    both are passed; the alias wins over nothing but the default.
-
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        Whether KERNEL entry should dispatch the source-level kernel_opt batch.
-    """
-    current = getattr(args, "auto_kernel_opt", None)
-    legacy = getattr(args, "continue_kernel_after_gemm", None)
-    if legacy is not None:
-        message = (
-            "--continue-kernel-after-gemm is deprecated; use --auto-kernel-opt "
-            "(the switch gates the KERNEL-entry kernel_opt dispatch on both "
-            "routes, not only after GEMM tuning)"
-        )
-        # Logged as well as warned. DeprecationWarning is silent under the
-        # default filter unless the caller is __main__, and the old flag is
-        # hidden from --help by SUPPRESS, so a launcher still passing it had no
-        # way to learn the transition had started.
-        log.warning("%s", message)
-        warnings.warn(message, DeprecationWarning, stacklevel=2)
-    if current is not None:
-        return bool(current)
-    if legacy is not None:
-        return bool(legacy)
-    return AUTO_KERNEL_OPT_DEFAULT
 
 
 def resolve_model_display_name(args: argparse.Namespace) -> str:
@@ -326,7 +283,7 @@ def _seed_shared_state(
     _cfg_tags = _load_model_config_tags(str(args.model))
 
     # Persisted for the session breakdown; the runtime reads the env directly.
-    _kernel_optimizer_record = "native" if forge_explicitly_enabled() else "geak"
+    _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority
     # base for the baseline server args.
@@ -367,7 +324,6 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        auto_kernel_opt_enabled=resolve_auto_kernel_opt(args),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,

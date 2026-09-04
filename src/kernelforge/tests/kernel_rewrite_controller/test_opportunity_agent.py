@@ -1,0 +1,445 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import kernelforge.kernel_rewrite_controller.opportunity_agent as opportunity_agent_module
+from kernelforge.agent_backends.base import (
+    AgentCapabilities,
+    AgentRunResult,
+    AgentRuntimeConfig,
+)
+from kernelforge.kernel_rewrite_controller import ControllerLayout, read_handoff
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    ANALYSIS_STATUS_COMPLETED,
+    ANALYSIS_STATUS_FAILED,
+    ANALYSIS_STATUS_TIMED_OUT,
+    OpportunityAnalysisAgent,
+    _AnalysisToolGuard,
+    _system_prompt,
+    run_opportunity_analysis,
+)
+from kernelforge.knowledge.kernel_identity import (
+    KernelRecipeIdentity,
+    kernel_recipe_canonical_id,
+)
+
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "controller-test",
+    "GIT_AUTHOR_EMAIL": "controller-test@local",
+    "GIT_COMMITTER_NAME": "controller-test",
+    "GIT_COMMITTER_EMAIL": "controller-test@local",
+}
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env={**os.environ, **_GIT_IDENTITY},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "baseline")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+def _handoff(tmp_path: Path):
+    root = tmp_path / "handoff"
+    root.mkdir()
+    (root / "workload.md").write_text("# Workload\n", encoding="utf-8")
+    (root / "serving-context.md").write_text("# Serving Context\n", encoding="utf-8")
+    (root / "trace-evidence.md").write_text("# Trace Evidence\n", encoding="utf-8")
+    return read_handoff(root)
+
+
+def _write_staged_task(staging_root: Path, repo: Path) -> str:
+    identity = {
+        "producer": "forge-loop",
+        "kernel_name": "kernel",
+        "framework": "standalone",
+        "framework_version": "unknown",
+        "backend": "triton",
+        "gpu": "mi355x",
+    }
+    operator_id = kernel_recipe_canonical_id(KernelRecipeIdentity.from_mapping(identity))
+    task = staging_root / "draft"
+    task.mkdir(parents=True)
+    (task / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
+    (task / "task.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "identity": identity,
+                "base_commit": "",
+                "repo_root": str(repo),
+                "kernel_path": "kernel.py",
+                "operator_name": "kernel",
+                "driver_path": "driver.py",
+                "source_files": ["kernel.py"],
+                "target_functions": ["kernel"],
+                "shape_cases": [],
+                "priority": 0,
+                "reason": "hot operator",
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return operator_id
+
+
+class _Backend:
+    name = "fake"
+    runtime = AgentRuntimeConfig(provider="fake", model="fake")
+    capabilities = AgentCapabilities(writable=True, stop_hooks=True)
+
+    def __init__(
+        self,
+        callback,
+        *,
+        error: Exception | None = None,
+        sleep: float = 0.0,
+        result: AgentRunResult | None = None,
+    ):
+        self.callback = callback
+        self.error = error
+        self.sleep = sleep
+        self.result = result
+        self.spec = None
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        if self.sleep:
+            await asyncio.sleep(self.sleep)
+        if self.error is not None:
+            raise self.error
+        return self.result if self.result is not None else AgentRunResult(text="done")
+
+
+class _ResumableBackend(_Backend):
+    capabilities = AgentCapabilities(writable=True, stop_hooks=True, resumable=True)
+
+    def __init__(self, callback, *, first: AgentRunResult):
+        super().__init__(callback)
+        self.first = first
+        self.resumed: list[tuple[str, str]] = []
+
+    async def run(self, spec, usage=None):
+        self.spec = spec
+        self.callback(Path(spec.cwd))
+        return self.first
+
+    async def resume(self, spec, session_id, feedback, usage=None):
+        self.resumed.append((session_id, feedback))
+        return AgentRunResult(text="continued", end_reason="agent_stopped")
+
+
+def test_a_provider_stream_failure_is_not_reported_as_an_answer(tmp_path: Path) -> None:
+    """``no_opportunity`` is a verdict, so a session that measured nothing fails."""
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda _staging: None,
+        result=AgentRunResult(
+            text="",
+            end_reason="sdk_error",
+            stderr_tail="JSON message exceeded maximum buffer size of 1048576 bytes",
+        ),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "maximum buffer size" in result.reason
+    assert result.published_task_count == 0
+
+
+def test_a_resumable_stream_failure_continues_the_same_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    backend = _ResumableBackend(
+        lambda staging: _write_staged_task(staging, repo),
+        first=AgentRunResult(text="", end_reason="sdk_error", session_id="session-1"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert [session for session, _prompt in backend.resumed] == ["session-1"]
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input", "expected"),
+    [
+        ("Grep", {"pattern": "moe"}, {"pattern": "moe", "head_limit": 200}),
+        ("Grep", {"pattern": "moe", "head_limit": 5000}, {"pattern": "moe", "head_limit": 200}),
+        ("Read", {"file_path": "/server.log"}, {"file_path": "/server.log", "limit": 2000}),
+    ],
+)
+def test_an_unbounded_investigation_read_is_capped(tool_name, tool_input, expected) -> None:
+    decision = asyncio.run(
+        opportunity_agent_module._cap_investigation_result(
+            {"tool_name": tool_name, "tool_input": tool_input},
+            "",
+            None,
+        )
+    )
+
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert decision["hookSpecificOutput"]["updatedInput"] == expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input"),
+    [
+        ("Grep", {"pattern": "moe", "head_limit": 20}),
+        ("Read", {"file_path": "/kernel.py", "limit": 40}),
+        ("Glob", {"glob_pattern": "**/*.py"}),
+    ],
+)
+def test_an_already_bounded_call_is_left_alone(tool_name, tool_input) -> None:
+    """An untouched call returns ``{}`` so the normal permission flow decides it."""
+    decision = asyncio.run(
+        opportunity_agent_module._cap_investigation_result(
+            {"tool_name": tool_name, "tool_input": tool_input},
+            "",
+            None,
+        )
+    )
+
+    assert decision == {}
+
+
+def test_agent_publishes_complete_tasks_and_pins_repo_head(tmp_path: Path) -> None:
+    repo, base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(lambda staging: _write_staged_task(staging, repo))
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert result.published_task_count == 1
+    task_dirs = [path for path in layout.tasks_root.iterdir() if not path.name.startswith(".")]
+    assert len(task_dirs) == 1
+    payload = json.loads((task_dirs[0] / "task.json").read_text(encoding="utf-8"))
+    assert payload["base_commit"] == base_commit
+    assert payload["driver_path"] == "driver.py"
+    assert backend.spec.tool_policy.shell is False
+    assert backend.spec.hooks is not None
+
+
+def test_backend_model_probe_receives_an_existing_agent_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(lambda _staging: None)
+    runtime = AgentRuntimeConfig(provider="fake", model="fake")
+    config = SimpleNamespace(
+        max_turns=20,
+        agent_runtime=lambda: runtime,
+    )
+
+    monkeypatch.setattr(
+        opportunity_agent_module.Config,
+        "from_env",
+        lambda **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        opportunity_agent_module,
+        "with_writable_sandbox",
+        lambda selected: selected,
+    )
+
+    def _create_backend(selected_runtime, *, probe_cwd):
+        assert selected_runtime is runtime
+        assert Path(probe_cwd).is_dir()
+        return backend
+
+    monkeypatch.setattr(
+        opportunity_agent_module,
+        "create_registered_backend",
+        _create_backend,
+    )
+
+    result = run_opportunity_analysis(
+        handoff=_handoff(tmp_path),
+        layout=layout,
+        controller_deadline_unix=time.time() + 60,
+    )
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert (layout.agent_root / "analysis-result.json").is_file()
+
+
+def test_agent_staging_always_gets_a_private_git_baseline(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+
+    def _assert_git_workspace(staging: Path) -> None:
+        assert _git(staging, "rev-parse", "--show-toplevel") == str(staging.resolve())
+
+    backend = _Backend(_assert_git_workspace)
+    backend.capabilities = AgentCapabilities(
+        writable=True,
+        stop_hooks=True,
+        workspace_guard=True,
+        requires_workspace_cwd=False,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+
+
+def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
+    prompt = _system_prompt()
+
+    assert '"identity": {' in prompt
+    assert '"producer": "forge-loop"' in prompt
+    assert '"evidence": [{' in prompt
+    assert "inspect it first" in prompt
+    assert "inspect every" in prompt
+    assert "never return no_opportunity solely" in prompt
+    assert "<measured|corroborated|inferred>" in prompt
+    assert "Never invent a GPU-time percentage" in prompt
+    assert "current end-to-end inference workload" in prompt
+    assert "available only as a binary" in prompt
+    assert "largest measured end-to-end GPU-time share" in prompt
+    assert "Derive driver cases from the current workload" in prompt
+    assert "correctness and performance must invoke the same operator" in prompt
+    assert "CUDA/HIP graph replays over preallocated inputs" in prompt
+    assert "Do not place identity fields at the top level" in prompt
+    assert '"gpu": "mi355x"' in prompt
+    assert "registered backend" in prompt
+    assert "one task cannot modify multiple repos" in prompt
+    assert "case_ms: <case> <ms>" in prompt
+    assert "CUDA/HIP graph replays" in prompt
+    assert "driver.py --profile-run" in prompt
+    assert "before investigating secondary candidates" in prompt
+
+
+def test_agent_failure_still_publishes_a_complete_task(tmp_path: Path) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda staging: _write_staged_task(staging, repo),
+        error=RuntimeError("agent crashed"),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_FAILED
+    assert "agent crashed" in result.reason
+    assert result.published_task_count == 1
+
+
+def test_agent_timeout_keeps_tasks_written_before_cancellation(tmp_path: Path) -> None:
+    repo, _base_commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(
+        lambda staging: _write_staged_task(staging, repo),
+        sleep=60,
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=1, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.status == ANALYSIS_STATUS_TIMED_OUT
+    assert result.published_task_count == 1
+
+
+def test_incomplete_staging_directory_is_not_published(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+
+    def _incomplete(staging: Path) -> None:
+        task = staging / "draft"
+        task.mkdir(parents=True)
+        (task / "task.json").write_text("{}", encoding="utf-8")
+
+    agent = OpportunityAnalysisAgent(
+        backend=_Backend(_incomplete),
+        timeout_sec=10,
+        max_turns=20,
+    )
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert result.published_task_count == 0
+    assert not list(layout.tasks_root.glob("*")) if layout.tasks_root.exists() else True
+
+
+def test_analysis_requires_a_hook_capable_provider() -> None:
+    backend = _Backend(lambda _staging: None)
+    backend.capabilities = AgentCapabilities(writable=True, stop_hooks=False)
+
+    with pytest.raises(ValueError, match="requires a provider with tool hooks"):
+        OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=20)
+
+
+def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+    allowed = asyncio.run(
+        protection._on_pre_write(
+            {"tool_input": {"file_path": "draft/task.json"}},
+            "",
+            None,
+        )
+    )
+    denied = asyncio.run(
+        protection._on_pre_write(
+            {"tool_input": {"file_path": str(tmp_path / "source.py")}},
+            "",
+            None,
+        )
+    )
+
+    assert allowed == {}
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+    matchers = {hook.matcher for hook in protection.hooks().pre_tool_use}
+
+    denied = asyncio.run(
+        protection._on_pre_disallowed_tool(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+            "",
+            None,
+        )
+    )
+
+    assert "Bash|Shell|Task.*|Agent" in matchers
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "direct read, search" in denied["hookSpecificOutput"]["permissionDecisionReason"]

@@ -58,3 +58,26 @@ def atomic_write_bytes(path: str | Path, data: bytes) -> None:
 def atomic_write_text(path: str | Path, content: str) -> None:
     """Publish UTF-8 text at ``path``, replacing any prior content in one step."""
     atomic_write_bytes(path, content.encode("utf-8"))
+
+
+def fsync_tree(root: Path) -> None:
+    """Flush every file and directory under ``root`` before it is renamed.
+
+    For a caller that stages a whole directory and then publishes it with one
+    ``os.replace``: the rename is only crash-safe if the contents reached disk
+    first, and a directory built from several writes has no single point to flush.
+
+    Files published through :func:`atomic_write_bytes` are already durable, so
+    this exists for the ones that are not -- a ``shutil.copy2`` of an agent's
+    file, for instance -- and re-flushing the rest costs a no-op syscall rather
+    than a second write.
+    """
+    for directory, _subdirectories, filenames in os.walk(root):
+        current = Path(directory)
+        for filename in filenames:
+            descriptor = os.open(str(current / filename), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        fsync_directory(current)

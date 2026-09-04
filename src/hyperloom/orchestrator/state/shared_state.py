@@ -629,11 +629,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
-    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
-    # only governs the entry's own dispatch: orchestration can still request
-    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
-    auto_kernel_opt_enabled: bool = True
+    # Terminal result of the phase-level KernelForge rewrite controller.
+    kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace

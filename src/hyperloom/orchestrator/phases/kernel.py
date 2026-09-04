@@ -792,6 +792,37 @@ class KernelPhase(PhaseHandler):
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
+    def _kernel_rewrite_controller_timeouts(self) -> tuple[int, int]:
+        """Return the Controller soft budget and Hyperloom hard timeout."""
+        candidates: list[float] = []
+        session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
+        if session_remaining is not None:
+            candidates.append(
+                max(
+                    0.0,
+                    float(session_remaining) - self.shared_state.closing_reserve_sec(),
+                )
+            )
+        phase_remaining = _phase_state.phase_budget_remaining_seconds(
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
+        )
+        if phase_remaining is not None:
+            candidates.append(max(0.0, float(phase_remaining)))
+        phase_cap = _phase_state.phase_cap_seconds(
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
+        )
+        if phase_cap is not None:
+            candidates.append(
+                max(
+                    0.0,
+                    float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state),
+                )
+            )
+        hard_timeout = int(min(candidates)) if candidates else 90 * 60
+        return max(0, hard_timeout - 30), max(0, hard_timeout)
+
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run).
 
@@ -3897,16 +3928,161 @@ class KernelPhase(PhaseHandler):
         self._replace_latest_gemm_tuning_attempt(result)
 
     async def _finish_kernel_entry(self) -> None:
-        """Close out KERNEL entry on either route: re-profile, then run the
-        independently gated stages.
+        """Run the gated kernel lanes, write the handoff, and delegate rewrite control.
 
-        Each stage owns its own gate and its own end-to-end validation, so the
+        Each lane owns its own gate and its own end-to-end validation, so the
         order here is sequencing, not dependency: skipping one does not disable
-        the next.
+        the next. The rewrite controller runs last and unconditionally -- no
+        trace, candidate count or source-resolution verdict gates it, because
+        choosing operators is now its job rather than Hyperloom's.
         """
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
         await self._maybe_run_collective_before_kernel_opt()
+        from hyperloom.inference_optimizer.session.session_paths import (
+            next_forge_attempt_dir,
+        )
+
+        # One fresh directory per entry rather than per macro cycle: the
+        # controller refuses an output root it has already initialized, and the
+        # handoff rides inside it so each attempt keeps the evidence it was given.
+        attempt_dir = next_forge_attempt_dir(
+            self.session_dir,
+            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+        )
+        handoff_dir = attempt_dir / "handoff"
+        try:
+            from ..kernel.forge_handoff import write_forge_handoff
+
+            try:
+                env_spec = self.build_env_spec()
+            except Exception:  # noqa: BLE001
+                log.exception("KERNEL entry: could not build Forge serving environment")
+                env_spec = {}
+            handoff_dir = write_forge_handoff(
+                self.session_dir,
+                self.shared_state,
+                env_spec=env_spec,
+                handoff_dir=handoff_dir,
+            )
+            log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("KERNEL entry: Forge handoff generation failed")
+        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir)
+
+    async def _run_kernel_rewrite_controller(self, handoff_dir: Path, output_dir: Path) -> None:
+        """Run one Controller attempt without preselecting operators."""
+        from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
+
+        from ..kernel.controller_submit import (
+            record_controller_llm_usage,
+            run_controller_subprocess,
+        )
+
+        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
+
+        def _stamp(when: float) -> None:
+            self.shared_state.kernel_inline_step_seen_unix = when
+
+        def _clear() -> None:
+            self.shared_state.kernel_inline_step_seen_unix = 0.0
+
+        # The heartbeat spans patch integration as well as the subprocess.
+        # Integration restarts the server and runs a full serving benchmark per
+        # patch, and until its outcome reaches SharedState this phase carries no
+        # task row and no terminal controller status -- so the busiest part of the
+        # phase is exactly what the idle guard would otherwise read as a stall.
+        async with inline_step_heartbeat(
+            stamp=_stamp,
+            interval_sec=_phase_state.KERNEL_HEARTBEAT_SEC,
+            clear=_clear,
+        ):
+            if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+                result = {
+                    "status": "no_result",
+                    "reason": "no KERNEL phase budget remains for the rewrite controller",
+                    "patch_count": 0,
+                    "task_count": 0,
+                    "output_dir": str(output_dir),
+                }
+            else:
+                try:
+                    result = await asyncio.to_thread(
+                        run_controller_subprocess,
+                        handoff_dir=handoff_dir,
+                        output_dir=output_dir,
+                        budget_minutes=controller_budget_sec / 60.0,
+                        hard_timeout_sec=hard_timeout_sec,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    log.exception("KERNEL entry: kernel rewrite controller failed")
+                    result = {
+                        "status": "failed",
+                        "reason": f"controller invocation failed: {error}",
+                        "patch_count": 0,
+                        "task_count": 0,
+                        "output_dir": str(output_dir),
+                    }
+
+            result = {
+                **result,
+                "macro_cycle": cycle,
+                "handoff_dir": str(handoff_dir),
+                "budget_minutes": controller_budget_sec / 60.0,
+                "hard_timeout_sec": hard_timeout_sec,
+            }
+            # The Controller cannot reach this ledger from its own process, so its
+            # forge-loops' spend is filed here now that the child has exited.
+            record_controller_llm_usage(result=result, session_dir=self.session_dir)
+            if int(result.get("patch_count") or 0) > 0:
+                try:
+                    from ..kernel.controller_patch_integration import (
+                        integrate_controller_patches,
+                    )
+
+                    integration = await integrate_controller_patches(
+                        patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                        session_dir=self.session_dir,
+                        shared_state=self.shared_state,
+                    )
+                    result["integration"] = integration.to_dict()
+                except Exception as error:  # noqa: BLE001
+                    log.exception("KERNEL entry: Controller patch integration failed")
+                    result["integration"] = {
+                        "status": "failed",
+                        "reason": str(error),
+                        "kept_count": 0,
+                    }
+            else:
+                result["integration"] = {
+                    "status": "not_run",
+                    "reason": "Controller published no patches",
+                    "kept_count": 0,
+                    "reverted_count": 0,
+                    "skipped_count": 0,
+                }
+        self.shared_state.kernel_optimizer = "forge"
+        self.shared_state.kernel_rewrite_controller_result = result
+        self.shared_state.set_pending_escalate_hint(
+            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
+        )
+        self.shared_state.save(self.session_dir)
+        await self.bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "response",
+                {
+                    "in_reply_to": "",
+                    "kind": "kernel_rewrite_controller_done",
+                    "status": result.get("status", "failed"),
+                    "result": result,
+                    "source": "kernel_entry_auto",
+                },
+                priority=1,
+            )
+        )
 
 
     def _fusion_required_before_kernel_opt(self) -> bool:

@@ -75,12 +75,21 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.session_dir = tmp_path
     c.shared_state = SharedState(
         baseline_tput=100.0,
-        kernel_optimizer="native",
+        kernel_optimizer="forge",
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c._run_deadline = None
     c._run_started_monotonic = None
+    c._phase_budget_pct = {}
+
+    # KERNEL entry ends by handing rewrite control to a controller subprocess.
+    # Entry tests are about what leads up to that, so the handoff is the last
+    # step they exercise; the test that covers the handoff stubs this itself.
+    async def _skip_controller(_handoff_dir: Path, _output_dir: Path) -> None:
+        return None
+
+    monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
     return c
 
 
@@ -368,6 +377,42 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert fusion_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_always_hands_rewrite_control_to_controller(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    """Entry writes a handoff and delegates, with no candidate gate in between."""
+
+    async def _skip() -> None:
+        return None
+
+    handed_off: list[tuple[Path, Path]] = []
+
+    async def _controller(handoff_dir: Path, output_dir: Path) -> None:
+        handed_off.append((handoff_dir, output_dir))
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_collective_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
+
+    await coord.phase_kernel._finish_kernel_entry()
+    await coord.phase_kernel._finish_kernel_entry()
+
+    attempt_root = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
+    # Each entry gets its own attempt directory: the controller refuses an output
+    # root it has already initialized, so re-entry cannot reuse the first one.
+    assert handed_off == [
+        (attempt_root / "attempt-0" / "handoff", attempt_root / "attempt-0"),
+        (attempt_root / "attempt-1" / "handoff", attempt_root / "attempt-1"),
+    ]
+    for handoff_dir, _output_dir in handed_off:
+        assert (handoff_dir / "workload.md").is_file()
+        assert (handoff_dir / "serving-context.md").is_file()
+        assert (handoff_dir / "trace-evidence.md").is_file()
 
 
 def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):

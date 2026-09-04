@@ -757,7 +757,7 @@ see what the lanes did; do not try to drive them.
 
 ### `integrate` — forced immediately after a KEEP
 
-On `run_optimization_done` with `decision='KEEP'`, integrate is the only
+On a lane response carrying `decision='KEEP'`, integrate is the only
 allowed action until the patch lands on `optimization_stack`:
 
   request{target_agent: 'kernel_agent', kind: 'integrate',
