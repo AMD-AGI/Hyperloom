@@ -82,7 +82,7 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
 _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
-            r"(?i)\b(authorization\s*:\s*)(?:(?:bearer|basic)\s+)?"
+            r"(?i)\b(authorization\s*:\s*(?:(?:bearer|basic)\s+)?)"
             r"[^\s,;'\"\\]+"
         ),
         r"\1[REDACTED]",
@@ -115,16 +115,18 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # for IZER / TOKENS still left ``tokenized_requests`` and
     # ``stop_token_ids`` matching — TOKEN is a generic word in this stack,
     # and a half-redacted list (``stop_token_ids=[REDACTED], 154827]``) is
-    # worse than leaving the knob readable. ``API_KEY`` / ``SECRET`` /
-    # ``PASSWORD`` / ``CREDENTIAL`` still allow trailing name characters, so
-    # ``AWS_SECRET_ACCESS_KEY`` is unchanged. A backslash is only excluded
-    # from the value when it precedes a quote, so a JSON-escaped closer is
-    # left in place (the quoting stays balanced) while ``PASSWORD=C:\foo``
-    # is still masked whole.
+    # worse than leaving the knob readable. ``AUTH`` is the same kind of
+    # suffix (``AUTH_KEY``) so ``Unauthorized:`` is not treated as a secret
+    # assignment. ``API_KEY`` / ``SECRET`` / ``PASSWORD`` / ``CREDENTIAL``
+    # still allow trailing name characters, so ``AWS_SECRET_ACCESS_KEY`` is
+    # unchanged. A backslash is only excluded from the value when it
+    # precedes a quote, so a JSON-escaped closer is left in place (the
+    # quoting stays balanced) while ``PASSWORD=C:\foo`` is still masked whole.
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
-            r"(?:(?:API_?KEY|AUTH|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL|HEADERS)[A-Z0-9_]*|"
+            r"AUTH(?:_[A-Z0-9]+)?|TOKEN(?:_\d+)?)"
             r"\s*[=:]\s*)"
             r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),

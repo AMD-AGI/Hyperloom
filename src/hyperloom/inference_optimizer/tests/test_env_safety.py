@@ -212,7 +212,14 @@ def test_redact_secret_values_preserves_json_around_authorization():
 
     out = common_env_safety.redact_secret_values(text)
 
-    assert json.loads(out) == {"header": "Authorization: [REDACTED]", "ok": True}
+    assert json.loads(out) == {"header": "Authorization: Basic [REDACTED]", "ok": True}
+
+
+def test_redact_secret_values_spares_unauthorized_status_text():
+    """AUTH is a suffix, so HTTP Unauthorized text is not an assignment."""
+    text = "401 Unauthorized: invalid API key"
+
+    assert common_env_safety.redact_secret_values(text) == text
 
 
 def test_redact_secret_values_masks_quoted_assignments():
