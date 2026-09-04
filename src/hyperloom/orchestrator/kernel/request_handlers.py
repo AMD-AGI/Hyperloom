@@ -34,7 +34,7 @@ from hyperloom.agents.kernel.tools._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy, nomination_auto_enabled
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
@@ -46,6 +46,15 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
+from . import candidate_manifest, nomination_request
+from .lane_budget import (
+    LANE_FUSION,
+    LANE_GEMM,
+    LANE_REWRITE,
+    allocate as _allocate_lane_budgets,
+    gemm_per_tuner_timeout_sec,
+)
+from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
@@ -81,7 +90,9 @@ from ._kernel_decisions import (
     is_collective_candidate as is_collective_candidate,
     unattempted_skip_reason as unattempted_skip_reason,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
+    enqueue_nominated_patch as enqueue_nominated_patch,
 )
+from .nomination_result import parse_outcome as parse_outcome
 from ..state.kernel_decision_settings import (
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
@@ -1012,6 +1023,54 @@ def _artifact_paths_from_payload(payload: dict) -> list[str]:
     return []
 
 
+def _final_content_snapshot(
+    *,
+    patch_path: str,
+    snapshot_dir: str | None,
+    repo_root: str | None,
+) -> str | None:
+    """Return a snapshot dir holding the patch's FINAL bytes, materializing if needed.
+
+    ``snapshot_dir`` means two different things on the two sides of the
+    nomination wire. The fusion exporter records its *pre-authoring pristine*
+    snapshot -- the baseline it diffed AGAINST -- on ``RecipePatch.snapshot_dir``,
+    and that value rides the envelope into the pending record. ``apply_kernel_patch``
+    reads the same field as the *post-patch final* contents it copies FROM. A
+    pristine dir can never satisfy that: it is missing, by construction, every
+    module the fusion authored, so the apply pre-flight refuses the whole patch
+    with "snapshot missing content for <...>_fused_<recipe>.py" and a real KEEP
+    is lost. (The collective lane never hit this only because its record carries
+    no ``snapshot_dir`` at all, so it always took the materialize path.)
+
+    Rather than trust the field, check it: a usable snapshot has the final bytes
+    for every path the patch writes. When it does not, materialize one from the
+    patch itself. Materialization failure returns the original value so apply
+    reports the real error instead of this helper's.
+    """
+    if not (patch_path.endswith(".patch") and repo_root):
+        return snapshot_dir
+    try:
+        descriptors = _load_apply_tool().parse_patch_manifest(
+            Path(patch_path).read_text(encoding="utf-8", errors="replace")
+        )
+        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
+    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+        return snapshot_dir
+    if not writes:
+        return snapshot_dir
+    if snapshot_dir and all((Path(snapshot_dir) / rel).exists() for rel in writes):
+        return snapshot_dir
+    try:
+        return materialize_unified_patch_snapshot(
+            patch_path=patch_path,
+            repo_root=repo_root,
+            snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
+        )
+    except Exception:  # noqa: BLE001 — fall back so apply surfaces the real failure.
+        log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
+        return snapshot_dir
+
+
 def _maybe_apply_kernel_patch(
     payload: dict,
     *,
@@ -1042,14 +1101,21 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
-    from hyperloom.inference_optimizer.session.session_paths import patches_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
-    backup_root = payload.get("backup_root") or (patches_dir(session_dir, kid or "anon") / "backup")
+    # Same fold as the integrate workspace: a fusion sibling keys this dir by its
+    # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
+    backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
     tool = _load_apply_tool()
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
+    snapshot_dir = _final_content_snapshot(
+        patch_path=patch_path,
+        snapshot_dir=snapshot_dir,
+        repo_root=repo_root,
+    )
     return tool.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
@@ -1162,6 +1228,18 @@ def materialize_unified_patch_snapshot(
     # normalized in-memory copy so materialization is tolerant without mutating
     # the content-addressed downloaded artifact.
     normalized_patch_text = patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
+    # Pin the work tree to ``snap``. Without this, ``git apply`` resolves paths
+    # against whatever repository encloses ``snap`` -- and when the session dir
+    # lives INSIDE a checkout (a session under the Hyperloom repo itself), every
+    # hunk is reported "Skipped patch ..." while git still exits 0. The snapshot
+    # then comes back empty and the failure surfaces later as the far more
+    # confusing "snapshot missing final content".
+    apply_env = {
+        **os.environ,
+        "GIT_DIR": str(snap / ".git_materialize"),
+        "GIT_WORK_TREE": str(snap),
+        "GIT_CEILING_DIRECTORIES": str(snap.parent),
+    }
     proc = subprocess.run(
         ["git", "apply", "--unsafe-paths", "-"],
         cwd=snap,
@@ -1169,6 +1247,7 @@ def materialize_unified_patch_snapshot(
         capture_output=True,
         text=True,
         timeout=60,
+        env=apply_env,
     )
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip()
@@ -1255,6 +1334,14 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
     return ""
 
 
+class AmbiguousIntegrationTarget(Exception):
+    """A bare ``kernel_id`` named several pending integration records.
+
+    ``kernel_id`` is not unique across a nomination round, so it cannot select
+    the record a KEEP/REVERT verdict is bound to.
+    """
+
+
 def _fill_integrate_defaults_from_state(
     payload: dict,
     *,
@@ -1272,6 +1359,11 @@ def _fill_integrate_defaults_from_state(
 
     Returns:
         A shallow copy of ``payload`` with defaults filled from state.
+
+    Raises:
+        AmbiguousIntegrationTarget: The payload carries no ``integration_id``
+            that resolves and its ``kernel_id`` matches more than one pending
+            record.
     """
     from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 
@@ -1287,15 +1379,22 @@ def _fill_integrate_defaults_from_state(
     if pending_record is None and resolved.get("kernel_id"):
         requested_kernel_id = str(resolved.get("kernel_id") or "")
         requested_task_key = str(resolved.get("task_group_key") or "")
-        pending_record = next(
-            (
-                record
-                for record in pending_records
-                if str(record.get("kernel_id") or "") == requested_kernel_id
-                and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
-            ),
-            None,
-        )
+        candidates = [
+            record
+            for record in pending_records
+            if str(record.get("kernel_id") or "") == requested_kernel_id
+            and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
+        ]
+        if len(candidates) > 1:
+            # Siblings of one nomination round share a kernel_id, so picking any
+            # of them would bind the verdict to a record nobody named.
+            raise AmbiguousIntegrationTarget(
+                f"integrate refused: kernel_id={requested_kernel_id!r} matches "
+                f"{len(candidates)} pending integration records; an explicit "
+                "integration_id is required to bind the KEEP/REVERT verdict. "
+                f"candidates={sorted(str(record.get('integration_id') or '') for record in candidates)!r}"
+            )
+        pending_record = candidates[0] if candidates else None
     if pending_record is not None:
         resolved.setdefault(
             "integration_id",
@@ -1321,6 +1420,25 @@ def _fill_integrate_defaults_from_state(
             "integration_validation_status",
             str(pending_record.get("integration_validation_status") or ""),
         )
+        # Fusion siblings carry three facts the generic drain cannot infer. The
+        # env flags gate the fused path (unset => the patch measures as the eager
+        # path and REVERTs a real win); the keep bar is fusion-specific; the
+        # action label routes the promoted stack row. Fold them in HERE, before
+        # the extra_envs merge below, so the fused path is active during e2e.
+        if str(pending_record.get("source") or "") == "forge_fusion":
+            resolved.setdefault("source", "forge_fusion")
+            resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
+            fusion_env_flags = pending_record.get("fusion_env_flags")
+            if isinstance(fusion_env_flags, dict) and fusion_env_flags:
+                requested = resolved.get("extra_envs")
+                requested = dict(requested) if isinstance(requested, dict) else {}
+                # The sibling's own flags win over anything already requested.
+                resolved["extra_envs"] = {**requested, **{str(k): str(v) for k, v in fusion_env_flags.items()}}
+            if "keep_threshold_pct" not in resolved and pending_record.get("keep_threshold_pct") is not None:
+                try:
+                    resolved["keep_threshold_pct"] = float(pending_record.get("keep_threshold_pct"))
+                except (TypeError, ValueError):
+                    pass
 
     current_best = getattr(state, "current_best", None) or {}
 
@@ -1380,8 +1498,25 @@ def _fill_integrate_defaults_from_state(
 
 
 def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
-    """Backfill integrate inputs from a recorded multi-file artifact bundle."""
+    """Backfill integrate inputs from a recorded multi-file artifact bundle.
+
+    A bundle is bound to the sibling that produced it by ``integration_id``. When
+    the caller already resolved this integrate from a specific pending record
+    (i.e. ``resolved`` carries an ``integration_id``), a bundle stamped with a
+    *different* id belongs to another sibling of the same nomination round and
+    must not be merged in: doing so would land one sibling's multi-file write
+    set under a second sibling's integrate. Under the one-patch era every
+    kernel_id had exactly one bundle so this never arose; the fallbacks keyed on
+    ``kernel_id`` (``last_kernel_opt`` / per-kernel ledger) now route several
+    bundles through the same kernel_id, so the guard is load-bearing.
+
+    A bundle with no ``integration_id`` of its own predates the contract and is
+    accepted as before -- there is no id to disagree with.
+    """
     if not isinstance(bundle, dict) or bundle.get("type") != "patch_snapshot":
+        return
+    if not bundle_belongs_to(bundle, resolved.get("integration_id")):
+        # Cross-sibling bundle -- refuse rather than silently mixing write sets.
         return
     if not resolved.get("snapshot_dir") and bundle.get("snapshot_dir"):
         resolved["snapshot_dir"] = str(bundle["snapshot_dir"])
@@ -1667,15 +1802,19 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _gemm_tuning_timeout_sec(payload: dict) -> int:
+def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the GEMM-tuning subprocess timeout in seconds.
 
     Reads ``payload['timeout_sec']`` then the
-    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var, falling back to the module
+    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- both operator inputs, so both
+    outrank a derived budget -- then the lane's share of the phase, then the module
     default; the result is floored at 60 seconds.
 
     Args:
         payload (dict): Request payload that may carry ``timeout_sec``.
+        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means no
+            allocation could be derived, which keeps the module default rather
+            than collapsing an unattended lane to a zero-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 60).
@@ -1687,12 +1826,76 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
     try:
         value = int(float(raw))
     except (TypeError, ValueError):
-        value = _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
+        value = lane_budget_sec if lane_budget_sec > 0 else _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
     return max(60, value)
 
 
-def _forge_fusion_timeout_sec(payload: dict) -> int:
-    """Resolve the forge-fusion subprocess timeout in seconds."""
+def _gemm_router_targets(
+    *,
+    model_path: str,
+    framework: str,
+    precision: str,
+    quant_type: str,
+    gpu_type: str,
+    kernel_signature_log: str,
+    has_untuned_csv: bool,
+    has_shapes_json: bool,
+    has_tunableop_input: bool,
+) -> tuple[tuple[str, int], ...]:
+    """Ask the forge router which tuners it would run and what each costs.
+
+    The router is the only place a per-tuner runtime estimate exists, and it
+    returns them already in the execution order the gemm lane ceiling assumes.
+
+    Args:
+        model_path (str): Local model directory the router profiles.
+        framework (str): Routed forge framework (``sglang``/``vllm``/``vllm-aiter``).
+        precision (str): Resolved precision label.
+        quant_type (str): Resolved quantisation type.
+        gpu_type (str): Target GPU identifier.
+        kernel_signature_log (str): Server log used to detect 1-stage ASM.
+        has_untuned_csv (bool): Whether an untuned CSV shape source was resolved.
+        has_shapes_json (bool): Whether any JSON shape source was resolved.
+        has_tunableop_input (bool): Whether TunableOp rows were resolved.
+
+    Returns:
+        tuple[tuple[str, int], ...]: ``(tuner name, seconds)`` per runnable tuner in
+            priority order, or an empty tuple when the router cannot be consulted,
+            which leaves the lane ceiling on its own per-target default.
+    """
+    try:
+        from kernelforge.gemm_tune.model_analyzer import analyze_model  # noqa: PLC0415
+        from kernelforge.gemm_tune.router import select_tuners  # noqa: PLC0415
+
+        specs = select_tuners(
+            analyze_model(model_path),
+            framework=framework,
+            precision=precision,
+            quant_type=quant_type,
+            gpu_type=gpu_type,
+            kernel_signature_log=kernel_signature_log or None,
+            has_untuned_csv=has_untuned_csv,
+            has_shapes_json=has_shapes_json,
+            has_tunableop_input=has_tunableop_input,
+        )
+    except Exception:  # noqa: BLE001 - an unavailable router must not fail the run
+        log.debug("GEMM: could not consult the tuner router for lane cost estimates", exc_info=True)
+        return ()
+    return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
+
+
+def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
+    """Resolve the forge-fusion subprocess timeout in seconds.
+
+    Args:
+        payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
+        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means no
+            allocation could be derived, which keeps the module default rather
+            than collapsing an unattended lane to a one-second timeout.
+
+    Returns:
+        int: The resolved timeout in seconds (>= 1).
+    """
     raw = (
         payload.get("timeout")
         or payload.get("timeout_sec")
@@ -1704,7 +1907,7 @@ def _forge_fusion_timeout_sec(payload: dict) -> int:
     try:
         value = int(float(raw))
     except (OverflowError, TypeError, ValueError):
-        value = 7200
+        value = lane_budget_sec if lane_budget_sec > 0 else 7200
     return max(1, value)
 
 
@@ -4174,7 +4377,39 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    timeout = _gemm_tuning_timeout_sec(payload)
+    # The lane's share, priced on the router's own per-tuner estimates. A share
+    # funding none of them degrades to the module default, not to a doomed run.
+    gemm_targets = await asyncio.to_thread(
+        _gemm_router_targets,
+        model_path=resolved_model_path,
+        framework=forge_framework,
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=gpu_type,
+        kernel_signature_log=kernel_sig_log,
+        has_untuned_csv=bool(untuned_csv),
+        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
+        has_tunableop_input=bool(tunableop_input),
+    )
+    gemm_lane = _nomination_lane_budget(
+        state,
+        LANE_GEMM,
+        gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets),
+    )
+    timeout = _gemm_tuning_timeout_sec(
+        payload,
+        lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
+    )
+    try:
+        requested_tuners = int(payload.get("max_tuners") or 0)
+    except (TypeError, ValueError):
+        requested_tuners = 0
+    # An explicit payload value stays an operator/test escape hatch; a named
+    # ``tuner`` already narrows the set to one, so no ceiling is needed then.
+    if str(payload.get("tuner") or "").strip():
+        gemm_tuner_ceiling = 0
+    else:
+        gemm_tuner_ceiling = requested_tuners if requested_tuners > 0 else gemm_lane.max_targets
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
     if shapes_json:
@@ -4196,7 +4431,11 @@ async def _run_forge_gemm_tuning(
         "conc": conc,
         "mp": mp,
         "output_dir": str(workspace),
-        "timeout": timeout,
+        # Passing the same value to both made the producer's own
+        # min(per_tuner, remaining) an identity, so the first tuner could
+        # consume the entire session and every later one was skipped for lack of
+        # time. The per-target cap must stay strictly below the global one.
+        "timeout": gemm_per_tuner_timeout_sec(timeout),
         # Bounds the whole session across all tuners.
         "global_timeout": timeout,
         "skip_gpu_check": True,
@@ -4209,6 +4448,9 @@ async def _run_forge_gemm_tuning(
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
+        # How many routed tuners the lane's share pays for. Omitted when none
+        # could be derived, which leaves the producer's own routing intact.
+        **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
     }
@@ -4277,6 +4519,29 @@ async def _run_forge_gemm_tuning(
         reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
         if reason:
             result["skip_reason"] = reason
+
+    # Surface crashed tuners. forge lists every failure in ``failed_tuners``
+    # regardless of the overall decision, but this array was previously dropped
+    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
+    # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
+    # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
+    # keep it on the envelope for the trace row / breakdown, and log it so the
+    # failure is never silent even when the session is kept.
+    if not result.get("failed_tuners"):
+        disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
+        if disk_failed:
+            result["failed_tuners"] = disk_failed
+    _failed_tuners = result.get("failed_tuners")
+    if isinstance(_failed_tuners, list) and _failed_tuners:
+        for _f in _failed_tuners:
+            if not isinstance(_f, dict):
+                continue
+            log.warning(
+                "forge gemm tuner %s failed (%s): %s",
+                _f.get("tuner") or "?",
+                _f.get("error_class") or "?",
+                _f.get("error") or "",
+            )
 
     # The breakdown and the stack read the envelope, not the jsonl audit row, so
     # a tuner's own error class has to surface here too. Lifted before the bridge
@@ -4889,7 +5154,16 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    timeout = _forge_fusion_timeout_sec(payload)
+    # The lane's share of the phase; a zero share means none could be derived, and
+    # the module default is safer for an unattended lane than a one-second session.
+    fusion_lane = _nomination_lane_budget(state, LANE_FUSION)
+    timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
+    try:
+        requested_recipes = int(payload.get("max_recipes") or 0)
+    except (TypeError, ValueError):
+        requested_recipes = 0
+    # An explicit payload value stays an operator/test escape hatch.
+    fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -4906,7 +5180,12 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "max_turns": max_turns,
         "gpu": gpu,
         "timeout": timeout,
-        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
+        # Multi-patch (one independent sibling per recipe) is the default; the
+        # combine escape hatch (a single merged patch) must be requested explicitly.
+        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
+        # How many recipes the lane's share pays for. Omitted when none could be
+        # derived, which leaves forge-fuse on every discovered recipe.
+        **({"max_recipes": fusion_recipe_ceiling} if fusion_recipe_ceiling > 0 else {}),
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
     }
@@ -5511,6 +5790,9 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "workspace": result.get("workspace"),
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
+        # A crash stays in the audit even when a sibling tuner won and the run was
+        # kept -- otherwise a KEEP row hid the failures behind it.
+        "failed_tuners": result.get("failed_tuners") or None,
         "error_class": error_class,
     }
     row = {k: v for k, v in row.items() if v is not None}
@@ -6056,6 +6338,415 @@ def _validate_trace_analyze_inputs(
     return None
 
 
+#: Rewrite targets forge can actually execute in one ``--auto`` call. Running
+#: several needs a per-target base commit and scratch path, so its CLI refuses
+#: more than one; asking for what the budget funds would fail the whole lane.
+_REWRITE_EXECUTABLE_TARGETS = 1
+
+
+def _build_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> dict[str, Any] | None:
+    """Build the manifest document forge reads under ``--auto``, without writing it.
+
+    Split from the write so a caller can inspect what forge would be handed and
+    decline before any artifact lands in the session directory.
+
+    Args:
+        payload: The run_optimization request payload; supplies ``candidates_path``.
+        session_dir: Session directory whose SharedState supplies the merged history.
+
+    Returns:
+        The manifest document, or ``None`` when the payload named no candidate
+        artifact.
+
+    Raises:
+        candidate_manifest.CandidateManifestError: When the candidate artifact is
+            unreadable or carries no recognizable row array.
+    """
+    candidates_path = str(payload.get("candidates_path") or "").strip()
+    if not candidates_path:
+        return None
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    document, _stats = candidate_manifest.build_manifest(
+        candidates_path,
+        rejected_kernel_ids=state.rejected_kernel_ids,
+        attempts_by_kernel_id=index_attempts_by_kernel_id(state.kernel_opt_task_attempts),
+        trace_path=_resolve_fusion_decode_trace(state, payload),
+    )
+    return document
+
+
+def _forge_auto_staging_blocker(document: dict[str, Any]) -> str:
+    """Name why a ``--auto`` run cannot reach a campaign, or ``""`` when it can.
+
+    forge resolves the nominated kernel against its workspace and refuses
+    anything outside it, so ``submit_auto`` stages a worktree of the tree the
+    candidates live in and rewrites their paths into it. That needs one row with
+    a resolved source to stage from; with none, no workspace could make any
+    nomination runnable and the run is futile before any artifact is written.
+
+    Args:
+        document: The manifest document forge would receive.
+
+    Returns:
+        An operator-readable reason, or an empty string when at least one row is
+        nominatable.
+    """
+    rows = document.get("hot_kernels")
+    rows = rows if isinstance(rows, list) else []
+    # Mirror the nominator's own eligibility: a row with no source file, or one
+    # this session already rejected, can never be picked.
+    nominatable = sum(
+        1
+        for row in rows
+        if isinstance(row, dict) and str(row.get("source_file") or "").strip() and not row.get("rejected")
+    )
+    if nominatable:
+        return ""
+    return (
+        f"forge --auto has no runnable target: none of the {len(rows)} candidate row(s) carries a "
+        "resolved source file this session has not already rejected, so there is no tree to stage "
+        "a workspace from and any nomination would be refused by forge's own containment check."
+    )
+
+
+def _write_forge_candidate_manifest(payload: dict, *, session_dir: Path) -> Path | None:
+    """Project the hot-kernel candidate list into the manifest forge reads under ``--auto``.
+
+    The manifest is the SUPERSET the selector drops: it keeps rows forge could not
+    route (so a real nominator can still rescue them) and merges the session's
+    rejected ids and per-kernel attempt counts. Written beside the other per-attempt
+    forge inputs as ``forge_candidate_manifest.json``.
+
+    Args:
+        payload: The run_optimization request payload; supplies ``candidates_path``.
+        session_dir: Session directory the manifest is written into.
+
+    Returns:
+        The manifest path, or ``None`` when the payload named no candidate artifact
+        (the auto path then has nothing to hand forge and skips).
+    """
+    document = _build_forge_candidate_manifest(payload, session_dir=session_dir)
+    if document is None:
+        return None
+    return candidate_manifest.write_manifest(Path(session_dir), document)
+
+
+def _nomination_lane_budget(
+    state: Any,
+    lane: str = LANE_REWRITE,
+    *,
+    gemm_target_costs_sec: tuple[int, ...] = (),
+):
+    """Derive one lane's share of the phase's remaining time.
+
+    Wraps :func:`lane_budget.allocate`, which divides the remaining time between
+    the lanes and returns, per lane, both a second budget and how many targets that
+    budget can fund. Every lane draws its share from this single probe of session
+    state, so the shares stay parts of one whole.
+
+    Args:
+        state: SharedState exposing ``remaining_minutes()``.
+        lane: Which lane's allocation to return.
+        gemm_target_costs_sec: Per-tuner estimates in the router's priority order;
+            only the gemm lane's target ceiling consumes them.
+
+    Returns:
+        That lane's ``LaneAllocation``. An unbounded session yields a zero budget
+        and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
+        reads as "no allocation to make".
+    """
+    remaining = _nomination_remaining_minutes(state)
+    return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+
+
+def _nomination_remaining_minutes(state: Any) -> float | None:
+    """Minutes a nomination may plan against: the tighter of session and phase.
+
+    The session clock alone overfunds a phase that has already spent most of its
+    own slice, and work planned past the phase exit is cut off partway through.
+
+    Args:
+        state: SharedState exposing ``remaining_minutes()`` and the phase clock.
+
+    Returns:
+        The binding remaining minutes, or ``None`` when the session is unbounded
+        and there is no finite budget to divide.
+    """
+    from ..phases.machine_state import phase_budget_remaining_seconds
+
+    remaining_fn = getattr(state, "remaining_minutes", None)
+    session = remaining_fn() if callable(remaining_fn) else None
+    if session is None:
+        return None
+    phase_sec = phase_budget_remaining_seconds(state)
+    if phase_sec is None:
+        return float(session)
+    return min(float(session), float(phase_sec) / 60.0)
+
+
+def _write_nomination_request(
+    payload: dict,
+    *,
+    session_dir: Path,
+    manifest_path: Path,
+    allocation: Any,
+) -> Path:
+    """Write the ``--auto`` brief forge consumes: lane, trace, manifest, budget, ceiling.
+
+    The request's ``candidates_path`` is the MANIFEST (not the raw candidate
+    artifact): forge's ``read_candidates`` reads the manifest's ``hot_kernels``
+    shape, including the unroutable rows the manifest exists to surface. ``build_request``
+    requires both the trace and the manifest to already exist on disk, so the
+    manifest must be written first.
+
+    ``max_kernels`` is the lane's target ceiling clamped by
+    :data:`_REWRITE_EXECUTABLE_TARGETS`, since a budget that funds several targets
+    still has to ask for a number forge can execute.
+
+    Args:
+        payload: The request payload; supplies an explicit ``trace_path`` when set.
+        session_dir: Session directory the request is written into.
+        manifest_path: The manifest written by :func:`_write_forge_candidate_manifest`.
+        allocation: The rewrite ``LaneAllocation`` from :func:`_nomination_lane_budget`.
+
+    Returns:
+        The request path (``forge_nomination_input.json``).
+    """
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    trace_path = _resolve_fusion_decode_trace(state, payload)
+    max_kernels = min(allocation.max_targets, _REWRITE_EXECUTABLE_TARGETS)
+    if allocation.max_targets > max_kernels:
+        log.info(
+            "nomination auto: budget funds %d rewrite target(s); asking for %d (multi-target execution pending)",
+            allocation.max_targets,
+            max_kernels,
+        )
+    request = nomination_request.build_request(
+        lane=LANE_REWRITE,
+        trace_path=trace_path,
+        candidates_path=str(manifest_path),
+        lane_budget_sec=allocation.budget_sec,
+        max_kernels=max_kernels,
+    )
+    return nomination_request.write_request(Path(session_dir), request)
+
+
+def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
+    """Count dropped patch entries by reason, logging each one as it is counted.
+
+    ``parse_outcome`` names why every unusable entry was refused, but a reason
+    nobody reports is indistinguishable from forge never having offered the
+    entry at all.
+    """
+    counts: dict[str, int] = {}
+    for entry in dropped or ():
+        reason = str(getattr(entry, "reason", "") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+        log.warning(
+            "nomination landing: refused patch kernel=%s reason=%s",
+            str(getattr(entry, "kernel_name", "") or "<unnamed>"),
+            reason,
+        )
+    return counts
+
+
+def _read_nomination_outcome(result: dict) -> tuple[list[Any], dict[str, int], str]:
+    """Read the forge ``--auto`` envelope into siblings the caller can queue.
+
+    This deliberately does not touch SharedState. The phase that invoked the
+    handler holds its own instance and saves it in full afterwards, so anything
+    written to a second instance here is overwritten the moment the handler
+    returns; the owner of the state does the queuing.
+
+    Args:
+        result: The raw forge ``--auto`` envelope (``patches[]`` + ``nomination``).
+
+    Returns:
+        The usable sibling patches, a count per named drop reason, and why the
+        envelope was unreadable when it was. Only an explicit empty ``patches``
+        array reads as a nomination that cleanly selected nothing.
+    """
+    outcome = parse_outcome(result)
+    return list(outcome.patches), _summarize_dropped_patches(outcome.dropped), outcome.schema_error
+
+
+def queue_nominated_siblings(state: Any, patches: Any) -> int:
+    """Queue rewrite siblings on the caller's own state, returning how many landed.
+
+    The lane is ``"rewrite"``, never ``"fusion"``: a rewrite patch stamped with the
+    fusion fields lifts as ``action="fusion"`` and is misfiled into the fusion
+    Recipe column. The SWEEP-entry drain applies and re-benches each record later,
+    so nothing is integrated here.
+
+    Args:
+        state: The SharedState the caller owns and will persist.
+        patches: Sibling patches from :func:`_read_nomination_outcome`.
+
+    Returns:
+        The number of siblings queued.
+    """
+    queued = 0
+    for patch in patches or ():
+        if enqueue_nominated_patch(state, patch=patch, lane=LANE_REWRITE) is not None:
+            queued += 1
+    return queued
+
+
+async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Drive the KERNEL rewrite lane through forge self-nomination (``--auto``).
+
+    The ``auto=true`` sibling of the selector path, composed from the producers
+    and the landing glue. It never touches ``_batch_kernel_candidates`` /
+    ``_run_optimization_single`` / the single-kernel stamping -- forge, not
+    Hyperloom, picks the kernels here:
+
+    1. Derive the rewrite lane's budget from the time actually left; an unbounded
+       session funds nothing, so there is nothing to nominate -- skip cleanly
+       rather than send forge a zero-budget brief.
+    2. Project the candidate list into the manifest forge reads, and refuse a run
+       whose every nominatable row lies outside the workspace
+       (:func:`_forge_auto_staging_blocker`).
+    3. Write the manifest and the request that ties trace + manifest + budget together.
+    4. Run ``forge-loop --auto`` and take back its raw ``patches[]`` envelope.
+    5. Queue each sibling for the shared integrate lane; the SWEEP-entry drain
+       decides KEEP/REVERT later.
+
+    Args:
+        payload: The run_optimization request payload.
+        session_dir: Session directory for state, manifest, request and workspace.
+
+    Returns:
+        A ``HandlerResult`` reporting how many siblings were queued, a ``skipped``
+        status when there was no budget or no manifest, or a ``failed`` status when
+        the run could not reach a campaign.
+    """
+    import asyncio
+    import uuid
+
+    from ..state.shared_state import SharedState
+    from ...agents.kernel.tools.backends import forge_submit
+    from hyperloom.inference_optimizer.session.session_paths import kernel_agent_runs_dir
+
+    log.warning(
+        "nomination auto: the shipped nominator is a placeholder that ranks already-resolved "
+        "candidates by gpu_pct; it does not read the trace, so this path adds no selection "
+        "beyond the standard selector and executes one target per call"
+    )
+
+    # Check the budget FIRST: an unbounded/exhausted session funds nothing, and we
+    # must not leave a stale forge_candidate_manifest.json behind on that skip.
+    state = SharedState.load_or_init(session_dir)
+    allocation = _nomination_lane_budget(state)
+    if not allocation.is_fundable:
+        # Unbounded / exhausted budget -> zero targets. build_request would reject
+        # a zero-budget brief, and forge has nothing to pick, so stop here before
+        # writing any artifact.
+        return {"status": "skipped", "reason": "no_budget"}
+
+    manifest_document = _build_forge_candidate_manifest(payload, session_dir=session_dir)
+    if manifest_document is None:
+        return {"status": "skipped", "reason": "no_candidates"}
+
+    # Same reason the budget is checked first: decline before anything is written,
+    # so a futile run leaves no stale manifest behind.
+    blocker = _forge_auto_staging_blocker(manifest_document)
+    if blocker:
+        log.warning("nomination auto: %s", blocker)
+        return {
+            "status": "failed",
+            "auto": True,
+            "error_class": "forge_workspace_staging_unavailable",
+            "error": blocker,
+        }
+
+    manifest_path = candidate_manifest.write_manifest(Path(session_dir), manifest_document)
+
+    # Producers raise a typed error on a missing decode trace or malformed
+    # candidate JSON (the up-front validation only checks candidates_path exists,
+    # not that a trace was captured). Degrade to a failed HandlerResult instead of
+    # letting the exception escape the handler.
+    try:
+        request_path = _write_nomination_request(
+            payload,
+            session_dir=session_dir,
+            manifest_path=manifest_path,
+            allocation=allocation,
+        )
+    except (nomination_request.NominationRequestError, candidate_manifest.CandidateManifestError) as error:
+        log.warning("nomination auto: could not build the forge request: %s", error)
+        return {
+            "status": "failed",
+            "auto": True,
+            "error_class": type(error).__name__,
+            "error": str(error),
+        }
+
+    # Unique per attempt. Staging retains its worktree for inspection and refuses
+    # to reuse a path, so a fixed directory fails the next cycle -- and any retry
+    # within one -- before the subprocess starts. Grouped by cycle to stay readable.
+    output_dir = (
+        kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name))
+        / "auto"
+        / f"cycle-{int(getattr(state, 'macro_cycle', 0) or 0)}"
+        / f"attempt-{uuid.uuid4().hex[:12]}"
+    )
+    target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
+
+    # submit_auto blocks on subprocess.communicate for the whole forge run; run it
+    # off the event loop so heartbeat/liveness/cancellation coroutines keep firing,
+    # matching how the selector path offloads kernel_optimization.py via
+    # _run_subprocess.
+    result = await asyncio.to_thread(
+        forge_submit.submit_auto,
+        nomination_input=str(request_path),
+        output_dir=output_dir,
+        timeout_s=_optimization_wrapper_timeout_sec(payload),
+        gpu_type=target_platform,
+    )
+
+    # Decided before anything is queued: a crashed run must land no patch, and
+    # "complete, queued=0" would not distinguish it from a clean empty pass.
+    forge_status = str(result.get("status") or "") if isinstance(result, dict) else ""
+    if forge_status in {"timeout", "failed"}:
+        forge_error = str(result.get("error") or "") if isinstance(result, dict) else ""
+        return {
+            "status": forge_status,
+            "auto": True,
+            # Same shape as the success path, so the caller queues nothing here
+            # without having to special-case a missing key.
+            "nominated_patches": [],
+            "error": forge_error,
+        }
+    patches, dropped, schema_error = _read_nomination_outcome(result)
+    nomination = result.get("nomination") if isinstance(result, dict) else None
+    if schema_error:
+        # An envelope this build cannot read is a failure, not an empty round:
+        # reporting it complete would latch the lane off on a schema skew.
+        return {
+            "status": "failed",
+            "auto": True,
+            "error": f"forge nomination result was unreadable: {schema_error}",
+            "dropped": dropped,
+            "nomination": nomination if isinstance(nomination, dict) else {},
+        }
+    # Carries no single-kernel identity: every sibling lands as its own pending
+    # record, so a kernel_id here would misattribute all of them to one phantom.
+    return {
+        "status": "complete",
+        "auto": True,
+        # The caller owns the state, so the siblings ride back to be queued there.
+        "nominated_patches": patches,
+        # Named refusals ride on the result so the report and the operator can
+        # tell a malformed envelope from one that nominated nothing.
+        "dropped": dropped,
+        "nomination": nomination if isinstance(nomination, dict) else {},
+    }
+
+
 async def run_optimization_handler(
     payload: dict,
     *,
@@ -6091,6 +6782,11 @@ async def run_optimization_handler(
         return data_guard
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
+    # auto=true: forge picks the kernels via nomination. Off by default, so an
+    # unset env falls straight through to the selector path below unchanged. A
+    # ``_single_kernel`` request (an explicit named kernel) is never auto-routed.
+    if nomination_auto_enabled():
+        return await _run_optimization_auto(payload, session_dir=session_dir)
     dispatch_skips: dict[str, str] = {}
     candidates = _batch_kernel_candidates(
         payload,
@@ -6306,12 +7002,27 @@ def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
     status_dir = kernel_agent_runs_dir(session_dir, sid) / "status" / "kernel_optimization"
     if not status_dir.is_dir():
         return in_flight
+    from hyperloom.common.in_flight_liveness import evaluate_marker
+
     for p in status_dir.glob("ko-*.json"):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(d.get("state") or "").lower() != "running":
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            mtime = None
+        # A signal-killed subprocess never clears its own marker, so a running
+        # state alone would pin its kernel as busy for the rest of the session.
+        verdict = evaluate_marker(state=d.get("state"), pid=d.get("pid"), mtime=mtime)
+        if not verdict.in_flight:
+            if verdict.stale_reason:
+                log.info(
+                    "kernel in-flight marker %s is stale (%s); treating its kernel as free",
+                    p.name,
+                    verdict.stale_reason,
+                )
             continue
         kid = ""
         for line in d.get("last_lines") or []:
@@ -8173,9 +8884,12 @@ async def integrate_handler(
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
 
-    fake_task_id = f"integrate-{kernel_id or 'anon'}"
+    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
+    # only reaches this handler now that fusion lands through the generic queue.
+    # It is a legal id but not a legal directory name everywhere -- fold it.
+    fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     from ..state.shared_state import SharedState
@@ -8535,6 +9249,12 @@ async def integrate_handler(
         "identity_route": str(payload.get("identity_route") or ""),
         "integration_id": str(payload.get("integration_id") or ""),
     }
+    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
+    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
+    # read by the idempotency short-circuit and the remote-recipe fusion export.
+    if str(payload.get("source") or "") == "forge_fusion":
+        result["source"] = "forge_fusion"
+        result["action_label"] = str(payload.get("action_label") or "fusion")
     if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")

@@ -146,74 +146,61 @@ def coord_session_dir(tmp_path, monkeypatch) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_intent_router_gemm_roofline_survives_terminal_lifecycle_save(
+async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
     coord_session_dir,
     monkeypatch,
 ):
-    """The lifecycle END save must not clobber the inline Roofline refresh.
+    """The terminal state save must not clobber the inline Roofline refresh.
 
-    On the intent_router path the terminal lifecycle event persists the live
-    state between the handler returning and the GEMM result being handled, so
-    the refresh has to be merged back before that save.
+    ``run_gemm_tuning`` is now a Coordinator-owned lane that the model can no
+    longer REQUEST (the intent path denies it), so the merge is exercised on the
+    live entrypoint: ``_handle_gemm_tuning_result`` calls
+    ``_sync_profile_state_after_gemm_roofline`` before it records the result and
+    persists the live state. A block-FP8 handler runs its inline Roofline
+    against a throwaway ``SharedState`` on disk; those refreshed fields have to
+    be merged into the live state before any save, or the next run loses the
+    steady-state trace.
     """
     coord = Coordinator(coord_session_dir, backends=_silent_backends())
     try:
         selected_trace = str(coord_session_dir / "mixed_steady_state.trace.json.gz")
 
-        async def fake_handler(payload, *, session_dir):
-            # Mirror the handler-owned inline Roofline: it mutates a throwaway
-            # SharedState loaded from disk and persists it there.
-            state = SharedState.load_or_init(session_dir)
-            state.last_profile_trace = str(session_dir / "profile.trace.json.gz")
-            state.last_profile_status = "succeeded"
-            state.last_profile_workload = {
-                "framework": "vllm",
-                "server_args": "--attention-backend AITER",
-            }
-            state.last_trace_analyze = {
-                "trace_input": state.last_profile_trace,
-                "steady_state_trace": selected_trace,
-                "roofline_snapshot_id": 7,
-            }
-            state.baseline_eager_fallback = False
-            state.save(session_dir)
-            return {
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "geak",
-                "shape_capture": {
-                    "capture_mode": "block_fp8_profile",
-                    "source_profile_trace": selected_trace,
-                },
-            }
+        # Mirror the handler-owned inline Roofline: a throwaway SharedState
+        # loaded from disk, mutated, and persisted there -- exactly what the
+        # block-FP8 GEMM handler leaves behind before returning.
+        state = SharedState.load_or_init(coord_session_dir)
+        state.last_profile_trace = str(coord_session_dir / "profile.trace.json.gz")
+        state.last_profile_status = "succeeded"
+        state.last_profile_workload = {
+            "framework": "vllm",
+            "server_args": "--attention-backend AITER",
+        }
+        state.last_trace_analyze = {
+            "trace_input": state.last_profile_trace,
+            "steady_state_trace": selected_trace,
+            "roofline_snapshot_id": 7,
+        }
+        state.baseline_eager_fallback = False
+        state.save(coord_session_dir)
 
-        monkeypatch.setitem(
-            krh_mod.KERNEL_REQUEST_HANDLERS,
-            "run_gemm_tuning",
-            fake_handler,
-        )
-        monkeypatch.setattr(
-            coord.dispatcher,
-            "_sequence_denial_for_request",
-            lambda target, kind: None,
-        )
         coord.shared_state.baseline_eager_fallback = True
 
-        await coord._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "run_gemm_tuning",
-                    "params": {},
-                },
-            ),
-        )
+        result = {
+            "status": "ok",
+            "decision": "REVERT",
+            "backend": "geak",
+            "shape_capture": {
+                "capture_mode": "block_fp8_profile",
+                "source_profile_trace": selected_trace,
+            },
+        }
+
+        # The live entrypoint both KERNEL-entry and any resume converge on. It
+        # syncs the Roofline refresh, then records + persists the live state.
+        await coord.phase_kernel._handle_gemm_tuning_result(result)
 
         assert coord.shared_state.last_trace_analyze.get("steady_state_trace") == selected_trace
         assert coord.shared_state.last_profile_status == "succeeded"
-        assert coord.shared_state.roofline_snapshot_id == 7
         assert coord.shared_state.baseline_eager_fallback is False
         # It must also survive on disk so the next run can reuse the trace.
         reloaded = SharedState.load_or_init(coord_session_dir)
@@ -357,6 +344,141 @@ class TestGemmE2eCandidates:
         coord = _coord(tmp_path, baseline_tput=100.0)
         assert coord._gemm_e2e_candidates({}) == []
 
+    def test_a_forced_split_k_candidate_reaches_e2e(self, tmp_path):
+        """split-K benefit is e2e-only, so micro reports ``no_improvement``.
+
+        The producer promotes it on the forced ``candidate`` flag. Rebuilding
+        from the raw tuner rows gates on status first, so that flag can never
+        rescue the row and the only artifact worth an e2e run is discarded.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {
+                        "tuner": "sglang_dense_fp8_splitk",
+                        "env": {"SGLANG_SPLITK_CONFIG": "/tuned/splitk.csv"},
+                        "best_micro_speedup": 1.0,
+                        "requires_e2e_validation": True,
+                    }
+                ],
+                "tuners_run": [
+                    {
+                        "tuner": "sglang_dense_fp8_splitk",
+                        "status": "no_improvement",
+                        "candidate": True,
+                        "env_var": "SGLANG_SPLITK_CONFIG",
+                        "env_value": "/tuned/splitk.csv",
+                        "best_micro_speedup": 1.0,
+                    }
+                ],
+            }
+        )
+        assert cands == [
+            {
+                "tuner": "sglang_dense_fp8_splitk",
+                "env_var": "SGLANG_SPLITK_CONFIG",
+                "env_value": "/tuned/splitk.csv",
+                "envs": {"SGLANG_SPLITK_CONFIG": "/tuned/splitk.csv"},
+                "micro_speedup": 1.0,
+            }
+        ]
+
+    def test_moe_and_dense_stay_independent_candidates(self, tmp_path):
+        """One call tunes both, and each earns its own KEEP/REVERT."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE": "/tuned/moe.csv"}, "best_micro_speedup": 1.4},
+                    {"tuner": "sglang_dense_fp8", "env": {"SGLANG_DENSE": "/tuned/d.csv"}, "best_micro_speedup": 1.2},
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["fmoe_ck", "sglang_dense_fp8"]
+        assert [c["micro_speedup"] for c in cands] == [1.4, 1.2]
+
+    def test_the_producer_verdict_is_not_re_derived_from_the_tuner_rows(self, tmp_path):
+        """The producer's list is authoritative once it names any candidate.
+
+        ``no_artifact`` below would sail through the rebuild's gate -- ``ok``
+        with improved shapes -- yet the producer excluded it, because a tuner
+        with nothing to apply is not landable. Re-deriving from the raw rows
+        would put it back and hand the integrate lane a patchless candidate.
+        """
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "forced", "env": {"FORCED": "/tuned/f.csv"}, "best_micro_speedup": 1.0},
+                ],
+                "tuners_run": [
+                    {"tuner": "forced", "status": "no_improvement", "env_var": "FORCED", "env_value": "/tuned/f.csv"},
+                    {
+                        "tuner": "no_artifact",
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "env_var": "LOOKS_PROMOTABLE",
+                        "env_value": "/tuned/none.csv",
+                        "best_micro_speedup": 1.6,
+                    },
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["forced"]
+
+    def test_a_candidate_with_no_env_is_not_offered(self, tmp_path):
+        """Nothing to apply means nothing an e2e run could validate."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "empty", "env": {}, "best_micro_speedup": 1.5},
+                    {"tuner": "usable", "env": {"OK": "/tuned/ok.csv"}, "best_micro_speedup": 1.1},
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["usable"]
+
+    def test_an_envelope_without_candidates_still_reads_the_tuner_rows(self, tmp_path):
+        """The pre-candidates envelope and the GEAK backend keep working."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        cands = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "tuners_run": [
+                    {
+                        "tuner": "fmoe_ck",
+                        "status": "ok",
+                        "improved_shapes": 3,
+                        "env_var": "AITER_CONFIG_FMOE",
+                        "env_value": "/tuned/moe.csv",
+                        "best_micro_speedup": 1.4,
+                    }
+                ],
+            }
+        )
+        assert [c["tuner"] for c in cands] == ["fmoe_ck"]
+
+    def test_a_multi_variable_candidate_leaves_the_singular_pair_empty(self, tmp_path):
+        """The singular pair is only unambiguous for a one-variable candidate."""
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        (cand,) = coord._gemm_e2e_candidates(
+            {
+                "backend": "forge",
+                "candidates": [
+                    {"tuner": "pair", "env": {"A": "1", "B": "2"}, "best_micro_speedup": 1.3},
+                ],
+            }
+        )
+        assert cand["envs"] == {"A": "1", "B": "2"}
+        assert cand["env_var"] == ""
+        assert cand["env_value"] == ""
+
     def test_forge_result_yields_one_candidate_per_improved_tuner(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
         cands = coord._gemm_e2e_candidates(
@@ -398,91 +520,103 @@ class TestGemmE2eCandidates:
         )
 
 
-class TestPromoteFusionIntegrateKeep:
-    def test_records_incremental_gain_but_preserves_baseline_total(self, tmp_path):
-        coord = _coord(
-            tmp_path,
-            baseline_tput=100.0,
-            cumulative_gain_validated=20.0,
-            cumulative_gain_validated_stack_len=1,
-            optimization_stack=[
-                {
-                    "action": "replay_warm_recipe",
-                    "tput": 120.0,
-                    "gain_pct": 20.0,
-                }
-            ],
-            gain_per_stack_entry=[20.0],
-            current_best={
-                "action": "replay_warm_recipe",
-                "tput": 120.0,
-                "extra_envs": {"SGLANG_USE_AITER": "1"},
-                "extra_server_args": "--moe-runner-backend aiter",
-            },
-        )
+class TestQueueFusionSiblings:
+    """A KEPT fusion nomination is queued as sibling records, not integrated inline.
 
-        KernelPhase(coord)._promote_fusion_integrate_keep(
-            {
-                "patch": "/tmp/fusion.patch",
-                "source_file": "/repo/model.py",
-                "kernel_speedup": 3.05,
-                "best_pattern": "llm:fused_a+llm:fused_b",
-            },
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "new_tput": 180.0,
-                # integrate's gain is relative to current_best=120, not the
-                # original baseline=100.
-                "gain_pct": 50.0,
-                "workspace": "/tmp/run",
-                "extra_server_args": "--moe-runner-backend aiter",
-            },
-            extra_envs={"SGLANG_USE_AITER": "1", "ZAYA_FUSED_HYBRID_RESIDUAL": "1"},
-        )
+    Under the nomination contract ``_integrate_fusion`` no longer cold-boots a
+    re-baseline itself: it writes one ``status="pending"`` record per nominated
+    sibling and the SWEEP-entry drain runs them through the shared integrate lane.
+    The fusion-specific facts the generic drain cannot infer -- the env flag that
+    activates the fused path, the fusion keep bar, and the ``fusion`` promotion
+    label -- must ride on each record.
+    """
 
-        stack = coord.shared_state.optimization_stack
-        assert len(stack) == 2
-        assert stack[1]["action"] == "fusion"
-        assert stack[1]["backend"] == "forge"
-        assert stack[1]["engine"] == "forge_fusion"
-        assert stack[1]["patch_path"] == "/tmp/fusion.patch"
-        assert stack[1]["gain_pct"] == pytest.approx(50.0)
-        assert stack[1]["extra_envs"]["SGLANG_USE_AITER"] == "1"
-        assert stack[1]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
-        assert coord.shared_state.current_best["action"] == "fusion"
-        assert coord.shared_state.current_best["tput"] == 180.0
-        # current_best is a config record; the forge labels live on the entry.
-        assert "engine" not in coord.shared_state.current_best
-        assert "backend" not in coord.shared_state.current_best
-        assert coord.shared_state.cumulative_gain_validated == 80.0
-        assert coord.shared_state.gain_per_stack_entry == [20.0, 80.0]
-        assert coord.shared_state.cumulative_gain_validated_stack_len == 2
-
-    def test_guard_paths_do_not_promote(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
         phase = KernelPhase(coord)
 
-        phase._promote_fusion_integrate_keep("bad", {"decision": "KEEP"})  # type: ignore[arg-type]
-        phase._promote_fusion_integrate_keep({}, {"decision": "REVERT"})
-        phase._promote_fusion_integrate_keep({}, {"decision": "KEEP", "new_tput": "bad"})
-        phase._promote_fusion_integrate_keep({}, {"decision": "KEEP", "new_tput": 0})
+        await phase._integrate_fusion(
+            {
+                "patches": [
+                    {
+                        "kernel_name": "fuse_a",
+                        "patch_path": "/out/fuse_a.patch",
+                        "target_file": "/repo/a.py",
+                        "kernel_repo": "/repo",
+                        "snapshot_dir": "/snap/a",
+                        "base_commit": "abc",
+                        "micro_speedup": 1.4,
+                        "env_flag": "ZAYA_FUSED_A",
+                        "kind": "fusion",
+                    },
+                    {
+                        "kernel_name": "fuse_b",
+                        "patch_path": "/out/fuse_b.patch",
+                        "target_file": "/repo/b.py",
+                        "kernel_repo": "/repo",
+                        "micro_speedup": 1.2,
+                        "env_flag": "ZAYA_FUSED_B",
+                        "kind": "fusion",
+                    },
+                ],
+                "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 2},
+            }
+        )
 
-        assert coord.shared_state.optimization_stack == []
-        assert coord.shared_state.current_best == {}
+        queue = coord.shared_state.pending_kernel_integrations
+        assert len(queue) == 2
+        by_source = {str(r["source_file"]): r for r in queue.values()}
+        assert set(by_source) == {"/repo/a.py", "/repo/b.py"}
+        rec_a = by_source["/repo/a.py"]
+        assert rec_a["status"] == "pending"
+        assert rec_a["source"] == "forge_fusion"
+        assert rec_a["action_label"] == "fusion"
+        assert rec_a["artifact_path"] == "/out/fuse_a.patch"
+        assert rec_a["fusion_env_flags"] == {"ZAYA_FUSED_A": "1"}
+        # The fusion-specific keep bar (default 3.0%) rides on the record so the
+        # generic drain grades against it rather than the integrate default.
+        assert rec_a["keep_threshold_pct"] == pytest.approx(3.0)
+        assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
 
-    def test_dedupes_same_fusion_patch(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_empty_nomination_is_a_clean_no_op(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
         phase = KernelPhase(coord)
-        fusion = {"patch": "/tmp/fusion.patch", "source_file": "/repo/model.py"}
-        integ = {"decision": "KEEP", "new_tput": 150.0, "gain_pct": 50.0}
 
-        phase._promote_fusion_integrate_keep(fusion, integ)
-        phase._promote_fusion_integrate_keep(fusion, integ)
+        # A run that kept nothing: patches present but empty, plus the legacy
+        # singular shape with no patches[] at all -- both queue nothing.
+        await phase._integrate_fusion({"patches": [], "nomination": {"selected": 0}})
+        await phase._integrate_fusion({"kept": True})
 
-        assert len(coord.shared_state.optimization_stack) == 1
-        assert coord.shared_state.optimization_stack[0]["patch_path"] == "/tmp/fusion.patch"
-        assert coord.shared_state.current_best["variant_name"] == "forge_fusion:fusion.patch"
+        assert coord.shared_state.pending_kernel_integrations == {}
+
+    @pytest.mark.asyncio
+    async def test_sibling_missing_patch_or_target_is_dropped(self, tmp_path):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        await phase._integrate_fusion(
+            {
+                "patches": [
+                    {"kernel_name": "no_patch", "patch_path": "", "target_file": "/repo/a.py"},
+                    {"kernel_name": "no_target", "patch_path": "/out/x.patch", "target_file": ""},
+                    {
+                        "kernel_name": "good",
+                        "patch_path": "/out/good.patch",
+                        "target_file": "/repo/g.py",
+                        "micro_speedup": 1.1,
+                    },
+                ]
+            }
+        )
+
+        queue = coord.shared_state.pending_kernel_integrations
+        assert len(queue) == 1
+        assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
 
     @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
@@ -522,87 +656,6 @@ class TestPromoteFusionIntegrateKeep:
         await phase._handle_fusion_result("not-dict")  # type: ignore[arg-type]
 
         assert coord.shared_state.last_fusion == {"status": "failed"}
-
-    @pytest.mark.asyncio
-    async def test_integrate_fusion_builds_payload_and_records_keep(self, tmp_path, monkeypatch):
-        coord = _coord(
-            tmp_path,
-            baseline_tput=100.0,
-            current_best={"extra_envs": {"SGLANG_USE_AITER": "1"}},
-        )
-        coord.bus = _Bus()
-        phase = KernelPhase(coord)
-        calls: list[dict] = []
-
-        async def _fake_integrate(payload, *, session_dir):
-            assert session_dir == tmp_path
-            calls.append(payload)
-            return {
-                "status": "ok",
-                "decision": "KEEP",
-                "new_tput": 170.0,
-                "gain_pct": 70.0,
-                "workspace": str(tmp_path / "integrate"),
-            }
-
-        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(
-            krh_mod,
-            "materialize_unified_patch_snapshot",
-            lambda **_kwargs: str(tmp_path / "snapshot"),
-        )
-
-        await phase._integrate_fusion(
-            {
-                "patch": str(tmp_path / "fusion.patch"),
-                "source_file": "/repo/model.py",
-                "kernel_repo": "/repo",
-                "env_flags": {"ZAYA_FUSED": "1"},
-                "kernel_speedup": 2.5,
-                "best_pattern": "llm:fused",
-            }
-        )
-
-        assert calls[0]["source"] == "forge_fusion"
-        assert calls[0]["snapshot_dir"] == str(tmp_path / "snapshot")
-        assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1", "ZAYA_FUSED": "1"}
-        assert coord.shared_state.last_fusion_integrate["decision"] == "KEEP"
-        assert coord.shared_state.current_best["action"] == "fusion"
-        assert coord.shared_state.optimization_stack[-1]["engine"] == "forge_fusion"
-        assert coord.bus.messages[-1].payload["kind"] == "fusion_integrate_done"
-
-    @pytest.mark.asyncio
-    async def test_integrate_fusion_records_snapshot_failure(self, tmp_path, monkeypatch):
-        coord = _coord(tmp_path)
-        coord.bus = _Bus()
-        phase = KernelPhase(coord)
-
-        def _raise_snapshot(**_kwargs):
-            raise ValueError("bad patch")
-
-        monkeypatch.setattr(krh_mod, "materialize_unified_patch_snapshot", _raise_snapshot)
-
-        await phase._integrate_fusion(
-            {
-                "patch": str(tmp_path / "fusion.patch"),
-                "source_file": "/repo/model.py",
-                "kernel_repo": "/repo",
-            }
-        )
-
-        assert coord.shared_state.last_fusion_integrate["decision"] == "REVERT"
-        assert coord.shared_state.last_fusion_integrate["error_class"] == "ValueError"
-
-    @pytest.mark.asyncio
-    async def test_integrate_fusion_skips_missing_patch_or_target(self, tmp_path):
-        coord = _coord(tmp_path)
-        coord.bus = _Bus()
-        phase = KernelPhase(coord)
-
-        await phase._integrate_fusion({"patch": "", "source_file": "/repo/model.py"})
-        await phase._integrate_fusion({"patch": "/tmp/fusion.patch", "source_file": ""})
-
-        assert coord.shared_state.last_fusion_integrate == {}
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_handles_handler_exception(self, tmp_path, monkeypatch):
@@ -2183,108 +2236,26 @@ class TestForgeGemmRuntimeConfigMerge:
         assert result["e2e_results"]["reverted"] == []
 
 
-class TestBf16DenseFallback:
-    def test_fallback_predicate_requires_forge_sglang_fp8_no_candidate(self, tmp_path):
-        coord = _coord(tmp_path, framework="sglang")
+class TestBf16DenseFallbackIsInternalToForge:
+    """Change 3: the fp8->bf16 dense retry moved down into forge's tuner router.
 
-        assert coord._should_run_bf16_dense_gemm_fallback(
-            {
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-                "tuners_run": [
-                    {
-                        "status": "no_improvement",
-                        "tuner": "a8w8",
-                        "improved_shapes": 0,
-                    }
-                ],
-            }
-        )
-
-    def test_fallback_predicate_skips_existing_candidate(self, tmp_path):
-        coord = _coord(tmp_path, framework="sglang")
-
-        assert not coord._should_run_bf16_dense_gemm_fallback(
-            {
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "candidate",
-                "recommended_env": {"AITER_CONFIG_GEMM_A8W8": "/tmp/tuned.csv"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "tuner": "a8w8",
-                        "improved_shapes": 4,
-                        "env_var": "AITER_CONFIG_GEMM_A8W8",
-                        "env_value": "/tmp/tuned.csv",
-                    }
-                ],
-            }
-        )
-
-    def test_fallback_predicate_skips_candidate_reverted_by_e2e(self, tmp_path):
-        coord = _coord(tmp_path, framework="sglang")
-
-        assert not coord._should_run_bf16_dense_gemm_fallback(
-            {
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "candidate_no_e2e_gain",
-                "e2e_validated": True,
-                "e2e_results": {"kept": [], "reverted": [{"tuner": "a8w8"}]},
-            }
-        )
-
-    def test_fallback_pending_resumes_terminal_fp8_no_candidate(self, tmp_path, monkeypatch):
-        coord = _coord(
-            tmp_path,
-            framework="sglang",
-            precision="fp8",
-            last_gemm_tuning={
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-                "tuners_run": [{"status": "no_improvement", "tuner": "a8w8"}],
-            },
-        )
-        monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
-
-        assert coord._bf16_dense_gemm_fallback_pending() is True
-        assert coord._gemm_tuning_required_before_kernel_opt() is True
-
-        coord.shared_state.gemm_tuning_attempts.append(
-            {
-                "status": "complete",
-                "decision": "REVERT",
-                "backend": "forge",
-                "precision": "bf16",
-                "workspace": str(tmp_path / "runs/gemm_tuning/kernel_entry_gemm_tuning_bf16_fallback"),
-                "tuners_run": [{"tuner": "sglang_dense_bf16"}],
-            }
-        )
-
-        assert coord._bf16_dense_gemm_fallback_pending() is False
-        assert coord._gemm_tuning_required_before_kernel_opt() is False
+    Hyperloom used to launch a *second* gemm subprocess
+    (``kernel_entry_gemm_tuning_bf16_fallback``) when an fp8 dense tuning came
+    back empty. That whole machinery is gone: forge now selects
+    ``sglang_dense_bf16`` as a conditional ``fallback`` tuner inside the single
+    KERNEL-entry call and runs it in-process only when the fp8 tuner produced no
+    candidate. From Hyperloom's side KERNEL entry makes exactly one gemm call,
+    regardless of whether that call ended up trying bf16 internally.
+    """
 
     @pytest.mark.asyncio
-    async def test_kernel_entry_runs_bf16_dense_fallback_after_fp8_no_improvement(self, tmp_path, monkeypatch):
+    async def test_kernel_entry_makes_exactly_one_gemm_call(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, framework="sglang")
-        coord.bus = type(
-            "Bus",
-            (),
-            {"append_and_seq": staticmethod(lambda *_args, **_kwargs: None)},
-        )()
 
         async def _append_and_seq(*_args, **_kwargs):
             return None
 
+        coord.bus = type("Bus", (), {})()
         coord.bus.append_and_seq = _append_and_seq
         coord.phase_machine._kernel_enabled = lambda: True
         coord.phase_kernel._geak_enabled = lambda: False
@@ -2298,8 +2269,14 @@ class TestBf16DenseFallback:
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
 
         calls: list[dict] = []
-        responses = [
-            {
+
+        async def _fake_run_gemm(payload, *, session_dir):
+            assert session_dir == tmp_path
+            calls.append(payload)
+            # An fp8 dense tuning that came back empty. Under the old design this
+            # return value would have triggered a second bf16 subprocess; now the
+            # bf16 retry, if any, already happened inside this one call.
+            return {
                 "status": "ok",
                 "decision": "REVERT",
                 "backend": "forge",
@@ -2308,112 +2285,33 @@ class TestBf16DenseFallback:
                 "framework": "sglang",
                 "micro_decision": "no_improvement",
                 "tuners_run": [
-                    {
-                        "status": "no_improvement",
-                        "tuner": "a8w8",
-                        "improved_shapes": 0,
-                    }
+                    {"status": "no_improvement", "tuner": "a8w8", "improved_shapes": 0},
                 ],
-            },
-            {
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "engine": "forge",
-                "precision": "bf16",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-            },
-        ]
-
-        async def _fake_run_gemm(payload, *, session_dir):
-            assert session_dir == tmp_path
-            calls.append(payload)
-            return dict(responses[len(calls) - 1])
-
-        monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
-
-        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-        assert [c["task_id"] for c in calls] == [
-            "kernel_entry_gemm_tuning",
-            "kernel_entry_gemm_tuning_bf16_fallback",
-        ]
-        assert calls[1]["precision"] == "bf16"
-        assert calls[1]["tuner"] == "sglang_dense_bf16"
-        assert coord.shared_state.last_gemm_tuning["precision"] == "bf16"
-
-    @pytest.mark.asyncio
-    async def test_kernel_entry_resumes_pending_bf16_fallback_without_rerunning_fp8(self, tmp_path, monkeypatch):
-        coord = _coord(
-            tmp_path,
-            framework="sglang",
-            precision="fp8",
-            last_gemm_tuning={
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-                "tuners_run": [{"status": "no_improvement", "tuner": "a8w8"}],
-            },
-        )
-        coord.bus = type("Bus", (), {})()
-
-        async def _append_and_seq(*_args, **_kwargs):
-            return None
-
-        async def _noop(*_args, **_kwargs):
-            return None
-
-        coord.bus.append_and_seq = _append_and_seq
-        coord.phase_machine._kernel_enabled = lambda: True
-        coord.phase_kernel._geak_enabled = lambda: False
-        coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
-        coord.phase_kernel._kernel_opt_work_remains = lambda: False
-        coord.phase_kernel._maybe_reprofile_for_kernel = _noop
-        monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
-
-        calls: list[dict] = []
-
-        async def _fake_run_gemm(payload, *, session_dir):
-            assert session_dir == tmp_path
-            calls.append(payload)
-            return {
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "engine": "forge",
-                "precision": "bf16",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
             }
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
         await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
-        assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning_bf16_fallback"]
-        assert calls[0]["precision"] == "bf16"
-        assert coord.shared_state.last_gemm_tuning["task_id"] == ("kernel_entry_gemm_tuning_bf16_fallback")
-        assert coord._bf16_dense_gemm_fallback_pending() is False
+        assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning"]
+        # No second, bf16-flavoured subprocess is launched.
+        assert not any(c["task_id"].endswith("_bf16_fallback") for c in calls)
+        assert "bf16_fallback" not in coord.shared_state.last_gemm_tuning.get("task_id", "")
 
-    @pytest.mark.asyncio
-    async def test_bf16_fallback_failure_is_recorded_as_attempt(self, tmp_path):
+    def test_deleted_fallback_machinery_is_gone(self, tmp_path):
+        """The dedicated bf16-fallback methods no longer exist on the coordinator.
+
+        Guards against reintroducing the second-subprocess path by accident.
+        """
         coord = _coord(tmp_path, framework="sglang")
-
-        async def _raise(*_args, **_kwargs):
-            raise RuntimeError("fallback boom")
-
-        result = await coord._run_bf16_dense_gemm_fallback(_raise)
-
-        assert result["status"] == "failed"
-        assert result["decision"] == "REVERT"
-        assert result["task_id"] == "kernel_entry_gemm_tuning_bf16_fallback"
-        assert result["source"] == "fp8_no_improvement_bf16_fallback"
-        assert result["precision"] == "bf16"
-        assert coord._is_bf16_dense_gemm_fallback_attempt(result) is True
+        for name in (
+            "_run_bf16_dense_gemm_fallback",
+            "_should_run_bf16_dense_gemm_fallback",
+            "_bf16_dense_gemm_fallback_pending",
+            "_bf16_dense_gemm_fallback_attempted",
+            "_is_bf16_dense_gemm_fallback_attempt",
+        ):
+            assert not hasattr(coord, name), f"{name} should have been removed by Change 3"
 
 
 def _eligible_coord(tmp_path, monkeypatch, **overrides):

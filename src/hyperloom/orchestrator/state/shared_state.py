@@ -985,6 +985,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # silently reset the cap. Monotonic -- every outcome that would justify a reset
     # already stops the gate on its own.
     fusion_infra_aborts: int = 0
+    # How many times a fusion round left targets its lane ceiling never funded,
+    # counted here for the same reason as the aborts above.
+    fusion_withheld_retries: int = 0
     # Most recent collective campaign and capped integration audit.
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -1103,6 +1106,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # phase. A timestamp rather than a flag, so one left behind by a process that
     # died mid-step goes stale instead of muting the guard for the next run.
     kernel_inline_step_seen_unix: float = 0.0
+
+    # Which macro cycle's kernel nomination pass has run to completion. A kernel
+    # a nominator looked at and passed over leaves no ledger row, so it stays
+    # "untried" forever and the phase-pending predicate never goes quiet. Stored
+    # as the cycle rather than a bare flag so the next cycle retires it without
+    # anyone having to clear it.
+    kernel_auto_pass_cycle: int | None = None
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)

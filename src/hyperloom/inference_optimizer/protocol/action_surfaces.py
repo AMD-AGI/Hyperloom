@@ -47,11 +47,26 @@ KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
 assert set(KERNEL_ACTION_REQUEST_KINDS) == KERNEL_AGENT_OWNED_ACTIONS
 
 
-# Request kinds an LLM may address to the kernel agent.
-LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(KERNEL_ACTION_REQUEST_KINDS.values()) | {
-    "trace_analyze",
-    "apply_patch",
+# Request-kind aliases that route to a kernel-owned handler. apply_patch is
+# an alias of integrate (both dispatch to integrate_handler); PolicyGate
+# resolves the alias to its canonical owned action so the phase-action gate
+# applies identically.
+KERNEL_REQUEST_KIND_ALIASES: dict[str, str] = {
+    "apply_patch": "integrate",
 }
+
+
+# Request ``kind`` -> the kernel-owned action it gates as, derived from the two
+# tables above so a new kind cannot fall out of sync with the catalogue.
+# ``trace_analyze`` is absent by design: it owns no action and no phase, and
+# mapping it onto one would deny it everywhere.
+REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
+    {
+        **{kind: action for action, kind in KERNEL_ACTION_REQUEST_KINDS.items()},
+        **KERNEL_REQUEST_KIND_ALIASES,
+    }
+)
+
 
 # Registered kernel lanes the Coordinator dispatches itself, at KERNEL entry and
 # once their own gate passes. A direct request would skip that gate. An
@@ -61,8 +76,30 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_collective",
         "run_fusion",
+        # Dispatched once at phase entry from a nomination and a lane budget. An
+        # LLM re-issuing either per tick would spend budget the allocation never
+        # granted and pick targets the nomination did not choose.
+        "run_optimization",
+        "run_gemm_tuning",
     }
 )
+
+
+# Request kinds an LLM may address to the kernel agent. Derived from the action
+# table minus the Coordinator-owned lanes: those two are still kernel-owned
+# *actions* (they keep their catalogue entry and their handler), but the
+# Coordinator is the only caller, so advertising them here would invite a
+# request PolicyGate then denies.
+LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
+    frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
+    | {
+        "trace_analyze",
+        "apply_patch",
+    }
+) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
+
+# The two sets answer the same question and must never both claim a kind.
+assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
 
 
 # Coordinator-managed actions that agents should not directly propose.
@@ -407,7 +444,9 @@ __all__ = [
     "KERNEL_ACTION_REQUEST_KINDS",
     "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
+    "KERNEL_REQUEST_KIND_ALIASES",
     "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
+    "REQUEST_KIND_TO_OWNED_ACTION",
     "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

@@ -62,6 +62,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
+| `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
+| `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
 | `--git-branch <name>` | none | Development branch to optimize on, checked out before the campaign config is snapshotted. |
 | `--program-md-file <file>` | none | Optional task context copied into the campaign. |
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
@@ -240,6 +242,7 @@ when no fusion is found.
 | `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
 | `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
+| `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
 | `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, e.g. `gfx950`; detected via `rocminfo` when omitted. |
 
@@ -313,6 +316,7 @@ Search and execution:
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--tuner <name>` | routed | Force a specific tuner, skipping routing. |
+| `--max-tuners <n>` | `0` | Run at most this many of the routed tuners, in priority order. `0` means uncapped; Hyperloom passes the count its GEMM lane budget pays for. |
 | `--thorough` | off | Full search space: all libtypes, more shapes, no per-shape timeout. Slower, but finds the absolute best config. |
 | `--iters <n>` | `80` | Benchmark iterations per config. |
 | `--warmup <n>` | `20` | Warmup iterations. |

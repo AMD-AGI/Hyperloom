@@ -135,3 +135,36 @@ def test_recipe_kb_paths():
 def test_recipe_snapshot_paths():
     assert sp.recipe_snapshot_dir(SD) == SD / "runtime" / "recipe_snapshot"
     assert sp.recipe_snapshot_audit_jsonl(SD).name == ".audit.jsonl"
+
+
+def test_fs_safe_id_folds_a_fusion_operator_name():
+    # The id that crashed integrate: legal as an id, illegal as a directory.
+    assert sp.fs_safe_id("llm:ar_residual_rmsnorm_fp8quant_wiring") == "llm-ar_residual_rmsnorm_fp8quant_wiring"
+
+
+def test_fs_safe_id_preserves_ordinary_ids():
+    # uuid hex / k001 / dotted names round-trip untouched, so existing run dirs
+    # keep their names and no in-flight session sees its workspace move.
+    for value in ("k001", "abc123", "kernel.name-v2", "9f3c1a2b4d5e"):
+        assert sp.fs_safe_id(value) == value
+
+
+def test_fs_safe_id_collapses_runs_and_trims_edges():
+    assert sp.fs_safe_id("a::  ::b") == "a-b"
+    assert sp.fs_safe_id(":::lead-and-trail:::") == "lead-and-trail"
+
+
+def test_fs_safe_id_falls_back_when_nothing_survives():
+    assert sp.fs_safe_id("") == "anon"
+    assert sp.fs_safe_id(":::") == "anon"
+    assert sp.fs_safe_id(None) == "anon"
+    assert sp.fs_safe_id(":::", fallback="unnamed") == "unnamed"
+
+
+def test_fs_safe_id_output_is_always_a_usable_single_segment(tmp_path):
+    for raw in ("llm:x", "a/b", "..", "  ", "sp ace", "*glob?"):
+        seg = sp.fs_safe_id(raw)
+        (tmp_path / seg).mkdir(exist_ok=True)
+        assert (tmp_path / seg).is_dir()
+        # Never escapes its parent.
+        assert (tmp_path / seg).resolve().parent == tmp_path.resolve()

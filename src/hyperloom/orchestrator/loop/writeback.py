@@ -632,10 +632,14 @@ class WritebackCollaborator:
         self.shared_state.save(self.session_dir)
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate mid-batch.
+        """Retained record-partial hook for the run_optimization calling convention: writes a per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate.
+
+        The which-kernel fan-out that once streamed several sub-attempts now
+        lives in forge nomination, so the surviving single-kernel path invokes
+        this at most once per dispatch.
 
         Args:
-            result: One sub-attempt's per-kernel result dict.
+            result: One per-kernel result dict.
         """
         try:
             self.shared_state.record_kernel_opt(result)
@@ -732,20 +736,32 @@ class WritebackCollaborator:
             new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
+        # A fusion sibling drained through the shared integrate lane must still
+        # land on the stack as ``action="fusion"``: the idempotency short-circuit
+        # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
+        # (``build_kernel_fusion_value``) both key on that label, and the latter
+        # also gates on ``last_fusion_integrate`` being a KEEP. The generic path
+        # is otherwise unchanged.
+        is_fusion = str(result.get("source") or "") == "forge_fusion"
+        action_label = str(result.get("action_label") or "").strip() if is_fusion else ""
+        lift_kind = action_label or "integrate"
+        variant: dict[str, Any] = {
+            "name": result.get("kernel_id"),
+            "candidate_extra_server_args": result.get("extra_server_args"),
+            "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
+            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
+            "ttft_mean_ms": result.get("ttft_mean_ms"),
+            "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "tpot_mean_ms": result.get("tpot_mean_ms"),
+            **graded_axes_of(result),
+            "workspace": result.get("workspace"),
+        }
+        if is_fusion:
+            variant["provenance"] = "forge_fusion"
         lifted = self._lift_to_current_best(
-            "integrate",
+            lift_kind,
             float(new_tput),
-            {
-                "name": result.get("kernel_id"),
-                "candidate_extra_server_args": result.get("extra_server_args"),
-                "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
-                "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-                "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
-                "tpot_mean_ms": result.get("tpot_mean_ms"),
-                **graded_axes_of(result),
-                "workspace": result.get("workspace"),
-            },
+            variant,
             gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
             entry_extra={
                 "integration_id": result.get("integration_id"),
@@ -756,8 +772,22 @@ class WritebackCollaborator:
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
                 "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
+                # Provenance for a fusion sibling; readers key the stack row on
+                # ``action == "fusion"`` above, this just records the producer.
+                **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
             },
         )
+        if is_fusion:
+            # ``build_kernel_fusion_value`` gates the remote-recipe fusion export
+            # on this being a KEEP; the old inline path set it and the generic
+            # drain does not, so restore it here for the fusion-origin case.
+            try:
+                self.shared_state.last_fusion_integrate = {
+                    **result,
+                    "decision": "KEEP",
+                }
+            except Exception:  # noqa: BLE001 - state shape tolerant, matches inline path
+                pass
         if lifted and self.shared_state.baseline_tput > 0:
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
             self._update_cumulative_gain_validated(new_tput, result.get("bench_result") or result)

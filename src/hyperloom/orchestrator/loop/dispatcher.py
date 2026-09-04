@@ -1688,8 +1688,9 @@ class DispatcherCollaborator:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
-        if self._bf16_dense_gemm_fallback_pending():
-            return True
+        # The fp8 -> bf16 dense retry now runs inside a single gemm call (the
+        # tuner router selects the bf16 pass as a fallback), so a completed run's
+        # status is terminal -- there is no pending second attempt to re-trigger.
         return status not in {
             "ok",
             "succeeded",

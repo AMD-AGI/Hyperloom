@@ -22,6 +22,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.kernel import _kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -1073,6 +1074,60 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._forge_fusion_timeout_sec({}) == 7200
 
+    async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the fusion lane against a faked subprocess and return its input JSON."""
+        trace_dir = tmp_path / "trace"
+        trace_dir.mkdir()
+        (trace_dir / "decode.trace.json.gz").write_text("{}", encoding="utf-8")
+        state = SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace_dir),
+            max_minutes=max_minutes,
+        )
+        state.save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, {**_OPENAI_ONLY_ENV, "CODEX_MODEL": "gpt-fusion"})
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: tmp_path / "tools" / name)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            body = json.dumps({"status": "ok", "decision": "REVERT", "kept": False})
+            return (0, f"FORGE_FUSION_RESULT_BEGIN\n{body}\nFORGE_FUSION_RESULT_END\n", "")
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        await krh._run_forge_fusion({"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path)
+        return json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
+        )
+
+    async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
+        """A bounded session funds the lane, so its target count is handed down."""
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+
+        assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
+
+    async def test_an_unbounded_session_sends_no_recipe_ceiling(self, tmp_path, monkeypatch):
+        """No share can be derived, and a zero ceiling would silence the lane.
+
+        The key is omitted rather than sent as 0, so forge-fuse keeps every
+        discovered recipe eligible; the rest of the brief is unaffected.
+        """
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert "max_recipes" not in payload
+        assert payload["timeout"] == krh._forge_fusion_timeout_sec({})
+
+    async def test_an_explicit_recipe_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
+        """An operator/test value stays an escape hatch over the derived share."""
+        payload = await self._fusion_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=120,
+            payload={"max_recipes": 1},
+        )
+
+        assert payload["max_recipes"] == 1
+
     def test_forge_fusion_timeout_infinite_env_falls_back(self, monkeypatch):
         monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
 
@@ -1115,6 +1170,40 @@ class TestForgeGemmHelperCoverage:
             (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
         )
         assert input_payload["timeout"] == 7200
+
+    @pytest.mark.asyncio
+    async def test_run_forge_fusion_takes_the_lane_share_of_a_bounded_phase(self, tmp_path, monkeypatch):
+        """600 min less the 5 min reserve = 35700s; fusion's 30% is 10710s."""
+        trace = tmp_path / "decode.trace.json.gz"
+        trace.write_text("{}", encoding="utf-8")
+        SharedState(
+            framework="sglang",
+            model_path="/models/zaya",
+            last_profile_trace=str(trace),
+        ).save(tmp_path)
+        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+        monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
+        # Pinned: a live clock would tick between the split and the assertion.
+        monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 600.0)
+        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+        monkeypatch.setattr(krh, "_kernel_agent_tool_path", lambda name: Path(name))
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            result = {"status": "complete", "decision": "REVERT", "kept": False}
+            return (
+                0,
+                "FORGE_FUSION_RESULT_BEGIN\n" + json.dumps(result) + "\nFORGE_FUSION_RESULT_END\n",
+                "",
+            )
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+        await krh._run_forge_fusion({"task_id": "fusion_task"}, session_dir=tmp_path)
+
+        input_payload = json.loads(
+            (tmp_path / "runs" / "fusion" / "fusion_task" / "forge_fusion_input.json").read_text(encoding="utf-8")
+        )
+        assert input_payload["timeout"] == 10710
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_unconfigured_provider_fails_before_subprocess(
@@ -1356,6 +1445,85 @@ class TestForgeGemmHelperCoverage:
         assert subprocess_cmd[2] == sys.executable
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
+
+    async def _gemm_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the gemm lane against a faked subprocess and return its input JSON."""
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
+        state = SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path=str(model),
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            max_minutes=max_minutes,
+        )
+        state.save(tmp_path)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_resolve_aiter_root_for_forge", lambda: "")
+        monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_k: (envs, ""))
+
+        async def _fake_subprocess(_cmd, *, timeout_sec):
+            body = json.dumps({"status": "ok", "micro_decision": "no_improvement"})
+            return 0, f"FORGE_GEMM_TUNE_RESULT_BEGIN\n{body}\nFORGE_GEMM_TUNE_RESULT_END\n", ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+        request = {"task_id": "gemm_ceiling", **(payload or {})}
+        await krh._run_forge_gemm_tuning(request, session_dir=tmp_path)
+        workspace = krh._gemm_tuning_workspace(request, session_dir=tmp_path)
+        return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_gemm_tuner_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
+        """A bounded session funds the lane, so its target count is handed down."""
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=600)
+
+        assert payload["max_tuners"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_session_sends_no_gemm_tuner_ceiling(self, tmp_path, monkeypatch):
+        """No share can be derived, and a zero ceiling would silence the lane."""
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    async def test_a_named_gemm_tuner_needs_no_ceiling(self, tmp_path, monkeypatch):
+        """An explicit tuner has already narrowed the routed set to one."""
+        payload = await self._gemm_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=600,
+            payload={"tuner": "a8w8"},
+        )
+
+        assert payload["tuner"] == "a8w8"
+        assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_gemm_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
+        """An operator/test value stays an escape hatch over the derived share.
+
+        The lane's own figure is pinned to a different number, so the assertion
+        fails if the derived share is used instead of the explicit one.
+        """
+        monkeypatch.setattr(
+            krh,
+            "_nomination_lane_budget",
+            lambda _state, _lane=None, **_k: lane_budget.LaneAllocation(
+                lane=lane_budget.LANE_GEMM, budget_sec=7140, max_targets=4
+            ),
+        )
+        payload = await self._gemm_input_payload(
+            tmp_path,
+            monkeypatch,
+            max_minutes=600,
+            payload={"max_tuners": 1},
+        )
+
+        assert payload["max_tuners"] == 1
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
@@ -5953,3 +6121,103 @@ def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
     generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
 
     assert rh._cold_start_rebaseline_timeout(generous) == generous
+
+
+class TestTheGemmLaneBudgetReachesTheInputJson:
+    """The gemm lane's share of the phase, as the wrapper actually receives it.
+
+    The wrapper exposes no "run at most N tuners" input, so a ceiling of one is
+    expressed by pinning ``tuner``; the wall-clock half travels as ``timeout`` and
+    ``global_timeout``.
+    """
+
+    @staticmethod
+    def _sentinel() -> str:
+        return (
+            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
+            + json.dumps({"status": "ok", "micro_decision": "skipped"})
+            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        )
+
+    def _prepare(self, tmp_path, monkeypatch, *, remaining_minutes, targets):
+        from hyperloom.orchestrator.state.shared_state import SharedState
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir(exist_ok=True)
+        SharedState(
+            precision="bf16",
+            framework="sglang",
+            model_path=str(model_dir),
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+        ).save(tmp_path)
+        # Pinned: a live clock would tick between the split and the assertion.
+        monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: remaining_minutes)
+
+        monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
+        monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(krh, "_gemm_router_targets", lambda **_kwargs: targets)
+
+        async def _fake_subprocess(cmd, *, timeout_sec):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
+
+    async def _written(self, tmp_path, payload):
+        await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+        workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
+        return json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_a_share_that_funds_one_tuner_caps_the_routed_set_at_one(self, tmp_path, monkeypatch):
+        # 600 min less the 5 min reserve leaves 35700s; gemm's 20% is 7140s, which
+        # funds the first 60-minute tuner and not the second.
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-one"})
+        assert written["max_tuners"] == 1
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 7140
+        assert written["timeout"] == krh.gemm_per_tuner_timeout_sec(7140)
+
+    @pytest.mark.asyncio
+    async def test_a_share_that_funds_every_tuner_caps_at_that_count(self, tmp_path, monkeypatch):
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 600), ("a8w8", 600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-none"})
+        assert written["max_tuners"] == 2
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 7140
+
+    @pytest.mark.asyncio
+    async def test_an_unbounded_session_keeps_the_module_default_and_no_pin(self, tmp_path, monkeypatch):
+        """No allocation must degrade to the default session, never to zero."""
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=None,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-unbounded"})
+        assert written["tuner"] == ""
+        assert written["global_timeout"] == 18000
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_tuner_survives_the_ceiling(self, tmp_path, monkeypatch):
+        self._prepare(
+            tmp_path,
+            monkeypatch,
+            remaining_minutes=600.0,
+            targets=(("fmoe_ck", 3600), ("a8w8", 3600)),
+        )
+        written = await self._written(tmp_path, {"task_id": "cap-explicit", "tuner": "a8w8"})
+        assert written["tuner"] == "a8w8"

@@ -20,7 +20,7 @@ import kernelforge.fusion.command as cli_module
 CLI_SOURCE = Path(inspect.getfile(cli_module))
 
 # Options that travel from the command down into a nested helper.
-THREADED_OPTIONS = ("server_extra", "pristine_dir", "tp", "block_size", "max_model_len")
+THREADED_OPTIONS = ("server_extra", "pristine_dir", "tp", "block_size", "max_model_len", "max_recipes")
 
 
 def _functions_missing_binding(tree: ast.Module, name: str) -> list[str]:
@@ -98,3 +98,42 @@ def test_pristine_snapshot_is_threaded_through_the_autoloop() -> None:
 
     assert any("pristine_dir" in names for names in _call_keywords("_run_fusion_autoloop"))
     assert any("pristine_dir" in names for names in _call_keywords("apply_serving_gate"))
+
+
+def test_recipe_ceiling_caps_at_the_supplied_budget() -> None:
+    """A ceiling below the discovered count is what limits the run."""
+    assert cli_module._recipe_ceiling(7, 3) == 3
+
+
+def test_recipe_ceiling_never_exceeds_what_was_discovered() -> None:
+    """A ceiling above the discovered count cannot invent recipes."""
+    assert cli_module._recipe_ceiling(2, 5) == 2
+
+
+def test_recipe_ceiling_treats_no_budget_as_uncapped() -> None:
+    """An absent ceiling leaves every discovered recipe eligible.
+
+    Zero reaches here when the session is unbounded and no lane share could be
+    derived. Reading it as a real cap would silence the lane for a whole run.
+    """
+    assert cli_module._recipe_ceiling(4, 0) == 4
+    assert cli_module._recipe_ceiling(4, -1) == 4
+
+
+def test_the_recipe_ceiling_reaches_the_loop_config() -> None:
+    """The autoloop must build LoopConfig from the ceiling, not the raw count."""
+    tree = ast.parse(CLI_SOURCE.read_text(encoding="utf-8"))
+    loop_config_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "LoopConfig"
+    ]
+    assert loop_config_calls, "LoopConfig is constructed somewhere in the CLI module"
+    ceilings = [
+        keyword.value for call in loop_config_calls for keyword in call.keywords if keyword.arg == "max_recipes"
+    ]
+    assert ceilings, "LoopConfig is given a max_recipes"
+    assert all(
+        isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "_recipe_ceiling"
+        for value in ceilings
+    )

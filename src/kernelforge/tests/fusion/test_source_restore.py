@@ -281,12 +281,17 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
 
     This is the case a refactor of the surrounding branches can silently drop --
     the restore hangs off the same condition as the export, so folding it under
-    another branch leaves the author's edits sitting in the framework.
+    another branch leaves the author's edits sitting in the framework. On the
+    multi-patch path each sibling is exported inside ``on_keep`` and the shared
+    tree is restored to base by the autoloop's ``shadow.reset_to_base()`` (a
+    git-level wipe of EVERY keeper's edits), not by the single-patch
+    ``restore_exported_changes``. The invariant this guards -- the author's edits
+    must not be left sitting in the framework -- is asserted on the file content.
     """
     root, source = _fake_framework(tmp_path)
-    restored: list[str] = []
+    baseline = source.read_text(encoding="utf-8")
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         source.write_text(
             FRAMEWORK_SOURCE.replace("import torch\n", "import torch\nFUSED = 1\n"),
             encoding="utf-8",
@@ -312,11 +317,6 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "run_fusion_loop", fake_run_fusion_loop)
     monkeypatch.setattr(cli, "_author_baseline_harness", lambda *a, **k: (True, ""))
     monkeypatch.setattr(cli, "serving_smoke", lambda *a, **k: (True, ""))
-    monkeypatch.setattr(
-        cli,
-        "restore_exported_changes",
-        lambda *a, **k: restored.append("restored"),
-    )
 
     out = tmp_path / "out"
     result = CliRunner().invoke(
@@ -336,4 +336,6 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code == 0, result.output
-    assert restored == ["restored"], "a KEPT run must put the framework back"
+    assert source.read_text(encoding="utf-8") == baseline, (
+        "a KEPT run must put the framework back (multi-patch restores via shadow reset)"
+    )

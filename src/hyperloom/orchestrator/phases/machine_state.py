@@ -82,11 +82,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
+    # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase
+    # entry, so an LLM re-issuing them per tick would bypass the lane budget and
+    # the nomination it is derived from. ``integrate`` stays -- draining the KEEP
+    # queue is still the model's job. This set is about what may be *proposed*;
+    # what counts as kernel-lane work in flight is ``KERNEL_LANE_TASK_KINDS``.
     PHASE_KERNEL_AGENT: frozenset(
         {
-            "kernel_opt",
             "integrate",
-            "gemm_tuning",
             "specialist",
             "roofline",
             "profile",
@@ -110,8 +113,36 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
 }
 
+
 # Dispatched by the Coordinator or owned by the Robustness ladder.
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+
+
+# Task kinds that mean the KERNEL lane is busy, which is a wider question than
+# what a model may propose: a Coordinator-owned lane is dispatched without ever
+# being proposable, and its task occupies the phase just the same. Kept separate
+# from PHASE_ALLOWED_ACTIONS because the idle guard once shared that set and a
+# running kernel_opt went invisible the moment the action stopped being
+# model-requestable.
+KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
+    {
+        "kernel_opt",
+        "gemm_tuning",
+    }
+)
+
+
+def _action_in_phase_map(action_name: str, phase: str, mapping: dict[str, frozenset[str]]) -> bool:
+    """Return True iff stripped ``action_name`` is a member of ``mapping[phase]`` (unknown phase → deny)."""
+    actions = mapping.get((phase or "").strip().upper())
+    if actions is None:
+        return False
+    return (action_name or "").strip() in actions
+
+
+def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
+    return _action_in_phase_map(action_name, phase, PHASE_ALLOWED_ACTIONS)
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
@@ -1863,6 +1894,36 @@ def collective_integration_pending(state: Any) -> bool:
     return kept and cleanup != "complete"
 
 
+def kernel_auto_pass_complete(state: Any) -> bool:
+    """Whether a nomination pass already ran to completion this macro cycle.
+
+    Stored with the cycle it belongs to rather than as a bare flag, so entering
+    the next cycle retires it without anyone having to remember to clear it.
+
+    Args:
+        state: Shared state carrying the marker and the current cycle.
+
+    Returns:
+        True when this cycle's pass is done.
+    """
+    marker = getattr(state, "kernel_auto_pass_cycle", None)
+    if marker is None:
+        return False
+    try:
+        return int(marker) == int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def mark_kernel_auto_pass_complete(state: Any) -> None:
+    """Record that this cycle's nomination pass reached a verdict.
+
+    Fired for an empty selection too, since "nothing was worth taking" is a
+    verdict; callers gate this on a readable result, never on a failure.
+    """
+    state.kernel_auto_pass_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+
+
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
@@ -1905,13 +1966,19 @@ def kernel_work_pending(state: Any) -> bool:
         # Optional capability probe; treat a failure as 'not available'.
         pass
 
-    try:
-        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-        if callable(untried_hot) and bool(untried_hot()):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    # A kernel a nominator looked at and passed over leaves no ledger row, is
+    # not rejected, and shares no source with anything integrated -- so it stays
+    # "untried" forever and this predicate never goes quiet. Once a pass has run
+    # to completion for the cycle, its verdict is what counts: a still-untried
+    # kernel means nobody wants it, not that work is outstanding.
+    if not kernel_auto_pass_complete(state):
+        try:
+            untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+            if callable(untried_hot) and bool(untried_hot()):
+                return True
+        except Exception:
+            # Optional capability probe; treat a failure as 'not available'.
+            pass
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
     integrated_entries: list[dict[str, Any]] = []

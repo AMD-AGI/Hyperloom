@@ -355,7 +355,7 @@ def test_non_routable_kernel_opt_skip_rejects_canonical_id() -> None:
         {
             "status": "skipped",
             "decision": "REVERT",
-            "error_class": "missing_native_source",
+            "error_class": "non_reusable_kernel",
             "reason": "non_routable_candidate",
             "kernel_id": "k001",
             "requested_kernel_id": "kn001",
@@ -364,7 +364,7 @@ def test_non_routable_kernel_opt_skip_rejects_canonical_id() -> None:
             "verification": {"micro_speedup": 0.0, "best_artifact_path": ""},
             "proposal": {
                 "decision": "REVERT",
-                "reasons": ["source file not resolved"],
+                "reasons": ["candidate is not a reusable native kernel"],
             },
         }
     )
@@ -374,3 +374,96 @@ def test_non_routable_kernel_opt_skip_rejects_canonical_id() -> None:
     assert entry["last_decision"] == "REVERT"
     assert entry["last_status"] == "skipped"
     assert entry["rejected_reason"] == "revert_decision"
+
+
+def test_the_tool_reports_an_unresolved_source_without_a_decision() -> None:
+    """The producer half of the contract the ledger reads."""
+    from hyperloom.agents.kernel.tools.kernel_optimization import non_routable_verdict
+
+    assert non_routable_verdict({"reusable_native_kernel": True, "source_file": ""}) == (
+        "unresolved_source",
+        "missing_native_source",
+        "",
+    )
+
+
+def test_the_tool_still_reverts_a_kernel_that_is_not_reusable() -> None:
+    """A rewritable-but-refused kernel was judged, so it keeps its verdict."""
+    from hyperloom.agents.kernel.tools.kernel_optimization import non_routable_verdict
+
+    assert non_routable_verdict({"reusable_native_kernel": False, "source_file": "/repo/a.py"}) == (
+        "non_routable_candidate",
+        "non_reusable_kernel",
+        "REVERT",
+    )
+
+
+def test_an_unresolved_source_retires_without_a_revert_verdict() -> None:
+    """No backend saw the kernel, so the ledger must not read as a lost attempt.
+
+    It still retires: untried_hot_reusable_kernels does not require a resolved
+    source, so leaving it unretired re-selects it every cycle.
+    """
+    state = SharedState()
+    state.last_trace_analyze = {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "aten::mm",
+                "gpu_pct": 30.0,
+                "reusable_native_kernel": True,
+                "source_file": "",
+                "recommended_backends": ["forge"],
+            }
+        ]
+    }
+    state.record_kernel_opt(
+        {
+            "status": "skipped",
+            "error_class": "missing_native_source",
+            "reason": "unresolved_source",
+            "kernel_id": "k001",
+            "kernel_name": "aten::mm",
+            "verification": {"micro_speedup": 0.0, "best_artifact_path": ""},
+        }
+    )
+
+    entry = state.kernel_opt_attempts["k001"]
+    assert entry["rejected_reason"] == "unresolved_source"
+    assert entry["last_decision"] == ""
+    assert state.rejected_kernel_ids == ["k001"]
+    assert [k.get("kernel_id") for k in state.untried_hot_reusable_kernels()] == []
+
+
+def test_an_unresolved_source_is_not_counted_as_a_revert(tmp_path) -> None:
+    """The reverted count is what a reader takes as "optimization lost"."""
+    from hyperloom.orchestrator.kernel.attempt_summary import build_kernel_optimization_summary
+
+    state = SharedState()
+    state.last_trace_analyze = {
+        "hot_kernels": [
+            {
+                "kernel_id": "k001",
+                "name": "aten::mm",
+                "gpu_pct": 30.0,
+                "reusable_native_kernel": True,
+                "source_file": "",
+                "recommended_backends": ["forge"],
+            }
+        ]
+    }
+    state.record_kernel_opt(
+        {
+            "status": "skipped",
+            "error_class": "missing_native_source",
+            "reason": "unresolved_source",
+            "kernel_id": "k001",
+            "kernel_name": "aten::mm",
+            "verification": {"micro_speedup": 0.0, "best_artifact_path": ""},
+        }
+    )
+
+    summary = build_kernel_optimization_summary(state, tmp_path)
+
+    breakdown = {reason: count for reason, count in (summary.get("rejection_breakdown") or {}).items() if count}
+    assert breakdown == {"unresolved_source": 1}

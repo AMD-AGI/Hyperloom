@@ -29,6 +29,14 @@ from typing import Any
 from hyperloom.common.env import env_bool
 
 from ._recorder_trace import trace_recording_skipped
+from .patch_landing import (
+    DEFAULT_PATCH_BUDGET,
+    VERDICT_STATUSES,
+    clamp_by_budget,
+    evict_terminal,
+    patch_budget,
+    record_source_path,
+)
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
@@ -48,6 +56,12 @@ log = logging.getLogger(__name__)
 #: Collective primitives the dedicated lane can measure. Each needs an
 #: independent reference implementation in the generated driver.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
+
+#: Stack labels whose KEEP overwrote a whole kernel source file, so a queued
+#: patch on that file can no longer be measured on its own. Every reader of the
+#: same-source exclusion draws from here: writeback labels a lane's KEEP by its
+#: own name, and a label missing from this set silently re-drains a spent patch.
+INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "collective", "fusion"})
 
 #: Batch-filter skip reasons that mean no backend ever saw the kernel. Two
 #: readers depend on the same answer -- the dispatcher reports such a skip
@@ -76,6 +90,11 @@ _UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
 def unattempted_skip_reason(reason: str) -> bool:
     """Whether ``reason`` means the kernel was never handed to a backend."""
     return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
+
+
+#: A hot kernel whose source file trace analysis could not resolve. It retires
+#: like a rejection because nothing can dispatch it, but no backend judged it.
+UNRESOLVED_SOURCE_REASON = "unresolved_source"
 
 
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
@@ -260,12 +279,204 @@ def _queue_kernel_keep(
     return queue[integration_id]
 
 
+def enqueue_nominated_patch(
+    state, *, patch, lane: str = "fusion", keep_threshold_pct: float = 3.0
+) -> dict[str, Any] | None:
+    """Queue one self-nominated sibling patch for the shared integrate lane.
+
+    Two lanes land through this one queue, distinguished ONLY by whether the
+    record carries the four fusion fields:
+
+    * ``lane="fusion"`` (default -- every pre-existing caller is byte-identical):
+      stamps ``source="forge_fusion"``/``action_label="fusion"`` plus the fusion
+      env flags and keep bar. The drain re-fetches this record from state, its
+      ``source == "forge_fusion"`` gate fires, and the KEEP lifts as
+      ``action="fusion"`` -- feeding the idempotency short-circuit and the
+      remote-recipe fusion exporter.
+    * ``lane="rewrite"`` (the auto-nomination rewrite path): OMITS all four
+      fields. The same gate is then False, so the KEEP lifts as the generic
+      ``action="integrate"`` -- landing in the rewrite Recipe column and staying
+      clear of both fusion consumers. Verified end-to-end: the lane label is
+      never itself read downstream; only the presence of ``source`` decides.
+
+    The fusion lane used to integrate inline (apply + e2e re-baseline + KEEP)
+    right where the run finished. Under the nomination contract each kept recipe
+    is instead written here as one ``status="pending"`` record and drained by the
+    SWEEP-entry integrate loop, so the same-file collapse, cross-file
+    independence, and patch budget the rewrite/gemm lanes already get
+    (``pending_kernel_integration_records``) apply to fusion siblings too.
+
+    Three fusion-specific facts ride on the record because the generic drain and
+    writeback cannot infer them:
+
+    * ``fusion_env_flags`` -- the fused path is env-gated; unset, the patch is the
+      eager path, so ``_fill_integrate_defaults_from_state`` merges these into the
+      re-baseline server's envs or a real win is measured un-fused and REVERTED.
+    * ``keep_threshold_pct`` -- fusion keeps its own e2e bar (default 3.0%),
+      distinct from the generic integrate default, so the KEEP/REVERT verdict is
+      unchanged from the pre-contract inline path.
+    * ``action_label="fusion"`` -- the promoted stack row must read ``fusion`` (not
+      ``integrate``) or the idempotency short-circuit and the remote-recipe fusion
+      export both go blind; ``last_fusion_integrate`` is set off the same signal.
+
+    Eviction-safe: a distinct ``integration_id`` at ``status="pending"`` survives
+    ``_ensure_kernel_task_state`` (evict_terminal keeps non-terminal records; the
+    re-queue loop only ADDS). Idempotent on ``(source_file, artifact_path)``.
+
+    The fusion workspace path is a constant, so a re-discovered recipe collapses
+    onto its own earlier record. A ``dispatch_failed`` one is revived for another
+    attempt -- the drain crashed, the patch never got a verdict. A record already
+    ``integrated`` or ``rejected`` is left exactly as it is: reviving a verdict to
+    pending misreports it and, since evict_terminal only reaps terminal records,
+    would keep it in the queue forever.
+
+    Args:
+        state: SharedState (mutated in place).
+        patch: A ``NominatedPatch`` (duck-typed) from ``parse_outcome``.
+        keep_threshold_pct: The fusion-specific e2e KEEP bar to carry.
+
+    Returns:
+        The queued record, or ``None`` when the patch has no artifact to apply or
+        its record already carries a verdict.
+    """
+    if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
+        state.pending_kernel_integrations = {}
+    kernel_name = str(getattr(patch, "kernel_name", "") or "").strip()
+    artifact_path = str(getattr(patch, "patch_path", "") or "").strip()
+    source_file = str(getattr(patch, "target_file", "") or "").strip()
+    if not artifact_path or not source_file:
+        # Nothing to apply / no same-source key to collapse on: refusing to queue
+        # keeps a malformed sibling off the serial lane rather than dispatching a
+        # patch that can only fail the apply gate.
+        return None
+    env_flag = str(getattr(patch, "env_flag", "") or "").strip()
+    fusion_env_flags = {flag: "1" for flag in env_flag.split() if flag}
+    try:
+        micro_speedup = float(getattr(patch, "micro_speedup", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        micro_speedup = 0.0
+    queue = state.pending_kernel_integrations
+    existing_integration_id = next(
+        (
+            candidate_id
+            for candidate_id, candidate in queue.items()
+            if isinstance(candidate, dict)
+            and str(candidate.get("source_file") or "") == source_file
+            and str(candidate.get("artifact_path") or "") == artifact_path
+        ),
+        "",
+    )
+    # Each lane owns its own task_key / kernel_id namespace so the two lanes get
+    # distinct integration_ids and distinct kernel-rejection identities; the
+    # prefix is a state key only -- no consumer reads it (they gate on the
+    # ``source`` field), so it cannot mis-route.
+    lane_prefix = "forge_fusion" if lane == "fusion" else "forge_rewrite"
+    task_key = f"{lane_prefix}:{kernel_name}" if kernel_name else f"{lane_prefix}:{source_file}"
+    integration_id = existing_integration_id or _kernel_integration_id(
+        task_key=task_key,
+        source_file=source_file,
+        artifact_path=artifact_path,
+        artifact_bundle={},
+    )
+    record = {
+        "integration_id": integration_id,
+        "task_key": task_key,
+        "task_group_key": "",
+        "identity_route": "",
+        "legacy_task_group_keys": [],
+        "kernel_id": kernel_name or lane_prefix,
+        "source_file": source_file,
+        "artifact_path": artifact_path,
+        "artifact_bundle": {},
+        "snapshot_dir": str(getattr(patch, "snapshot_dir", "") or ""),
+        "deploy_patch_path": artifact_path,
+        "deploy_repo_root": str(getattr(patch, "kernel_repo", "") or ""),
+        "base_commit": str(getattr(patch, "base_commit", "") or ""),
+        "micro_speedup": micro_speedup,
+        "optimization_decision": "KEEP",
+        "trace_gpu_pct": 0.0,
+        "created_at": _now_iso(),
+        "status": "pending",
+        "correctness_source": "",
+        "artifact_kind": "",
+        "integration_validation_status": "",
+        "framework_applyback": {},
+    }
+    if lane == "fusion":
+        # Fusion-only: the generic drain / writeback read these back to lift the
+        # KEEP as action="fusion". Omitting them on the rewrite lane is exactly
+        # what makes that lane land as the generic action="integrate".
+        record["source"] = "forge_fusion"
+        record["action_label"] = "fusion"
+        record["fusion_env_flags"] = fusion_env_flags
+        record["keep_threshold_pct"] = float(keep_threshold_pct)
+    elif fusion_env_flags:
+        # Rewrite lane deliberately drops the env flags (it lands as the generic
+        # action="integrate", which does not carry them into the re-baseline). A
+        # rewrite patch is expected to be self-activating (an in-source edit); if
+        # forge ever emits an env-GATED rewrite, the drain would re-bench the
+        # un-activated eager path and REVERT a genuine win. Surface that here so
+        # the contract violation is visible rather than a silent regression.
+        log.warning(
+            "nomination rewrite patch %s carries env_flag %r; rewrite lane cannot "
+            "activate it and the KEEP re-baseline will run the un-gated path",
+            kernel_name or source_file,
+            env_flag,
+        )
+    if integration_id not in queue:
+        queue[integration_id] = record
+    else:
+        # Re-enqueue of the same sibling: refresh the mutable fields (the patch
+        # snapshot identity is immutable) so a re-run's env/threshold win. The
+        # fusion-specific fields are re-stamped ONLY on the fusion lane, or a
+        # rewrite re-enqueue would resurrect fusion identity onto its record.
+        queued = queue[integration_id]
+        if isinstance(queued, dict):
+            if str(queued.get("status") or "") in VERDICT_STATUSES:
+                # A settled verdict is not re-litigated: reviving it to pending
+                # both misreports it and puts it beyond evict_terminal's reach.
+                log.info(
+                    "nomination re-offers %s patch %s (%s); keeping the verdict, not re-queueing",
+                    queued.get("status"),
+                    kernel_name or source_file,
+                    artifact_path,
+                )
+                return None
+            queued["status"] = "pending"
+            queued["micro_speedup"] = micro_speedup
+            if lane == "fusion":
+                queued["fusion_env_flags"] = fusion_env_flags
+                queued["keep_threshold_pct"] = float(keep_threshold_pct)
+                queued["source"] = "forge_fusion"
+                queued["action_label"] = "fusion"
+    return queue[integration_id]
+
+
+def _patch_budget_for(state) -> int:
+    """How many sibling patches one round may land, env-overridable.
+
+    ``HL_KERNEL_PATCH_BUDGET`` lets an operator widen or narrow the ceiling; the
+    default is the module constant. Kept here so both the eviction cap and the
+    pending-record clamp read one number.
+    """
+    return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"), default=DEFAULT_PATCH_BUDGET)
+
+
 def _ensure_kernel_task_state(state) -> None:
     """Initialise the stable ledger and re-queue the KEEPs recorded in it."""
     if not isinstance(getattr(state, "kernel_opt_task_attempts", None), dict):
         state.kernel_opt_task_attempts = {}
     if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
         state.pending_kernel_integrations = {}
+    # The queue's only deletion point. Terminal records (integrated / rejected /
+    # dispatch-failed) were once only status-flipped and never removed, so the
+    # dict grew every round and was rescanned in full each time. Reap them here,
+    # keeping a bounded tail for triage, before the re-queue below repopulates
+    # the live KEEPs.
+    state.pending_kernel_integrations = evict_terminal(
+        state.pending_kernel_integrations,
+        budget=_patch_budget_for(state),
+    )
     for task_key, stable_entry in state.kernel_opt_task_attempts.items():
         if not isinstance(stable_entry, dict):
             continue
@@ -284,7 +495,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
+        if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
     attempted_entries = [
         entry
@@ -301,7 +512,10 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         task_group_key = str(record.get("task_group_key") or "")
         task_group_aliases = {str(alias) for alias in (record.get("legacy_task_group_keys") or []) if str(alias)}
         kernel_id = str(record.get("kernel_id") or "")
-        source_file = str(record.get("source_file") or "")
+        # One spelling on both sides: the integrated-stack scan below writes
+        # ``target_file or source_file`` too, so reading only ``source_file``
+        # here would let a same-source sibling slip past the exclusion.
+        source_file = record_source_path(record)
         artifact_path = str(record.get("artifact_path") or "")
         stable_entry = state.kernel_opt_task_attempts.get(str(record.get("task_key") or "")) or {}
         if kernel_id in set(state.rejected_kernel_ids or []) and (
@@ -329,7 +543,10 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
                 source_file=source_file,
                 task_group_aliases=task_group_aliases,
             )
-            and (not artifact_path or str(attempted.get("patch_path") or "") in {"", artifact_path})
+            # Match only on a real patch_path: an attempted entry with a blank
+            # patch_path used to match {"", artifact_path}, so one empty-path
+            # attempt dropped the whole sibling family from the pending list.
+            and (not artifact_path or str(attempted.get("patch_path") or "") == artifact_path)
             for attempted in attempted_entries
         ):
             continue
@@ -346,16 +563,27 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
         record["integration_id"] = str(record.get("integration_id") or integration_id)
         candidates.append((impact, micro, integration_id, record))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    # Collapse only genuine same-source siblings: two whole-file overwrites of one
+    # file cannot both land, so the strongest wins. Siblings on *different* files
+    # are kept -- that is the whole point of a batch. The source key is read the
+    # same way it is written (target_file or source_file), so a record whose path
+    # lives under target_file is no longer mistaken for source-less.
     claimed_sources: set[str] = set()
-    result: list[dict[str, Any]] = []
+    deduped: list[dict[str, Any]] = []
     for _impact, _micro, _integration_id, record in candidates:
-        source_file = str(record.get("source_file") or "")
+        source_file = record_source_path(record)
         if source_file and source_file in claimed_sources:
             continue
         if source_file:
             claimed_sources.add(source_file)
-        result.append(record)
-    return result
+        deduped.append(record)
+    # Cap how many siblings dispatch this round. The overflow is deferred, not
+    # dropped: it stays pending (its queue record is untouched) and is
+    # reconsidered next macro cycle, because a patch below this round's cut may
+    # clear the next round's. The integrate lane is serial, so this ceiling is a
+    # wall-clock guard, not a preference.
+    fit, _deferred = clamp_by_budget(deduped, _patch_budget_for(state))
+    return fit
 
 
 def _vendor_playbook_id_from_result(result: dict[str, Any]) -> str:
@@ -399,7 +627,18 @@ def _resolve_kernel_patch_identity(
     payload = payload or {}
     kernel_id = str(payload.get("kernel_id") or "")
     patch_path = str(payload.get("patch_path") or payload.get("best_artifact_path") or "")
-    if not patch_path and kernel_id and str((state.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id:
+    # The last_kernel_opt back-fill is a single-patch convenience: it lends the
+    # one just-optimized patch to a result that omitted its own path. A batch
+    # sibling carries an integration_id and must never borrow it -- last_kernel_opt
+    # holds whichever sibling finished most recently, so borrowing would key this
+    # result under another sibling's identity. When a sibling omits its path it
+    # is resolved from its own pending record, not from here.
+    if (
+        not patch_path
+        and kernel_id
+        and not str(payload.get("integration_id") or "")
+        and str((state.last_kernel_opt or {}).get("kernel_id") or "") == kernel_id
+    ):
         patch_path = str(
             (state.last_kernel_opt or {}).get("best_artifact_path")
             or (state.last_kernel_opt or {}).get("patch_path")
@@ -519,6 +758,23 @@ def record_kernel_integrate_result(
 
     if not isinstance(result, dict):
         return None
+    # Bind the result to its queued record first, by integration_id alone. An
+    # integration_id is now required: the old fallback grabbed the first sibling
+    # matching only the kernel name and accepted an empty artifact_path, which
+    # could stamp integrated/rejected onto the wrong member of a batch. Every
+    # auto-dispatched integrate carries its integration_id (the drain and
+    # auto-enqueue drivers both pass it), and the LLM path that once dispatched by
+    # bare kernel_id is now closed, so the fallback has no legitimate caller left.
+    integration_id = str(result.get("integration_id") or "")
+    pending_record = (state.pending_kernel_integrations or {}).get(integration_id) if integration_id else None
+    if isinstance(pending_record, dict):
+        # A sibling result may omit its own patch path -- resolve it from the
+        # bound record rather than from last_kernel_opt, which would borrow a
+        # different sibling's identity and key the ledger wrong.
+        if not str(result.get("patch_path") or result.get("best_artifact_path") or ""):
+            result = {**result, "patch_path": str(pending_record.get("artifact_path") or "")}
+        if not str(result.get("target_file") or result.get("source_file") or ""):
+            result = {**result, "target_file": record_source_path(pending_record)}
     key = kernel_patch_key(state, result)
     if not key:
         return None
@@ -526,21 +782,6 @@ def record_kernel_integrate_result(
     task_group_key = str(
         result.get("task_group_key") or (_entry_by_kernel_id(state, kernel_id) or {}).get("task_group_key") or ""
     )
-    integration_id = str(result.get("integration_id") or "")
-    pending_record = (state.pending_kernel_integrations or {}).get(integration_id) if integration_id else None
-    if not isinstance(pending_record, dict):
-        pending_record = next(
-            (
-                record
-                for record in (state.pending_kernel_integrations or {}).values()
-                if isinstance(record, dict)
-                and str(record.get("kernel_id") or "") == kernel_id
-                and (not target_file or str(record.get("source_file") or "") in {"", target_file})
-                and str(record.get("artifact_path") or "") in {"", patch_path}
-                and (not task_group_key or str(record.get("task_group_key") or "") == task_group_key)
-            ),
-            None,
-        )
     if isinstance(pending_record, dict):
         integration_id = str(pending_record.get("integration_id") or integration_id)
     identity_route = str(
@@ -1090,17 +1331,30 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         if _impact_pct >= _min_gpu:
             infra_failure_cap = max(max_failures, _infra_max)
 
+    # Retires without a verdict: leaving it dispatchable would re-select it every
+    # cycle, since untried_hot_reusable_kernels does not require a resolved source.
+    unresolved_source = str(result.get("reason") or "") == UNRESOLVED_SOURCE_REASON
     should_reject = (
         decision == "REVERT"
+        or unresolved_source
         or int(entry.get("partial_count", 0)) >= max_partial
         or int(entry.get("failure_count", 0)) >= infra_failure_cap
     )
     if should_reject:
-        if kernel_id not in state.rejected_kernel_ids:
+        # A grouped task's members must stay out of ``rejected_kernel_ids`` --
+        # the ids are synthetic per trace and one member's REVERT would blacklist
+        # the shared kernel name, tombstoning its siblings by association. The
+        # integrate path already exempts grouped tasks (see
+        # record_kernel_integrate_result); the kernel-opt REVERT did not, which
+        # was the real sibling guilt-by-association risk. The task-level
+        # rejected_reason below remains the terminal fact for grouped tasks.
+        if kernel_id and not task_group_key and kernel_id not in state.rejected_kernel_ids:
             state.rejected_kernel_ids.append(kernel_id)
         entry["rejected_reason"] = (
             "revert_decision"
             if decision == "REVERT"
+            else UNRESOLVED_SOURCE_REASON
+            if unresolved_source
             else (
                 f"max_partial_attempts_{max_partial}_without_keep"
                 if int(entry.get("partial_count", 0)) >= max_partial
@@ -1195,13 +1449,13 @@ def _kernel_ids_in_optimization_stack(state) -> set[str]:
 
     Returns:
         set[str]: The set of ``kernel_id`` values that appear on an
-            ``integrate`` or ``collective`` entry of
+            :data:`INTEGRATING_STACK_ACTIONS` entry of
             :attr:`optimization_stack`.
     """
     return {
         str(e.get("kernel_id"))
         for e in (state.optimization_stack or [])
-        if isinstance(e, dict) and e.get("action") in {"integrate", "collective"} and e.get("kernel_id")
+        if isinstance(e, dict) and e.get("action") in INTEGRATING_STACK_ACTIONS and e.get("kernel_id")
     }
 
 
@@ -1210,14 +1464,14 @@ def _source_files_in_optimization_stack(state) -> set[str]:
 
     Returns:
         set[str]: The set of ``target_file`` / ``source_file`` paths
-            referenced by ``integrate`` or ``collective`` entries of
+            referenced by :data:`INTEGRATING_STACK_ACTIONS` entries of
             :attr:`optimization_stack`.
     """
     sources: set[str] = set()
     for e in state.optimization_stack or []:
-        if not isinstance(e, dict) or e.get("action") not in {"integrate", "collective"}:
+        if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
             continue
-        src = str(e.get("target_file") or e.get("source_file") or "")
+        src = record_source_path(e)
         if src:
             sources.add(src)
     return sources
@@ -1238,7 +1492,7 @@ def _record_matches_task(
         return recorded_key in accepted_keys
     if str(record.get("kernel_id") or "") != kernel_id:
         return False
-    recorded_source = str(record.get("target_file") or record.get("source_file") or "")
+    recorded_source = record_source_path(record)
     if source_file and recorded_source:
         return source_file == recorded_source
     return True
@@ -1495,7 +1749,7 @@ def untried_hot_reusable_kernels(
     integrated_entries = [
         entry
         for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
+        if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)

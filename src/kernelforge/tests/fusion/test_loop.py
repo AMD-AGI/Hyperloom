@@ -56,8 +56,14 @@ class _ScriptedCampaign:
         return result
 
 
-class TestEarlyExit:
-    def test_stops_at_the_first_recipe_that_keeps(self, tmp_path):
+class TestNoEarlyExit:
+    """Under the nomination contract every kept recipe is an independent sibling,
+    so the loop runs the whole recipe budget instead of stopping at the first
+    keeper. The strongest keeper is still reported through ``best``/``best_recipe``
+    for the combine-path callers that ignore ``patches``."""
+
+    def test_runs_every_recipe_even_after_a_keep(self, tmp_path):
+        # Two recipes both keep; the loop must attempt BOTH, not stop at #1.
         campaign = _ScriptedCampaign([_vr(kept=True, speedup=1.2, note="KEPT")])
         res = run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="LFM2_FUSED_SWIGLU")],
@@ -66,11 +72,94 @@ class TestEarlyExit:
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert res.kept is True
-        assert res.best.kernel_speedup == 1.2
-        assert res.best_recipe.pattern_id == "residual_add_rmsnorm"
         assert res.termination_reason == "kept"
-        assert len(res.history) == 1
-        assert len(campaign.calls) == 1
+        assert len(res.history) == 2
+        assert len(campaign.calls) == 2
+
+    def test_strongest_keeper_is_reported_best(self, tmp_path):
+        # Recipe #1 keeps at 1.2x, recipe #2 keeps at 1.5x -> best is #2.
+        campaign = _ScriptedCampaign(
+            [
+                _vr(kept=True, speedup=1.2, note="KEPT"),
+                _vr(kept=True, speedup=1.5, note="KEPT"),
+            ]
+        )
+        res = run_fusion_loop(
+            [_recipe(), _recipe(pattern_id="swiglu", env_flag="LFM2_FUSED_SWIGLU")],
+            framework="sglang",
+            campaign_fn=campaign,
+            config=LoopConfig(output_dir=str(tmp_path)),
+        )
+        assert res.kept is True
+        assert res.best.kernel_speedup == 1.5
+        assert res.best_recipe.pattern_id == "swiglu"
+
+    def test_on_keep_collects_one_patch_per_keeper_strongest_first(self, tmp_path):
+        from kernelforge.fusion.loop import RecipePatch
+
+        # #1 keeps 1.2x on file A, #2 fails, #3 keeps 1.5x on file B.
+        campaign = _ScriptedCampaign(
+            [
+                _vr(kept=True, speedup=1.2, note="KEPT"),
+                _vr(correct=True, kept=False, speedup=1.0, note="not fast"),
+                _vr(kept=True, speedup=1.5, note="KEPT"),
+            ]
+        )
+        exported: list[str] = []
+
+        def on_keep(recipe, vr):
+            exported.append(recipe.pattern_id)
+            return RecipePatch(
+                kernel_name=recipe.pattern_id,
+                patch_path=f"/out/{recipe.pattern_id}.patch",
+                source_file=recipe.source_file,
+                micro_speedup=vr.kernel_speedup,
+            )
+
+        res = run_fusion_loop(
+            [
+                _recipe(pattern_id="p1", env_flag="F1", source_file="/sgl/a.py"),
+                _recipe(pattern_id="p2", env_flag="F2", source_file="/sgl/b.py"),
+                _recipe(pattern_id="p3", env_flag="F3", source_file="/sgl/c.py"),
+            ],
+            framework="sglang",
+            campaign_fn=campaign,
+            config=LoopConfig(max_recipes=3, output_dir=str(tmp_path)),
+            on_keep=on_keep,
+        )
+        # on_keep fired only for the two keepers, in loop order.
+        assert exported == ["p1", "p3"]
+        # patches[] ordered strongest-first: p3 (1.5x) before p1 (1.2x).
+        assert [p.kernel_name for p in res.patches] == ["p3", "p1"]
+        assert [p.micro_speedup for p in res.patches] == [1.5, 1.2]
+
+    def test_on_keep_returning_none_drops_that_keeper_without_aborting(self, tmp_path):
+        campaign = _ScriptedCampaign([_vr(kept=True, speedup=1.2, note="KEPT")])
+
+        def on_keep(recipe, vr):
+            return None  # caller could not export this sibling.
+
+        res = run_fusion_loop(
+            [_recipe(), _recipe(pattern_id="swiglu", env_flag="F2")],
+            framework="sglang",
+            campaign_fn=campaign,
+            config=LoopConfig(output_dir=str(tmp_path)),
+            on_keep=on_keep,
+        )
+        assert res.kept is True
+        assert res.patches == []
+
+    def test_combine_path_without_on_keep_reports_best_and_no_patches(self, tmp_path):
+        campaign = _ScriptedCampaign([_vr(kept=True, speedup=1.2, note="KEPT")])
+        res = run_fusion_loop(
+            [_recipe()],
+            framework="sglang",
+            campaign_fn=campaign,
+            config=LoopConfig(output_dir=str(tmp_path)),
+        )
+        assert res.kept is True
+        assert res.best_recipe.pattern_id == "residual_add_rmsnorm"
+        assert res.patches == []
 
 
 class TestExperienceInjection:

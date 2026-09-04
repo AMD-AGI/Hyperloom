@@ -171,6 +171,61 @@ def test_gate_orchestration_propose_action_ok(gate):
     )
 
 
+@pytest.mark.parametrize("precision", ["bf16", "fp8"])
+@pytest.mark.parametrize("backend_order", [None, "forge"])
+def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
+    """Refused by channel, not by applicability.
+
+    The lane is dispatched once at KERNEL entry from a lane budget, so a
+    per-tick re-issue would spend time the allocation never granted. Precision
+    and backend order are still not pre-filtered -- the reason is the same for
+    every combination of them, which is what the parametrization pins.
+    """
+    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+    if backend_order:
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
+    state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
+            ),
+        )
+    assert exc.value.rule == "request_kind"
+
+
+def test_gate_refuses_a_model_requested_kernel_optimization(monkeypatch):
+    """Same reason as gemm tuning: the Coordinator owns the dispatch."""
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "run_optimization", "params": {}},
+            ),
+        )
+    assert exc.value.rule == "request_kind"
+
+
+def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
+    """Closing the lanes must not close integrate; draining KEEPs stays its job."""
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.REQUEST,
+            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"kernel_id": "k1"}},
+        ),
+    )
+
+
 def test_gate_orchestration_delegate_normal_action_ok(gate):
     gate.validate_intent(
         "orchestration",

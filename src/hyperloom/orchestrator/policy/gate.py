@@ -139,6 +139,11 @@ SPECIALIST_ACTION_NAME: str = "specialist"
 # Orchestrator-side patch integration step (gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
+# GEMM tuning action; the hook that guards it is called for every action, so it
+# needs its own name to answer only for itself.
+GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
+
+
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
@@ -1094,9 +1099,10 @@ class PolicyGate:
                 f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable",
                 rule="request_kind",
                 hint=(
-                    "the lane runs at KERNEL entry once its own gate passes and "
-                    "reports as run_collective_done / run_fusion_done; request "
-                    "run_optimization for a source-level kernel instead."
+                    "the lane runs at KERNEL entry once its own gate passes, "
+                    "targeted from the nomination and bounded by the lane budget; "
+                    "its outcome arrives as <kind>_done. Wait for that event and "
+                    "`integrate` the KEEPs it queues."
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
@@ -1208,12 +1214,13 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Do not pre-filter GEMM tuning applicability in Hyperloom.
+        """Refuse a model-proposed GEMM tuning run; the Coordinator owns the lane.
 
-        Current GEAK owns its optimization loop and decides internally whether
-        GEMM tuning applies to the workload.  Hyperloom keeps this hook as a
-        named policy boundary but deliberately does not reject by precision,
-        framework, or GEMM type.
+        Applicability is still not pre-filtered here -- the producer decides
+        internally whether tuning applies to the workload. What this now refuses
+        is the *channel*: the lane is dispatched once at phase entry from a lane
+        budget, so a per-tick re-issue would spend time the allocation never
+        granted. Mirrors how the fusion and collective lanes are already closed.
 
         Args:
             action_name (str): the action name being checked.
@@ -1221,9 +1228,21 @@ class PolicyGate:
                 error hint.
 
         Raises:
-            PolicyDenied: This hook does not currently raise.
+            PolicyDenied: When ``action_name`` is the GEMM tuning action.
         """
-        return
+        # Called unconditionally for every action, so it must answer only for
+        # its own; it used to never raise, which hid that.
+        if action_name != GEMM_TUNING_ACTION_NAME:
+            return
+        raise PolicyDenied(
+            f"{action_name!r} is a Coordinator-owned kernel lane and not model-requestable ({intent_kind})",
+            rule="phase_incompatible",
+            hint=(
+                "GEMM tuning is dispatched by the Coordinator at KERNEL entry once its "
+                "deterministic gate passes; it draws on a lane budget rather than a "
+                "per-request one, so it cannot be re-issued per tick."
+            ),
+        )
 
     # R5 — tool_whitelist_role
     def _validate_tool_whitelist_collision(

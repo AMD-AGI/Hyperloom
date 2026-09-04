@@ -308,6 +308,12 @@ def gemm_tune():
     help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.",
 )
 @click.option("--tuner", default="", help="Force a specific tuner (skip routing)")
+@click.option(
+    "--max-tuners",
+    default=0,
+    type=int,
+    help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
+)
 @click.option("--untuned-csv", default="", help="Input untuned CSV for dense aiter tuners")
 @click.option(
     "--moe-untuned-csv",
@@ -350,6 +356,7 @@ def run(
     global_timeout: int,
     thorough: bool,
     tuner: str,
+    max_tuners: int,
     untuned_csv: str,
     moe_untuned_csv: str,
     shapes_json: str,
@@ -369,6 +376,7 @@ def run(
     from .utils import check_gpu_status, emit_result_json
     from .tuners.base import TuneContext
     from .report import build_report, write_report
+    from .candidates import is_candidate
 
     output_path = Path(output_dir)
     _setup_logging(output_path, verbose)
@@ -541,6 +549,16 @@ def run(
             emit_result_json(report_dict)
             raise SystemExit(2)
 
+    # Cut the routed set to what the caller's share pays for, in priority order
+    # so the dropped ones rank last. 0 means no ceiling was supplied.
+    if max_tuners > 0 and len(tuner_specs) > max_tuners:
+        log.info(
+            "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
+            max_tuners,
+            ", ".join(spec.name for spec in tuner_specs[max_tuners:]),
+        )
+        tuner_specs = tuner_specs[:max_tuners]
+
     # Write plan
     plan = {
         "model_path": model_path,
@@ -619,6 +637,17 @@ def run(
         if not spec.should_run:
             skipped.append((spec.name, spec.skip_reason or "unknown"))
             log.info("SKIP %s: %s", spec.name, spec.skip_reason)
+            continue
+
+        # A fallback tuner runs only when no earlier non-fallback tuner produced
+        # a deployable candidate. This is the fp8-barren -> bf16-dense retry that
+        # used to be a second subprocess: selected up front, executed here only
+        # when the fp8 tuning came back empty, so a winning fp8 run never spends
+        # budget on it. Ordered last by priority, so ``results`` is complete for
+        # the non-fallback tuners by the time this is checked.
+        if spec.fallback and any(is_candidate(r) for r in results):
+            skipped.append((spec.name, "fallback not needed: an earlier tuner produced a candidate"))
+            log.info("SKIP %s: an earlier tuner already produced a candidate", spec.name)
             continue
 
         # Check global timeout
@@ -849,10 +878,12 @@ def plan(
     click.echo(f"\nTuners ({len(tuner_specs)}):")
 
     for spec in tuner_specs:
-        if spec.should_run:
-            click.echo(f"  [RUN]  {spec.name}")
-        else:
+        if not spec.should_run:
             click.echo(f"  [SKIP] {spec.name}: {spec.skip_reason}")
+        elif spec.fallback:
+            click.echo(f"  [FALLBACK] {spec.name}: runs only if no earlier tuner produces a candidate")
+        else:
+            click.echo(f"  [RUN]  {spec.name}")
 
 
 def _tuner_registry() -> dict:

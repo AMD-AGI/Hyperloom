@@ -4223,14 +4223,15 @@ def test_default_kernel_batch_parallel_matches_full_node():
 
 
 @pytest.mark.asyncio
-async def test_coordinator_injects_candidates_path_for_run_optimization(
+async def test_coordinator_refuses_a_model_issued_run_optimization(
     session_dir,
 ):
-    """When the LLM emits ``run_optimization`` without ``candidates_path``,
-    the Coordinator must pull it from ``state.last_trace_analyze`` and
-    inject it into the handler payload so ``_run_optimization_batch``
-    fires instead of silently collapsing to ``_run_optimization_single``
-    (which would waste 7 idle GPUs on an 8-GPU node)."""
+    """The lane is Coordinator-owned, so the request never reaches its handler.
+
+    It used to arrive from the model and have ``candidates_path`` back-filled
+    from state. Dispatch now happens once at phase entry from a nomination and a
+    lane budget, so a per-tick re-issue is refused rather than topped up: it
+    would spend time the allocation never granted."""
     c = Coordinator(session_dir, backends=_backends_silent())
     # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
     # last_profile_trace set; simulate the post-baseline + post-profile state.
@@ -4271,7 +4272,7 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
                     },
                 ),
             )
-            assert captured["payload"].get("candidates_path") == explicit
+            assert "payload" not in captured, "a Coordinator-owned lane must not reach its handler from the model"
         finally:
             await c.stop()
 
@@ -4789,7 +4790,9 @@ def test_batch_candidates_skips_in_flight_kernels(
             {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
         ]
     )
-    # Plant a running status file for k004.
+    # Plant a running status file for k004. The pid must be a live one: the
+    # marker is only honored while its process is, so a fabricated pid would
+    # describe a dead run and correctly free the kernel.
     status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
     status_dir.mkdir(parents=True, exist_ok=True)
     (status_dir / "ko-deadbeef.json").write_text(
@@ -4797,7 +4800,7 @@ def test_batch_candidates_skips_in_flight_kernels(
             {
                 "state": "running",
                 "current_step": "run_backends",
-                "pid": 123456,
+                "pid": os.getpid(),
                 "last_lines": ["kernel_id=k004", "selected_backends=forge"],
             }
         )
@@ -4809,6 +4812,38 @@ def test_batch_candidates_skips_in_flight_kernels(
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert out_ids == ["k001"]
+
+
+def test_batch_candidates_ignore_a_stale_in_flight_marker(
+    session_dir,
+    _candidates_factory,
+):
+    """A signal-killed run leaves its marker behind; its kernel must stay eligible."""
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+        ]
+    )
+    status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    (status_dir / "ko-deadbeef.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "current_step": "run_backends",
+                # A pid that cannot exist: the process is provably gone.
+                "pid": 2**31 - 1,
+                "last_lines": ["kernel_id=k004", "selected_backends=forge"],
+            }
+        )
+    )
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath},
+        session_dir=session_dir,
+    )
+    assert sorted(c.get("kernel_id") for c in out) == ["k001", "k004"]
 
 
 def test_batch_candidates_below_min_gpu_pct_skipped(
