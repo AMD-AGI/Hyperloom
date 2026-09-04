@@ -207,11 +207,14 @@ def make_entry(
         "confidence": confidence,
         "reason": str(reason or ""),
         "rejected_value": str(rejected_value or ""),
-        # Derived from the caller's verdict when not supplied, so an entry is
-        # never written without a class a consumer can act on.
+        # Derived from ``reason`` when the caller does not supply a class, so an
+        # entry is never written without one a consumer can act on. The routing
+        # verdict is deliberately not inferred from the path: a vendor binary and
+        # a dispatch shim both resolve to a file and neither is dispatchable, so
+        # treating "has a path" as ``reusable`` would report them as resolved.
         "reason_class": str(reason_class or "")
         or classify_skip_reason(
-            reusable=bool(source_file),
+            reusable=None,
             skip_reason=reason,
             source_file=source_file,
         ),

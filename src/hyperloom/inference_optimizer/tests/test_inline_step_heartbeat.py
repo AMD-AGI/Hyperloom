@@ -69,3 +69,48 @@ async def test_an_exception_inside_the_block_propagates_and_stops_the_beat() -> 
     before = len(stamps)
     await asyncio.sleep(0.03)
     assert len(stamps) == before
+
+
+async def test_the_stamp_is_retired_when_the_step_ends() -> None:
+    """Cancelling the beat is not enough: the last stamp still reads as running.
+
+    Without retiring it the guard stays muted for as long as a stamp counts as
+    fresh, which is time after the covered work has already finished.
+    """
+    cleared: list[bool] = []
+    async with inline_step_heartbeat(
+        stamp=lambda _when: None,
+        interval_sec=0.01,
+        now=lambda: 1.0,
+        clear=lambda: cleared.append(True),
+    ):
+        await asyncio.sleep(0.02)
+    assert cleared == [True]
+
+
+async def test_the_stamp_is_retired_even_when_the_step_raises() -> None:
+    cleared: list[bool] = []
+    with pytest.raises(RuntimeError, match="boom"):
+        async with inline_step_heartbeat(
+            stamp=lambda _when: None,
+            interval_sec=0.01,
+            now=lambda: 1.0,
+            clear=lambda: cleared.append(True),
+        ):
+            raise RuntimeError("boom")
+    assert cleared == [True]
+
+
+async def test_a_failing_clear_does_not_mask_the_step() -> None:
+    """The step is already over; a stamp left behind goes stale on its own."""
+
+    def _boom() -> None:
+        raise RuntimeError("clear failed")
+
+    async with inline_step_heartbeat(
+        stamp=lambda _when: None,
+        interval_sec=0.0,
+        now=lambda: 1.0,
+        clear=_boom,
+    ):
+        pass

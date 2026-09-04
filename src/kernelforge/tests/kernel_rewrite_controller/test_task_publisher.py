@@ -209,6 +209,66 @@ def test_a_quiescent_staged_task_is_published(tmp_path: Path) -> None:
     assert payload["base_commit"] == head
 
 
+def test_a_refused_draft_is_not_revalidated_until_it_changes(tmp_path: Path) -> None:
+    """Refusal keeps the draft, and this scan runs on a half-second timer.
+
+    Without a memory of the refusal one bad draft is contract-checked thousands
+    of times across an analysis window, respawning Git probes on every pass.
+    """
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    (staged / "task.json").write_text("{ not json", encoding="utf-8")
+    written_at = _newest_staged_mtime(staged)
+    refused: dict[str, float] = {}
+
+    first = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: written_at + 5.0,
+        refused=refused,
+    )
+    second = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: written_at + 6.0,
+        refused=refused,
+    )
+
+    assert [result.published for result in first] == [False]
+    assert second == ()
+    assert staged.is_dir()
+
+
+def test_a_revised_draft_is_offered_again_after_a_refusal(tmp_path: Path) -> None:
+    repo, head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    broken = staged / "task.json"
+    payload = broken.read_text(encoding="utf-8")
+    broken.write_text("{ not json", encoding="utf-8")
+    refused: dict[str, float] = {}
+
+    publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: _newest_staged_mtime(staged) + 5.0,
+        refused=refused,
+    )
+    broken.write_text(payload, encoding="utf-8")
+    os.utime(broken, (_newest_staged_mtime(staged) + 10.0,) * 2)
+    retried = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=0.0,
+        now=lambda: _newest_staged_mtime(staged) + 15.0,
+        refused=refused,
+    )
+
+    assert [result.published for result in retried] == [True]
+    published = json.loads((layout.task_dir(retried[0].operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert published["base_commit"] == head
+
+
 def test_publish_rejects_a_symlinked_staging_directory(tmp_path: Path) -> None:
     repo, _head = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")

@@ -224,10 +224,12 @@ def _raise_controller_failure(
     running: ControllerRunState,
     reason: str,
     error: Exception,
+    progress: dict[str, Any] | None = None,
 ) -> None:
     failed = ControllerRunState(
         **{
             **running.to_dict(),
+            **(progress or {}),
             "status": CONTROLLER_STATUS_FAILED,
             "finished_at": _now_iso(),
             "reason": reason,
@@ -269,6 +271,23 @@ def run_controller(
     _write_state(layout, running)
     _write_summary(layout, running)
 
+    progress: dict[str, Any] = {}
+
+    def _publish_running(**updates: Any) -> None:
+        """Persist what the campaign has accounted for so far, still as running.
+
+        These fields used to land only in the terminal write, which is the one
+        write a Hyperloom hard kill never reaches: it raises ``TimeoutExpired``
+        without this process's streams, so anything recorded only at the end is
+        unreadable afterwards -- and a timeout is the ordinary end of a long
+        campaign, not an edge case. Publishing per milestone is what makes the
+        spend, the pinned baselines and the skip reasons survive it.
+        """
+        progress.update(updates)
+        snapshot = ControllerRunState(**{**running.to_dict(), **progress})
+        _write_state(layout, snapshot)
+        _write_summary(layout, snapshot)
+
     try:
         handoff = read_handoff(handoff_path)
     except Exception as error:
@@ -280,17 +299,33 @@ def run_controller(
         )
 
     try:
-        recovered = list(recover_all_task_results(layout))
+        # No recovery pass before analysis: the layout was just created, and an
+        # already-initialized output directory is refused rather than resumed, so
+        # there is never a prior task workspace here to reclaim.
         analysis = run_opportunity_analysis(
             handoff=handoff,
             layout=layout,
             controller_deadline_unix=running.deadline_unix,
         )
+        _publish_running(
+            analysis_status=analysis.status,
+            analysis_reason=analysis.reason,
+            analysis_published_task_count=analysis.published_task_count,
+            analysis_rejected_task_count=analysis.rejected_task_count,
+            analysis_rejected_tasks=analysis.rejected_tasks,
+        )
         schedule = dispatch_prepared_tasks(
             layout,
             controller_deadline_unix=running.deadline_unix,
+            on_progress=lambda partial: _publish_running(
+                task_count=partial.task_count,
+                patch_count=len(published_operator_dirs(layout)),
+                skipped_task_count=partial.skipped_count,
+                repository_pins=partial.repository_pins,
+                forge_llm_usage=_forge_llm_usage(partial.results),
+            ),
         )
-        recovered.extend(recover_all_task_results(layout))
+        recovered = list(recover_all_task_results(layout))
         patch_count = len(published_operator_dirs(layout))
     except Exception as error:
         _raise_controller_failure(
@@ -298,6 +333,7 @@ def run_controller(
             running,
             f"controller execution failed: {error}",
             error,
+            progress,
         )
 
     if analysis.status != ANALYSIS_STATUS_COMPLETED and schedule.task_count == 0 and patch_count == 0:

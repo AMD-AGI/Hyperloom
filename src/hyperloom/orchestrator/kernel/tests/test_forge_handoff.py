@@ -12,6 +12,10 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     _additional_directories,
 )
 
+from hyperloom.inference_optimizer.session.session_paths import (
+    forge_cycle_dir,
+    next_forge_attempt_dir,
+)
 from hyperloom.orchestrator.kernel.forge_handoff import write_forge_handoff
 
 
@@ -161,3 +165,43 @@ def test_handoff_exposes_configured_git_source_roots_without_trace(
     additional = _additional_directories(read_handoff(handoff_dir))
     assert str(framework_repo.resolve()) in additional
     assert str(aiter_repo.resolve()) in additional
+
+
+def test_each_kernel_entry_gets_its_own_attempt_directory(tmp_path: Path) -> None:
+    """A second KERNEL entry needs an output root the controller has not used.
+
+    ``macro_cycle`` cannot supply one: it only advances in EXPLORE, which never
+    runs under ``--no-framework-agent``, so keying on the cycle alone leaves every
+    re-entry refused before it starts.
+    """
+    session = tmp_path / "session"
+
+    first = next_forge_attempt_dir(session, 3)
+    first.mkdir(parents=True)
+    second = next_forge_attempt_dir(session, 3)
+
+    assert first == forge_cycle_dir(session, 3) / "attempt-0"
+    assert second == forge_cycle_dir(session, 3) / "attempt-1"
+    assert next_forge_attempt_dir(session, 4) == forge_cycle_dir(session, 4) / "attempt-0"
+
+
+def test_a_foreign_directory_does_not_disturb_attempt_numbering(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    cycle = forge_cycle_dir(session, 0)
+    (cycle / "attempt-0").mkdir(parents=True)
+    (cycle / "handoff").mkdir()
+    (cycle / "attempt-not-a-number").mkdir()
+
+    assert next_forge_attempt_dir(session, 0) == cycle / "attempt-1"
+
+
+def test_the_handoff_can_be_written_beside_the_attempt_that_consumes_it(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    attempt = next_forge_attempt_dir(session, 3)
+
+    written = write_forge_handoff(session, _state(), handoff_dir=attempt / "handoff")
+
+    assert written == attempt / "handoff"
+    assert (written / "workload.md").is_file()
+    # The per-cycle default location is untouched, so nothing else has to move.
+    assert not (forge_cycle_dir(session, 3) / "handoff").exists()

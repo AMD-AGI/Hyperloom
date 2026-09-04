@@ -109,6 +109,105 @@ def test_tasks_run_sequentially_by_priority_and_continue_after_failure(
     assert result.stopped_for_budget is False
 
 
+def test_progress_is_reported_after_every_task(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A campaign killed mid-schedule must have already reported what it did.
+
+    The caller persists this, and the write it used to rely on is the terminal
+    one -- the one a hard timeout never reaches.
+    """
+    layout = ControllerLayout(tmp_path / "output")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _publish_task(layout, repo_root=repo, kernel_name="first", priority=0)
+    _publish_task(layout, repo_root=repo, kernel_name="second", priority=1)
+
+    def _dispatch(task_dir, **_kwargs):
+        task = scheduler.load_task(task_dir, record_state=False).task
+        assert task is not None
+        return _result(task, "succeeded")
+
+    monkeypatch.setattr(scheduler, "dispatch_single_task", _dispatch)
+    seen: list[tuple[int, dict[str, str]]] = []
+
+    scheduler.dispatch_prepared_tasks(
+        layout,
+        controller_deadline_unix=20_000,
+        clock=lambda: 10_000,
+        on_progress=lambda partial: seen.append((len(partial.results), dict(partial.repository_pins))),
+    )
+
+    assert [count for count, _ in seen] == [1, 2]
+    assert all(pins == {str(repo): "a" * 40} for _count, pins in seen)
+
+
+def test_a_superseded_duplicate_is_recorded_rather_than_dropped(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The loser of a dedup needs a skip record whichever side it is on.
+
+    Without one it stays ``ready`` and never appears in results, while
+    ``task_count`` still counts its directory.
+    """
+    layout = ControllerLayout(tmp_path / "output")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Same identity, two directories: reachable only by writing the second one
+    # under a name of its own, which is what a future non-identity layout would do.
+    loser = _publish_task(layout, repo_root=repo, kernel_name="only", priority=5)
+    # Sorted after the encoded identity directory, so the better priority is the
+    # one that arrives second and displaces an incumbent.
+    winner_dir = layout.tasks_root / "zz-better-priority"
+    winner_dir.mkdir()
+    for name in ("task.json", "driver.py"):
+        (winner_dir / name).write_text((loser / name).read_text(encoding="utf-8"), encoding="utf-8")
+    payload = json.loads((winner_dir / "task.json").read_text(encoding="utf-8"))
+    payload["priority"] = 0
+    (winner_dir / "task.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        scheduler,
+        "dispatch_single_task",
+        lambda task_dir, **_kwargs: _result(scheduler.load_task(task_dir, record_state=False).task, "succeeded"),
+    )
+    monkeypatch.setattr(scheduler, "load_task", _load_without_directory_identity)
+
+    result = scheduler.dispatch_prepared_tasks(
+        layout,
+        controller_deadline_unix=20_000,
+        clock=lambda: 10_000,
+    )
+
+    assert result.task_count == len(result.results)
+    assert result.skipped_count == 1
+    assert TaskStateStore(loser).load().status == "skipped"
+
+
+def _load_without_directory_identity(task_dir, **kwargs):
+    """Let a second directory hold the same identity, which the layout forbids.
+
+    The production layout derives a task's directory name from its identity, so
+    two directories cannot collide today. The dedup branch still has to record
+    its loser, because that invariant lives in a different module.
+    """
+    from kernelforge.kernel_rewrite_controller import task as task_module
+
+    payload = json.loads((Path(task_dir) / "task.json").read_text(encoding="utf-8"))
+    parsed = task_module.parse_task_payload(
+        payload,
+        task_dir=task_dir,
+        expected_base_commit=kwargs.get("expected_base_commit"),
+        enforce_directory_identity=False,
+    )
+    store = TaskStateStore(task_dir)
+    if kwargs.get("record_state", True) and store.load() is None:
+        store.initialize_ready()
+    return task_module.TaskParseResult(task=parsed)
+
+
 def test_task_deadline_is_capped_by_controller_remaining_time(
     tmp_path: Path,
     monkeypatch,

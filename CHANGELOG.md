@@ -5,6 +5,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed kernel-rewrite patch no longer deletes untracked files in the
+  framework repository.** Controller patch integration reverted with
+  `_git_checkout_clean`, whose last step is a tree-wide `git clean -fd`, while its
+  own admission check asks `git status --untracked-files=no` — so an operator's
+  untracked notes or scratch directory passed admission and were then destroyed by
+  the first patch that failed E2E, applied badly, or failed to commit. The legacy
+  integrate path can afford that clean because it stashes first; this path
+  declines a dirty repository instead of stashing, so its revert is now scoped the
+  same way its commit already was: the diff is reverse-applied, and if that is
+  impossible only the paths the patch names are restored to HEAD. A revert that
+  cannot finish is recorded in the patch's own result instead of being discarded.
+
+- **The KERNEL idle guard no longer reads patch integration as a stall.** The
+  progress heartbeat wrapped only the controller subprocess, while integration —
+  which restarts the server and runs a full serving benchmark per patch — ran
+  outside it with no task row and no terminal controller status yet in
+  SharedState. A single patch whose E2E ends in REVERT leaves the phase without an
+  observable progress change for longer than the idle floor, so the phase could
+  wind down to SWEEP while its own integration was still running. The heartbeat
+  now spans integration, and it retires its stamp on exit rather than leaving one
+  that keeps reporting a finished step as running.
+
+- **A second KERNEL entry within one macro cycle can run again.** Controller
+  output now lives in `kernel-agent/forge/cycle-<n>/attempt-<m>/`, numbered upward
+  per entry, with that attempt's handoff inside it. The Controller refuses an
+  output root it has already initialized and `macro_cycle` only advances in
+  EXPLORE — which never runs under `--no-framework-agent` — so keying the output on
+  the cycle alone left every re-entry permanently barren.
+
+- **A campaign killed by the phase timeout now reports what it spent.**
+  `controller/state.json` is rewritten after analysis and after every task reaches
+  a terminal state, so the per-operator LLM spend, the pinned repository
+  baselines, the skipped-task count and the rejected analysis drafts survive a
+  hard kill. They previously landed only in the terminal write, which is the one
+  write Hyperloom's `TimeoutExpired` path never reaches — and a timeout is the
+  ordinary end of a long campaign. Consequently the forge-loop rows that reach
+  `reports/trace/llm_calls.jsonl` no longer disappear on that path.
+
+- **A rejected analysis draft is no longer re-validated on every poll.** The
+  staging scan runs on a half-second timer and a refusal deliberately keeps the
+  draft so the agent can revise it, so one malformed draft was contract-checked
+  thousands of times per analysis window, respawning the Git probes that check
+  costs on every pass. A refusal is now remembered against the draft's
+  modification time, which still lets a revised draft be picked up.
+
+- **A published patch records the scope Git reports.** `publication.json` carries
+  the repo-relative paths the patch changes, read from the diff rather than from
+  the optimizer's manifest — `source_files` is orientation for `forge-loop`, not an
+  edit allowlist — and Hyperloom validates every entry before using it to stage a
+  KEEP.
+
+- Smaller correctness and reporting repairs in the same area: an
+  accepted-but-unintegrated KEEP is answered before a terminal controller
+  short-circuits the phase-pending predicate, so a session resumed from before the
+  cutover cannot strand one; the operator-directory encoder escapes `%` so its
+  encoding stays injective; the loser of a task-identity deduplication is recorded
+  as skipped instead of silently left `ready`; `KERNEL_LANE_TASK_KINDS` is written
+  out rather than derived from the model-proposable action set, which is what
+  previously hid a running task from the idle guard; the source-resolution
+  fallback no longer infers a routing verdict from the mere presence of a path;
+  and PolicyGate's coordinator-owned request denial names `run_gemm_tuning` in its
+  hint instead of only the fusion and collective lanes.
+
 ### Changed
 
 - **BREAKING — KernelForge decides which operators to rewrite.** Hyperloom no

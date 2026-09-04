@@ -49,10 +49,14 @@ accounting.
 
 ## Controller artifacts
 
-For macro cycle `<n>`, Hyperloom writes and reads:
+Each KERNEL entry gets its own attempt directory under its macro cycle, numbered
+upward from `attempt-0`. The Controller refuses an output root it has already
+initialized, and `macro_cycle` only advances in EXPLORE — which never runs under
+`--no-framework-agent` — so a second entry needs a directory of its own rather
+than the cycle's. For macro cycle `<n>`, attempt `<m>`, Hyperloom writes and reads:
 
 ```text
-kernel-agent/forge/cycle-<n>/
+kernel-agent/forge/cycle-<n>/attempt-<m>/
   handoff/
     workload.md
     serving-context.md
@@ -75,7 +79,16 @@ kernel-agent/forge/cycle-<n>/
 Only patch directories containing `change.patch`, `report.md`, and a schema-v2
 `publication.json` are eligible for integration. The publication binds the
 patch to its six-dimensional operator identity, source repository, kernel path,
-Controller base commit, and validated Forge commit.
+Controller base commit, validated Forge commit, and the repo-relative paths the
+patch changes. That last list is read from Git rather than from the optimizer's
+manifest, because `source_files` is orientation for `forge-loop` rather than an
+edit allowlist, so only the diff itself bounds what integration stages.
+
+`controller/state.json` is rewritten as the campaign progresses — after analysis
+and after every task reaches a terminal state — not only when the Controller
+exits. Hyperloom raises `TimeoutExpired` without the child's streams when it hard
+-kills the Controller, so a field that only landed in the terminal write was
+unreadable on the ordinary end of a long campaign.
 
 Filesystem directory names percent-encode the canonical ID separators
 (`:` → `%3A`) because some shared filesystems reject colons. The canonical

@@ -403,6 +403,9 @@ class OpportunityAnalysisAgent:
             )
         )
         publications: dict[str, TaskPublicationResult] = {}
+        # Carried across polls so a draft this host already refused is not
+        # re-validated on every half-second tick for the rest of the session.
+        refused: dict[str, float] = {}
         status = ANALYSIS_STATUS_COMPLETED
         reason = ""
         deadline = time.monotonic() + self.timeout_sec
@@ -415,7 +418,7 @@ class OpportunityAnalysisAgent:
                     backend_task.cancel()
                     break
                 await asyncio.wait({backend_task}, timeout=min(_PUBLISH_POLL_SEC, remaining))
-                for result in publish_complete_staged_tasks(layout):
+                for result in publish_complete_staged_tasks(layout, refused=refused):
                     publications[result.source_dir.name] = result
             if not backend_task.cancelled():
                 try:
@@ -447,7 +450,7 @@ class OpportunityAnalysisAgent:
             # No quiescence window here: the session has stopped, so nothing is
             # still writing, and waiting would strand a task finished moments
             # before the deadline -- the case incremental publication exists for.
-            for result in publish_complete_staged_tasks(layout, quiescent_sec=0.0):
+            for result in publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused):
                 publications[result.source_dir.name] = result
             if progress:
                 atomic_write_text(layout.agent_root / "progress.log", "\n".join(progress) + "\n")

@@ -222,12 +222,20 @@ def write_forge_handoff(
     state: Any,
     *,
     env_spec: Mapping[str, Any] | None = None,
+    handoff_dir: Path | None = None,
 ) -> Path:
-    """Atomically write one macro cycle's Forge handoff and return its directory."""
-    handoff_dir = forge_handoff_dir(
-        Path(session_dir),
-        int(getattr(state, "macro_cycle", 0) or 0),
-    )
+    """Atomically write one Forge handoff and return its directory.
+
+    ``handoff_dir`` lets the caller keep the handoff beside the controller output
+    that consumed it, so a second attempt within one macro cycle does not
+    overwrite the evidence the first one was given.
+    """
+    if handoff_dir is None:
+        handoff_dir = forge_handoff_dir(
+            Path(session_dir),
+            int(getattr(state, "macro_cycle", 0) or 0),
+        )
+    handoff_dir = Path(handoff_dir)
     documents = {
         WORKLOAD_FILENAME: build_workload_md(state),
         SERVING_CONTEXT_FILENAME: build_serving_context_md(state, env_spec),

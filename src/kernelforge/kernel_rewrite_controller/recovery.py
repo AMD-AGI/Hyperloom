@@ -21,6 +21,7 @@ from kernelforge.kernel_rewrite_controller.state import TaskStateStore
 from kernelforge.kernel_rewrite_controller.task import discover_task_dirs, load_task
 from kernelforge.kernel_rewrite_controller.worktree import (
     OperatorWorktree,
+    changed_files_from_base,
     export_patch_from_base,
 )
 from kernelforge.loop.reporting import BestResultPublisher
@@ -201,6 +202,7 @@ def recover_task_result(
                 best_commit=best_commit,
                 patch=patch,
                 manifest=manifest,
+                changed_files=changed_files_from_base(worktree, best_commit=best_commit),
             ),
         )
         if update_state:

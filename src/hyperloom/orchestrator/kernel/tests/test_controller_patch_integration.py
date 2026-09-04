@@ -252,6 +252,106 @@ async def test_e2e_failure_reverts_only_current_patch_and_continues(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_a_revert_leaves_the_operators_untracked_files_alone(tmp_path: Path) -> None:
+    """A failed patch must not take the operator's own files with it.
+
+    Admission asks ``git status --untracked-files=no``, so an untracked file is
+    admitted rather than refused -- which means a tree-wide ``git clean`` on the
+    revert path would delete work this integration never looked at.
+    """
+    repo, base = _repo(tmp_path)
+    (repo / "notes.md").write_text("operator notes\n", encoding="utf-8")
+    (repo / "bench_local").mkdir()
+    (repo / "bench_local" / "run.sh").write_text("echo bench\n", encoding="utf-8")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="first",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {"decision": "REVERT", "new_tput": 90.0, "gain_pct": -10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.reverted_count == 1
+    # The patch itself is gone.
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    # Everything the patch never named is still here.
+    assert (repo / "notes.md").read_text(encoding="utf-8") == "operator notes\n"
+    assert (repo / "bench_local" / "run.sh").read_text(encoding="utf-8") == "echo bench\n"
+
+
+@pytest.mark.asyncio
+async def test_a_revert_unstages_a_patch_whose_commit_never_landed(tmp_path: Path) -> None:
+    """Reverting the working tree is not enough once a commit attempt staged it.
+
+    A staged leftover reads as a dirty tree, which would make every later patch
+    in the same run skip on an admission check it has nothing to do with.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="first",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="second",
+        kernel_path="second.py",
+        patch=_patch(repo, "second.py", "VALUE = 3\n"),
+    )
+
+    def _commit_nothing(_repo: Path, _message: str, _paths: list[str]) -> tuple[bool, str]:
+        return True, "nothing to commit"
+
+    calls: list[str] = []
+
+    async def _validate(publication):
+        calls.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    original = integration._git_commit_kept
+    integration._git_commit_kept = _commit_nothing  # type: ignore[assignment]
+    try:
+        summary = await integrate_controller_patches(
+            patches_root=patches,
+            session_dir=session_dir,
+            shared_state=_state(session_dir, repo),
+            validator=_validate,
+        )
+    finally:
+        integration._git_commit_kept = original  # type: ignore[assignment]
+
+    assert [result.status for result in summary.results] == [
+        "reverted_commit_failed",
+        "reverted_commit_failed",
+    ]
+    # The second patch was reached, so the first one's revert left no dirty index.
+    assert calls == ["first", "second"]
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
 async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path) -> None:
     repo, _base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"

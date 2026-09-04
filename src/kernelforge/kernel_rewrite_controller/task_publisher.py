@@ -176,8 +176,18 @@ def publish_complete_staged_tasks(
     *,
     quiescent_sec: float = PUBLISH_QUIESCENT_SEC,
     now: Callable[[], float] = time.time,
+    refused: dict[str, float] | None = None,
 ) -> tuple[TaskPublicationResult, ...]:
-    """Publish every staged task that is complete and no longer being written."""
+    """Publish every staged task that is complete and no longer being written.
+
+    ``refused`` remembers the modification time each rejected draft was refused
+    at. A refusal is deliberately not destructive -- the draft stays so the agent
+    can revise it -- and this scan runs on a half-second timer beside the live
+    agent, so without that memory one bad draft is re-validated thousands of times
+    across an analysis window, respawning the Git probes its contract check needs
+    on every pass. Keying on the mtime rather than the name alone is what still
+    lets a revised draft be offered again.
+    """
     root = layout.agent_staging_root
     if not root.is_dir():
         return ()
@@ -193,7 +203,10 @@ def publish_complete_staged_tasks(
         # and then deletes the agent's working copy. Publication is also
         # one-way, so a task revised right after it was written would lose the
         # revision. Wait for the tree to go quiet instead.
-        if float(now()) - _newest_mtime(entry) < float(quiescent_sec):
+        newest = _newest_mtime(entry)
+        if float(now()) - newest < float(quiescent_sec):
+            continue
+        if refused is not None and refused.get(entry.name) == newest:
             continue
         result = publish_staged_task(layout, entry)
         if result.published:
@@ -203,6 +216,8 @@ def publish_complete_staged_tasks(
             # otherwise invisible: it stays in staging and the run just reports
             # one fewer task than the agent believes it wrote.
             log.warning("rejected staged task %s: %s", entry.name, result.reason)
+            if refused is not None:
+                refused[entry.name] = newest
         results.append(result)
     return tuple(results)
 

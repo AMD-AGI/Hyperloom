@@ -83,7 +83,7 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c._run_started_monotonic = None
     c._phase_budget_pct = {}
 
-    async def _skip_controller(_handoff_dir: Path) -> None:
+    async def _skip_controller(_handoff_dir: Path, _output_dir: Path) -> None:
         return None
 
     monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
@@ -384,10 +384,10 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     async def _skip() -> None:
         return None
 
-    handed_off: list[Path] = []
+    handed_off: list[tuple[Path, Path]] = []
 
-    async def _controller(handoff_dir: Path) -> None:
-        handed_off.append(handoff_dir)
+    async def _controller(handoff_dir: Path, output_dir: Path) -> None:
+        handed_off.append((handoff_dir, output_dir))
 
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
@@ -395,12 +395,19 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
 
     await coord.phase_kernel._finish_kernel_entry()
+    await coord.phase_kernel._finish_kernel_entry()
 
-    expected = coord.session_dir / "kernel-agent" / "forge" / "cycle-0" / "handoff"
-    assert handed_off == [expected]
-    assert (expected / "workload.md").is_file()
-    assert (expected / "serving-context.md").is_file()
-    assert (expected / "trace-evidence.md").is_file()
+    attempt_root = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
+    # Each entry gets its own attempt directory: the controller refuses an output
+    # root it has already initialized, so re-entry cannot reuse the first one.
+    assert handed_off == [
+        (attempt_root / "attempt-0" / "handoff", attempt_root / "attempt-0"),
+        (attempt_root / "attempt-1" / "handoff", attempt_root / "attempt-1"),
+    ]
+    for handoff_dir, _output_dir in handed_off:
+        assert (handoff_dir / "workload.md").is_file()
+        assert (handoff_dir / "serving-context.md").is_file()
+        assert (handoff_dir / "trace-evidence.md").is_file()
 
 
 @pytest.mark.asyncio
@@ -413,7 +420,7 @@ async def test_controller_result_integrates_published_patches_before_terminal_st
         controller_submit,
     )
 
-    output_dir = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
+    output_dir = coord.session_dir / "kernel-agent" / "forge" / "cycle-0" / "attempt-0"
     patches_root = output_dir / "result" / "patches"
 
     def _run_controller_subprocess(**_kwargs):
@@ -458,6 +465,7 @@ async def test_controller_result_integrates_published_patches_before_terminal_st
     await type(coord.phase_kernel)._run_kernel_rewrite_controller(
         coord.phase_kernel,
         output_dir / "handoff",
+        output_dir,
     )
 
     assert integrated == [patches_root]
@@ -497,6 +505,7 @@ async def test_controller_without_patches_records_integration_not_run(
     await type(coord.phase_kernel)._run_kernel_rewrite_controller(
         coord.phase_kernel,
         coord.session_dir / "handoff",
+        coord.session_dir / "attempt-0",
     )
 
     assert coord.shared_state.kernel_rewrite_controller_result["integration"] == {

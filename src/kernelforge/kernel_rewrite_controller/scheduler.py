@@ -83,8 +83,14 @@ def dispatch_prepared_tasks(
     *,
     controller_deadline_unix: float,
     clock: Callable[[], float] = time.time,
+    on_progress: Callable[[ScheduleResult], None] | None = None,
 ) -> ScheduleResult:
-    """Validate and run all published tasks sequentially by priority."""
+    """Validate and run all published tasks sequentially by priority.
+
+    ``on_progress`` receives the schedule so far after every task reaches a
+    terminal state, so a caller can persist what a campaign has accounted for
+    before it is killed rather than only when it returns.
+    """
     task_dirs = discover_task_dirs(layout)
     parsed_by_id: dict[str, tuple[Path, KernelRewriteTask]] = {}
     results: list[SingleTaskResult] = []
@@ -95,7 +101,20 @@ def dispatch_prepared_tasks(
             results.append(_skipped_result(None, parsed.reason))
             continue
         incumbent = parsed_by_id.get(parsed.task.operator_id)
-        if incumbent is None or parsed.task.priority < incumbent[1].priority:
+        if incumbent is None:
+            parsed_by_id[parsed.task.operator_id] = (task_dir, parsed.task)
+        elif parsed.task.priority < incumbent[1].priority:
+            # The displaced incumbent needs the same skip record its rival would
+            # have got. Without one it stays `ready` and produces no result row,
+            # while ``task_count`` still counts its directory -- so the run would
+            # report one more task than it accounts for.
+            results.append(
+                _skip_task(
+                    incumbent[0],
+                    incumbent[1],
+                    f"superseded by a higher-priority task for operator {parsed.task.operator_id}",
+                )
+            )
             parsed_by_id[parsed.task.operator_id] = (task_dir, parsed.task)
         else:
             results.append(
@@ -123,6 +142,18 @@ def dispatch_prepared_tasks(
     pinned_bases: dict[Path, str] = {}
     stopped_for_budget = False
 
+    def _snapshot() -> ScheduleResult:
+        return ScheduleResult(
+            task_count=len(task_dirs),
+            results=tuple(results),
+            stopped_for_budget=stopped_for_budget,
+            repository_pins=dict(sorted((str(repo), commit) for repo, commit in pinned_bases.items())),
+        )
+
+    def _report() -> None:
+        if on_progress is not None:
+            on_progress(_snapshot())
+
     for index, task in enumerate(tasks):
         task_dir = task_dirs_by_id[task.operator_id]
         pinned_base = pinned_bases.setdefault(task.repo_root, task.base_commit)
@@ -134,6 +165,7 @@ def dispatch_prepared_tasks(
                     f"repository {task.repo_root} is pinned to base commit {pinned_base}",
                 )
             )
+            _report()
             continue
 
         now = float(clock())
@@ -152,6 +184,7 @@ def dispatch_prepared_tasks(
                         ),
                     )
                 )
+            _report()
             break
 
         task_deadline = min(
@@ -166,13 +199,9 @@ def dispatch_prepared_tasks(
                 expected_base_commit=pinned_base,
             )
         )
+        _report()
 
-    return ScheduleResult(
-        task_count=len(task_dirs),
-        results=tuple(results),
-        stopped_for_budget=stopped_for_budget,
-        repository_pins=dict(sorted((str(repo), commit) for repo, commit in pinned_bases.items())),
-    )
+    return _snapshot()
 
 
 __all__ = [

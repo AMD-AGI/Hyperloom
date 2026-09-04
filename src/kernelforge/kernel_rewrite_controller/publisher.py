@@ -43,6 +43,10 @@ class OperatorPublication:
     patch: str
     report: str
     manifest: dict[str, Any]
+    #: Every repo-relative path the patch changes, read from Git rather than from
+    #: the optimizer's manifest. Additive within schema 2: an older reader ignores
+    #: it, and writer and reader ship together here.
+    changed_files: tuple[str, ...] = ()
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -55,6 +59,7 @@ class OperatorPublication:
             "kernel_path": self.kernel_path,
             "operator_name": self.operator_name,
             "micro_validated": True,
+            "changed_files": list(self.changed_files),
             "manifest": self.manifest,
         }
 
@@ -143,6 +148,7 @@ def render_operator_report(
     *,
     best_commit: str,
     manifest: dict[str, Any] | None = None,
+    changed_files: tuple[str, ...] = (),
 ) -> str:
     """Render the stable human-readable report shipped beside one patch."""
     details = dict(manifest or {})
@@ -159,10 +165,12 @@ def render_operator_report(
         lines.append(f"- **Mean case speedup:** `{float(details['mean_case_speedup']):.6f}x`")
     if details.get("iteration") is not None:
         lines.append(f"- **Best iteration:** `{int(details['iteration'])}`")
-    changed_files = details.get("changed_files")
-    if isinstance(changed_files, list):
+    # What the patch changes, preferred over the manifest's account of what the
+    # optimizer edited, because this is the list integration will act on.
+    reported = list(changed_files) if changed_files else details.get("changed_files")
+    if isinstance(reported, list):
         lines.extend(["", "## Changed Files", ""])
-        lines.extend(f"- `{path}`" for path in changed_files)
+        lines.extend(f"- `{path}`" for path in reported)
     return "\n".join(lines) + "\n"
 
 
@@ -172,6 +180,7 @@ def publication_from_task(
     best_commit: str,
     patch: str,
     manifest: dict[str, Any] | None = None,
+    changed_files: tuple[str, ...] = (),
 ) -> OperatorPublication:
     """Build one publication with normalized metadata and report."""
     details = dict(manifest or {})
@@ -191,8 +200,14 @@ def publication_from_task(
         kernel_path=task.kernel_path,
         operator_name=task.operator_name,
         patch=patch,
-        report=render_operator_report(task, best_commit=best_commit, manifest=details),
+        report=render_operator_report(
+            task,
+            best_commit=best_commit,
+            manifest=details,
+            changed_files=changed_files,
+        ),
         manifest=details,
+        changed_files=tuple(changed_files),
     )
 
 

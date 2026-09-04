@@ -49,9 +49,17 @@ def safe_operator_id(value: object) -> str:
 
 
 def operator_directory_name(value: object) -> str:
-    """Encode a canonical operator ID as one portable filesystem segment."""
+    """Encode a canonical operator ID as one portable filesystem segment.
+
+    ``%`` is escaped before ``:`` so the encoding stays injective: without it a
+    literal ``%3A`` in an ID and an encoded colon would name the same directory,
+    and two operators would then share one version store and one public pointer.
+    Canonical IDs cannot currently contain ``%`` -- every dimension is validated
+    against a character set that excludes it -- but this function only requires
+    :func:`safe_operator_id`, which does not.
+    """
     operator_id = safe_operator_id(value)
-    encoded = operator_id.replace(":", "%3A")
+    encoded = operator_id.replace("%", "%25").replace(":", "%3A")
     if len(encoded.encode("utf-8")) <= 240:
         return encoded
     return f"operator-{hashlib.sha256(operator_id.encode('utf-8')).hexdigest()}"

@@ -112,10 +112,19 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 # Dispatched by the Coordinator or owned by the Robustness ladder.
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
-# Task kinds that mean a registry-backed KERNEL lane is busy.
-KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
+# Task kinds that mean a registry-backed KERNEL lane is busy. Written out rather
+# than derived from ``PHASE_ALLOWED_ACTIONS``: what a model may propose and what
+# means a lane is in flight are independent questions, and deriving the second
+# from the first is what made a *running* task of a kind invisible to the idle
+# guard the moment that kind left the proposable set.
+KERNEL_LANE_TASK_KINDS: frozenset[str] = frozenset(
     {
         "gemm_tuning",
+        "integrate",
+        "profile",
+        "recover",
+        "roofline",
+        "specialist",
     }
 )
 
@@ -1896,15 +1905,28 @@ def collective_integration_pending(state: Any) -> bool:
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
-    A pending collective or accepted legacy KEEP still blocks phase exit.
-    Terminal Controller and GEAK phase owners short-circuit their retired
-    internal work queues; hard time/budget exits remain in
+    A pending collective or an accepted-but-unintegrated KEEP still blocks phase
+    exit, and both are answered before a terminal phase owner short-circuits its
+    retired internal work queue -- otherwise a validated gain that never reached
+    the stack would be abandoned. Hard time/budget exits remain in
     :func:`exit_normal_kernel`.
+
+    The KEEP queue has no producer left on the Controller path: Hyperloom stopped
+    recording kernel_opt attempts when it stopped selecting operators, and every
+    Controller patch is committed inside its own integration. What the probe still
+    covers is a session resumed from before that cutover, whose ledger can carry
+    a KEEP that nothing else would drain.
     """
     if collective_integration_pending(state):
         return True
     if bool(getattr(state, "collective_only_mode", False)):
         return False
+    try:
+        if bool(getattr(state, "has_keep_pending_integrate", False)):
+            return True
+    except Exception:
+        # Optional capability probe; treat a failure as 'not available'.
+        pass
     if _controller_phase_terminal(state):
         return False
     if _geak_phase_terminal(state):
@@ -1919,13 +1941,6 @@ def kernel_work_pending(state: Any) -> bool:
         ):
             return True
         return False
-
-    try:
-        if bool(getattr(state, "has_keep_pending_integrate", False)):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
 
     return False
 
@@ -2437,7 +2452,11 @@ def exit_normal_kernel(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the KERNEL
         exit, or ``None`` when KERNEL should continue.
     """
-    if _controller_phase_terminal(state) and not collective_integration_pending(state):
+    # ``kernel_work_pending`` answers for both outstanding integrations before it
+    # short-circuits on a terminal Controller, so asking it here keeps this exit
+    # from stepping over a pending collective or an unintegrated KEEP. The idle
+    # streak below still bounds the phase if that work can never be drained.
+    if _controller_phase_terminal(state) and not kernel_work_pending(state):
         result = getattr(state, "kernel_rewrite_controller_result", None) or {}
         return "kernel_controller_done", {
             "controller_status": result.get("status"),

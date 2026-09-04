@@ -77,6 +77,41 @@ def test_parser_rejects_old_or_unvalidated_publication(tmp_path: Path) -> None:
         load_controller_publication(patch_dir)
 
 
+def test_parser_carries_the_declared_patch_scope(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    patch_dir = _publication(tmp_path / "patches", repo)
+    metadata_path = patch_dir / "publication.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["changed_files"] = ["kernel.py", "helper/util.py"]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_controller_publication(patch_dir).changed_files == ("kernel.py", "helper/util.py")
+
+
+def test_parser_rejects_a_patch_scope_that_escapes_the_repository(tmp_path: Path) -> None:
+    """The scope decides what integration stages, so it cannot name an outside path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    patch_dir = _publication(tmp_path / "patches", repo)
+    metadata_path = patch_dir / "publication.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["changed_files"] = ["../../etc/profile"]
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ControllerPublicationError, match="changed_files entry"):
+        load_controller_publication(patch_dir)
+
+
+def test_a_publication_without_a_declared_scope_is_still_accepted(tmp_path: Path) -> None:
+    """The field is additive within schema 2; an older bundle simply has none."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    patch_dir = _publication(tmp_path / "patches", repo)
+
+    assert load_controller_publication(patch_dir).changed_files == ()
+
+
 def test_discovery_ignores_incomplete_and_hidden_versions(tmp_path: Path) -> None:
     root = tmp_path / "patches"
     root.mkdir()

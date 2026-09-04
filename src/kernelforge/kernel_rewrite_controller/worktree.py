@@ -137,6 +137,32 @@ def create_operator_worktree(
         raise
 
 
+def changed_files_from_base(
+    worktree: OperatorWorktree,
+    *,
+    best_commit: str,
+) -> tuple[str, ...]:
+    """List the repo-relative paths one KEEP changes against the controller base.
+
+    Read from Git rather than from the forge-loop manifest. The manifest is the
+    optimizer's own account of what it edited; this is what the published patch
+    will actually apply, and only the second one bounds what integration commits.
+    The task's ``source_files`` do not bound it either -- forge-loop treats them
+    as orientation, not as an edit allowlist -- so without this the scope of a
+    published patch is not recorded anywhere its consumer can check.
+    """
+    best = str(best_commit or "").strip().lower()
+    if not best:
+        return ()
+    output = git(
+        "diff",
+        "--name-only",
+        f"{worktree.base_commit}..{best}",
+        cwd=worktree.workspace,
+    ).stdout
+    return tuple(line.strip() for line in output.splitlines() if line.strip())
+
+
 def export_patch_from_base(
     worktree: OperatorWorktree,
     *,
@@ -171,6 +197,7 @@ __all__ = [
     "FORGE_LOOP_OUTPUT_DIRNAME",
     "OperatorWorktree",
     "WorktreeError",
+    "changed_files_from_base",
     "create_operator_worktree",
     "export_patch_from_base",
 ]

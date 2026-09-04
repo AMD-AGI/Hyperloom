@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -18,7 +19,8 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
 )
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _git_apply,
-    _git_checkout_clean,
+    _git_apply_reverse,
+    _git_restore_to_head,
 )
 
 from .controller_publication import (
@@ -84,6 +86,70 @@ def _head_commit(repo: Path) -> str:
         return _git_output(repo, "rev-parse", "HEAD").lower()
     except Exception:  # noqa: BLE001 - an unreadable HEAD reads as "no commit landed"
         return ""
+
+
+def _tracked_at_head(repo: Path, relative: str) -> bool:
+    """Whether HEAD carries ``relative``, i.e. whether it has a version to restore."""
+    try:
+        _git_output(repo, "cat-file", "-e", f"HEAD:{relative}")
+    except Exception:  # noqa: BLE001 - anything but a hit means "no version at HEAD"
+        return False
+    return True
+
+
+def _revert_patch(repo: Path, patch_path: Path) -> tuple[bool, str]:
+    """Undo one applied patch without touching a path the patch never named.
+
+    ``_git_checkout_clean`` is not usable here. It ends in ``git clean -fd``,
+    which deletes every untracked file in the repository, and the admission check
+    above asks ``git status`` with ``--untracked-files=no`` -- so an operator's
+    own untracked notes or scratch directory pass admission and would then be
+    destroyed by the first patch that fails. The legacy integrate path can afford
+    that clean because it stashes the working tree first; this path never
+    stashes, it declines a dirty repository instead, so its revert has to be
+    scoped to the patch the same way its commit already is.
+
+    Reversing the diff is the scoped equivalent: it restores what the patch
+    modified and removes what it created, and names nothing else.
+    """
+    touched = _patch_touched_paths(repo, [patch_path])
+    if touched:
+        # A commit attempt that failed after ``git add`` leaves the patched
+        # content staged, and reversing the working tree does not unstage it --
+        # which would make the next patch see a dirty index and skip.
+        with contextlib.suppress(Exception):
+            _git_output(repo, "reset", "--quiet", "HEAD", "--", *touched)
+    reversed_ok, reverse_error = _git_apply_reverse(repo, patch_path)
+    if reversed_ok:
+        return True, ""
+    # A reverse apply refuses a partially applied patch, which is the state a
+    # failed forward apply leaves. Restore every path HEAD still has a version
+    # of; a path HEAD does not know is one the patch created, and it is left in
+    # place rather than removed, because at this point nothing can prove it was
+    # not already the operator's own untracked file.
+    tracked = [relative for relative in touched if _tracked_at_head(repo, relative)]
+    if not tracked:
+        return False, reverse_error or "patch could not be reversed"
+    restored_ok, restore_error = _git_restore_to_head(repo, tracked)
+    if not restored_ok:
+        return False, restore_error or reverse_error
+    untracked_residue = [relative for relative in touched if relative not in tracked]
+    if untracked_residue:
+        return True, f"left files the patch created in place: {', '.join(untracked_residue)}"
+    return True, ""
+
+
+def _revert_note(repo: Path, patch_path: Path) -> str:
+    """Revert one patch and render what happened as a reason suffix.
+
+    Every caller drops into this on its way to a ``reverted_`` status, and a
+    revert that could not finish changes what the next patch will see, so it
+    belongs in the recorded reason rather than in a discarded return value.
+    """
+    reverted, note = _revert_patch(repo, patch_path)
+    if not reverted:
+        return f" (revert failed: {note})"
+    return f" (revert: {note})" if note else ""
 
 
 def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult) -> None:
@@ -161,7 +227,10 @@ async def _default_validator(
             "kernel_id": publication.operator_id,
             "patch_path": str(publication.patch_path),
             "target_file": str(publication.repo_root / publication.kernel_path),
-            "patch_write_paths": list(publication.manifest.get("changed_files") or []),
+            # The Controller's Git-derived scope when it has one; the optimizer's
+            # own manifest only as a fallback for a publication without it.
+            "patch_write_paths": list(publication.changed_files)
+            or list(publication.manifest.get("changed_files") or []),
             "_preapplied_git_patch": True,
         },
         session_dir=session_dir,
@@ -329,11 +398,10 @@ async def integrate_controller_patches(
             check_only=False,
         )
         if not applied:
-            _git_checkout_clean(repo)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_apply_failed",
-                reason=apply_error or "git apply failed",
+                reason=(apply_error or "git apply failed") + _revert_note(repo, publication.patch_path),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -346,11 +414,10 @@ async def integrate_controller_patches(
         try:
             validation = await validate(publication)
         except Exception as error:
-            _git_checkout_clean(repo)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_e2e_failed",
-                reason=f"E2E validation raised: {error}",
+                reason=f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -364,11 +431,11 @@ async def integrate_controller_patches(
             str(validation.get("status") or "ok").lower() != "ok"
             or str(validation.get("decision") or "").upper() != "KEEP"
         ):
-            _git_checkout_clean(repo)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_e2e_failed",
-                reason=str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP"),
+                reason=str(validation.get("error") or validation.get("decision_reason") or "E2E did not KEEP")
+                + _revert_note(repo, publication.patch_path),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -393,11 +460,10 @@ async def integrate_controller_patches(
         # must neither admit an uncommitted patch nor discard a committed one.
         keep_commit = _head_commit(repo)
         if not committed or not keep_commit or keep_commit == head_before:
-            _git_checkout_clean(repo)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_commit_failed",
-                reason=commit_note or "git commit did not advance HEAD",
+                reason=(commit_note or "git commit did not advance HEAD") + _revert_note(repo, publication.patch_path),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),

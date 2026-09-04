@@ -42,6 +42,7 @@ class ControllerPatchPublication:
     patch_path: Path
     report_path: Path
     publication_path: Path
+    changed_files: tuple[str, ...] = ()
 
 
 def discover_controller_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
@@ -121,6 +122,14 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     manifest = payload.get("manifest")
     if not isinstance(manifest, dict):
         raise ControllerPublicationError("manifest must be a JSON object")
+    # The scope the Controller says its patch has. Checked here so a declared path
+    # cannot escape the repository, and carried on so integration stages the paths
+    # the patch actually changes rather than the ones the optimizer claims it
+    # edited. Absent on a publication written before the field existed.
+    changed_files_raw = payload.get("changed_files", [])
+    if not isinstance(changed_files_raw, list):
+        raise ControllerPublicationError("changed_files must be a JSON list")
+    changed_files = tuple(_relative_path(value, "changed_files entry") for value in changed_files_raw)
     return ControllerPatchPublication(
         operator_id=operator_id,
         identity=identity,
@@ -133,6 +142,7 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
         patch_path=patch_path.resolve(),
         report_path=report_path.resolve(),
         publication_path=publication_path.resolve(),
+        changed_files=changed_files,
     )
 
 

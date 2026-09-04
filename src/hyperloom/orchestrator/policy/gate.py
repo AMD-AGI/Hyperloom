@@ -1094,16 +1094,16 @@ class PolicyGate:
                 f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable",
                 rule="request_kind",
                 hint=(
-                    "run_fusion / run_collective are dispatched by the "
-                    "Coordinator at KERNEL entry once their deterministic gate "
-                    "passes; their outcomes arrive as run_fusion_done / "
-                    "run_collective_done responses. Requesting one directly "
-                    "skips that gate, the lane's SharedState accounting, and "
-                    "its integrate step. Source-level rewrites are owned by "
-                    "the phase-level KernelForge controller."
+                    "run_fusion / run_collective / run_gemm_tuning are dispatched "
+                    "by the Coordinator at KERNEL entry once their deterministic "
+                    "gate passes, and each draws on a lane budget rather than a "
+                    "per-request one; their outcomes arrive as the matching "
+                    "*_done responses. Requesting one directly skips that gate, "
+                    "the lane's SharedState accounting, and its integrate step. "
+                    "Source-level rewrites are owned by the phase-level "
+                    "KernelForge controller."
                 ),
             )
-        self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(
             role.name,

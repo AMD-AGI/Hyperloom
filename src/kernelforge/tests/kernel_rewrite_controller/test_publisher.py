@@ -54,6 +54,33 @@ def test_publish_operator_result_exposes_one_complete_operator_directory(
     ]
 
 
+def test_publication_records_the_scope_git_reports_not_the_manifest_claim(
+    tmp_path: Path,
+    task_dir: Path,
+) -> None:
+    """What integration stages has to come from the patch, not from the optimizer.
+
+    ``source_files`` is orientation for forge-loop rather than an edit allowlist,
+    so the manifest's account of what it edited cannot bound the patch.
+    """
+    layout = ControllerLayout(tmp_path / "output")
+    task = load_task(task_dir, record_state=False).task
+    assert task is not None
+    publication = publisher.publication_from_task(
+        task,
+        best_commit="c" * 40,
+        patch="patch\n",
+        manifest={"changed_files": [task.kernel_path]},
+        changed_files=(task.kernel_path, "sglang/srt/layers/helper.py"),
+    )
+
+    destination = publisher.publish_operator_result(layout, publication)
+
+    metadata = json.loads((destination / "publication.json").read_text(encoding="utf-8"))
+    assert metadata["changed_files"] == [task.kernel_path, "sglang/srt/layers/helper.py"]
+    assert "sglang/srt/layers/helper.py" in (destination / "report.md").read_text(encoding="utf-8")
+
+
 def test_new_keep_atomically_replaces_the_public_operator_result(
     tmp_path: Path,
     task_dir: Path,

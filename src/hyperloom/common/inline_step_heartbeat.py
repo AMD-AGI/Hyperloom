@@ -28,6 +28,7 @@ async def inline_step_heartbeat(
     interval_sec: float,
     now: Callable[[], float] = time.time,
     on_beat: Callable[[int], None] | None = None,
+    clear: Callable[[], None] | None = None,
 ) -> AsyncIterator[None]:
     """Stamp progress every ``interval_sec`` for as long as the block runs.
 
@@ -40,6 +41,11 @@ async def inline_step_heartbeat(
             beating but keeps the entry stamp.
         now: Clock, injected for testability.
         on_beat: Optional observer receiving the 1-based beat number.
+        clear: Retires the stamp once the step is over. Without it the last beat
+            keeps reporting the step as running for as long as a stamp stays
+            fresh, which mutes the guard after the work it was covering has
+            finished. Failures are swallowed: the step itself has already
+            completed, and a stamp left behind goes stale on its own.
 
     Yields:
         None, for the duration of the guarded step.
@@ -65,3 +71,6 @@ async def inline_step_heartbeat(
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if clear is not None:
+            with contextlib.suppress(Exception):
+                clear()
