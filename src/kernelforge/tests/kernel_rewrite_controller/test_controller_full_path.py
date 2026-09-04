@@ -253,6 +253,23 @@ def test_invalid_agent_task_becomes_no_result_without_starting_forge(
     assert state.task_count == 0
     assert state.patch_count == 0
 
+    # A count cannot say which contract rule the agent broke, and that is this
+    # stage's usual failure. The reason has to reach disk because Hyperloom
+    # discards this process's streams when it hard-kills the controller.
+    assert [rejected["draft"] for rejected in state.analysis_rejected_tasks] == ["draft"]
+    assert state.analysis_rejected_tasks[0]["reason"] == (
+        "invalid staged task: repo_root must be an absolute path"
+    )
+    analysis = json.loads(
+        (tmp_path / "output" / "controller" / "agent" / "analysis-result.json").read_text(encoding="utf-8")
+    )
+    assert analysis["rejected_tasks"] == [dict(state.analysis_rejected_tasks[0])]
+    persisted = json.loads((tmp_path / "output" / "controller" / "state.json").read_text(encoding="utf-8"))
+    assert persisted["analysis_rejected_tasks"] == [dict(state.analysis_rejected_tasks[0])]
+    summary = (tmp_path / "output" / "result" / "summary.md").read_text(encoding="utf-8")
+    assert "Rejected Analysis Drafts" in summary
+    assert "repo_root must be an absolute path" in summary
+
 
 def test_agent_failure_after_task_write_still_dispatches_and_returns_partial(
     tmp_path: Path,

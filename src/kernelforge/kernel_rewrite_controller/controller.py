@@ -67,6 +67,9 @@ class ControllerRunState:
     analysis_reason: str = ""
     analysis_published_task_count: int = 0
     analysis_rejected_task_count: int = 0
+    #: Why each draft the analysis agent wrote was refused. A malformed contract
+    #: is this stage's usual failure and the count cannot say which rule it broke.
+    analysis_rejected_tasks: tuple[dict[str, str], ...] = ()
     task_count: int = 0
     patch_count: int = 0
     skipped_task_count: int = 0
@@ -143,6 +146,13 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
     if state.repository_pins:
         lines.extend(["## Pinned Source Repositories", ""])
         lines.extend(f"- `{root}` @ `{commit}`" for root, commit in sorted(state.repository_pins.items()))
+        lines.append("")
+    if state.analysis_rejected_tasks:
+        lines.extend(["## Rejected Analysis Drafts", ""])
+        lines.extend(
+            f"- `{rejected.get('draft', '')}`: {rejected.get('reason', '')}"
+            for rejected in state.analysis_rejected_tasks
+        )
         lines.append("")
     if state.recovery_failures:
         lines.extend(["## Unpublishable Validated Results", ""])
@@ -283,6 +293,7 @@ def run_controller(
             "analysis_reason": analysis.reason,
             "analysis_published_task_count": analysis.published_task_count,
             "analysis_rejected_task_count": analysis.rejected_task_count,
+            "analysis_rejected_tasks": analysis.rejected_tasks,
             "task_count": schedule.task_count,
             "patch_count": patch_count,
             "skipped_task_count": schedule.skipped_count,

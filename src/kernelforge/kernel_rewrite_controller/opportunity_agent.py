@@ -63,6 +63,11 @@ class OpportunityAnalysisResult:
     reason: str = ""
     published_task_count: int = 0
     rejected_task_count: int = 0
+    #: Why each rejected draft was refused, keyed by its staging directory name.
+    #: A contract the agent got wrong is the most common way this stage fails and
+    #: the count alone cannot say which rule it broke. Durable because Hyperloom
+    #: discards this process's streams when it hard-kills the controller.
+    rejected_tasks: tuple[dict[str, str], ...] = ()
     started_at_unix: float = 0.0
     finished_at_unix: float = 0.0
 
@@ -448,12 +453,17 @@ class OpportunityAnalysisAgent:
                 atomic_write_text(layout.agent_root / "progress.log", "\n".join(progress) + "\n")
 
         published = sum(result.published for result in publications.values())
-        rejected = sum(not result.published for result in publications.values())
+        rejected = tuple(
+            {"draft": name, "operator_id": result.operator_id, "reason": result.reason}
+            for name, result in sorted(publications.items())
+            if not result.published
+        )
         outcome = OpportunityAnalysisResult(
             status=status,
             reason=reason,
             published_task_count=published,
-            rejected_task_count=rejected,
+            rejected_task_count=len(rejected),
+            rejected_tasks=rejected,
             started_at_unix=started,
             finished_at_unix=time.time(),
         )
