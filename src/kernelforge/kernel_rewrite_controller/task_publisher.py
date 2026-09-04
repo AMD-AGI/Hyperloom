@@ -9,6 +9,8 @@ import json
 import os
 import shutil
 import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,12 @@ from kernelforge.kernel_rewrite_controller.task import parse_task_payload
 from kernelforge.knowledge.implementation_identity import normalize_operator_name
 from kernelforge.knowledge.kernel_identity import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.llm.git import GitError, git
+
+
+#: How long a staged directory must stop changing before it is taken. The agent
+#: writes task.json and driver.py in separate tool calls and neither write is
+#: atomic, so the pair existing does not mean the pair is finished.
+PUBLISH_QUIESCENT_SEC = 5.0
 
 
 @dataclass(frozen=True)
@@ -161,10 +169,24 @@ def publish_staged_task(
     )
 
 
+def _newest_mtime(root: Path) -> float:
+    """Return the most recent mtime anywhere in one staged directory tree."""
+    newest = 0.0
+    for path in (root, *root.rglob("*")):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
 def publish_complete_staged_tasks(
     layout: ControllerLayout,
+    *,
+    quiescent_sec: float = PUBLISH_QUIESCENT_SEC,
+    now: Callable[[], float] = time.time,
 ) -> tuple[TaskPublicationResult, ...]:
-    """Publish every complete non-temporary task currently visible in staging."""
+    """Publish every staged task that is complete and no longer being written."""
     root = layout.agent_staging_root
     if not root.is_dir():
         return ()
@@ -174,11 +196,20 @@ def publish_complete_staged_tasks(
             continue
         if not (entry / "task.json").is_file() or not (entry / "driver.py").is_file():
             continue
+        # Both files existing is not a completion signal: this runs on a timer
+        # beside the live agent, and taking a directory mid-write copies a
+        # truncated driver.py -- whose contents nothing downstream validates --
+        # and then deletes the agent's working copy. Publication is also
+        # one-way, so a task revised right after it was written would lose the
+        # revision. Wait for the tree to go quiet instead.
+        if float(now()) - _newest_mtime(entry) < float(quiescent_sec):
+            continue
         results.append(publish_staged_task(layout, entry))
     return tuple(results)
 
 
 __all__ = [
+    "PUBLISH_QUIESCENT_SEC",
     "TaskPublicationResult",
     "publish_complete_staged_tasks",
     "publish_staged_task",

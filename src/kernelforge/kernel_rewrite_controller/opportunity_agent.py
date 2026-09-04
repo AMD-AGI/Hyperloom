@@ -439,7 +439,10 @@ class OpportunityAnalysisAgent:
                 backend_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await backend_task
-            for result in publish_complete_staged_tasks(layout):
+            # No quiescence window here: the session has stopped, so nothing is
+            # still writing, and waiting would strand a task finished moments
+            # before the deadline -- the case incremental publication exists for.
+            for result in publish_complete_staged_tasks(layout, quiescent_sec=0.0):
                 publications[result.source_dir.name] = result
             if progress:
                 atomic_write_text(layout.agent_root / "progress.log", "\n".join(progress) + "\n")

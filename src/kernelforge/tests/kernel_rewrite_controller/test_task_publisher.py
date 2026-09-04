@@ -9,7 +9,10 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.kernel_rewrite_controller.task_publisher import publish_staged_task
+from kernelforge.kernel_rewrite_controller.task_publisher import (
+    publish_complete_staged_tasks,
+    publish_staged_task,
+)
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "publisher-test",
@@ -73,6 +76,10 @@ def _staged(layout: ControllerLayout, repo: Path, name: str = "draft") -> Path:
         encoding="utf-8",
     )
     return staged
+
+
+def _newest_staged_mtime(staged: Path) -> float:
+    return max(path.stat().st_mtime for path in (staged, *staged.rglob("*")))
 
 
 def test_publish_pins_live_head_and_moves_complete_task_atomically(tmp_path: Path) -> None:
@@ -165,6 +172,41 @@ def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path:
     assert result.published is False
     assert result.reason == "operator task is already published"
     assert duplicate.is_dir()
+
+
+def test_a_staged_task_still_being_written_is_left_alone(tmp_path: Path) -> None:
+    # The scan runs on a timer beside the live agent, so a directory whose files
+    # were touched a moment ago may still be mid-write. Taking it would copy a
+    # truncated driver.py and delete the agent's working copy.
+    repo, _head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+
+    # Default window against real time: the files were just written, which is
+    # what a scan landing in the same poll tick as the agent's write sees.
+    results = publish_complete_staged_tasks(layout)
+
+    assert results == ()
+    assert staged.is_dir()
+    assert (staged / "driver.py").is_file()
+
+
+def test_a_quiescent_staged_task_is_published(tmp_path: Path) -> None:
+    repo, head = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    staged = _staged(layout, repo)
+    written_at = _newest_staged_mtime(staged)
+
+    results = publish_complete_staged_tasks(
+        layout,
+        quiescent_sec=5.0,
+        now=lambda: written_at + 5.0,
+    )
+
+    assert [result.published for result in results] == [True]
+    assert not staged.exists()
+    payload = json.loads((layout.task_dir(results[0].operator_id) / "task.json").read_text(encoding="utf-8"))
+    assert payload["base_commit"] == head
 
 
 def test_publish_rejects_a_symlinked_staging_directory(tmp_path: Path) -> None:
