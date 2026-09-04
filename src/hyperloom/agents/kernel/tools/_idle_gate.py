@@ -1,9 +1,9 @@
 """Shared GPU work-share gates: threshold resolution + trace-health warnings.
 
 Single source of truth for the trace-health gates applied by BOTH trace-analysis
-routes (the TraceLens agent/deterministic pipeline and the standalone bypass
-reader), so the thresholds, gate semantics, and warning shapes stay identical
-regardless of which backend produced the trace analysis.
+routes (the TraceLens agent pipeline and the standalone bypass reader), so the
+thresholds, gate semantics, and warning shapes stay identical regardless of
+which backend produced the trace analysis.
 
 Two complementary gates live here, both answering "can rewriting a kernel move
 end-to-end latency on this trace?":

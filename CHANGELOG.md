@@ -85,6 +85,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   KB. They were a lone log warning, so downstream saw an outcome with no link to
   the cause and re-authored the same proposal until the budget ran out.
 
+- **BREAKING — the `deterministic` trace-analysis route is gone.**
+  `HYPERLOOM_TRACE_ANALYSIS_ROUTE` and the `analysis_route` payload key now take
+  `agent` or `bypass`, and `tracelens_analysis.py` no longer accepts
+  `--analysis-route` at all. The route reached hot kernels without a model by
+  driving the TraceLens Python toolchain directly (perf report,
+  `orchestrator_prepare`, the per-category analysis scripts,
+  `generate_priority_data`) and extracting candidates from `priority_data.json`
+  — a second extraction pipeline maintained beside the one `analysis.md` already
+  defines, and the only caller of the category-script fan-out. `bypass` serves
+  the same no-LLM intent by reading the profiler trace directly and needs no
+  TraceLens checkout to do it. A request still naming `deterministic` is rejected
+  with `invalid_analysis_route` before TraceLens or an LLM is started, and the
+  error points to `bypass`. Only an omitted route defaults to `agent`; explicit
+  unknown values no longer fall back to a route that may spend an LLM session.
+
 - **Codex sandbox bypass uses a single env var.** Set
   `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
   enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
