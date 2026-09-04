@@ -51,6 +51,11 @@ from ..loop.coordinator_helpers import (
     geak_spec_is_env,
     _resolve_roofline_watermark_ratio,
     _accepted_config_as_variant,
+    _coerce_tp,
+    _resolve_gpu_pin,
+    _resolve_handoff_gpu_ids,
+    _resolve_handoff_gpu_ids_space,
+    _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
 from .base import PhaseHandler
@@ -811,23 +816,42 @@ class KernelPhase(PhaseHandler):
         return False
 
     @staticmethod
-    def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
-        """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
+    def _read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
+        """Read the materialized baseline recipe's ``benchmark.envs``. Never raises.
 
-        Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
-        to the process env) and returns only the keys that resolve, so absent
-        values leave GEAK on its standalone defaults. Never raises.
+        Args:
+            recipe_path: Path to the baseline recipe YAML (may be empty/missing).
+
+        Returns:
+            The ``benchmark.envs`` mapping, or ``{}`` when the recipe is absent
+            or unreadable.
         """
-        envs: dict[str, Any] = {}
         try:
             import yaml
 
             if recipe_path and Path(recipe_path).is_file():
                 cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
                 envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+                return dict(envs) if isinstance(envs, dict) else {}
         except Exception:  # noqa: BLE001
-            log.warning("bench_protocol: could not read recipe %r", recipe_path, exc_info=True)
-            envs = {}
+            log.warning("geak handoff: could not read recipe %r", recipe_path, exc_info=True)
+        return {}
+
+    @classmethod
+    def _resolve_bench_protocol(cls, recipe_path: str, *, envs: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
+
+        Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
+        to the process env) and returns only the keys that resolve, so absent
+        values leave GEAK on its standalone defaults. Never raises.
+
+        Args:
+            recipe_path: Path to the baseline recipe YAML.
+            envs: An already-parsed ``benchmark.envs`` for that path. Pass it
+                when the caller needs the envs too, so the YAML is read once and
+                both consumers see the same snapshot.
+        """
+        envs = cls._read_recipe_bench_envs(recipe_path) if envs is None else envs
 
         def _pick(key: str, cast: Callable[[str], Any]) -> Any:
             raw = envs.get(key)
@@ -982,7 +1006,40 @@ class KernelPhase(PhaseHandler):
         # Forward the SAME bench knobs Hyperloom benched with so GEAK's internal
         # e2e measures identically; source = the baseline recipe's benchmark.envs
         # (process-env fallback). Only resolved keys are sent.
-        bench_protocol = self._resolve_bench_protocol(str(getattr(state, "baseline_config_path", "") or ""))
+        _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
+        # One read, two consumers: the recipe is parsed once so bench_protocol,
+        # the GPU pin and tp below all see the same snapshot.
+        _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
+        bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
+        # The run's ACTUAL GPU pin (issue #1312). GEAK launches full servers
+        # out-of-process and writes its own visible-devices mask for each one;
+        # with no pin in the handoff it defaults to physical GPU 0 and collides
+        # with whatever else holds that card. Process mask first, recipe as the
+        # fallback; {} means "whole machine", not "card 0".
+        gpu_pin = _resolve_gpu_pin(recipe_envs=_recipe_envs)
+        # tp must come from the SAME place as gpu_ids or the two can disagree.
+        # The materializer clamps TP to the visible GPU count, so a stale
+        # $TP=8 on a 4-card pod would otherwise ship `tp: 8` alongside four
+        # gpu_ids and GEAK would launch sglang with --tp 8 and fail to load.
+        # Recipe TP first, process env as the fallback; both guarded, so a
+        # non-numeric $TP cannot raise out of the fallback itself.
+        _tp = _coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
+        # gpu_ids is capped at the pin's mask width; tp follows it down so the
+        # two can never disagree (e.g. ROCR=6 with TP=2 ships tp=1, not tp=2).
+        _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
+        _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
+        _gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
+        if _gpu_ids_space == "none":
+            # Set-but-empty mask: the run has no visible devices, so no id list
+            # in this handoff can be truthful. The payload says so via
+            # gpu_ids_space, but say it in the log too — a GEAK run that dies
+            # on "invalid device ordinal" is otherwise unexplainable.
+            log.error(
+                "geak handoff: %s is set but empty; the run has no visible GPUs. "
+                "gpu_ids=%s is a placeholder (gpu_ids_space=none), not a device set.",
+                gpu_pin.get("var"),
+                _gpu_ids,
+            )
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
         # the baseline served with so GEAK launches the identical engine and its
         # baseline matches raw_baseline_tput. Resolver parses these from the raw
@@ -1002,11 +1059,14 @@ class KernelPhase(PhaseHandler):
         handoff = {
             # v2 adds ``baseline_env_spec`` (the full layered env of current_best);
             # v1-only consumers ignore it and degrade to the flags/env-only baseline.
-            "schema_version": 2,
+            # v3 adds ``gpu_pin`` (the run's actual visible-devices mask) and
+            # ``gpu_ids_space``; older consumers ignore both and keep reading
+            # ``gpu_ids`` exactly as before.
+            "schema_version": 3,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
             "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
             "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
-            "tp": int(os.environ.get("TP", "1") or 1),
+            "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
@@ -1045,13 +1105,23 @@ class KernelPhase(PhaseHandler):
             "bench_client": "auto",
             "e2e_metric": "output",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
-            # Pin the serving GPU set: explicit visibility mask, else 0..tp-1.
-            "gpu_ids": (
-                os.environ.get("HIP_VISIBLE_DEVICES")
-                or os.environ.get("CUDA_VISIBLE_DEVICES")
-                or ",".join(str(i) for i in range(int(os.environ.get("TP", "1") or 1)))
-            ),
+            # The serving/optimization device set, as HIP-level ids (what the
+            # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
+            # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
+            "gpu_ids": _gpu_ids,
+            # Which coordinate system ``gpu_ids`` is in: "logical" (positions
+            # inside the ROCR mask the child inherits), "absolute" (whole-
+            # machine device ids), or "none" (the mask is set but empty — the
+            # ids are placeholders and must not be launched on). Exporting them
+            # as HIP_VISIBLE_DEVICES is correct in the first two; a consumer
+            # that instead writes ROCR itself needs to know which it holds.
+            "gpu_ids_space": _gpu_ids_space,
         }
+        if gpu_pin:
+            # ABSOLUTE ids + the var they came from, so a consumer that writes
+            # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of
+            # resetting the child to card 0.
+            handoff["gpu_pin"] = gpu_pin
         if bench_protocol:
             handoff["bench_protocol"] = bench_protocol
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.

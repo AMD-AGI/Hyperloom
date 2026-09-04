@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
@@ -55,11 +56,9 @@ CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 # the very round it is meant to stop.
 _SERVING_ACTOR_CONCURRENCY: int = 2
 
-_VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = (
-    "ROCR_VISIBLE_DEVICES",
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-)
+#: The masks Ray owns for its serving children. Single definition lives in
+#: ``hyperloom.common.visible_devices``.
+_VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = COUNTING_VISIBLE_DEVICE_VARS
 
 
 class RayInfeasibleError(RuntimeError):

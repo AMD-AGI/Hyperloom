@@ -38,6 +38,67 @@ GEAK's `e2e_workflow` recursively drives `kernel_workflow` to author and tune th
 individual hot kernels worth fixing. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
+## GPU pinning in the handoff
+
+GEAK launches full servers out-of-process (baseline, profile, config-tuning
+validation) and writes a visible-devices mask for each one, so the handoff has
+to say which cards the run owns. Two fields carry that, in two different
+coordinate systems:
+
+| Field | Coordinate system | Value |
+|-------|-------------------|-------|
+| `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside an *inherited* ROCr-level mask, capped at `tp` and at the mask width (`ROCR=6` → `"0"`); a HIP-level mask nested inside that slice is already logical and is forwarded instead (`ROCR=4,5,6,7` + `HIP=2,3` → `"2,3"`, i.e. cards 6 and 7); any other mask passes through uncapped (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned. Never empty — a falsy `gpu_ids` sends GEAK back to its own `0..tp-1` fallback |
+| `gpu_ids_space` | — | `"logical"` when `gpu_ids` indexes into an inherited ROCr mask, `"absolute"` when they are whole-machine ids, `"none"` when the mask is set but empty. The one field that makes the coordinate systems distinguishable from the payload alone |
+| `gpu_pin` | absolute device ids | `{"var", "value", "ids", "count", "source"}` for the winning mask, plus `"inner"` (the same shape) when a HIP-level mask is nested inside a ROCr-level one. Omitted entirely only when no mask is set anywhere, which means "whole machine visible", not "pinned to card 0"; a mask that is *set but empty* is reported with `count: 0` (zero devices visible). `value` is the mask as authored, only whitespace-trimmed and (for a YAML sequence) comma-joined, so a UUID mask can be re-exported as-is; `ids` are its numeric ids and `count` how many devices it exposes — both derived from the same effective token list, with duplicate and negative ordinals dropped, so `count >= len(ids)` always and they differ only for a (partly) non-numeric mask |
+
+The mask is resolved variable-major, over the full ROCm precedence chain in
+`common/visible_devices.py`: the ROCr-level masks (`ROCR_VISIBLE_DEVICES`, then
+its legacy spelling `HSA_VISIBLE_DEVICES`) before the HIP-level ones
+(`HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`, `GPU_DEVICE_ORDINAL`). Within
+each variable the process environment comes before the materialized baseline
+recipe's `benchmark.envs`.
+
+That module is also the single definition of the tuple and the mask parser that
+`orchestrator/bus/gpu_pool.py`, `orchestrator/policy/gate.py`,
+`actions/executors/_ray_serving.py` and `common/env_safety.py` use. Those layers
+read the narrower `COUNTING_VISIBLE_DEVICE_VARS` on purpose — they answer "how
+many GPUs does this process have", and widening that would change GPU accounting
+repo-wide — while this resolver answers "where is this run pinned", and a run
+pinned with a legacy spelling is really pinned.
+
+The process env comes first because the recipe's ROCR key is not evidence of a
+pin: `materialize_config_with_envs` autofills `ROCR_VISIBLE_DEVICES=0..tp-1`
+into every materialized recipe when the mask is absent or narrower than `TP`.
+A recipe ROCR value byte-identical to that default is therefore ignored, so a
+`HIP`-pinned or genuinely unpinned run is not silently re-pinned to cards
+`0..tp-1`. A recipe mask that differs from the default *is* honoured — but its
+ids are forwarded absolute, not logical, because the GEAK child inherits the
+process environment and never sees that mask.
+
+`tp` in the handoff is read from the same resolved recipe as `gpu_ids`, so the
+two cannot disagree when the materializer clamps `TP` to the visible GPU count.
+
+A consumer that re-exports `HIP_VISIBLE_DEVICES` and leaves ROCr alone should
+use `gpu_ids`; that is correct in both coordinate systems, because the child
+inherits the same ROCr mask this process runs under.
+
+A consumer that writes `ROCR_VISIBLE_DEVICES` itself must use
+`gpu_pin["value"]` — writing `gpu_ids` there resets the child to physical card
+0 regardless of the run's pin — and must then renumber: it has just made the
+device set `0..count-1` from the child's point of view, so the inner HIP mask
+is `0..count-1`, **not** `gpu_ids`. Re-applying an absolute `gpu_ids` on top of
+a ROCr mask it also wrote yields out-of-range ordinals (`ROCR=4,5` plus
+`HIP=4,5` indexes positions 4 and 5 of a two-element set). `gpu_ids_space` is
+how a consumer tells the cases apart without inferring it from `source`.
+
+`gpu_ids_space: "none"` is the third case: the mask is set but empty, so the run
+has no visible devices and no id list can be truthful. `gpu_ids` still carries
+`0..tp-1` — a falsy `gpu_ids` is read as "unset" and falls back to exactly those
+ids anyway (`interface/run_e2e.py`), so an empty string would buy nothing and
+lose the ability to say why. A consumer must treat those ids as placeholders and
+not launch on them; the orchestrator also logs the condition at ERROR, because a
+GEAK run that dies on an invalid device ordinal is otherwise unexplainable.
+
 ## GEAK documentation
 
 For detailed documentation on GEAK, see [GEAK on ROCm Docs](https://rocm.docs.amd.com/projects/geak/en/latest/).
