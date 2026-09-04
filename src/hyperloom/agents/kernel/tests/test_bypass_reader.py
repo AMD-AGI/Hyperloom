@@ -83,8 +83,9 @@ def test_long_kernel_names_are_not_merged_before_display_truncation(tmp_path):
 def test_gpu_event_cap_returns_truncated_analysis(tmp_path, monkeypatch):
     """An oversized trace returns the retained prefix instead of failing."""
     events = [
-        {"cat": "kernel", "ph": "X", "name": f"kernel_{i}", "ts": i * 10, "dur": 1, "args": {}}
-        for i in range(3)
+        {"cat": "kernel", "ph": "X", "name": "kernel_0", "ts": 0, "dur": 1, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": "kernel_1", "ts": 10, "dur": 1, "args": {}},
+        {"cat": "kernel", "ph": "X", "name": "kernel_2", "ts": 20, "dur": 1, "args": {}},
     ]
     tf = tmp_path / "capped.trace.json"
     tf.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
