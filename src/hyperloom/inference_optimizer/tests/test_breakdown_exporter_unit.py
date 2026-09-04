@@ -14,8 +14,6 @@ import pytest
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
-from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_session_meta
-
 
 # ---- _load_session_json ----
 
@@ -95,7 +93,7 @@ def test_build_empty_session(tmp_path):
     out = ex.build(tmp_path)
     assert out["exporter_version"] == ex.EXPORTER_VERSION
     assert "warnings" in out
-    assert "session" in out
+    assert "session" in out["metadata"]
     assert any("missing" in w for w in out["warnings"])
 
 
@@ -283,7 +281,7 @@ def test_patch_breakdown_langfuse_success(tmp_path):
 
     assert ex.patch_breakdown_langfuse(tmp_path) is True
     bd = json.loads((tmp_path / ex.BREAKDOWN_FILENAME).read_text())
-    assert bd["langfuse"]["enabled"] is True
+    assert bd["metadata"]["langfuse"]["enabled"] is True
     assert ex.patch_breakdown_langfuse(tmp_path) is False
 
 
@@ -446,8 +444,8 @@ def test_orchestration_context_is_empty_without_a_census_or_db(tmp_path):
     assert warnings == []
 
 
-def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
-    """A recorder fragment replaces its whole section, so it must not own workload."""
+def test_recorder_snapshot_leaves_the_task_config_contract_intact(tmp_path):
+    """An unset knob must stay unset; a recorder snapshot used to coerce it to 0."""
     from types import SimpleNamespace
 
     from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -465,15 +463,14 @@ def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
         SimpleNamespace(framework="sglang", model_name="qwen3-8b", model_path="", session_id="s"),
     )
 
-    workload = ex.build(tmp_path)["workload"]
-    assert workload["framework_name"] == "sglang"
-    assert workload["framework_version"] == "0.4.1"
-    assert workload["conc"] == 64
-    # Unset knobs stay None; a recorder fragment used to coerce them to 0.
-    assert workload["tp"] is None
+    task_config = ex.build(tmp_path)["metadata"]["task_config"]
+    assert task_config["framework_name"] == "sglang"
+    assert task_config["framework_version"] == "0.4.1"
+    assert task_config["conc"] == 64
+    assert task_config["tp"] is None
 
 
-# ---- session_meta duration ----
+# ---- session elapsed time ----
 
 
 def _freeze_now(monkeypatch, instant: datetime) -> None:
@@ -492,66 +489,24 @@ def _freeze_now(monkeypatch, instant: datetime) -> None:
     monkeypatch.setattr(sessions, "datetime", _FrozenDatetime)
 
 
-def test_session_duration_is_measured_from_the_session_timestamps():
-    """The live recorder's ``session`` snapshot carries no ``elapsed_minutes``."""
-    meta = collect_session_meta(
-        {"code_revision": "abc1234"},
-        {
-            "start_ts": "2026-08-08T00:37:27+00:00",
-            "ended_at_utc": "2026-08-08T02:55:27+00:00",
-        },
-        [],
-    )
-    assert meta["session_duration_seconds"] == 8280
-
-
-def test_a_running_session_is_measured_up_to_now():
-    started = datetime.now(timezone.utc) - timedelta(minutes=10)
-    meta = collect_session_meta({}, {"start_ts": started.isoformat()}, [])
-    assert 590 <= meta["session_duration_seconds"] <= 620
-
-
-def test_a_session_that_has_not_stopped_yet_is_still_measured_up_to_now(monkeypatch):
+def test_a_session_that_has_not_stopped_yet_is_still_measured_up_to_now(tmp_path, monkeypatch):
     _freeze_now(monkeypatch, datetime(2026, 8, 8, 1, 37, 27, tzinfo=timezone.utc))
-    meta = collect_session_meta(
-        {},
-        {"start_ts": "2026-08-08T00:37:27+00:00", "stop_reason": ""},
-        [],
-    )
-    assert meta["session_duration_seconds"] == 3600
+    section = sessions.collect_session(tmp_path, {"session_id": "s", "start_ts": "2026-08-08T00:37:27+00:00"}, {}, [])
+    assert section["elapsed_minutes"] == 60.0
 
 
-def test_a_stopped_session_without_an_end_timestamp_is_not_measured_up_to_now(monkeypatch):
-    """The live recorder's ``session`` snapshot of a crashed run has no end."""
-    _freeze_now(monkeypatch, datetime(2026, 10, 20, 0, 37, 27, tzinfo=timezone.utc))
-    meta = collect_session_meta(
-        {},
-        {"start_ts": "2026-08-08T00:37:27+00:00", "stop_reason": "coordinator_exception"},
-        [],
-    )
-    assert meta["session_duration_seconds"] == 0
-
-
-def test_a_stopped_session_measures_the_same_however_late_it_is_exported(monkeypatch):
-    section = {
+def test_a_stopped_session_measures_the_same_however_late_it_is_exported(tmp_path, monkeypatch):
+    state = {
+        "session_id": "s",
         "start_ts": "2026-08-08T00:37:27+00:00",
         "stop_reason": "time_exhausted",
-        "elapsed_minutes": 138.0,
+        "stop_ts": "2026-08-08T02:55:27+00:00",
     }
     _freeze_now(monkeypatch, datetime(2026, 8, 8, 3, 0, 0, tzinfo=timezone.utc))
-    first = collect_session_meta({}, section, [])["session_duration_seconds"]
+    first = sessions.collect_session(tmp_path, state, {}, [])["elapsed_minutes"]
     _freeze_now(monkeypatch, datetime(2026, 10, 20, 3, 0, 0, tzinfo=timezone.utc))
-    second = collect_session_meta({}, section, [])["session_duration_seconds"]
-    assert first == second == 8280
-
-
-def test_elapsed_minutes_still_answers_when_no_timestamp_does():
-    meta = collect_session_meta({}, {"elapsed_minutes": 12.5}, [])
-    assert meta["session_duration_seconds"] == 750
-
-
-def test_a_session_with_nothing_to_measure_reports_zero():
-    assert collect_session_meta({}, {}, [])["session_duration_seconds"] == 0
+    second = sessions.collect_session(tmp_path, state, {}, [])["elapsed_minutes"]
+    assert first == second == 138.0
 
 
 def _stopped_session(session_dir: Path, *, ran_for: timedelta, stopped_ago: timedelta = timedelta(0)):
@@ -584,9 +539,9 @@ def test_a_recorded_session_exports_the_time_it_actually_ran(tmp_path):
     state = _stopped_session(tmp_path, ran_for=timedelta(hours=2), stopped_ago=timedelta(days=3))
 
     bd = ex.build(tmp_path)
-    assert bd["session"]["start_ts"] == state.start_ts
-    assert bd["session"]["ended_at_utc"] == iso_z(state.stop_ts)
-    assert bd["session_meta"]["session_duration_seconds"] == 7200
+    assert bd["metadata"]["session"]["start_ts"] == state.start_ts
+    assert bd["metadata"]["session"]["ended_at_utc"] == iso_z(state.stop_ts)
+    assert bd["metadata"]["session"]["elapsed_minutes"] == pytest.approx(120.0, abs=0.02)
 
 
 def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_path):
@@ -594,9 +549,7 @@ def test_the_human_report_reads_the_same_elapsed_time_as_the_machine_field(tmp_p
     _stopped_session(tmp_path, ran_for=timedelta(hours=2))
 
     bd = ex.build(tmp_path)
-    elapsed_minutes = bd["session"]["elapsed_minutes"]
-    assert elapsed_minutes == pytest.approx(bd["session_meta"]["session_duration_seconds"] / 60.0, abs=0.02)
-    assert 119.0 <= elapsed_minutes <= 121.0
+    assert 119.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 121.0
 
 
 def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_path, monkeypatch):
@@ -605,9 +558,9 @@ def test_the_recorder_path_keeps_the_fields_only_the_collector_can_resolve(tmp_p
     _stopped_session(tmp_path, ran_for=timedelta(minutes=5))
 
     bd = ex.build(tmp_path)
-    assert bd["session"]["image"] == "registry.example/hyperloom:test"
-    assert bd["session_meta"]["image"] == "registry.example/hyperloom:test"
-    assert bd["session"]["session_dir"] == str(tmp_path.resolve())
+    assert bd["metadata"]["session"]["image"] == "registry.example/hyperloom:test"
+    assert bd["metadata"]["session"]["image_id"] == "hyperloom:test"
+    assert bd["metadata"]["session"]["session_dir"] == str(tmp_path.resolve())
 
 
 def test_a_clean_stop_resume_keeps_measuring_from_the_original_start(tmp_path):
@@ -634,9 +587,9 @@ def test_elapsed_time_is_measured_from_the_resumed_start_not_the_first_launch(tm
     _stopped_session(tmp_path, ran_for=timedelta(minutes=30))
 
     bd = ex.build(tmp_path)
-    assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
+    assert 29.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 31.0
     # The first launch is still on record, so the gap before the resume is visible.
-    assert bd["session"]["created_at_utc"] == "2026-08-01T00:00:00+00:00"
+    assert bd["metadata"]["session"]["created_at_utc"] == "2026-08-01T00:00:00+00:00"
 
 
 def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close(tmp_path):
@@ -656,9 +609,9 @@ def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)
-    assert bd["session"]["stop_reason"] == ""
-    assert bd["session"]["ended_at_utc"] == ""
-    assert 29.0 <= bd["session"]["elapsed_minutes"] <= 31.0
+    assert bd["outcome"]["stop_reason"] == ""
+    assert bd["metadata"]["session"]["ended_at_utc"] == ""
+    assert 29.0 <= bd["metadata"]["session"]["elapsed_minutes"] <= 31.0
 
 
 def test_a_session_resumed_after_a_clean_stop_is_still_reported_as_running(tmp_path):

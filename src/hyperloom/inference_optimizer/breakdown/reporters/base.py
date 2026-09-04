@@ -25,6 +25,9 @@ __all__ = [
     "as_dict",
     "register_renderer",
     "render_section",
+    "session_of",
+    "stop_reason_of",
+    "task_config_of",
 ]
 
 
@@ -38,6 +41,45 @@ def as_dict(value: Any) -> dict[str, Any]:
         ``value`` when it is a dict, otherwise ``{}``.
     """
     return value if isinstance(value, dict) else {}
+
+
+def session_of(breakdown: Any) -> dict[str, Any]:
+    """The session identity and lifecycle block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``metadata.session``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("metadata")).get("session") or {}
+
+
+def task_config_of(breakdown: Any) -> dict[str, Any]:
+    """The launch-time workload and model configuration block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``metadata.task_config``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("metadata")).get("task_config") or {}
+
+
+def stop_reason_of(breakdown: Any) -> str:
+    """Why the run ended.
+
+    The reason is an outcome of the session rather than part of its identity,
+    so it lives on ``outcome`` and not alongside the session ids.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        The stop reason, or ``""`` when the run recorded none.
+    """
+    return str(as_dict(as_dict(breakdown).get("outcome")).get("stop_reason") or "")
 
 
 @dataclass(frozen=True)

@@ -124,7 +124,7 @@ def _architecture(workload: dict[str, Any], model_info: dict[str, Any]) -> dict[
     return architecture
 
 
-def _langfuse_projection(langfuse: dict[str, Any]) -> dict[str, Any]:
+def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
     """The trace entrypoint plus the reason a disabled session pushed nothing."""
     config = langfuse.get("config") if isinstance(langfuse.get("config"), dict) else {}
     trace_url = langfuse.get("trace_url")
@@ -235,7 +235,7 @@ def collect_v6_metadata(
             },
         },
         "task_config": task_config,
-        "langfuse": _langfuse_projection(langfuse),
+        "langfuse": langfuse_block(langfuse),
     }
     metadata = _overlay_recorded(projected, recorded)
     # ``elapsed_minutes`` is measured, not recorded: the recorder snapshots the
@@ -2302,6 +2302,7 @@ def collect_v6_outcome(
 
 __all__ = [
     "collect_v6_metadata",
+    "langfuse_block",
     "collect_v6_outcome",
     "collect_v6_timeline",
 ]

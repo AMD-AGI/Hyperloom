@@ -285,17 +285,6 @@ def build(
         assembled.get("session"),
         _safe_collect("session", lambda: collectors.collect_session(sd, state, manifest, warnings), warnings),
     )
-    # Author-side ``session_meta`` enrichment, emitted from the manifest +
-    # resolved ``session`` block.
-    session_meta = _pick(
-        "session_meta",
-        _safe_collect(
-            "session_meta",
-            lambda: collectors.collect_session_meta(manifest, session_section, warnings),
-            warnings,
-            default={},
-        ),
-    )
     workload = _pick(
         "workload", _safe_collect("workload", lambda: collectors.collect_workload(state, manifest, warnings), warnings)
     )
@@ -645,13 +634,6 @@ def build(
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
         "exporter_version": EXPORTER_VERSION,
-        "session": session_section,
-        # Session metadata enrichment; always present from the exporter.
-        "session_meta": session_meta,
-        "workload": workload,
-        # Structural model summary (state.model_info mirror); empty {} on
-        # non-transformers models.
-        "model_info": model_info,
         "baseline": baseline,
         "final": final,
         "phase_timeline": phase_timeline,
@@ -689,15 +671,10 @@ def build(
         "decision_trace": decision_trace,
         # Promoted token-spend summary, derived from decision_trace.token_rollup.
         "token_usage": token_usage,
-        # Live-Langfuse push receipt; ``enabled`` False on the default path.
-        "langfuse": langfuse,
         # Kernel-major lifecycle view (discovery -> dispatch -> backend
         # attempts -> e2e), composed from the recorder substreams. Empty {} on
         # sessions that predate the substreams.
         "kernel_journey": kernel_journey,
-        # Authoritative external-tool versions, one object per tool keyed by
-        # tool name. Each carries ``{tool, root_dir, commit, version}``.
-        "versions": versions,
         # Enablement attempt-runtime observability; {} → hidden.
         "enablement": enablement,
         "metadata": metadata,
@@ -923,14 +900,14 @@ def _patch_breakdown(
 
 
 def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
-    """Refresh only the ``langfuse`` section of an already-written breakdown.
+    """Refresh only ``metadata.langfuse`` in an already-written breakdown.
 
     ``session_breakdown.json`` is written *before* the session-end
     ``flush_session`` (the flush depends on ``decision_trace.jsonl``, which the
-    breakdown produces). So the breakdown's first ``langfuse`` section carries
-    the pre-flush, in-process counts (``counts_final=False``). Call this right
-    after ``flush_session`` to splice in the post-flush
-    ``langfuse_receipt.json`` (final counts) without rebuilding the whole file.
+    breakdown produces). So the breakdown's first Langfuse block carries the
+    pre-flush, in-process counts. Call this right after ``flush_session`` to
+    splice in the post-flush ``langfuse_receipt.json`` (final counts) without
+    rebuilding the whole file.
 
     Best-effort and self-skipping: returns False (no-op) when no breakdown or
     no receipt exists yet, when live push was disabled, or on any error. Never
@@ -940,7 +917,7 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
         session_dir: The hyperloom session directory holding the breakdown.
 
     Returns:
-        ``True`` when the langfuse section was refreshed, ``False`` otherwise.
+        ``True`` when the langfuse block was refreshed, ``False`` otherwise.
     """
     from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
 
@@ -948,10 +925,13 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
         receipt = read_receipt(sd)
         if receipt is None:
             return False
-        receipt["receipt_source"] = "receipt_file"
-        if breakdown.get("langfuse") == receipt:
+        metadata = breakdown.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        block = collectors.langfuse_block(receipt)
+        if metadata.get("langfuse") == block:
             return False  # already current
-        breakdown["langfuse"] = receipt
+        metadata["langfuse"] = block
         return True
 
     return _patch_breakdown(session_dir, "langfuse", _revise)

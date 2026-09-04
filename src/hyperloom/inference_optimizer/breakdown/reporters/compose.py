@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .base import REGISTRY, RenderedSection, as_dict, render_section
+from .base import REGISTRY, RenderedSection, render_section, session_of
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
@@ -202,7 +202,7 @@ def _stitch(
     Returns:
         str: The complete report markdown, newline-terminated.
     """
-    session = as_dict(breakdown.get("session"))
+    session = session_of(breakdown)
     title = f"# Hyperloom Session Report — {session.get('session_id') or '(no session_id)'}"
 
     parts: list[str] = [title, ""]

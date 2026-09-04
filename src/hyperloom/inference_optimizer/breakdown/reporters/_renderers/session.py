@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, md_kv_list, register_renderer
+from ..base import Decision, RenderedSection, md_kv_list, register_renderer, session_of, stop_reason_of
 
 
 @register_renderer("session")
@@ -24,14 +24,14 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     Returns:
         RenderedSection: The rendered session section.
     """
-    s = breakdown.get("session") or {}
+    s = session_of(breakdown)
     facts: list[str] = []
     warnings: list[str] = []
 
     sid = str(s.get("session_id") or "")
     claw = s.get("claw_session_id")
     sandbox = s.get("sandbox_user_id")
-    stop_reason = str(s.get("stop_reason") or "")
+    stop_reason = stop_reason_of(breakdown)
     elapsed = s.get("elapsed_minutes")
     host = str(s.get("host") or "")
     image = s.get("image")

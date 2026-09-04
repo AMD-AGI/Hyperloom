@@ -81,8 +81,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
-  "session":            { /* §3  SessionMeta */ },
-  "workload":           { /* §4  Workload */ },
+  "metadata":           { /* §3  Task identity, launch config, versions, Langfuse */ },
   "baseline":           { /* §5  Baseline */ },
   "final":              { /* §6  Final state — SaFE contract core */ },
   "phase_timeline":     [ /* §7  PhaseEvent[] */ ],
@@ -93,7 +92,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
-  "metadata":           { /* additive V6 metadata and launch configuration */ },
   "outcome":            { /* additive V6 terminal result */ },
   "timeline":           [ /* additive V6 ordered stage events */ ],
   "close":              { /* additive V6 close-stage result */ },
@@ -103,7 +101,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
   /* Optional sections — present when the run produced the relevant data.
      Consumers MUST tolerate their absence (total=False TypedDict). */
-  "model_info":                  { /* model architecture summary */ },
   "phase_segments":              [ /* per-phase segment records */ ],
   "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
@@ -115,23 +112,17 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "roofline_progress":           [ /* roofline watermark crossings */ ],
   "decision_trace":              { /* KEEP/REVERT decisions + token rollup */ },
   "token_usage":                 { /* LLM token spend rollup (see below) */ },
-  "langfuse":                    { /* Langfuse push receipt */ },
   "kernel_journey":              { /* kernel lifecycle journey */ },
   "collective":                  { /* §11a collective-lane campaigns */ },
-  "versions":                    { /* component/version stamps */ },
   "enablement":                  { /* enablement / targeted-build subsystem summary */ }
 }
 ```
 
-The `session` (SessionMeta) section also carries `user_data_path` and a
-`recovery` sub-object in addition to the fields documented in §3.
-
-The additive V6 surface is identified by
-`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"` while
-the existing top-level V5 contract remains unchanged. Startup source events are
-stored in execution order under `reports/sbd_v6/timeline/`; writer failures are
-reported through `metadata.warnings` rather than being indistinguishable from a
-stage that never ran.
+The V6 surface is identified by
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"`. Startup
+source events are stored in execution order under `reports/sbd_v6/timeline/`;
+writer failures are reported through `metadata.warnings` rather than being
+indistinguishable from a stage that never ran.
 
 All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session
@@ -370,9 +361,13 @@ place. `null` there means the lane recorded no verdict.
 Sessions started with `--no-eval` run no eval at all, warm replay included, so
 these fields record the absence rather than a score.
 
-## `session` — `SessionMeta`
+## `metadata` — `V6Metadata`
 
-The `session` section contains the following metadata fields.
+Task identity, recorded as each fact is decided rather than re-derived at
+export. Four blocks: `session`, `task_config`, `versions` and `langfuse`, plus
+the export's own `exported_at_utc` and `warnings`.
+
+`metadata.session` — identity and lifecycle:
 
 | Field              | Type    | Description                                                                                  |
 |--------------------|---------|----------------------------------------------------------------------------------------------|
@@ -380,26 +375,37 @@ The `session` section contains the following metadata fields.
 | `claw_session_id`  | string \| null | Hosted SaFE / Claw id; populated from env `CLAW_SESSION_ID`.                          |
 | `sandbox_user_id`  | string \| null | Hosted SaFE user id; populated from env `SANDBOX_USER_ID`.                            |
 | `created_at_utc`   | string  | ISO-8601 UTC.                                                                                |
-| `ended_at_utc`     | string  | ISO-8601 UTC.                                                                                |
-| `stop_reason`      | string  | One of `target_reached`, `time_exhausted`, `global_converged`, `max_ticks`, `baseline_failed`, ... |
+| `start_ts`         | string  | The anchor `--max-hours` is counted from; a resume may re-anchor it.                         |
+| `ended_at_utc`     | string  | ISO-8601 UTC; empty while the session is still running.                                      |
 | `max_minutes`      | int     | Configured time budget.                                                                       |
-| `elapsed_minutes`  | float   | Actual wall-clock.                                                                            |
+| `elapsed_minutes`  | float   | Actual wall-clock, measured from `start_ts` to the recorded end (or to now).                 |
 | `host`             | string  | Hostname of the Coordinator pod.                                                              |
 | `code_revision`    | string  | Hyperloom git SHA.                                                                            |
 | `pid`              | int     | Coordinator PID.                                                                              |
 | `session_dir`      | string  | Concrete session directory, typically `$USER_DATA_PATH/<model_basename>/<timestamp>/`.       |
+| `user_data_path`   | string  | The operator-chosen workspace base.                                                           |
 | `tick_count`       | int     | Number of Coordinator ticks.                                                                  |
 | `image`            | string \| null | Container image fully-qualified, if configured.                                       |
+| `image_id`         | string \| null | The image reference without its registry path.                                        |
+| `recovery`         | object  | Crash / interruption / resume history: `recovered`, `crash_count`, `crash_timestamps`, `degraded_mode`, `resume_pending_revalidation`, `last_tick_exception`. |
 
----
+Why the run ended is an outcome rather than an identity, and lives on
+`outcome.stop_reason`.
 
-## `workload` — `Workload`
+`metadata.task_config` — the workload the session optimised: model, framework,
+GPU type, shape, precision, launch overrides, and the optimization objective
+(gain %, target throughput, baseline-relative, or time-only). Consumers should
+treat the `objective.kind` enum as the canonical optimisation goal. Its
+`architecture` sub-object is the structural model summary parsed from the
+model's own `config.json`, and is empty on non-transformers models.
 
-The workload the session optimised: model, framework, GPU type, shape,
-precision, and the optimization objective (gain %, target throughput,
-baseline-relative, or time-only). See `schema.py::Workload` for the
-full field list. Consumers should treat the `objective.kind` enum as
-the canonical optimisation goal.
+`metadata.versions` — the schema version, the Hyperloom revision, the framework
+and its version, and a `tools` map carrying `{tool, root_dir, commit, version}`
+per external tool.
+
+`metadata.langfuse` — the live-Langfuse entrypoint: `enabled`,
+`disabled_reason`, `trace_id`, `session_id`, `trace_url` and push `counts`. The
+local trace jsonl is always written regardless.
 
 ---
 
@@ -752,37 +758,62 @@ The following example shows a complete `session_breakdown.json` for a finished G
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 
-  "session": {
-    "session_id": "sess-20260517-1130",
-    "claw_session_id": "claw-abc123",
-    "sandbox_user_id": "user-42",
-    "created_at_utc": "2026-05-17T11:30:00Z",
-    "ended_at_utc": "2026-05-17T13:58:42Z",
-    "stop_reason": "target_reached",
-    "max_minutes": 240,
-    "elapsed_minutes": 148.7,
-    "host": "claw-sandbox-7",
-    "code_revision": "a1b2c3d",
-    "pid": 12345,
-    "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
-    "tick_count": 89,
-    "image": "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825"
-  },
-
-  "workload": {
-    "framework_name": "sglang",
-    "framework_version": "0.5.18",
-    "model_name": "GLM-5-FP8",
-    "model_path": "/models/GLM-5-FP8",
-    "model_class": "moe_mla_nsa",
-    "gpu_type": "mi355x",
-    "tp": 4,
-    "conc": 64,
-    "isl": 1024,
-    "osl": 1024,
-    "max_model_len": 8192,
-    "precision": "fp8",
-    "objective": { "kind": "tput", "value": 150.0 }
+  "metadata": {
+    "exported_at_utc": "2026-05-17T14:02:15.001Z",
+    "versions": {
+      "schema_version": "hyperloom.session_breakdown.v6.0",
+      "hyperloom": "a1b2c3d",
+      "framework": "sglang",
+      "framework_version": "0.5.18",
+      "tools": {
+        "geak": { "tool": "geak", "root_dir": "/opt/geak", "commit": "9f8e7d6", "version": "0.4.2" }
+      }
+    },
+    "session": {
+      "session_id": "sess-20260517-1130",
+      "claw_session_id": "claw-abc123",
+      "sandbox_user_id": "user-42",
+      "created_at_utc": "2026-05-17T11:30:00Z",
+      "start_ts": "2026-05-17T11:30:00Z",
+      "ended_at_utc": "2026-05-17T13:58:42Z",
+      "max_minutes": 240,
+      "elapsed_minutes": 148.7,
+      "host": "claw-sandbox-7",
+      "code_revision": "a1b2c3d",
+      "pid": 12345,
+      "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
+      "user_data_path": "/workspace",
+      "tick_count": 89,
+      "image": "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825",
+      "image_id": "sglang-rocm:v0.5.18-rocm724-mi30x-20260825",
+      "recovery": {
+        "recovered": false,
+        "crash_count": 0,
+        "crash_timestamps": [],
+        "degraded_mode": false,
+        "resume_pending_revalidation": false,
+        "last_tick_exception": null
+      }
+    },
+    "task_config": {
+      "framework_name": "sglang",
+      "framework_version": "0.5.18",
+      "model_name": "GLM-5-FP8",
+      "model_path": "/models/GLM-5-FP8",
+      "gpu_type": "mi355x",
+      "tp": 4,
+      "conc": 64,
+      "isl": 1024,
+      "osl": 1024,
+      "max_model_len": 8192,
+      "precision": "fp8",
+      "objective": { "kind": "tput", "value": 150.0 },
+      "launch_env": {},
+      "launch_server_args": "",
+      "architecture": { "model_class": "moe_mla_nsa", "model_type": "glm5", "is_moe": true }
+    },
+    "langfuse": { "enabled": false, "disabled_reason": "no_credentials", "trace_url": null, "counts": {} },
+    "warnings": []
   },
 
   "baseline": {

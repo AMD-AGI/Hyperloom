@@ -17,29 +17,31 @@ from hyperloom.inference_optimizer.breakdown.reporters.base import REGISTRY
 
 def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
     base = {
-        "session": {
-            "session_id": "test-sid",
-            "claw_session_id": "test-claw",
-            "sandbox_user_id": "sandbox-1",
-            "stop_reason": "time_exhausted",
-            "elapsed_minutes": 720,
-            "tick_count": 12,
-            "host": "node-1",
-            "code_revision": "deadbeef",
-            "session_dir": "/path/sessions/test",
+        "metadata": {
+            "session": {
+                "session_id": "test-sid",
+                "claw_session_id": "test-claw",
+                "sandbox_user_id": "sandbox-1",
+                "elapsed_minutes": 720,
+                "tick_count": 12,
+                "host": "node-1",
+                "code_revision": "deadbeef",
+                "session_dir": "/path/sessions/test",
+            },
+            "task_config": {
+                "model_name": "deepseek-ai/DeepSeek-R1",
+                "framework_name": "vllm",
+                "gpu_type": "MI300X",
+                "tp": 8,
+                "conc": 64,
+                "isl": 1024,
+                "osl": 1024,
+                "precision": "FP8",
+                "max_model_len": 4096,
+                "objective": {"kind": "gain_pct", "value": 30.0},
+            },
         },
-        "workload": {
-            "model_name": "deepseek-ai/DeepSeek-R1",
-            "framework": "vllm",
-            "gpu_type": "MI300X",
-            "tp": 8,
-            "conc": 64,
-            "isl": 1024,
-            "osl": 1024,
-            "precision": "FP8",
-            "max_model_len": 4096,
-            "objective": {"kind": "gain_pct", "value": 30.0},
-        },
+        "outcome": {"stop_reason": "time_exhausted"},
         "baseline": {
             "throughput_tok_s_per_gpu": 2205.0,
             "accuracy": None,
@@ -396,7 +398,7 @@ def test_v5_attribution_method_and_notes_render_from_validation() -> None:
 def test_invocation_section_renders_when_present() -> None:
     """Baseline/final renderers surface an ``### Invocation`` block; secret-shaped envs are filtered out."""
     bd = _fixture_breakdown()
-    bd["session"]["image"] = "registry.example/hyperloom:abc123"
+    bd["metadata"]["session"]["image"] = "registry.example/hyperloom:abc123"
     bd["baseline"]["invocation"] = {
         "framework_args": "python -m sglang.launch_server --model /weka/m --tp 8",
         "extra_envs": {"TP": "8", "VLLM_FLASH_ATTN": "1"},
@@ -420,7 +422,7 @@ def test_invocation_section_renders_when_present() -> None:
 def test_invocation_renders_framework_args_source() -> None:
     """When ``invocation.framework_args_source`` is set, the renderer surfaces the lineage label under the command line."""
     bd = _fixture_breakdown()
-    bd["session"]["image"] = "registry.example/hyperloom:src"
+    bd["metadata"]["session"]["image"] = "registry.example/hyperloom:src"
     bd["baseline"]["invocation"] = {
         "framework_args": "python -m sglang.launch_server --tp 4",
         "framework_args_source": "yaml_cmd",
@@ -476,18 +478,18 @@ def test_a_renderer_failure_is_reported_not_swallowed(restore_registry) -> None:
 
 @pytest.mark.parametrize(
     "section",
-    ["session", "workload", "baseline", "final", "attribution", "kernel_lifecycle", "capability_summary"],
+    ["metadata", "baseline", "final", "attribution", "kernel_lifecycle", "capability_summary"],
 )
 def test_a_section_that_drifted_to_a_string_still_yields_a_report(section: str) -> None:
     """Producers are not schema-checked, so a drifted shape must cost one section."""
-    r = render_session_report({"session": {"session_id": "s"}, section: "drifted"})
+    r = render_session_report({"metadata": {"session": {"session_id": "s"}}, section: "drifted"})
 
     assert r.markdown.startswith("# Hyperloom Session Report")
 
 
 def test_every_section_drifting_at_once_still_yields_a_report() -> None:
     bd = {sid: "drifted" for sid, _ in REGISTRY}
-    bd["session"] = "drifted"
+    bd["metadata"] = "drifted"
 
     r = render_session_report(bd)
 
@@ -498,7 +500,8 @@ def test_every_section_drifting_at_once_still_yields_a_report() -> None:
 def test_a_drifted_section_yields_neutral_facts() -> None:
     r = render_session_report(
         {
-            "session": {"session_id": "s", "stop_reason": "target_reached"},
+            "metadata": {"session": {"session_id": "s"}},
+            "outcome": {"stop_reason": "target_reached"},
             "kernel_lifecycle": ["not", "a", "dict"],
         }
     )
@@ -512,7 +515,7 @@ def test_a_drifted_section_yields_neutral_facts() -> None:
 def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
     r = render_session_report(
         {
-            "session": {"session_id": "s"},
+            "metadata": {"session": {"session_id": "s"}},
             "baseline": {"throughput_tok_s_per_gpu": "2205"},
             "final": {"throughput_tok_s_per_gpu": "2447", "cumulative_gain_pct_validated": "10.99"},
         }

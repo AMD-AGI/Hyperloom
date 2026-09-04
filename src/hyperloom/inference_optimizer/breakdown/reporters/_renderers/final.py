@@ -13,6 +13,8 @@ from ..base import (
     fmt_pct,
     md_kv_list,
     register_renderer,
+    session_of,
+    task_config_of,
 )
 from ._invocation import render_invocation_block
 
@@ -43,7 +45,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """
     f = breakdown.get("final") or {}
     b = breakdown.get("baseline") or {}
-    session = breakdown.get("session") or {}
+    session = session_of(breakdown)
     final_tput = f.get("throughput_tok_s_per_gpu")
     base_tput = b.get("throughput_tok_s_per_gpu")
     gain_v = f.get("cumulative_gain_pct_validated")
@@ -68,7 +70,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     from .... import framework_registry
 
-    fw = (breakdown.get("workload") or {}).get("framework_name")
+    fw = task_config_of(breakdown).get("framework_name")
     _unit = framework_registry.primary_metric_unit(fw)
     if final_tput:
         facts.append(f"Final: {framework_registry.format_primary_metric(fw, final_tput, precision=2)}.")

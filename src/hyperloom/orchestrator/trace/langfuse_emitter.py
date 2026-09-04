@@ -931,7 +931,7 @@ class LangfuseEmitter:
                 metadata={
                     "schema_version": breakdown.get("schema_version"),
                     "exporter_version": breakdown.get("exporter_version"),
-                    "stop_reason": (breakdown.get("session") or {}).get("stop_reason"),
+                    "stop_reason": (breakdown.get("outcome") or {}).get("stop_reason"),
                 },
             )
             # Stamp trace name/session_id so a breakdown-only session is still grouped.

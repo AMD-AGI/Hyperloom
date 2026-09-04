@@ -4184,11 +4184,9 @@ class SessionBreakdown(TypedDict, total=False):
         schema_version (str): Schema version string (see ``SCHEMA_VERSION``).
         exported_at_utc (str): ISO UTC timestamp the file was exported.
         exporter_version (str): Version of the exporter that produced the file.
-        session (SessionMeta): Session identity, timing, and host context.
-        workload (Workload): Model/framework/serving configuration.
-        model_info (ModelInfo): Structural summary of the served model
-            (architecture / scale / attention), parsed from its config.json.
-            Empty {} on non-transformers models or pre-field sessions.
+        metadata (V6Metadata): Task identity: session ids and lifecycle, the
+            launch configuration and model architecture, tool versions, and
+            the Langfuse entrypoint. Recorded at author time.
         baseline (Baseline): Pre-optimization reference performance.
         final (Final): Final validated optimization state.
         phase_timeline (list[PhaseEvent]): Flat per-action timeline.
@@ -4209,8 +4207,6 @@ class SessionBreakdown(TypedDict, total=False):
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
             the markdown report's ``## Roofline`` section.
         roofline_progress (RooflineProgress): Optimization-progress curve for the dashboard.
-        langfuse (LangfusePush): Live-Langfuse push receipt (enabled? / redacted
-            config / counts); the local trace jsonl is always written regardless.
         warnings (list[str]): Collector warnings emitted while assembling the file.
         source_files (SourceFiles): Paths to the source artifacts used.
     """
@@ -4219,10 +4215,6 @@ class SessionBreakdown(TypedDict, total=False):
     exported_at_utc: str
     exporter_version: str
 
-    session: SessionMeta
-    workload: Workload
-    # Structural model summary parsed from config.json (state.model_info mirror); {} when absent.
-    model_info: ModelInfo
     baseline: Baseline
     final: Final
     # flat per-action timeline (v1 compat); ``phase_segments`` is the boundary view.
@@ -4256,12 +4248,8 @@ class SessionBreakdown(TypedDict, total=False):
     decision_trace: DecisionTrace
     # Promoted token-spend rollup derived from decision_trace.token_rollup.
     token_usage: TokenUsage
-    # Live-Langfuse push receipt; ``enabled`` False (with ``disabled_reason``) when the push is off.
-    langfuse: LangfusePush
     # Kernel-major unified lifecycle view (discovery -> dispatch -> backend attempts -> e2e); {} when absent.
     kernel_journey: KernelJourney
-    # Authoritative external-tool versions keyed by tool name; {} when absent.
-    versions: dict[str, KernelToolMetadata]
     # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement: EnablementBreakdown
     metadata: V6Metadata

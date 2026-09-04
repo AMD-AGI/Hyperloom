@@ -17,6 +17,7 @@ from ..base import (
     fmt_pct,
     md_table,
     register_renderer,
+    task_config_of,
 )
 
 _MAX_ROUNDS = 20
@@ -118,7 +119,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     from .... import framework_registry
 
-    fw = (breakdown.get("workload") or {}).get("framework_name")
+    fw = task_config_of(breakdown).get("framework_name")
     headers = ["name", "outcome", "gain_vs_base", "tput", "reject_reason", "status"]
     for entry in rounds:
         phase = entry.get("phase") or "?"

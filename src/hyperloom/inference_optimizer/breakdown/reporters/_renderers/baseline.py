@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, md_kv_list, md_table, register_renderer
+from ..base import Decision, RenderedSection, md_kv_list, md_table, register_renderer, session_of, task_config_of
 from ._invocation import render_invocation_block
 
 
@@ -27,7 +27,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         RenderedSection: The rendered baseline section.
     """
     b = breakdown.get("baseline") or {}
-    session = breakdown.get("session") or {}
+    session = session_of(breakdown)
     tput = b.get("throughput_tok_s_per_gpu")
     acc = b.get("accuracy")
     ttft = b.get("ttft_mean_ms")
@@ -42,7 +42,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     from .... import framework_registry
 
-    fw = (breakdown.get("workload") or {}).get("framework_name")
+    fw = task_config_of(breakdown).get("framework_name")
     if tput:
         facts.append(f"Baseline: {framework_registry.format_primary_metric(fw, tput, precision=2)}.")
         decisions.append(

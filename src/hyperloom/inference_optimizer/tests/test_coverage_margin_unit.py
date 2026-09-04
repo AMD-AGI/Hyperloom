@@ -87,6 +87,6 @@ def test_roofline_and_workload_render_minimal_inputs():
     assert not roof.skipped
     assert "k1" in roof.markdown_block
 
-    wk = workload.render({"workload": {"model_name": "m", "framework_name": "sglang"}})
+    wk = workload.render({"metadata": {"task_config": {"model_name": "m", "framework_name": "sglang"}}})
     assert not wk.skipped
     assert "sglang" in wk.markdown_block

@@ -57,7 +57,6 @@ from .sessions import (
     _should_use_close_stop_reason as _should_use_close_stop_reason,
     _collect_recovery as _collect_recovery,
     collect_session as collect_session,
-    collect_session_meta as collect_session_meta,
     session_elapsed_minutes as session_elapsed_minutes,
     collect_workload as collect_workload,
     collect_model_info as collect_model_info,
@@ -181,6 +180,7 @@ from .geak import (
 )
 from .v6 import (
     collect_v6_metadata as collect_v6_metadata,
+    langfuse_block as langfuse_block,
     collect_v6_outcome as collect_v6_outcome,
     collect_v6_timeline as collect_v6_timeline,
 )
@@ -209,6 +209,7 @@ __all__ = [
     "collect_token_usage",
     "collect_v6_close",
     "collect_v6_metadata",
+    "langfuse_block",
     "collect_v6_outcome",
     "collect_v6_timeline",
     "project_conc_sweep_event",

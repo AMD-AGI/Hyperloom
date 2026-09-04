@@ -133,7 +133,8 @@ def _summary_line(breakdown: dict) -> str:
         str: Single-line summary with session id, stop reason, validated gain,
         and assorted invocation/lifecycle counts.
     """
-    sess = breakdown.get("session") or {}
+    sess = (breakdown.get("metadata") or {}).get("session") or {}
+    stop_reason = (breakdown.get("outcome") or {}).get("stop_reason") or "?"
     final = breakdown.get("final") or {}
     optimization_entries = (breakdown.get("optimizations") or {}).get("entries") or []
     geak_n = sum(1 for entry in optimization_entries if isinstance(entry, dict) and entry.get("backend") == "geak")
@@ -145,7 +146,7 @@ def _summary_line(breakdown: dict) -> str:
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "
-        f"stop_reason={sess.get('stop_reason') or '?'}  "
+        f"stop_reason={stop_reason}  "
         f"gain_validated={final.get('cumulative_gain_pct_validated', 0.0):.2f}%  "
         f"geak={geak_n}  "
         f"detected={len(lifecycle.get('detected') or [])}  "

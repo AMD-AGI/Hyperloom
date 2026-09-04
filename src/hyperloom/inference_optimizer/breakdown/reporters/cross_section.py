@@ -14,7 +14,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_float
 
-from .base import RenderedSection, as_dict
+from .base import RenderedSection, as_dict, session_of, stop_reason_of, task_config_of
 
 __all__ = ["GlobalFacts", "build_global_facts"]
 
@@ -281,7 +281,7 @@ def _headline(breakdown: dict[str, Any]) -> str:
     """
     from ... import framework_registry
 
-    fw = as_dict(breakdown.get("workload")).get("framework_name")
+    fw = task_config_of(breakdown).get("framework_name")
     b = to_float(as_dict(breakdown.get("baseline")).get("throughput_tok_s_per_gpu"))
     f = to_float(as_dict(breakdown.get("final")).get("throughput_tok_s_per_gpu"))
     g = to_float(as_dict(breakdown.get("final")).get("cumulative_gain_pct_validated"))
@@ -315,13 +315,13 @@ def build_global_facts(
     Returns:
         GlobalFacts: The populated, frozen fact pack.
     """
-    workload = as_dict(breakdown.get("workload"))
-    session = as_dict(breakdown.get("session"))
+    workload = task_config_of(breakdown)
+    session = session_of(breakdown)
     attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
     kept, not_attempted = _capabilities_split(breakdown)
     return GlobalFacts(
         headline=_headline(breakdown),
-        stop_reason=str(session.get("stop_reason") or ""),
+        stop_reason=stop_reason_of(breakdown),
         elapsed_minutes=to_float(session.get("elapsed_minutes")),
         objective=as_dict(workload.get("objective")),
         workload_summary=_workload_summary(workload),
