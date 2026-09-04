@@ -3688,6 +3688,9 @@ def is_multigpu_kernel(name: str, source_file: str) -> bool:
             "all_gather",
             "allgather",
             "reduce_scatter",
+            "reducescatter",
+            "all_to_all",
+            "alltoall",
             "broadcast",
             "p2p",
             "send_recv",
@@ -4860,7 +4863,17 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
-    item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
+    # The nccl-summary lane identifies collectives from TraceLens' own
+    # nccl_summary table plus a resolved device symbol, which outranks a name
+    # guess. Re-deriving over it unresolves rows the lane already resolved:
+    # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1
+    # all carry is_multigpu=True from _nccl_summary_candidates and all read False
+    # by name. That flip also disqualifies them at is_collective_candidate
+    # (_kernel_decisions.py), which gates the lane on candidate_source ==
+    # "nccl_summary" AND is_multigpu -- so the lane refuses its own rows.
+    authoritative = bool(item.get("is_multigpu")) and str(item.get("candidate_source") or "") == "nccl_summary"
+    if not authoritative:
+        item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
     item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
     item["recommended_backends"] = recommend_backends(item)
     item["optimization_notes"] = build_notes(item)
