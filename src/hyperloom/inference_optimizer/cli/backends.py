@@ -244,12 +244,12 @@ def _build_backends(
             cwd=agent_dir(session_dir, "orchestration") / "codex_workspace",
         )
     else:
-        # Orchestration runs as a persistent ReAct conversation: the Claude
-        # session is resumed across ticks so the plan persists.
+        # Orchestration is stateless: every tick opens a fresh session and
+        # carries the full state projection, so it needs the agentic turn
+        # budget and the orchestration effort tier.
         orchestration_backend = ClaudeBackend(
             model=claude_model,
-            max_turns_default=4,
-            conversational=True,
+            effort_role="orchestration",
             capture_turn_diagnostics=True,
             allowed_intents=default_role_registry()["orchestration"].allowed_intents,
         )

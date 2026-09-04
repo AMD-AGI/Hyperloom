@@ -79,9 +79,9 @@ async def test_replay_for_respects_limit(tmp_path):
     bus = MessageBus(db)
     for i in range(20):
         await bus.append_and_seq(
-            Message.new(from_agent="coord", to_agent="agent1", topic="observation", payload={"n": i})
+            Message.new(from_agent="coord", to_agent="critic", topic="observation", payload={"n": i})
         )
 
-    assert len(await bus.replay_for("agent1", after_seq=0, limit=5)) == 5
-    assert len(await bus.replay_for("agent1", after_seq=0, limit=100)) == 20
+    assert len(await bus.replay_for("critic", after_seq=0, limit=5)) == 5
+    assert len(await bus.replay_for("critic", after_seq=0, limit=100)) == 20
     db.close()

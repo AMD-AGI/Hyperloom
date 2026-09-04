@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Periodic Coordinator maintenance: lease reaping, DB retention, disk trim."""
 
 from __future__ import annotations
 from typing import Any
@@ -69,17 +69,13 @@ class MaintenanceCollaborator:
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Periodic in-process maintenance (R5 reaper + R4 DB retention).
+        """Reap expired leases, prune the DB, and trim ``runs/`` when disk is low.
 
-        Actively reaps TTL-expired serving + GPU leases and prunes the
-        events/tasks DB so a multi-day single-session run never leaks
-        capacity or grows the DB unbounded. Best-effort — every step is
-        independently guarded so one failure never aborts the run loop.
-        The coordinator's time-based gate owns the cadence; this method
-        just runs when called.
+        Every step is independently guarded so one failure never aborts the
+        run loop. The Coordinator's wall-clock gate owns the cadence.
 
         Args:
-            tick: The current coordinator tick; included in the summary dict.
+            tick: The current coordinator tick; recorded in the summary.
 
         Returns:
             A summary dict of work performed (leases reaped, tasks reclaimed,
@@ -163,4 +159,3 @@ class MaintenanceCollaborator:
                 removed,
             )
         return summary
-

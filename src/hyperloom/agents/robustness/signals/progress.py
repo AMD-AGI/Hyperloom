@@ -28,12 +28,11 @@ if TYPE_CHECKING:
 class ProgressConfig:
     """Tunables for :class:`ProgressDetector`.
 
-    ``gain_plateau`` only fires once the ``gain_window_actions`` buffer is
-    full; ``gain_epsilon_pct`` is the unchanged-gain window.
-    ``no_levers_min_minutes`` (default 45) is the elapsed-time floor so
-    cold-start alone doesn't look "empty"; multi-node large-model runs
-    should override it higher (host passes 60.0 when ``nodes >= 2``).
-    ``gain_window_actions`` is a count of completed measurements (not ticks).
+    ``gain_plateau`` only fires once ``gain_window_actions`` completed
+    measurements (not ticks) are buffered; ``gain_epsilon_pct`` is the
+    unchanged-gain window. ``no_levers_min_minutes`` is the elapsed-time
+    floor so cold-start alone doesn't look "empty"; multi-node large-model
+    runs override it higher (the host passes 60.0 when ``nodes >= 2``).
     """
 
     gain_window_actions: int = 6
@@ -86,7 +85,7 @@ class ProgressDetector:
             self._macro_cycle = 0
 
     def _persist(self) -> None:
-        """Write the gain history and last gated count to the state view, if any."""
+        """Persist the gain history and gated-action watermark, if a view exists."""
         if self._state_view is None:
             return
         self._state_view.save(

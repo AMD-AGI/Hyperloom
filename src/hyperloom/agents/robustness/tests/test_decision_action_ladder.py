@@ -969,15 +969,15 @@ async def test_recover_unsuccessful_cooldown_fires_twice():
     assert not any(i.type is IntentType.DELEGATE for i in second.intents)
 
 
-# Cooldown / heartbeat
+# Cooldown / idle observation
 
 
-async def test_no_symptoms_falls_back_to_heartbeat():
+async def test_no_symptoms_falls_back_to_idle_observation():
     ladder = ActionLadder()
     out = await ladder.decide([], tick_index=0, now_unix=1.0)
     assert len(out.intents) == 1
     assert out.intents[0].type is IntentType.SEND_MESSAGE
-    assert out.intents[0].payload["topic"] == "heartbeat"
+    assert out.intents[0].payload["topic"] == "observation"
     assert out.findings == []
 
 
@@ -988,7 +988,7 @@ async def test_cooldown_suppresses_duplicate_within_window():
     suppressed = await ladder.decide([sym], tick_index=1, now_unix=2.0)
     assert any(i.type is IntentType.ALERT for i in first.intents)
     assert all(i.type is not IntentType.ALERT for i in suppressed.intents)
-    assert any(i.payload.get("topic") == "heartbeat" for i in suppressed.intents)
+    assert any(i.payload.get("topic") == "observation" for i in suppressed.intents)
     assert suppressed.findings == []
 
 
@@ -1138,7 +1138,7 @@ async def test_gpu_memory_leaked_cooldown_dedups_within_window():
     second_types = [i.type for i in second.intents]
     assert IntentType.DELEGATE not in second_types
     assert IntentType.ALERT not in second_types
-    assert any(i.payload.get("topic") == "heartbeat" for i in second.intents)
+    assert any(i.payload.get("topic") == "observation" for i in second.intents)
 
 
 async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
@@ -1152,7 +1152,7 @@ async def test_gpu_memory_leaked_idempotency_key_advances_with_tick():
     second = await ladder.decide(
         [_gpu_leak_symptom()],
         tick_index=5,
-        now_unix=2.0,
+        now_unix=10.0,
     )
     first_delegate = next(i for i in first.intents if i.type is IntentType.DELEGATE)
     second_delegate = next(i for i in second.intents if i.type is IntentType.DELEGATE)
@@ -1229,7 +1229,7 @@ async def test_local_server_unreachable_idempotency_key_stable_for_same_target()
     second = await ladder.decide(
         [_server_unreachable_symptom("http://127.0.0.1:8000/health")],
         tick_index=9,
-        now_unix=2.0,
+        now_unix=1_000.0,
     )
     first_key = next(i.payload["idempotency_key"] for i in first.intents if i.type is IntentType.DELEGATE)
     second_key = next(i.payload["idempotency_key"] for i in second.intents if i.type is IntentType.DELEGATE)

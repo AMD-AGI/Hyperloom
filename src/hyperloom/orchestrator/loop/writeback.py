@@ -2561,8 +2561,8 @@ class WritebackCollaborator:
                 task.task_id,
             )
 
-        # Harvest specialist findings (hints, gap seeds, PR dedup) for any domain that reports new_findings. Fail-soft.
-        if bool(done_payload.get("new_findings")):
+        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain. Fail-soft.
+        if done_payload.get("new_findings"):
             try:
                 await self._coord._harvest_specialist_findings(done_payload)
             except Exception:  # noqa: BLE001 — defensive
@@ -2739,9 +2739,9 @@ class WritebackCollaborator:
         try:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: gap seeding failed")
+            log.exception("specialist findings: gap seeding failed")
         log.info(
-            "research-scout harvested: hints_added=%d seen_pr_ids=%d",
+            "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
             added,
             len(self.shared_state.research_scout_seen_pr_ids or []),
         )
@@ -4279,11 +4279,9 @@ class WritebackCollaborator:
             self.shared_state.note_explore_outcome(promoted=promoted)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("depth: note_explore_outcome failed")
-        # Increment gain_gated_action_count when the round produced at least one
-        # valid measurement (winners present, or losers measured but not kept).
-        _has_measurement = bool(winners) or bool(result.get("losers"))
-        if _has_measurement and not is_revalidation_task:
-            self.shared_state.gain_gated_action_count = int(getattr(self.shared_state, "gain_gated_action_count", 0) or 0) + 1
+        # A round with no measured variant is not a data point for the plateau window.
+        if not is_revalidation_task and (winners or result.get("losers")):
+            self.shared_state.gain_gated_action_count += 1
         if promoted:
             # A KEEP's own measurement promotes into cumulative_gain_validated and
             # advances validated_stack_len so the unvalidated-stack guard clears.
@@ -4485,10 +4483,9 @@ class WritebackCollaborator:
             audit_decision = "kept_inert"
         else:
             audit_decision = "discarded"
-        # Increment gain_gated_action_count when a valid tput measurement exists,
-        # regardless of KEEP/REVERT outcome.
+        # A measured integrate counts either way; KEEP/REVERT is a later judgement.
         if new_tput is not None:
-            self.shared_state.gain_gated_action_count = int(getattr(self.shared_state, "gain_gated_action_count", 0) or 0) + 1
+            self.shared_state.gain_gated_action_count += 1
         audit_extras = {
             **audit_extras,
             "status": status,

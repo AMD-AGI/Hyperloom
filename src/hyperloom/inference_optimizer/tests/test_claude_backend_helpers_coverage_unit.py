@@ -83,13 +83,6 @@ def test_set_context_provider_none_clears() -> None:
     assert b._context_server_config is None
 
 
-def test_reset_conversation_clears_session_id() -> None:
-    b = _backend(conversational=True)
-    b._session_id = "sess-1"
-    b.reset_conversation()
-    assert b._session_id is None
-
-
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")

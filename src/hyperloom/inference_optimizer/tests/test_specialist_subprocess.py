@@ -597,7 +597,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 
     result = await runner.run(ctx)
     assert result.status in ("empty_synthesised", "stale")
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert "subprocess" in (result.error or "")
 
 

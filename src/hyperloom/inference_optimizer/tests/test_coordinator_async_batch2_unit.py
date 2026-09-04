@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Batch 2 coverage for Coordinator: synchronous context readers, the
-no-progress circuit-breaker signal, resume replay, orchestration-conversation
-reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
+"""Batch 2 coverage for Coordinator: synchronous context readers, resume
+replay, specialist result recording, and lifecycle teardown (stop / Recipe
+KB T4 safety net)."""
 
 from __future__ import annotations
 
@@ -17,22 +17,20 @@ import pytest
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
-    MockTurn,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+def _idle_intent() -> Intent:
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"})
 
 
 def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
+    return ScriptedPlan(turns=[], default_intent=_idle_intent())
 
 
 def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,7 +208,7 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
-    await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "heartbeat", {"body_md": "hi"}))
+    await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "observation", {"body_md": "hi"}))
     out = coord._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
@@ -233,27 +231,6 @@ async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
 def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
     assert isinstance(coord._context_recent_outcomes_reader(top_k=999), str)
     assert isinstance(coord._context_recent_outcomes_reader(top_k=0), str)
-
-
-# -- _reset_orchestration_conversation --------------------------------------
-def test_reset_orchestration_conversation_clears_seed(coord: Coordinator) -> None:
-    coord._reset_orchestration_conversation()
-
-
-def test_reset_orchestration_conversation_invokes_backend_hook(coord: Coordinator) -> None:
-    calls: list[int] = []
-    backend = coord.backends["orchestration"]
-    backend.reset_conversation = lambda: calls.append(1)  # type: ignore[attr-defined]
-    coord._reset_orchestration_conversation()
-    assert calls == [1]
-
-
-def test_reset_orchestration_conversation_swallows_hook_error(coord: Coordinator) -> None:
-    def _boom() -> None:
-        raise RuntimeError("nope")
-
-    coord.backends["orchestration"].reset_conversation = _boom  # type: ignore[attr-defined]
-    coord._reset_orchestration_conversation()
 
 
 @pytest.mark.asyncio
@@ -844,98 +821,6 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
     assert coord.shared_state.cumulative_gain_validated_stack_len == len(coord.shared_state.optimization_stack)
 
 
-@pytest.mark.asyncio
-async def test_reactor_pass_records_context_tokens(coord: Coordinator) -> None:
-    backend = MockBackend(
-        ScriptedPlan(
-            turns=[
-                MockTurn(
-                    intents=[_heartbeat()],
-                    raw_text="ok",
-                    metadata={
-                        "input_tokens": 10,
-                        "cache_read_input_tokens": 20,
-                        "cache_creation_input_tokens": 30,
-                        "context_tokens_peak": 45,
-                    },
-                )
-            ]
-        ),
-        name="orchestration",
-    )
-    backend.conversational = True  # type: ignore[attr-defined]
-    coord.backends["orchestration"] = backend
-    await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 45
-
-
-@pytest.mark.asyncio
-async def test_reactor_pass_ignores_call_cumulative_token_counters(coord: Coordinator) -> None:
-    backend = MockBackend(
-        ScriptedPlan(
-            turns=[
-                MockTurn(
-                    intents=[_heartbeat()],
-                    raw_text="ok",
-                    metadata={
-                        "input_tokens": 6,
-                        "cache_read_input_tokens": 75_448,
-                        "cache_creation_input_tokens": 154_099,
-                    },
-                )
-            ]
-        ),
-        name="orchestration",
-    )
-    backend.conversational = True  # type: ignore[attr-defined]
-    coord.backends["orchestration"] = backend
-    await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 0
-    assert coord._checkpoint_tracker.chars_since_last > 0
-
-
-@pytest.mark.asyncio
-async def test_reactor_pass_chars_fallback_without_token_metadata(coord: Coordinator) -> None:
-    backend = MockBackend(
-        ScriptedPlan(turns=[MockTurn(intents=[_heartbeat()], raw_text="raw-reply", metadata={})]),
-        name="orchestration",
-    )
-    backend.conversational = True  # type: ignore[attr-defined]
-    coord.backends["orchestration"] = backend
-    coord._checkpoint_tracker.chars_since_last = 0
-    await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 0
-    assert coord._checkpoint_tracker.chars_since_last > len("raw-reply")
-
-
-# -- _conversation_progress_signal ------------------------------------------
-def test_progress_signal_first_call_seeds_marker(coord: Coordinator) -> None:
-    coord._progress_marker = {}
-    sig = coord._conversation_progress_signal()
-    assert sig["ticks_without_progress"] == 0
-    assert sig["severity"] == "ok"
-
-
-def test_progress_signal_detects_progress(coord: Coordinator) -> None:
-    coord._progress_marker = {}
-    coord._conversation_progress_signal()  # seed
-    coord.shared_state.tick = 5
-    coord.shared_state.cumulative_gain_validated = 10.0
-    sig = coord._conversation_progress_signal()
-    assert sig["last_progress_tick"] == 5
-    assert sig["severity"] == "ok"
-
-
-def test_progress_signal_flags_stall(coord: Coordinator) -> None:
-    coord._progress_marker = {}
-    coord._no_progress_threshold = 2
-    coord._conversation_progress_signal()  # seed at tick 0
-    coord.shared_state.tick = 10
-    sig = coord._conversation_progress_signal()
-    assert sig["ticks_without_progress"] >= 2
-    assert sig["severity"] == "high"
-
-
 # -- replay_for_resume ------------------------------------------------------
 @pytest.mark.asyncio
 async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator) -> None:
@@ -1096,7 +981,6 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
-
 
 
 # -- specialist visibility contract -----------------------------------------
@@ -1308,8 +1192,11 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
     assert "KERNEL_AGENT plateau detected" in out
 
 
-@pytest.mark.asyncio
 # -- _record_specialist_result ----------------------------------------------
+def _ptask(tid: str, kind: str) -> Task:
+    return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
+
+
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
     task = _ptask("rec-spec-1", "specialist")
@@ -1351,7 +1238,8 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 
 
 @pytest.mark.asyncio
-async def test_record_specialist_result_research_scout(coord: Coordinator, monkeypatch) -> None:
+async def test_record_specialist_result_harvests_findings(coord: Coordinator, monkeypatch) -> None:
+    """Findings are harvested from any domain that reports them, not just the scout."""
     task = _ptask("rec-spec-2", "specialist")
     harvested: list[dict] = []
 
@@ -1362,10 +1250,9 @@ async def test_record_specialist_result_research_scout(coord: Coordinator, monke
     await coord._record_specialist_result(
         task=task,
         done_payload={
-            "domain": "research_scout_specialist",
+            "domain": "kernel_agent",
             "proposal_set": [],
-            "empty": True,
-            "research": {"hints": {}},
+            "new_findings": [{"text": "aiter gemm path is fused upstream"}],
         },
         source="specialist:rec-spec-2",
     )
@@ -1470,7 +1357,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
         recorded.append(denied)
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord._handle_intent("orchestration", _heartbeat())
+    await coord._handle_intent("orchestration", _idle_intent())
     assert recorded
 
 
@@ -1482,7 +1369,7 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
         raise RuntimeError("handler boom")
 
     monkeypatch.setattr(coord, "_handle_send_message", _boom)
-    await coord._handle_intent("orchestration", _heartbeat())
+    await coord._handle_intent("orchestration", _idle_intent())
 
 
 @pytest.mark.asyncio

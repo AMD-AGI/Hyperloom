@@ -688,7 +688,6 @@ _REQUIRED_ONLY: Mapping[IntentType, tuple[str, ...]] = {
         "gap_canonical_id",
         "domain",
         "proposal_set",
-        "empty",
         "summary",
     ),
 }

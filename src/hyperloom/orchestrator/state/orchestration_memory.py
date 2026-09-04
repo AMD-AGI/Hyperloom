@@ -1,9 +1,9 @@
-"""Orchestration working-memory checkpoint / compaction.
+"""Orchestration working memory, captured at a macro-cycle boundary.
 
-Compresses the live ReAct conversation into a compact structured snapshot
-on ``SharedState.orchestration_memory``, then resets + re-seeds from it.
-Bounds context growth and drives crash recovery. Pure helpers; the
-Coordinator owns the IO.
+Turns the agent's own summary of the finished cycle into the structured
+record on ``SharedState.orchestration_memory``, whose
+``next_cycle_directive`` is injected into the next cycle's system prompt.
+Pure helpers; the phase handler owns the IO.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from typing import Any
 from hyperloom.common.timeutil import now_iso
 
 
-# List threads that carry forward when a checkpoint reply omits them
-# (``learnings`` accumulates separately).
+# List threads that carry forward when a reply omits them (``learnings``
+# accumulates separately).
 _MEMORY_LIST_KEYS: tuple[str, ...] = ("hypotheses", "tried_and_why", "pending")
 
 # seconds + ``+00:00`` (canonical helper; kept importable for callers).
@@ -37,13 +37,12 @@ _DIRECTIVE_POLICY_BLACKLIST: tuple[str, ...] = (
     "ignore policy",
 )
 
-# Appended as the next user turn to elicit the compact summary (parsed as JSON).
-CHECKPOINT_REQUEST_PROMPT: str = """\
-=== CHECKPOINT (compaction) ===
-We are about to compact this conversation to keep it bounded. Summarise
-YOUR OWN working memory so you can resume seamlessly from a fresh
-conversation. Do NOT call any tool for this turn — reply with a single
-fenced JSON object and nothing else:
+# Sent as its own turn at the macro-cycle boundary to elicit the record (parsed as JSON).
+MEMORY_REQUEST_PROMPT: str = """\
+=== MACRO-CYCLE HANDOFF ===
+This macro-cycle is ending. From the session state above, write the working
+memory the next cycle should start from. Do NOT call any tool for this turn —
+reply with a single fenced JSON object and nothing else:
 
 ```json
 {
@@ -56,10 +55,9 @@ fenced JSON object and nothing else:
 }
 ```
 
-Keep it tight (a few items per list). This snapshot — plus the
-authoritative session facts — is all you will carry into the next
-conversation, so capture intent and rationale, not raw numbers you can
-re-pull from the context tools.
+Keep it tight (a few items per list). The authoritative session facts are
+re-projected every turn, so capture intent and rationale here, not raw
+numbers.
 """
 
 
@@ -82,15 +80,15 @@ def _sanitize_cycle_directive(raw: str) -> str:
     return text
 
 
-def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
-    """Parse the agent's checkpoint reply into the memory schema.
+def parse_memory_reply(raw_text: str) -> dict[str, Any]:
+    """Parse the agent's handoff reply into the memory schema.
 
     Tolerant: accepts a fenced ```json block or bare object; missing keys
     default to empty. Never raises — malformed replies yield a best-effort
     dict (with a ``parse_error`` marker).
 
     Args:
-        raw_text: The agent's raw checkpoint reply text.
+        raw_text: The agent's raw handoff reply text.
 
     Returns:
         The parsed memory dict (``current_plan`` / ``hypotheses`` /
@@ -107,7 +105,7 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
             "pending": [],
             "learnings": [],
             "next_cycle_directive": "",
-            "parse_error": "no JSON object found in checkpoint reply",
+            "parse_error": "no JSON object found in memory reply",
         }
     out: dict[str, Any] = {}
     out["current_plan"] = str(obj.get("current_plan") or "").strip()
@@ -121,27 +119,6 @@ def parse_checkpoint_reply(raw_text: str) -> dict[str, Any]:
             out[key] = []
     out["next_cycle_directive"] = _sanitize_cycle_directive(str(obj.get("next_cycle_directive") or ""))
     return out
-
-
-def is_degenerate_checkpoint(parsed: dict[str, Any]) -> bool:
-    """True when a parsed checkpoint reply carries no usable working memory.
-
-    Degenerate iff parsing failed (``parse_error`` set) OR all four content
-    fields are empty. The Coordinator skips compaction on a degenerate reply,
-    preserving the live conversation and prior memory, and counts the reply
-    toward the consecutive-degenerate advisory.
-
-    Args:
-        parsed: A parsed checkpoint reply from :func:`parse_checkpoint_reply`.
-
-    Returns:
-        ``True`` when the reply is degenerate.
-    """
-    if str(parsed.get("parse_error") or "").strip():
-        return True
-    has_plan = bool(str(parsed.get("current_plan") or "").strip())
-    has_lists = any(parsed.get(k) for k in _MEMORY_LIST_KEYS)
-    return not (has_plan or has_lists)
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -184,21 +161,20 @@ def build_memory_record(
 ) -> dict[str, Any]:
     """Build the persisted ``orchestration_memory`` record.
 
-    ``learnings`` accumulate across checkpoints (deduped, capped) so durable
-    lessons survive a later checkpoint that forgets to repeat them. The other
-    content fields (``current_plan`` + the list threads) carry the prior value
-    forward when the new reply omits them, so one forgetful checkpoint never
-    blanks an in-flight plan.
+    ``learnings`` accumulate across cycles (deduped, capped) so durable lessons
+    survive a later reply that forgets to repeat them. The other content fields
+    (``current_plan`` + the list threads) carry the prior value forward when the
+    new reply omits them, so one forgetful reply never blanks an in-flight plan.
 
     Args:
-        parsed: The parsed checkpoint reply from :func:`parse_checkpoint_reply`.
-        seq: The checkpoint sequence number.
+        parsed: The parsed reply from :func:`parse_memory_reply`.
+        seq: The bus sequence number at capture time.
         tick: The current tick.
         previous: The prior persisted memory record, or ``None``.
 
     Returns:
         The persisted ``orchestration_memory`` record with accumulated,
-        deduped, capped ``learnings`` and checkpoint bookkeeping.
+        deduped, capped ``learnings`` and capture bookkeeping.
     """
     prev = previous or {}
     learnings = list(prev.get("learnings") or [])
@@ -213,10 +189,10 @@ def build_memory_record(
         "current_plan": plan,
         "learnings": learnings,
         "next_cycle_directive": directive,
-        "last_checkpoint_seq": int(seq),
-        "last_checkpoint_tick": int(tick),
-        "last_checkpoint_ts": _now_iso(),
-        "checkpoint_count": int(prev.get("checkpoint_count", 0)) + 1,
+        "last_capture_seq": int(seq),
+        "last_capture_tick": int(tick),
+        "last_capture_ts": _now_iso(),
+        "capture_count": int(prev.get("capture_count", 0)) + 1,
         "parse_error": parsed.get("parse_error", ""),
     }
     for key in _MEMORY_LIST_KEYS:
@@ -225,12 +201,11 @@ def build_memory_record(
 
 
 __all__ = [
-    "CHECKPOINT_REQUEST_PROMPT",
+    "MEMORY_REQUEST_PROMPT",
     "_DIRECTIVE_MAX_LEN",
     "_DIRECTIVE_POLICY_BLACKLIST",
     "_MEMORY_LIST_KEYS",
     "_sanitize_cycle_directive",
     "build_memory_record",
-    "is_degenerate_checkpoint",
-    "parse_checkpoint_reply",
+    "parse_memory_reply",
 ]

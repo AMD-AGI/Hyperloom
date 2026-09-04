@@ -377,28 +377,21 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
                 error = result.get("error")
             raw_notes = result.get("notes")
             if isinstance(raw_notes, list):
-                # Exclude patch_safety_numeric notes from orchestration view;
-                # they are only relevant for critic-targeted rendering.
-                notes = [
-                    n for n in raw_notes
-                    if n and not str(n).startswith("patch_safety_numeric:")
-                ][:_OUTCOME_NOTES_MAX]
-            # For specialist delegated results, also unpack specialist_done metadata.
-            if kind == "specialist":
-                specialist_done = result.get("specialist_done") or {}
-                if isinstance(specialist_done, dict):
-                    sd_summary = str(specialist_done.get("summary") or "").strip()
-                    if sd_summary:
-                        parts.append(f"summary={sd_summary[:400]!r}")
-                    sd_confidence = specialist_done.get("confidence")
-                    if sd_confidence is not None:
-                        parts.append(f"confidence={sd_confidence}")
-                    new_findings = specialist_done.get("new_findings") or []
-                    if isinstance(new_findings, list) and len(new_findings) > 0:
-                        parts.append(f"findings={len(new_findings)}")
-                    residual_questions = specialist_done.get("residual_questions") or []
-                    if isinstance(residual_questions, list) and len(residual_questions) > 0:
-                        parts.append(f"questions={len(residual_questions)}")
+                # patch_safety_numeric is the Critic's artifact; it is not a lever here.
+                notes = [n for n in raw_notes if n and not str(n).startswith("patch_safety_numeric:")][
+                    :_OUTCOME_NOTES_MAX
+                ]
+            done = result.get("specialist_done") if kind == "specialist" else None
+            if isinstance(done, dict):
+                summary = str(done.get("summary") or "").strip()
+                if summary:
+                    parts.append(f"summary={summary[:400]!r}")
+                if done.get("confidence") is not None:
+                    parts.append(f"confidence={done['confidence']}")
+                for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
+                    items = done.get(key)
+                    if isinstance(items, list) and items:
+                        parts.append(f"{label}={len(items)}")
         if error:
             parts.append(f"error={str(error)[:200]!r}")
         if notes:
@@ -717,9 +710,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
 
-        # Periodic maintenance/reaper cadence (lease reaping + DB retention), wall-clock seconds.
-        self._last_maintenance_ts: float = 0.0
-        self._maintenance_interval_sec: int = MAINTENANCE_INTERVAL_SEC
+        # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
+        self._last_maintenance_ts: float = time.monotonic()
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions
         # apply per cycle. Only takes effect for long/unbounded runs; short
@@ -934,7 +926,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_negative_ledger_domain_counts": "phase_explore",
         "_plan_cycle_focus": "phase_explore",
         "_record_cycle_strategy_for_current_cycle": "phase_explore",
-        "_cycle_strategy_seed_block": "phase_explore",
+        "_cycle_strategy_block": "phase_explore",
         "_cycle_directive_fallback": "phase_explore",
         "_reseed_orch_prompt_for_cycle": "phase_explore",
         "_apply_macro_cycle_reloop": "phase_explore",
@@ -1014,9 +1006,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_candidate_discovery_inflight": "phase_framework",
         "_ingest_candidate_discovery": "phase_framework",
         "_candidates_from_discovery_proposals": "phase_framework",
-        "_orchestration_conversational": "conversation",
-        "_orchestration_context_tools_mounted": "conversation",
-        "_orchestration_needs_seed": "conversation",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
@@ -1573,9 +1562,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ) -> None:
         """Run one tick step, cancelling it when the session/closing bound elapses.
 
-        The wall-clock stop lives at the end of each tick. A conversational
-        reactor turn or a long phase-enter await that never returns would skip
-        that stop. Cancelling the step lets the tick finish and enter CLOSE.
+        The wall-clock stop lives at the end of each tick. A reactor turn or a
+        long phase-enter await that never returns would skip that stop.
+        Cancelling the step lets the tick finish and enter CLOSE.
 
         Args:
             factory: Builds the awaitable so a skipped step is never started.
@@ -1718,7 +1707,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     # Periodic reaper + DB retention; time-gated.
                     try:
                         now = time.monotonic()
-                        if now - self._last_maintenance_ts >= self._maintenance_interval_sec:
+                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
                             await self._run_maintenance(tick=tick_n)
                             self._last_maintenance_ts = now
                     except Exception:  # noqa: BLE001
@@ -1861,13 +1850,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             agent_name (str): The agent role to run this pass for.
         """
         backend = self.backends[agent_name]
-        # The system prompt is loaded first because the SEED/DELTA gate inside
-        # _compose_prompt has to know whether THIS prompt replaces the backend's
-        # conversation. A re-scoped prompt opens a new thread inside the turn, so
-        # a gate that only sees the thread as it stands would compose a delta for
-        # a conversation that is about to be emptied.
         sys_prompt = await self._load_system_prompt(agent_name)
-        prompt = await self._compose_prompt(agent_name, system_prompt=sys_prompt)
+        prompt = await self._compose_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         # No-op for backends without the hook. Presence of the hook is also what

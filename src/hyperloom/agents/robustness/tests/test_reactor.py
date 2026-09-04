@@ -81,13 +81,13 @@ def _ctx(crash_count: int = 0) -> ReactorContext:
 
 
 @pytest.mark.asyncio
-async def test_reactor_emits_heartbeat_when_no_symptoms(tmp_path: Path):
+async def test_reactor_emits_idle_observation_when_no_symptoms(tmp_path: Path):
     primary = _FakeSource("server", SourceData())
     reactor, sink = _build_reactor(primary=primary, tmp_path=tmp_path)
     intents = await reactor.tick(_ctx())
     assert len(intents) == 1
     assert intents[0].type is IntentType.SEND_MESSAGE
-    assert intents[0].payload["topic"] == "heartbeat"
+    assert intents[0].payload["topic"] == "observation"
     assert reactor.tick_index == 1
     assert not sink.file_path.exists()
 
@@ -118,7 +118,7 @@ async def test_reactor_returns_empty_data_when_primary_fails(tmp_path: Path):
     intents = await reactor.tick(_ctx())
     assert primary.calls == 1
     # With empty data (blind tick) the reactor emits a heartbeat, not an alert.
-    assert any(i.type is IntentType.SEND_MESSAGE and i.payload.get("topic") == "heartbeat" for i in intents)
+    assert any(i.type is IntentType.SEND_MESSAGE and i.payload.get("topic") == "observation" for i in intents)
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,6 @@ from hyperloom.common.codex_session import (
     CodexSessionUnavailableError,
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_STRUCTURED_OUTPUT,
@@ -39,12 +38,10 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS, default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.codex import CodexBackend
 from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
@@ -137,70 +134,6 @@ def test_backends_declare_their_transport(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # The delta note must not point at tools that were never mounted.
-
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _coordinator(session_dir: Path, orchestration: Any) -> Coordinator:
-    plan = ScriptedPlan(turns=[MockTurn(intents=[])], default_intent=_heartbeat())
-    return Coordinator(
-        session_dir,
-        backends={
-            "orchestration": orchestration,
-            "critic": MockBackend(plan, name="critic"),
-            "robustness": MockBackend(plan, name="robustness"),
-        },
-    )
-
-
-def _stub_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _start(session: CodexSession) -> None:
-        return None
-
-    async def _turn(session: CodexSession, prompt: str, **_kwargs: Any) -> CodexSessionResult:
-        return CodexSessionResult(
-            text='{"intents": [{"intent_type": "send_message", "payload": "{\\"topic\\": \\"h\\"}"}]}'
-        )
-
-    monkeypatch.setattr(CodexSession, "start", _start)
-    monkeypatch.setattr(CodexSession, "turn", _turn)
-
-
-async def test_delta_turn_without_context_tools_names_none(
-    session_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Telling a Codex turn to call a context tool is an instruction it cannot follow."""
-    _stub_session(monkeypatch)
-    backend = CodexBackend(allowed_intents=_ORCHESTRATION_INTENTS, cwd=tmp_path / "codex")
-    coord = _coordinator(session_dir, backend)
-
-    await backend.run(await coord._compose_prompt("orchestration"))
-    delta = await coord._compose_prompt("orchestration")
-
-    assert "=== Context" in delta
-    for tool in CONTEXT_TOOL_NAMES:
-        assert tool not in delta
-
-
-async def test_delta_turn_with_context_tools_still_names_them(session_dir: Path) -> None:
-    """The Claude path's pull instruction must survive the conditional."""
-
-    class _ToolBackend(MockBackend):
-        conversational = True
-        context_tools_mounted = True
-
-    backend = _ToolBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="orchestration")
-    coord = _coordinator(session_dir, backend)
-
-    await coord._compose_prompt("orchestration")
-    delta = await coord._compose_prompt("orchestration")
-
-    for tool in CONTEXT_TOOL_NAMES:
-        assert tool in delta
 
 
 # ---------------------------------------------------------------------------

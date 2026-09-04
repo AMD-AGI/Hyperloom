@@ -33,10 +33,7 @@ TOPIC_ALLOWLIST = frozenset(
     }
 )
 
-# Per-role subscription map.  A message is delivered to an agent's inbox only when
-# its topic appears in the agent's subscription set AND the sender is not the agent
-# itself.  Raw-DB readers (lookup_by_id, tail, replay_for_resume) bypass this and
-# always see every row.
+# Per-role inbox subscriptions; a role absent from this map receives nothing.
 ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
     "orchestration": frozenset(
         {
@@ -260,13 +257,11 @@ class MessageBus:
         after_seq: int,
         limit: int = DEFAULT_EVENTS_KEEP_RECENT,
     ) -> list[Message]:
-        """Return inbox messages for an agent, applying subscription and self-echo rules.
+        """Return an agent's inbox tail, filtered by subscription and self-echo.
 
-        Messages are excluded if:
-        - the topic is not in the agent's subscription set, or
-        - the sender is the agent itself.
-
-        Raw-DB readers (lookup_by_id, tail) bypass this and see every row.
+        A row is delivered only when its topic is in the agent's
+        :data:`ROLE_SUBSCRIPTIONS` set and the sender is not the agent itself.
+        The raw-DB readers (:meth:`lookup_by_id`, :meth:`tail`) bypass both rules.
 
         Args:
             to_agent (str): Recipient agent id (broadcasts are included).
@@ -277,20 +272,15 @@ class MessageBus:
         Returns:
             list[Message]: Matching messages ordered by ascending ``seq``.
         """
-        subscribed = ROLE_SUBSCRIPTIONS.get(to_agent)
-        if subscribed is None:
-            rows = await self.db.fetchall(
-                "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"
-                " AND from_agent != ? ORDER BY seq ASC LIMIT ?",
-                (after_seq, to_agent, to_agent, limit),
-            )
-        else:
-            placeholders = ",".join("?" * len(subscribed))
-            rows = await self.db.fetchall(
-                f"SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"  # nosec B608
-                f" AND from_agent != ? AND topic IN ({placeholders}) ORDER BY seq ASC LIMIT ?",
-                (after_seq, to_agent, to_agent, *subscribed, limit),
-            )
+        subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
+        if not subscribed:
+            return []
+        placeholders = ",".join("?" * len(subscribed))
+        rows = await self.db.fetchall(
+            f"SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"  # nosec B608
+            f" AND from_agent != ? AND topic IN ({placeholders}) ORDER BY seq ASC LIMIT ?",
+            (after_seq, to_agent, to_agent, *subscribed, limit),
+        )
         return [Message.from_row(r) for r in rows]
 
     async def lookup_by_id(self, msg_id: str) -> Message | None:

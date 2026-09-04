@@ -1036,29 +1036,17 @@ class ExploreExecutor:
 
         runnable: list[GridVariant] = list(unique_in_round.values())
 
-        # Surface re-proposals: fingerprints already in the tested ledger.
-        # We do NOT skip them — they must still be benchmarked — but we record
-        # a warning so the agent can see the prior outcome/gain.
-        re_proposed: list[dict[str, Any]] = []
-        for fp, gv in unique_in_round.items():
+        # Re-proposals are still benchmarked; we only surface the prior outcome.
+        re_proposed = 0
+        for fp in unique_in_round:
             prior = tested_dict.get(fp)
-            if isinstance(prior, dict):
-                re_proposed.append(
-                    {
-                        "name": gv.name,
-                        "fingerprint": fp,
-                        "prior_outcome": prior.get("outcome"),
-                        "prior_gain_pct": prior.get("gain_pct"),
-                        "prior_name": prior.get("name"),
-                    }
-                )
-        if re_proposed and shared_state is not None:
-            for rp in re_proposed:
-                fp = rp["fingerprint"]
-                prior = tested_dict.get(fp) or {}
+            if not isinstance(prior, dict):
+                continue
+            re_proposed += 1
+            if shared_state is not None:
                 shared_state.record_action_failure(
                     action="explore_re_proposal",
-                    task_id=round_id,
+                    task_id=str(ctx.task.task_id),
                     result={
                         "status": "warning",
                         "fingerprint": fp,
@@ -1067,17 +1055,13 @@ class ExploreExecutor:
                         "name": prior.get("name"),
                     },
                 )
-            log.info(
-                "explore dedup: %d re-proposed fingerprint(s) already in tested ledger",
-                len(re_proposed),
-            )
 
         log.info(
             "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d)",
             len(grid),
             len(runnable),
             len(skipped_dup),
-            len(re_proposed),
+            re_proposed,
         )
 
         # Multi-node grid shaping. Both helpers short-circuit in single-node

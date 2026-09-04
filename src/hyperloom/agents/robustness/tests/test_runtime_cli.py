@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 
-_REQUEST_HEARTBEAT = {
+_REQUEST_IDLE = {
     "kind": "coordinator_inbox",
     "session_id": "sess-runtime-1",
     "raw_prompt": (
@@ -47,16 +47,16 @@ _REQUEST_HIGH_SEVERITY = {
 
 
 @pytest.mark.asyncio
-async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
+async def test_run_tick_emits_idle_observation_envelope(tmp_path: Path):
     from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
 
     request = _coerce_request(
         {
-            **_REQUEST_HEARTBEAT,
+            **_REQUEST_IDLE,
             "options": {
                 "session_dir": str(tmp_path),
                 "auto_probe_inference_server": False,
-                # Inert CI hosts have no Ray head; disable the probe so it doesn't mask the heartbeat.
+                # Inert CI hosts have no Ray head; disable the probe so it doesn't mask the idle observation.
                 "ray_probe_enabled": False,
                 # CI lacks the TraceLens CLI / WekaFS mounts the external_deps probe expects.
                 "external_deps_enabled": False,
@@ -71,7 +71,7 @@ async def test_run_tick_emits_heartbeat_envelope(tmp_path: Path):
     intents = envelope["intents"]
     assert len(intents) == 1
     assert intents[0]["intent_type"] == "send_message"
-    assert intents[0]["payload"]["topic"] == "heartbeat"
+    assert intents[0]["payload"]["topic"] == "observation"
 
 
 @pytest.mark.asyncio
@@ -136,13 +136,13 @@ def test_coerce_request_rejects_bad_kind():
     from hyperloom.agents.robustness.runtime.cli import RuntimeAdapterError, _coerce_request
 
     with pytest.raises(RuntimeAdapterError):
-        _coerce_request({**_REQUEST_HEARTBEAT, "kind": "not-a-real-kind"})
+        _coerce_request({**_REQUEST_IDLE, "kind": "not-a-real-kind"})
 
 
 def test_coerce_request_rejects_missing_session_id():
     from hyperloom.agents.robustness.runtime.cli import RuntimeAdapterError, _coerce_request
 
-    bad = dict(_REQUEST_HEARTBEAT)
+    bad = dict(_REQUEST_IDLE)
     bad.pop("session_id")
     with pytest.raises(RuntimeAdapterError):
         _coerce_request(bad)
@@ -152,7 +152,7 @@ def test_coerce_request_rejects_empty_raw_prompt():
     from hyperloom.agents.robustness.runtime.cli import RuntimeAdapterError, _coerce_request
 
     with pytest.raises(RuntimeAdapterError):
-        _coerce_request({**_REQUEST_HEARTBEAT, "raw_prompt": "   "})
+        _coerce_request({**_REQUEST_IDLE, "raw_prompt": "   "})
 
 
 # ---------------------------------------------------------------------------
@@ -194,15 +194,15 @@ def _run_subprocess(request_obj: dict, request_path: Path, out_path: Path) -> su
     )
 
 
-def test_subprocess_tick_emits_heartbeat(tmp_path: Path):
+def test_subprocess_tick_emits_idle_observation(tmp_path: Path):
     request_path = tmp_path / "request.json"
     out_path = tmp_path / "emit.json"
     request = {
-        **_REQUEST_HEARTBEAT,
+        **_REQUEST_IDLE,
         "options": {
             "session_dir": str(tmp_path / "sess"),
             "auto_probe_inference_server": False,
-            # CI/dev hosts have no Ray head; disable the probe so it doesn't fire alongside the heartbeat.
+            # CI/dev hosts have no Ray head; disable the probe so it doesn't fire alongside the idle observation.
             "ray_probe_enabled": False,
             # CI lacks the TraceLens CLI / WekaFS mounts the external_deps probe expects.
             "external_deps_enabled": False,
@@ -282,7 +282,7 @@ async def test_run_tick_applies_multi_node_options(tmp_path: Path, monkeypatch):
 
     request = _coerce_request(
         {
-            **_REQUEST_HEARTBEAT,
+            **_REQUEST_IDLE,
             "options": {
                 "session_dir": str(tmp_path),
                 "disable_local_probe": True,
@@ -332,7 +332,7 @@ async def test_run_tick_surfaces_rca_llm_usage(tmp_path: Path, monkeypatch):
 
     request = _coerce_request(
         {
-            **_REQUEST_HEARTBEAT,
+            **_REQUEST_IDLE,
             "options": {"session_dir": str(tmp_path)},
         }
     )
@@ -362,7 +362,7 @@ async def test_run_tick_omits_llm_usage_when_none(tmp_path: Path, monkeypatch):
 
     request = _coerce_request(
         {
-            **_REQUEST_HEARTBEAT,
+            **_REQUEST_IDLE,
             "options": {"session_dir": str(tmp_path)},
         }
     )

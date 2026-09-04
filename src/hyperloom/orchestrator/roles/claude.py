@@ -97,8 +97,6 @@ def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
 
 def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
     """Render the output-format suffix for a role's allowed intent set."""
-    import json as _json
-
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
@@ -172,6 +170,12 @@ _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
 _VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+# Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
+_EFFORT_ROLES: dict[str, tuple[str, str]] = {
+    "orchestration": (_EFFORT_ENV_ORCH, "medium"),
+    "kernel": (_EFFORT_ENV_KERNEL, "low"),
+}
+
 
 def _import_sdk() -> tuple[Any, Any, Any]:
     """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
@@ -201,6 +205,8 @@ class ClaudeBackend:
         model: Claude model id; defaults to ``ANTHROPIC_MODEL`` env or library default.
         api_key_env: Env var checked at construction (``ANTHROPIC_API_KEY`` by default).
         max_turns_default: Agent-loop budget when caller doesn't override; floored at 8.
+        effort_role: Key into :data:`_EFFORT_ROLES` selecting this backend's
+            reasoning-effort env override and default tier.
         enable_mcp_emit_intent: Registers the in-process MCP ``emit_intent`` tool.
         capture_turn_diagnostics: Capture full turn diagnostics for orchestration tracing.
         allowed_intents: Role's permitted intent set; drives the output-format suffix.
@@ -211,6 +217,7 @@ class ClaudeBackend:
     # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
     # (8), so values below 8 have no effect.
     max_turns_default: int = 12
+    effort_role: str = "kernel"
     enable_mcp_emit_intent: bool = True
     capture_turn_diagnostics: bool = False
     # Raw single-shot completion mode: skips the emit_intent server + suffix,
@@ -444,7 +451,6 @@ class ClaudeBackend:
             raise
         if self._active_turn_diagnostic is not None:
             self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)
-            self._active_turn_diagnostic["new_session"] = bool(session_id)
         cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
         cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
         input_tokens = safe_int(usage.get("input_tokens") if usage else None)
@@ -550,15 +556,6 @@ class ClaudeBackend:
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
-    @property
-    def context_tools_mounted(self) -> bool:
-        """Whether the read-only context-pull tools are live this turn.
-
-        ``set_context_provider`` degrades to a soft warning when the MCP build
-        fails, so a caller must not infer availability from having called it.
-        """
-        return self._context_server_config is not None
-
     def get_turn_diagnostic(self) -> dict[str, Any]:
         """Return the most recently completed turn diagnostic."""
         return dict(self._last_turn_diagnostic)
@@ -601,10 +598,7 @@ class ClaudeBackend:
             "sdk_version": getattr(self.sdk_module, "__version__", None),
             "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
             "gateway_endpoint": self._gateway_endpoint_identifier(),
-            "resume_requested": False,
-            "previous_session_id_hash": None,
             "session_id_hash": None,
-            "new_session": None,
             "max_turns": None,
             "timeout_sec": self.call_timeout_s,
             "reasoning_effort": None,
@@ -649,16 +643,9 @@ class ClaudeBackend:
                 if self._context_server_config is not None:
                     servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         diag["max_turns"] = max_turns
-        diag["resume_requested"] = False
         diag["allowed_tools"] = [str(tool) for tool in allowed or []]
         diag["mcp_servers"] = sorted(str(name) for name in (servers or {}))
-        default_effort = "medium"
-        diag["reasoning_effort"] = kwargs.get(
-            "effort",
-            getattr(
-                options, "effort", (os.environ.get(_EFFORT_ENV_ORCH) or os.environ.get(_EFFORT_ENV) or default_effort).strip()
-            ),
-        )
+        diag["reasoning_effort"] = kwargs.get("effort", getattr(options, "effort", self._resolve_effort()))
         diag["thinking"] = kwargs.get(
             "thinking",
             getattr(options, "thinking", {"type": (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()}),
@@ -774,9 +761,19 @@ class ClaudeBackend:
             )
         )
 
+    def _resolve_effort(self) -> str:
+        """Reasoning-effort tier for this backend's role.
+
+        Returns:
+            The role's env override, else the shared override, else the role
+            default from :data:`_EFFORT_ROLES`.
+        """
+        role_env, default = _EFFORT_ROLES.get(self.effort_role, _EFFORT_ROLES["kernel"])
+        return (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options."""
-        effort = (os.environ.get(_EFFORT_ENV_ORCH) or os.environ.get(_EFFORT_ENV) or "medium").strip().lower()
+        effort = self._resolve_effort()
         if effort in _VALID_EFFORT:
             kwargs["effort"] = effort
         thinking = (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()

@@ -112,13 +112,6 @@ def test_post_init_emit_intent_setup_failure(monkeypatch):
     assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
-def test_post_init_conversational_floors(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", raising=False)
-    b = _backend(conversational=True, max_turns_default=2)
-    assert b.max_turns_default >= cl._CONVERSATIONAL_MIN_MAX_TURNS
-    assert b.call_timeout_s >= cl._CONVERSATIONAL_DEFAULT_TIMEOUT_SEC
-
-
 # ---- set_context_provider -------------------------------------------------
 def test_set_context_provider_success(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
@@ -136,12 +129,12 @@ def test_set_context_provider_failure(monkeypatch):
 
 
 # ---- _build_options -------------------------------------------------------
-def test_build_options_model_and_resume():
+def test_build_options_model_and_system_prompt():
     b = _backend(model="claude-x")
-    opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys", resume_session_id="sess-1")
+    opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys")
     assert opts.kwargs["model"] == "claude-x"
     assert opts.kwargs["system_prompt"] == "sys"
-    assert opts.kwargs["resume"] == "sess-1"
+    assert "resume" not in opts.kwargs
 
 
 def test_build_options_raw_completion():
@@ -221,7 +214,6 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
     b.call_timeout_s = 0.05
     res = await b.run("hi")
     assert len(res.intents) == 4
-
 
 
 # ---- run(): no-intent raises ----------------------------------------------

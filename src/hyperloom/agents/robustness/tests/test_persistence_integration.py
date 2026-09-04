@@ -78,6 +78,8 @@ def _ctx_with_tick(
         tick_index=tick,
         shared_state=SharedStateSnapshot(
             tick=tick,
+            # One completed measurement per tick; the plateau window counts those.
+            gain_gated_action_count=tick,
             cumulative_gain_validated=cumulative_gain_validated,
             optimization_stack_size=optimization_stack_size,
         ),
@@ -191,7 +193,7 @@ def test_ray_pending_starvation_needs_three_subprocesses(tmp_path: Path):
 def test_gain_plateau_history_survives_subprocess_restarts(
     tmp_path: Path,
 ):
-    # Flat 3-tick window across 3 fresh classifiers; stack_size=1 bypasses the no_levers early-return to hit the plateau path.
+    # Flat 3-measurement window across 3 fresh classifiers; stack_size=1 bypasses the no_levers early-return to hit the plateau path.
     for tick in (1, 2, 3):
         c, store = _fresh_classifier(tmp_path)
         ctx = _ctx_with_tick(
@@ -201,7 +203,7 @@ def test_gain_plateau_history_survives_subprocess_restarts(
         )
         c.classify(SourceData(), ctx)
         store.flush_atomic()
-    # After three flat ticks the rolling window is full and delta is 0
+    # After three flat measurements the rolling window is full and delta is 0
     # → ``gain_plateau`` should fire on a 4th classifier instance.
     c4, store4 = _fresh_classifier(tmp_path)
     syms = c4.classify(

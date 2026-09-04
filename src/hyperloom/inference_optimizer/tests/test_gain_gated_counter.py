@@ -1,5 +1,5 @@
 """Tests for gain_gated_action_count."""
-from unittest.mock import MagicMock, patch
+
 
 def test_counter_not_incremented_on_zero_measurement_round():
     """A round that produced no measurements must not increment the counter."""
@@ -8,6 +8,7 @@ def test_counter_not_incremented_on_zero_measurement_round():
     # in SharedState stays at 0 after note_explore_outcome(promoted=False) when
     # no fingerprints were added.
     from hyperloom.orchestrator.state.shared_state import SharedState
+
     state = SharedState.__new__(SharedState)
     state.gain_gated_action_count = 0
     state.params_no_promote_streak = 0

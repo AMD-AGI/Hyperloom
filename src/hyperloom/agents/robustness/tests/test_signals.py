@@ -32,12 +32,14 @@ def _ctx(
     current_action: str = "",
     inbox: list[InboxItem] | None = None,
     now_unix: float = 1_700_000_000.0,
+    agent_last_active_unix: dict[str, float] | None = None,
 ) -> ReactorContext:
     return ReactorContext(
         tick_index=1,
         shared_state=SharedStateSnapshot(
             crash_count=crash_count,
             current_action=current_action,
+            agent_last_active_unix=dict(agent_last_active_unix or {}),
         ),
         inbox=list(inbox or []),
         now_unix=now_unix,
@@ -49,13 +51,8 @@ def _ctx(
 
 def test_stall_emits_medium_when_agent_silent_past_threshold():
     now = 1_000.0
-    ctx = _ctx(now_unix=now)
-    data = SourceData(
-        coordinator_events=[
-            {"agent": "critic", "topic": "heartbeat", "ts": now - 600.0},
-            {"agent": "orchestration", "topic": "heartbeat", "ts": now - 100.0},
-        ],
-    )
+    ctx = _ctx(now_unix=now, agent_last_active_unix={"critic": now - 600.0, "orchestration": now - 100.0})
+    data = SourceData()
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0))
     assert len(out) == 1
     assert out[0].name == "agent_stall"
@@ -65,10 +62,8 @@ def test_stall_emits_medium_when_agent_silent_past_threshold():
 
 def test_stall_escalates_to_high_after_long_silence():
     now = 1_000.0
-    ctx = _ctx(now_unix=now)
-    data = SourceData(
-        coordinator_events=[{"agent": "critic", "ts": now - 1500.0}],
-    )
+    ctx = _ctx(now_unix=now, agent_last_active_unix={"critic": now - 1500.0})
+    data = SourceData()
     out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0, severity_high_after_s=900.0))
     assert out and out[0].severity is SymptomSeverity.HIGH
 
@@ -77,18 +72,6 @@ def test_stall_silent_when_no_data_present():
     ctx = _ctx()
     data = SourceData()
     assert evaluate_stall_signals(ctx, data) == []
-
-
-def test_stall_uses_iso_timestamps_too():
-    now = 1_700_000_500.0
-    ctx = _ctx(now_unix=now)
-    data = SourceData(
-        coordinator_events=[
-            {"agent": "critic", "ts": "2023-11-14T22:13:20+00:00"},  # ~1700000000
-        ],
-    )
-    out = evaluate_stall_signals(ctx, data, config=StallConfig(stall_timeout_s=300.0))
-    assert out and out[0].evidence["agent"] == "critic"
 
 
 # Crash
@@ -493,7 +476,6 @@ def test_signal_registry_order_is_pinned():
         "gpu_leak",
         "budget",
         "phase_budget",
-        "conversation_progress",
         "aiter_jit",
         "progress",
         "repeated_payload",
@@ -515,7 +497,7 @@ def test_context_only_signal_rows():
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     no_data = {spec.name for spec in _SIGNAL_REGISTRY if spec.evaluator is not None and not spec.needs_source_data}
-    assert no_data == {"budget", "phase_budget", "conversation_progress"}
+    assert no_data == {"budget", "phase_budget"}
 
 
 def test_kernel_pipeline_config_slot_feeds_two_rows():

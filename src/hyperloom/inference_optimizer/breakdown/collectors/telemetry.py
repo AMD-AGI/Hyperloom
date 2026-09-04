@@ -346,15 +346,6 @@ def _collect_lane_timeline(
     return rows
 
 
-def _collect_orchestration_context(
-    session_dir: Path,
-    state: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
-    """Summarize the orchestration turn count for this session."""
-    return {"tick_count": int(state.get("tick") or 0)}
-
-
 def collect_telemetry(
     session_dir: Path,
     state: dict[str, Any],
@@ -396,8 +387,7 @@ def collect_telemetry(
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
         # per-lane occupancy / capacity summary from the leases DB.
         "lane_timeline": _collect_lane_timeline(session_dir, warnings),
-        # SEED/DELTA census + compaction rate for the orchestration loop.
-        "orchestration_context": _collect_orchestration_context(session_dir, state, warnings),
+        "orchestration_context": {"tick_count": int(state.get("tick") or 0)},
     }
 
 

@@ -239,9 +239,8 @@ class Config:
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0
 
-    # -- phase budget / conversation progress signals --
+    # -- phase budget signal --
     phase_budget_warn_used_pct: float = 90.0
-    conversation_progress_enabled: bool = True
 
     # -- cross-tick state persistence --
     # Subprocess-per-tick transport needs disk-backed state for any

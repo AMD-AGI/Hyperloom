@@ -227,9 +227,9 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   swaps the probe for a silent stub. What remains is the node-agnostic set the
   agent reads straight off the Coordinator prompt and inbox: the deadline /
   budget ladder, `gain_plateau`, `no_levers_found`, crash escalation,
-  `phase_budget_nearly_exhausted`, `conversation_no_progress`, plus the
+  `phase_budget_nearly_exhausted`, plus the
   inbox-driven `agent_stall` / `repeated_failure` / `repeated_policy_denied`
-  family. Pass `--robustness-mock` for heartbeat-only. Shell-level health
+  family. Pass `--robustness-mock` for idle-only. Shell-level health
   monitoring (`optimizer_runs/robustness_monitor.sh`, auto-resume on terminal
   `stop_reason`) is unaffected.
 

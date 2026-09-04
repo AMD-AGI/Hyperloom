@@ -9,7 +9,6 @@ import time
 from typing import Any
 from ..phases import machine_state as _phase_state
 from ..roles.base import BackendTurnResult
-from ..roles.mcp_context_tools import CONTEXT_TOOL_NAMES as _CONTEXT_TOOL_NAMES
 from ..bus.message_bus import Message
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 
@@ -37,15 +36,6 @@ class ConversationCollaborator:
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
-
-    def _orchestration_context_tools_mounted(self) -> bool:
-        """True when the orchestration backend really exposes the pull tools.
-
-        Returns:
-            ``True`` when the backend reports the read-only context tools live;
-            backends without them (and a failed MCP build) report ``False``.
-        """
-        return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
 
     def _attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
@@ -317,13 +307,12 @@ class ConversationCollaborator:
                 exc_info=True,
             )
 
-    async def _compose_prompt(self, agent_name: str, *, system_prompt: str | None = None) -> str:
+    async def _compose_prompt(self, agent_name: str) -> str:
         """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row).
 
         Args:
             agent_name: The agent role to compose the per-tick prompt for;
                 selects which advisory/telemetry sections are included.
-            system_prompt: The system prompt the turn will carry.
 
         Returns:
             The assembled prompt string for this agent's reactor turn.
@@ -352,9 +341,9 @@ class ConversationCollaborator:
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
             try:
-                cycle_strategy_block = self._cycle_strategy_seed_block()
+                cycle_strategy_block = self._cycle_strategy_block()
             except Exception:  # noqa: BLE001 — advisory only
-                log.exception("Coordinator: cycle strategy seed render failed")
+                log.exception("Coordinator: cycle strategy render failed")
                 cycle_strategy_block = ""
             if cycle_strategy_block:
                 sections.append(cycle_strategy_block)
@@ -393,7 +382,6 @@ class ConversationCollaborator:
                 f"closing_phase={self.shared_state.closing_phase}"
             )
 
-        # Shared session state.
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         # Resource pools are orchestration-only; robustness cannot schedule GPU work.
@@ -429,9 +417,9 @@ class ConversationCollaborator:
                 sections.append("=== Current gaps ===")
                 sections.append(gaps_block)
             try:
-                research_block = self._specialist_findings_seed_block()
+                research_block = self._specialist_findings_block()
             except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: specialist findings seed render failed")
+                log.exception("Coordinator: specialist findings render failed")
                 research_block = ""
             if research_block:
                 sections.append(research_block)
@@ -517,11 +505,7 @@ class ConversationCollaborator:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
 
-            try:
-                discarded_escalate_block = self._discarded_escalate_hint_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: discarded escalation hint advisory failed")
-                discarded_escalate_block = ""
+            discarded_escalate_block = self._discarded_escalate_hint_advisory_block()
             if discarded_escalate_block:
                 sections.append("=== Discarded escalation hint (advisory) ===")
                 sections.append(discarded_escalate_block)
@@ -998,33 +982,26 @@ class ConversationCollaborator:
                     out.append(variant)
         return out
 
-    def _specialist_findings_seed_block(self) -> str:
-        """Render persisted specialist findings for an Orchestration SEED.
+    def _specialist_findings_block(self) -> str:
+        """Render persisted specialist findings, any domain, most confident first.
 
-        Covers all domains: any specialist_rounds entry with non-empty
-        new_findings or residual_questions is included, ordered by confidence
-        descending (entries without confidence treated as 0).
-
-        The specialist's executable proposals are not rendered here: they go
-        through ``=== Untested proposals (current cycle) ===`` alongside every
-        other domain's, which also drops the ones already benched.
+        Executable proposals are not rendered here: they go through
+        ``=== Untested proposals (current cycle) ===`` alongside every other
+        domain's, which also drops the ones already benched.
         """
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
-        all_rounds = [
-            row
-            for row in (getattr(self.shared_state, "specialist_rounds", []) or [])
-            if isinstance(row, dict)
-            and (row.get("new_findings") or row.get("residual_questions"))
-        ]
-        # Sort by confidence descending; entries without confidence treated as 0.
-        all_rounds = sorted(
-            all_rounds,
+        rounds = sorted(
+            (
+                row
+                for row in (getattr(self.shared_state, "specialist_rounds", []) or [])
+                if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
+            ),
             key=lambda r: float(r.get("confidence") or 0),
             reverse=True,
         )
-        if not hints and not all_rounds:
+        if not hints and not rounds:
             return ""
 
         lines = ["=== Specialist findings ==="]
@@ -1035,7 +1012,7 @@ class ConversationCollaborator:
 
         questions: list[str] = []
         seen_questions: set[str] = set()
-        for row in all_rounds:
+        for row in rounds:
             domain_label = str(row.get("domain") or "").strip()
             findings = row.get("new_findings") or []
             if findings:
@@ -1077,16 +1054,16 @@ class ConversationCollaborator:
             return ""
 
     def _discarded_escalate_hint_advisory_block(self) -> str:
-        """Render advisory when a pending escalate_strategy_change hint was discarded.
+        """Render the advisory for an escalate_strategy_change hint that was discarded.
 
-        Fires when a phase transition to a phase other than FRAMEWORK_AGENT
-        consumed the hint before ``exit_normal_optimize`` could read it.
+        A transition to a phase other than FRAMEWORK_AGENT drops the hint before
+        the exit rules that consume it can read it.
 
         Returns:
             The advisory string, or ``""`` when no discarded hint is recorded.
         """
-        hint = str(getattr(self.shared_state, "last_discarded_escalate_hint", "") or "")
-        ts = str(getattr(self.shared_state, "last_discarded_escalate_hint_ts", "") or "")
+        hint = str(self.shared_state.last_discarded_escalate_hint or "")
+        ts = str(self.shared_state.last_discarded_escalate_hint_ts or "")
         if not hint:
             return ""
         return (

@@ -2130,7 +2130,7 @@ async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypat
         raise RuntimeError("stop after options")
 
     monkeypatch.setattr(claude_mod.ClaudeBackend, "_build_options", fake_build_options)
-    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True, conversational=False)
+    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True)
     with pytest.raises(Exception):
         await backend.run("prompt", system_prompt="critic system", tools=[], max_turns=1)
 

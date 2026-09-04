@@ -27,8 +27,11 @@ def _ctx(
     has_keep_pending_integrate: bool = False,
     explore_started: bool = False,
 ) -> ReactorContext:
+    # One gated action per tick: the detector's history advances on completed
+    # measurements, and every tick in these tests stands for exactly one.
     snap = SharedStateSnapshot(
         tick=tick,
+        gain_gated_action_count=tick + 1,
         macro_cycle=macro_cycle,
         cumulative_gain_validated=cumulative_gain_validated,
         elapsed_minutes=elapsed_minutes,
