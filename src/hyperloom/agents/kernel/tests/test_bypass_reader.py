@@ -973,10 +973,7 @@ def test_severity_grades_with_share_of_device_time():
 
 def test_analyze_trace_caps_annotation_buffers(tmp_path, monkeypatch):
     monkeypatch.setattr(reader, "_MAX_ANNOTATION_WINDOWS", 2)
-    events = [
-        {"cat": "gpu_user_annotation", "ph": "X", "name": f"step{i}", "ts": i, "dur": 1}
-        for i in range(5)
-    ]
+    events = [{"cat": "gpu_user_annotation", "ph": "X", "name": f"step{i}", "ts": i, "dur": 1} for i in range(5)]
     path = tmp_path / "cap.trace.json"
     path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
     out = reader.analyze_trace(path, top_k=0)
