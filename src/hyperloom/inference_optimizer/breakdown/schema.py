@@ -2041,13 +2041,9 @@ class KernelOptimizationSummary(TypedDict, total=False):
     session_id: str  # global id ``{model}_{ts}_{short_uuid}``
     model_name: str
     cumulative_gain_validated_pct: float
-    totals: dict[str, int]  # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
+    totals: dict[str, int]  # {attempted, integrated, keep_pending, rejected, in_flight}
     rejection_breakdown: dict[str, int]
-    unattempted_reason_breakdown: dict[str, int]
     failure_reason_breakdown: dict[str, int]
-    dispatch_skip_reason: dict[
-        str, Any
-    ]  # {} or {reason, kernels_considered, message, ts} when a dispatch found no eligible kernels
     field_glossary: dict[str, str]  # {field_name: explanation} for tooltips
     top_takeaways: list[str]  # 2-4 deterministic (non-LLM) sentences
     by_kernel: list[dict[str, Any]]  # one row per top kernel, sorted gpu_pct desc

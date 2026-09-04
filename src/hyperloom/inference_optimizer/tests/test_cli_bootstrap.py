@@ -651,7 +651,7 @@ def test_kernel_opt_summary_line_prints_totals(tmp_path: Path, monkeypatch, caps
 
     def _summary(_state, _session_dir):
         return {
-            "totals": {"attempted": 3, "integrated": 1, "rejected": 1, "unattempted": 2},
+            "totals": {"attempted": 3, "integrated": 1, "rejected": 1},
             "top_takeaways": ["headline", "root cause"],
         }
 
