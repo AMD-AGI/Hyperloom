@@ -168,6 +168,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "plateau_overrides",
         # CLOSE phase sequencer flag.
         "close_sequence_done",
+        # Objective-met marker; the Coordinator is its only writer.
+        "target_reached_at",
         # unified explore search ledger.
         "explore_search",
         # structured gaps ledger.

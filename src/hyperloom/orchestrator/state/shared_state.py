@@ -647,6 +647,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
+    # Stamped once when the run objective is first met. Separate from
+    # ``stop_reason`` because that routes to CLOSE from any phase, which is what
+    # this exists to avoid: a met target goes to SWEEP first.
+    target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by
     # ``_parse_conc_sweep_concs``. Empty is not an instruction: both readers
     # send None instead, which resolves to the ladder for this workload.
@@ -2083,6 +2087,27 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if isinstance(latest, dict):
             return str(latest.get("top_bottleneck") or "")
         return ""
+
+    def current_within_roofline_pct(self) -> float | None:
+        """Return the latest snapshot's achieved share of its roofline ceiling.
+
+        ``None`` until a roofline has been measured, which is what keeps a
+        roofline target inert on a session that never ran one.
+
+        Returns:
+            float | None: ``within_roofline_pct`` from the newest snapshot, or
+                ``None`` when no snapshot carries a numeric one.
+        """
+        snaps = self.roofline_snapshots if isinstance(self.roofline_snapshots, list) else []
+        if not snaps:
+            return None
+        latest = snaps[-1]
+        if not isinstance(latest, dict):
+            return None
+        value = latest.get("within_roofline_pct")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
 
     def current_comm_pct(self) -> float | None:
         """Return the latest exposed-communication percentage."""

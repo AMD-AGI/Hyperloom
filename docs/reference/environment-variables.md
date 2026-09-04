@@ -82,8 +82,9 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
   `--conc`, `--max-model-len`, `--profile-osl`.
-- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
-  `--target-tput`, `--compare-against-gpu`.
+- **Goal / budget:** `--target-gain`, `--target-roofline`, `--max-hours`,
+  `--target-summary`, `--target-tput`, `--compare-against-gpu`. The roofline
+  target composes with the others: whichever is met first ends the run.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning

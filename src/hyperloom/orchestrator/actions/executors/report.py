@@ -352,7 +352,7 @@ def _build_failure_summary(
 
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Terminal reasons the coordinator loop sets directly.
-    "target_reached": "Target reached: the requested --target-gain / --target-tput was met.",
+    "target_reached": "Target reached: a requested --target-gain / --target-tput / --target-roofline was met.",
     "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
     "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",

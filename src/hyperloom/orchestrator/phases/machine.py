@@ -245,7 +245,7 @@ class MachinePhase(PhaseHandler):
     async def _advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick.
 
-        Priority order (Inv-8.2): global terminal > exit_terminal > exit_normal, per phase_state.compute_next_phase.
+        Priority order (Inv-8.2): met target > global terminal > exit_terminal > exit_normal, per phase_state.compute_next_phase.
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()

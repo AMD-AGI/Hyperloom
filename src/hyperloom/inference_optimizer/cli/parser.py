@@ -630,6 +630,18 @@ def _build_parser() -> argparse.ArgumentParser:
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
     )
+    # Outside the group: it measures a different axis, so it ORs with whichever
+    # of the three above is set rather than competing with them.
+    opt.add_argument(
+        "--target-roofline",
+        type=float,
+        default=None,
+        help=(
+            "Stop when the latest roofline snapshot reaches N%% of its modelled "
+            "ceiling. Inert until a roofline has been measured, and satisfied "
+            "independently of --target-gain / --target-tput / --target-baseline-dir."
+        ),
+    )
     opt.add_argument(
         "--resume-from",
         type=str,
