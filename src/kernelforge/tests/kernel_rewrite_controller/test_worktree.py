@@ -97,6 +97,51 @@ def test_create_operator_worktree_pins_the_shared_base_commit(tmp_path: Path) ->
     assert not worktree.workspace.is_relative_to(repo)
 
 
+def test_forge_loop_output_is_invisible_to_the_workspace_guard(tmp_path: Path) -> None:
+    repo, base_commit = _source_repo(tmp_path)
+    task, _ = _task(tmp_path, repo, base_commit)
+
+    worktree = create_operator_worktree(task, ControllerLayout(tmp_path / "output"))
+
+    # The JIT cache reaches this depth, and the guard asks git for new paths with
+    # exactly this command, so a shallower assertion would not cover the failure.
+    jit_artifact = worktree.workspace / "forge_experiments" / "aiter_cache" / "sources" / "abc" / "launch_moe"
+    jit_artifact.parent.mkdir(parents=True)
+    jit_artifact.write_text("compiled\n", encoding="utf-8")
+
+    untracked = _git(worktree.workspace, "ls-files", "--others", "--exclude-standard")
+
+    assert untracked == ""
+
+
+def test_forge_loop_output_ignore_rule_stays_out_of_the_patch(tmp_path: Path) -> None:
+    repo, base_commit = _source_repo(tmp_path)
+    task, _ = _task(tmp_path, repo, base_commit)
+    worktree = create_operator_worktree(task, ControllerLayout(tmp_path / "output"))
+    worktree.kernel_path.write_text("VALUE = 2\n", encoding="utf-8")
+    _git(worktree.workspace, "add", "-A")
+    _git(worktree.workspace, "commit", "-m", "optimize kernel")
+
+    patch = export_patch_from_base(
+        worktree,
+        best_commit=_git(worktree.workspace, "rev-parse", "HEAD"),
+    )
+
+    assert "VALUE = 2" in patch
+    assert "forge_experiments" not in patch
+
+
+def test_forge_loop_output_ignore_does_not_leak_into_the_source_repo(tmp_path: Path) -> None:
+    repo, base_commit = _source_repo(tmp_path)
+    task, _ = _task(tmp_path, repo, base_commit)
+
+    create_operator_worktree(task, ControllerLayout(tmp_path / "output"))
+    (repo / "forge_experiments").mkdir()
+    (repo / "forge_experiments" / "stray").write_text("x\n", encoding="utf-8")
+
+    assert _git(repo, "status", "--porcelain") == "?? forge_experiments/"
+
+
 def test_export_patch_uses_controller_base_and_excludes_external_driver(tmp_path: Path) -> None:
     repo, base_commit = _source_repo(tmp_path)
     task, task_dir = _task(tmp_path, repo, base_commit)

@@ -17,6 +17,11 @@ from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.llm.git import GitError, git
 
 
+#: Directory ``forge-loop`` writes its campaign state, JIT caches and iteration
+#: archive into, relative to the workspace it optimizes.
+FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
+
+
 class WorktreeError(RuntimeError):
     """An operator worktree could not be created or validated."""
 
@@ -60,6 +65,28 @@ def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> N
         git("branch", "-D", branch, cwd=repo_root, check=False)
 
 
+def _ignore_forge_loop_output(workspace: Path) -> None:
+    """Hide forge-loop's own output directory from Git inside one worktree.
+
+    forge-loop optimizes a Git workspace while writing its campaign state and
+    JIT caches into that same workspace, and its workspace guard rejects any
+    untracked path the caller did not declare. It therefore requires the
+    workspace to ignore that directory -- the packaged examples satisfy this by
+    writing a ``.gitignore`` themselves. A framework repository never does, so
+    without this the first JIT compile inside an operator worktree fails the
+    iteration for infrastructure output rather than for anything the agent did.
+
+    The rule is a ``.gitignore`` inside the directory rather than
+    ``$GIT_DIR/info/exclude``: Git resolves ``info/`` against the common
+    directory, so an exclude file would be ignored for this worktree and instead
+    leak into the shared repository. Matching ``*`` also covers the file itself,
+    which keeps it untracked and therefore out of the exported patch.
+    """
+    output_root = workspace / FORGE_LOOP_OUTPUT_DIRNAME
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / ".gitignore").write_text("*\n", encoding="utf-8")
+
+
 def create_operator_worktree(
     task: KernelRewriteTask,
     layout: ControllerLayout,
@@ -96,6 +123,7 @@ def create_operator_worktree(
         for source_file in source_files:
             if not source_file.is_relative_to(workspace) or not source_file.is_file():
                 raise WorktreeError(f"source file is not a file in the base commit: {source_file}")
+        _ignore_forge_loop_output(workspace)
         return OperatorWorktree(
             repo_root=repo_root,
             workspace=workspace,
@@ -140,6 +168,7 @@ def export_patch_from_base(
 
 
 __all__ = [
+    "FORGE_LOOP_OUTPUT_DIRNAME",
     "OperatorWorktree",
     "WorktreeError",
     "create_operator_worktree",

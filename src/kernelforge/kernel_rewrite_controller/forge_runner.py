@@ -20,7 +20,10 @@ from typing import Any
 
 from kernelforge.fusion.gpu_arch import canon_arch
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
-from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
+from kernelforge.kernel_rewrite_controller.worktree import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
+    OperatorWorktree,
+)
 
 _RESULT_SENTINEL = "__FORGE_RESULT__"
 _TERMINATE_GRACE_SEC = 5.0
@@ -115,7 +118,7 @@ def build_forge_loop_invocation(
         "--producer",
         task.identity.producer,
         "--experiments-dir",
-        str(worktree.workspace / "forge_experiments"),
+        str(worktree.workspace / FORGE_LOOP_OUTPUT_DIRNAME),
         "--experiment-id",
         experiment_id,
         "--experience-id",
