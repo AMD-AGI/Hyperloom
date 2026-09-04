@@ -20,7 +20,7 @@ does this fall back to the aggregate ratio, and then ``speedup_basis`` says so.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 from kernelforge.loop.scoring import aggregate_regression_detail
 from kernelforge.rewrite_by_flydsl import driver_contract, protocol
@@ -29,9 +29,12 @@ from kernelforge.durable_io import atomic_write_text
 
 # How the reported speedup was obtained. The mean over cases is authoritative;
 # the aggregate ratio is what remains when a driver reports no per-case times,
-# and it is named so a consumer never mistakes one for the other.
+# and it is named so a consumer never mistakes one for the other. A coverage
+# mismatch yields neither: the two paths timed different work, so no comparison
+# is published at all.
 SPEEDUP_BASIS_MEAN_CASE = "mean_case_speedup"
 SPEEDUP_BASIS_AGGREGATE = "aggregate_ratio"
+SPEEDUP_BASIS_NONE = ""
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by
 # rewrite_by_flydsl.optimize, so this is the only one a caller sees.
@@ -57,6 +60,9 @@ class RewriteResult:
     # Which statistic `speedup` is, so a consumer can tell an equal-weight mean
     # over cases from a ratio of two aggregates that happen to share a unit.
     speedup_basis: str
+    # Why no speedup was published, when none was. Distinguishes "the driver
+    # reported no per-case timings" from "the two paths timed different cases".
+    speedup_unavailable_reason: str
     # The per-case timings the mean was built from, kept as the evidence for a
     # reported speedup rather than only its scalar result.
     source_case_times: dict
@@ -64,7 +70,8 @@ class RewriteResult:
     # Set when the mean claims an improvement the aggregate contradicts. Both
     # can be true at once and it is not an error: a suite spanning orders of
     # magnitude can get faster on most cases and slower in total. Naming it is
-    # what stops the pair from reading as an inconsistency.
+    # what stops the pair from reading as an inconsistency; it does not veto the
+    # verdict, because the mean is this layer's authoritative statistic.
     aggregate_regression: str
     experiment_id: str | None
     port_attempts: int
@@ -133,16 +140,28 @@ def build_result(
     source_cases = dict(source_case_times or {})
     candidate_cases = dict(flydsl_best_case_times or {})
     speedup = None
-    speedup_basis = ""
+    speedup_basis = SPEEDUP_BASIS_NONE
+    speedup_unavailable_reason = ""
     if port_ok:
-        speedup = driver_contract.cross_language_mean_case_speedup(source_cases, candidate_cases)
+        speedup, reason = driver_contract.cross_language_mean_case_speedup(source_cases, candidate_cases)
         if speedup is not None:
             speedup_basis = SPEEDUP_BASIS_MEAN_CASE
+        elif reason == driver_contract.CASE_SCORE_INCOMPARABLE:
+            # The two paths timed different case sets. Their aggregate ratio
+            # would compare different work, so nothing is published and the
+            # reason travels in the result instead of a number.
+            speedup_unavailable_reason = reason
         elif source_ms and flydsl_best_ms and flydsl_best_ms > 0:
             speedup = source_ms / flydsl_best_ms
             speedup_basis = SPEEDUP_BASIS_AGGREGATE
+        else:
+            speedup_unavailable_reason = reason
 
     # Only meaningful for the mean; the aggregate ratio cannot contradict itself.
+    # Reported for the record, NOT used to veto the verdict: for this layer the
+    # mean is the authoritative statistic, and letting the aggregate withdraw
+    # `improved` would restore it as the gate this change exists to remove. The
+    # loop withdraws it because there the aggregate wall time is the headline.
     regression = (
         aggregate_regression_detail(
             baseline_ms=source_ms,
@@ -168,6 +187,7 @@ def build_result(
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         speedup_basis=speedup_basis,
+        speedup_unavailable_reason=speedup_unavailable_reason,
         source_case_times=source_cases,
         flydsl_best_case_times=candidate_cases,
         aggregate_regression=regression,
@@ -178,10 +198,7 @@ def build_result(
         ),
         baseline_ms=source_ms,
         best_ms=flydsl_best_ms,
-        # Withdrawn when the aggregate contradicts the mean, matching how
-        # forge-loop badges its own iterations: the contradiction is reported by
-        # name rather than carried as a pass.
-        improved=bool(speedup and speedup > 1.0) and not regression,
+        improved=bool(speedup and speedup > 1.0),
         total_speedup=speedup,
         base_commit=str(applyback.get("base_commit") or ""),
         best_commit=best_commit,

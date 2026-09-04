@@ -14,6 +14,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ._subprocess import kill_process_group
@@ -132,6 +133,50 @@ SWEEP_ECHO = "sweep_const"
 EXPLORATORY_KIND = "exploratory"
 
 _CASE_MS_RE = re.compile(r"case_ms:\s*(\S+)\s+([\d.eE+-]+)[ \t]*(\S*)")
+
+
+@dataclass
+class CaseTimings:
+    """The per-case timings read out of one driver invocation's output.
+
+    ``duplicates`` is reported rather than resolved. A driver printing one case
+    twice has measured something the caller cannot name -- two shapes under one
+    id, or the same shape twice with only one kept -- and either way a score
+    built on it is not the suite the task declared.
+    """
+
+    case_times: dict[str, float] = field(default_factory=dict)
+    unscored: list[str] = field(default_factory=list)
+    duplicates: list[str] = field(default_factory=list)
+
+
+def parse_case_timings(text: str) -> CaseTimings:
+    """Read every ``case_ms:`` line, keeping the unscored marker and duplicates.
+
+    The one parser for this line, shared with the rewrite driver contract, so
+    the ids a coverage check accepts and the times a KEEP score is built from
+    can never come from two regexes that agree today. Deliberately NOT anchored
+    to the start of a line: a collectives driver prefixes its output with
+    ``[rank0] ``, and an anchored pattern silently reads no cases at all there.
+
+    A case MAY carry a trailing ``unscored`` marker meaning it is measured and
+    guarded but kept out of the score. ``[ \\t]*`` keeps that optional field on
+    its own line, so a plain two-field line cannot absorb the next one.
+    """
+    timings = CaseTimings()
+    duplicates: set[str] = set()
+    for case_id, raw_ms, tag in _CASE_MS_RE.findall(text or ""):
+        try:
+            value = float(raw_ms)
+        except ValueError:
+            continue
+        if case_id in timings.case_times:
+            duplicates.add(case_id)
+        timings.case_times[case_id] = value
+        if tag == "unscored" and case_id not in timings.unscored:
+            timings.unscored.append(case_id)
+    timings.duplicates = sorted(duplicates)
+    return timings
 _SWEEP_ECHO_RE = re.compile(rf"{SWEEP_ECHO}:\s*([A-Z][A-Z0-9_]*)\s+(\S+)")
 _CONSTANT_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _CONSTANT_VALUE_RE = re.compile(r"^[A-Za-z0-9_.,:=+-]+$")
@@ -474,23 +519,14 @@ async def bench_wallclock(
     # need this: the slowest case in a suite can be an excluded one, and
     # analysing it describes a shape no gate reads. ``[ \t]*`` keeps the optional
     # field on its own line, so a plain two-field line cannot absorb the next one.
-    case_times: dict[str, float] = {}
-    duplicate_case_ids: set[str] = set()
-    unscored_cases: list[str] = []
-    for cid, cms, tag in _CASE_MS_RE.findall(full_output):
-        try:
-            if cid in case_times:
-                duplicate_case_ids.add(cid)
-            case_times[cid] = float(cms)
-        except ValueError:
-            continue
-        if tag == "unscored":
-            unscored_cases.append(cid)
+    timings = parse_case_timings(full_output)
+    case_times = timings.case_times
+    unscored_cases = timings.unscored
 
-    if duplicate_case_ids:
+    if timings.duplicates:
         return {
             "success": False,
-            "message": ("DUPLICATE CASE TIMINGS: " + ", ".join(sorted(duplicate_case_ids))),
+            "message": ("DUPLICATE CASE TIMINGS: " + ", ".join(timings.duplicates)),
             "output": full_output[-1500:],
         }
 

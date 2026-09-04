@@ -9,11 +9,13 @@ primitives) is covered by the L1/L2/L3 integration ladder, not here.
 from __future__ import annotations
 
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.mcp_server.tools.bench import calculate_mean_case_speedup
-from kernelforge.rewrite_by_flydsl import driver_contract, ingest, report, seed
+from hyperloom.agents.kernel.tools.backends import forge_submit
+from kernelforge.mcp_server.tools.bench import calculate_mean_case_speedup, parse_case_timings
+from kernelforge.rewrite_by_flydsl import driver_contract, ingest, kb, report, seed
 from kernelforge.rewrite_by_flydsl.port_loop import (
     _validation_error_tail,
     check_flydsl_port,
@@ -357,6 +359,50 @@ def test_case_timings_are_read_off_the_driver_not_just_case_ids():
     assert reading.timing_ms == pytest.approx(0.120920)
 
 
+def test_case_timings_survive_a_driver_that_prefixes_its_output():
+    # A collectives driver prefixes every line with its rank. Anchoring the
+    # pattern to the start of a line reads no cases at all there, and the result
+    # silently degrades to the aggregate ratio instead of failing.
+    reading = driver_contract.read_driver_output(
+        "[rank0] case_ms: n_8 1.500\n[rank0] case_ms: n_16 3.000\n[rank0] mean_ms: 2.250\n"
+    )
+    assert reading.case_times == {"n_8": pytest.approx(1.5), "n_16": pytest.approx(3.0)}
+
+
+def test_unscored_cases_are_kept_out_of_the_score():
+    # forge-loop excludes them because their run-to-run spread swamps a real
+    # change; averaging them in lets noise, or a win on a case nobody is
+    # optimizing, carry the verdict.
+    reading = driver_contract.read_driver_output(
+        "case_ms: a 1.000\ncase_ms: b 2.000 unscored\nmean_ms: 1.500\n"
+    )
+    assert reading.unscored_cases == ("b",)
+    assert reading.scored_case_times == {"a": pytest.approx(1.0)}
+
+
+def test_duplicate_case_timings_are_refused_like_the_bench_tool_refuses_them():
+    # bench.py fails a measurement with duplicate case timings. Accepting it
+    # here would let the rewrite score a suite the loop rejects.
+    reading = driver_contract.read_driver_output(
+        "case_ms: a 1.000\ncase_ms: a 9.000\nmean_ms: 5.000\n"
+    )
+    assert reading.duplicate_case_ids == ("a",)
+    report_out = driver_contract._timing_report(reading)
+    assert not report_out.ok
+    assert report_out.failure_class == driver_contract.DUPLICATE_CASE_TIMINGS
+
+
+def test_one_parser_serves_the_bench_tool_and_the_rewrite_contract():
+    # Two regexes that agree today drift; the ids a coverage check accepts and
+    # the times a KEEP score is built from have to come from one place.
+    text = "[rank0] case_ms: a 1.000\ncase_ms: b 2.000 unscored\ncase_ms: a 3.000\n"
+    shared = parse_case_timings(text)
+    reading = driver_contract.read_driver_output(text)
+    assert reading.case_times == shared.case_times
+    assert list(reading.unscored_cases) == shared.unscored
+    assert list(reading.duplicate_case_ids) == shared.duplicates
+
+
 def test_rewrite_speedup_is_the_mean_over_cases_not_the_ratio_of_aggregates():
     # Measured aiter a16w16 baseline at n=k=6144, whose per-case times span 18x.
     source = {
@@ -389,10 +435,12 @@ def test_rewrite_speedup_is_the_mean_over_cases_not_the_ratio_of_aggregates():
     # The aggregate ratio calls the same candidate a regression, which is the
     # verdict this pipeline used to publish.
     assert source_ms / candidate_ms == pytest.approx(0.955, abs=1e-3)
-    # Both readings are true; the contradiction is named rather than hidden, and
-    # an improvement the aggregate does not support is not badged as one.
+    # Both readings are true and the contradiction is named, but the mean is
+    # this layer's authoritative statistic: letting the aggregate withdraw
+    # `improved` would restore it as the gate, and every consumer that reads
+    # `improved is True` would reject the candidate exactly as before.
     assert result.aggregate_regression
-    assert result.improved is False
+    assert result.improved is True
     assert result.source_case_times == source
 
 
@@ -412,6 +460,62 @@ def test_rewrite_speedup_matches_the_statistic_forge_loop_keeps_on():
     )
     assert result.speedup == pytest.approx(calculate_mean_case_speedup(candidate, source))
     assert result.speedup == pytest.approx(3.0)  # mean(2x, 4x), not 2.222x
+
+
+def test_the_submission_gate_grades_on_the_mean_not_the_aggregate():
+    # The PR's own example: a candidate the mean scores at 3.385x and the
+    # aggregate calls a 0.955x regression. Grading on the aggregate rejects it,
+    # so publishing the mean in the result while the gate still divides the
+    # aggregates would change nothing that matters.
+    applyback = {
+        "baseline_ms": 0.048061,
+        "best_ms": 0.050326,  # slower in total
+        "mean_case_speedup": 3.385,
+        "best_commit": "c" * 40,
+    }
+    assert forge_submit._rewrite_micro_speedup(applyback) == pytest.approx(3.385)
+    assert forge_submit._rewrite_micro_speedup(applyback) > 1.0
+
+
+def test_the_submission_gate_falls_back_to_the_aggregate_without_a_mean():
+    aggregate_only = {"baseline_ms": 2.0, "best_ms": 1.0, "best_commit": "c" * 40}
+    assert forge_submit._rewrite_micro_speedup(aggregate_only) == pytest.approx(2.0)
+
+    unusable = {"baseline_ms": 0.0, "best_ms": 1.0, "best_commit": "c" * 40}
+    assert forge_submit._rewrite_micro_speedup(unusable) is None
+
+
+def test_the_kb_improvement_gate_grades_on_the_mean_not_the_aggregate(monkeypatch, tmp_path):
+    # kb.py refused to record anything whose aggregate ratio was <= 1.0, which
+    # discards exactly the ports this route is looking for. The store and the
+    # gpu_type are stubbed so the improvement gate is the check under test.
+    monkeypatch.setattr(kb, "create_rewrite_record_store", lambda config: object())
+    config = SimpleNamespace(gpu_type="gfx950")
+    spec = RewriteSpec(
+        op_name="gemm",
+        source_kernel="/w/gemm.py",
+        target_functions=[],
+        flydsl_kernel=str(tmp_path / "kernel.py"),
+    )
+
+    # Slower in aggregate (0.048 -> 0.050) but 3.385x on the mean over cases.
+    kept = kb.write_flydsl_kb_solution(
+        spec, "driver.py", config, source_ms=0.048061, flydsl_best_ms=0.050326, mean_case_speedup=3.385
+    )
+    assert kept["reason"] != "no_improvement"
+
+    # A mean at or below 1.0 is still refused; the change is which statistic
+    # decides, not whether there is a gate.
+    refused = kb.write_flydsl_kb_solution(
+        spec, "driver.py", config, source_ms=0.048061, flydsl_best_ms=0.010000, mean_case_speedup=0.9
+    )
+    assert refused["reason"] == "no_improvement"
+
+    # No mean available -> the aggregate ratio still gates, unchanged.
+    legacy = kb.write_flydsl_kb_solution(
+        spec, "driver.py", config, source_ms=2.0, flydsl_best_ms=4.0, mean_case_speedup=None
+    )
+    assert legacy["reason"] == "no_improvement"
 
 
 def test_aggregate_ratio_is_used_and_named_when_a_driver_reports_no_cases():
@@ -440,9 +544,13 @@ def test_a_case_set_mismatch_refuses_to_score_rather_than_comparing_subsets():
         source_case_times={"a": 2.0, "b": 2.0},
         flydsl_best_case_times={"a": 1.0},
     )
-    # Falls back to the aggregate rather than scoring 'a' alone, which would
-    # publish a partial workload's speedup as the whole suite's.
-    assert result.speedup_basis == report.SPEEDUP_BASIS_AGGREGATE
+    # No number at all, not a quiet fall back to the aggregate: the two paths
+    # timed different work, so their aggregates compare different work too.
+    # Scoring 'a' alone would publish a partial workload as the whole suite.
+    assert result.speedup is None
+    assert result.speedup_basis == report.SPEEDUP_BASIS_NONE
+    assert result.speedup_unavailable_reason == driver_contract.CASE_SCORE_INCOMPARABLE
+    assert result.improved is False
 
 
 def test_applyback_is_required_only_for_framework_repositories():

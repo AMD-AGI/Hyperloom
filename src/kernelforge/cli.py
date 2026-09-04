@@ -1969,6 +1969,12 @@ def forge_loop(
             "pristine_baseline_ms": pristine_ms,
             "search_start_ms": search_start_ms,
             "best_ms": best,
+            # The per-case medians behind best_ms, for the same kernel. Reported
+            # so a caller scoring this kernel against a DIFFERENT anchor than the
+            # loop's own -- the rewrite pipeline compares it to the original
+            # source, not to the port the loop started from -- can compute an
+            # equal-weight mean over cases instead of dividing two aggregates.
+            "best_case_times": dict(getattr(loop_runner.run_state, "best_case_times", {}) or {}),
             "mean_case_speedup": total_speedup,
             "search_start_mean_case_speedup": (search_start_mean_case_speedup),
             "aggregate_regression": aggregate_regression,

@@ -337,6 +337,7 @@ def write_flydsl_kb_solution(
     *,
     source_ms: float | None,
     flydsl_best_ms: float | None,
+    mean_case_speedup: float | None = None,
     best_commit: str = "",
     framework: str = "",
     snr_db: float | None = None,
@@ -360,7 +361,14 @@ def write_flydsl_kb_solution(
     gpu_type = str(config.gpu_type or "").strip()
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
-    speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
+    # The equal-weight mean over cases when the driver reported per-case timings,
+    # which is the statistic forge-loop keeps a candidate on. The ratio of
+    # aggregates is only the fallback: on a suite whose cases span orders of
+    # magnitude it is dominated by the largest one, so gating the KB on it
+    # discards ports that are faster on most of the shapes the operator serves.
+    speedup = mean_case_speedup
+    if speedup is None:
+        speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
     if not allow_non_improving and (speedup is None or speedup <= 1.0):
         return {"written": False, "reason": "no_improvement"}
     try:

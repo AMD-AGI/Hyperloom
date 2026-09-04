@@ -592,6 +592,9 @@ def _publish_patch(
     commit_ref: str,
     source_ms: float | None,
     flydsl_best_ms: float | None,
+    mean_case_speedup: float | None,
+    source_case_times: dict[str, float] | None,
+    flydsl_best_case_times: dict[str, float] | None,
     reference_snr_db: float | None,
     patch: str,
     changed_files: list[str],
@@ -626,7 +629,16 @@ def _publish_patch(
     version_name = f"iter_{iteration:03d}"
     version = best_root / version_name
     relative_dir = version.relative_to(root)
-    speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
+    # The published speedup is the equal-weight mean over cases when the driver
+    # reported per-case timings, and the ratio of aggregates only when it did
+    # not. The consumer gates publication on this number, so it has to be the
+    # statistic the search optimized: an aggregate ratio on a suite whose cases
+    # span orders of magnitude is set by the largest case alone, and it rejects
+    # a kernel that is faster on most of the shapes the operator serves.
+    aggregate_speedup = (
+        source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
+    )
+    speedup = mean_case_speedup if mean_case_speedup is not None else aggregate_speedup
     manifest = validate_applyback_manifest(
         {
             "schema_version": protocol.ARTIFACT_SCHEMA_VERSION,
@@ -644,6 +656,13 @@ def _publish_patch(
             "baseline_wall_ms": source_ms,
             "best_wall_ms": flydsl_best_ms,
             "speedup": speedup,
+            # Named separately so a consumer can tell which statistic `speedup`
+            # is without inferring it, and can see the aggregate it may
+            # legitimately disagree with.
+            "mean_case_speedup": mean_case_speedup,
+            "aggregate_speedup": aggregate_speedup,
+            "baseline_case_times": dict(source_case_times or {}),
+            "best_case_times": dict(flydsl_best_case_times or {}),
             "reference_correctness_passed": True,
             "reference_snr_db": reference_snr_db,
             "integration_validation_required": True,
@@ -728,6 +747,9 @@ def generate_applyback_patch(
     best_commit: str = "",
     source_ms: float | None = None,
     flydsl_best_ms: float | None = None,
+    mean_case_speedup: float | None = None,
+    source_case_times: dict[str, float] | None = None,
+    flydsl_best_case_times: dict[str, float] | None = None,
     reference_snr_db: float | None = None,
     deadline_unix: float | None = None,
     import_modules: list[str] | tuple[str, ...] = (),
@@ -894,6 +916,9 @@ def generate_applyback_patch(
                     commit_ref=commit_ref,
                     source_ms=source_ms,
                     flydsl_best_ms=flydsl_best_ms,
+                    mean_case_speedup=mean_case_speedup,
+                    source_case_times=source_case_times,
+                    flydsl_best_case_times=flydsl_best_case_times,
                     reference_snr_db=reference_snr_db,
                     patch=patch,
                     changed_files=changed_files,

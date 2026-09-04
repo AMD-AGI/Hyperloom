@@ -296,6 +296,40 @@ def test_applyback_retries_from_a_fresh_worktree_with_prior_failure(
     assert "no repository changes" in prior_failures[1]
 
 
+def test_the_manifest_publishes_the_mean_so_the_consumer_can_gate_on_it(tmp_path):
+    # The consumer's publication gate reads the manifest, so a mean computed but
+    # left out of it changes nothing: submission would still divide the
+    # aggregates and reject a rewrite that is faster on most cases.
+    repo, base, spec = _repo_spec(tmp_path)
+    _seed_standalone_forge_loop_best(repo)
+
+    _patch, manifest_path, _files, _result = applyback._publish_patch(
+        spec=spec,
+        framework="vllm",
+        base_commit=base,
+        applyback_commit=base,
+        flydsl_best_commit="standalone-flydsl-best",
+        commit_ref="refs/forge-rewrite/applyback/softmax-abcdef123456",
+        # Slower in aggregate, 3.385x on the mean over cases.
+        source_ms=0.048061,
+        flydsl_best_ms=0.050326,
+        mean_case_speedup=3.385,
+        source_case_times={"m_1": 0.012818, "m_4096": 0.229021},
+        flydsl_best_case_times={"m_1": 0.002564, "m_4096": 0.286276},
+        reference_snr_db=45.0,
+        patch="framework patch\n",
+        changed_files=["softmax.py"],
+    )
+
+    manifest = json.loads(Path(manifest_path).read_text())
+    assert manifest["speedup"] == pytest.approx(3.385)
+    assert manifest["mean_case_speedup"] == pytest.approx(3.385)
+    # The aggregate travels too, named as itself, so a reader can see the
+    # disagreement rather than having to infer which statistic they were given.
+    assert manifest["aggregate_speedup"] == pytest.approx(0.048061 / 0.050326)
+    assert manifest["baseline_case_times"] == {"m_1": 0.012818, "m_4096": 0.229021}
+
+
 def test_applyback_publications_increment_within_their_own_namespace(tmp_path):
     repo, base, spec = _repo_spec(tmp_path)
     _seed_standalone_forge_loop_best(repo)
@@ -310,6 +344,9 @@ def test_applyback_publications_increment_within_their_own_namespace(tmp_path):
             commit_ref="refs/forge-rewrite/applyback/softmax-abcdef123456",
             source_ms=2.0,
             flydsl_best_ms=1.0,
+            mean_case_speedup=2.0,
+            source_case_times={"case_0": 2.0},
+            flydsl_best_case_times={"case_0": 1.0},
             reference_snr_db=45.0,
             patch=f"framework patch {index}\n",
             changed_files=["softmax.py"],

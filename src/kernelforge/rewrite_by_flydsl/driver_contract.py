@@ -25,7 +25,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kernelforge.mcp_server.tools.bench import CaseCoverageError, calculate_mean_case_speedup
+from kernelforge.mcp_server.tools.bench import (
+    CaseCoverageError,
+    calculate_mean_case_speedup,
+    parse_case_timings,
+)
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
@@ -43,6 +47,7 @@ CANDIDATE_TIMING_UNPARSEABLE = "candidate_timing_unparseable"
 CANDIDATE_NOT_ISOLATED = "candidate_not_isolated"
 CANDIDATE_SHADOWED = "candidate_shadowed"
 CASE_COVERAGE_MISMATCH = "case_coverage_mismatch"
+DUPLICATE_CASE_TIMINGS = "duplicate_case_timings"
 
 REF_BENCH_FLAG = "--ref-bench-mode"
 BENCH_FLAG = "--bench-mode"
@@ -53,7 +58,6 @@ CANONICAL_TIMING_METRIC = "median_ms"
 DEPRECATED_TIMING_METRIC = "mean_ms"
 
 _TIMING_RE = re.compile(r"\b(median_ms|mean_ms):\s*([-+\d.eE]+)")
-_CASE_MS_RE = re.compile(r"^[^\S\n]*case_ms:[^\S\n]*(\S+)[^\S\n]+([-+\d.eE]+)", re.M)
 _CASE_COMMENT_RE = re.compile(r"^[^\S\n]*#[^\S\n]*case[^\S\n]+([^\s:]+)[^\S\n]*:", re.M)
 _SNR_RE = re.compile(r"SNR:\s*([-+\d.eE]+)\s*dB")
 _ALLCLOSE_RE = re.compile(r"allclose:\s*(True|False)", re.IGNORECASE)
@@ -103,12 +107,24 @@ class DriverReading:
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
     case_times: dict[str, float] = field(default_factory=dict)
+    # Cases the driver measured but marked out of the score. Excluded from the
+    # mean for the same reason forge-loop excludes them: a case whose
+    # run-to-run spread swamps a real change lets noise carry the verdict.
+    unscored_cases: tuple[str, ...] = ()
+    # Reported, never resolved. One case printed twice means the ids and the
+    # times describe different things, and no honest score can be built on it.
+    duplicate_case_ids: tuple[str, ...] = ()
     snr_db: float | None = None
     allclose: bool | None = None
 
     @property
     def has_timing(self) -> bool:
         return self.timing_ms is not None
+
+    @property
+    def scored_case_times(self) -> dict[str, float]:
+        excluded = set(self.unscored_cases)
+        return {case: ms for case, ms in self.case_times.items() if case not in excluded}
 
     @property
     def has_correctness_verdict(self) -> bool:
@@ -148,18 +164,12 @@ def read_driver_output(text: str) -> DriverReading:
             reading.timing_ms = value
             reading.timing_metric = metric
 
-    case_ids: list[str] = []
-    for case_id, raw in _CASE_MS_RE.findall(text or ""):
-        if case_id not in case_ids:
-            case_ids.append(case_id)
-        # A repeated case id keeps the first reading, matching how the aggregate
-        # keys are read; a driver is expected to report each case once.
-        if case_id in reading.case_times:
-            continue
-        try:
-            reading.case_times[case_id] = float(raw)
-        except ValueError:
-            continue
+    timings = parse_case_timings(text)
+    reading.case_times = dict(timings.case_times)
+    reading.unscored_cases = tuple(timings.unscored)
+    reading.duplicate_case_ids = tuple(timings.duplicates)
+
+    case_ids: list[str] = list(timings.case_times)
     for case_id in _CASE_COMMENT_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
@@ -177,34 +187,43 @@ def read_driver_output(text: str) -> DriverReading:
     return reading
 
 
+# Why no per-case mean was produced. The two are not interchangeable: with no
+# per-case timings at all the aggregate ratio is the only number available and
+# using it is honest, while a coverage disagreement means the two paths measured
+# different work and NO comparison should be published.
+CASE_SCORE_UNAVAILABLE = "no_case_timings"
+CASE_SCORE_INCOMPARABLE = "case_coverage_mismatch"
+
+
 def cross_language_mean_case_speedup(
     source_case_times: dict[str, float],
     candidate_case_times: dict[str, float],
-) -> float | None:
+) -> tuple[float | None, str]:
     """Score the FlyDSL candidate against the source with equal weight per case.
 
-    This is the same statistic forge-loop decides KEEP and REVERT on, computed
-    by the same function, so the number this pipeline reports for "did the
-    rewrite help?" answers the question the loop was optimizing. Dividing the
-    two aggregate timings instead answers a different one: the aggregate is a
-    sum over cases whose times routinely span an order of magnitude or two, so
-    it is dominated by the largest case, and a candidate that transforms the
-    cheap cases while leaving the expensive one alone scores near 1.0 on it
-    while scoring far above 1.0 on the mean.
+    Returns ``(speedup, reason)``; exactly one is set. This is the same
+    statistic forge-loop decides KEEP and REVERT on, computed by the same
+    function, so the number this pipeline reports for "did the rewrite help?"
+    answers the question the loop was optimizing. Dividing the two aggregate
+    timings instead answers a different one: the aggregate is a sum over cases
+    whose times routinely span an order of magnitude or two, so it is dominated
+    by the largest case, and a candidate that transforms the cheap cases while
+    leaving the expensive one alone scores near 1.0 on it while scoring far
+    above 1.0 on the mean.
 
-    Returns None when either side reported no per-case timings -- the reports
-    are then aggregate-only and the caller has to say so rather than quietly
-    presenting a different statistic under the same name.
+    The two failure reasons are kept apart because they call for opposite
+    handling. No per-case timings means the driver only reported an aggregate,
+    and falling back to its ratio is the best available answer. A coverage
+    mismatch means the source and the candidate were timed on different case
+    sets, so their ratio -- aggregate or otherwise -- compares different work
+    and must not be published at all.
     """
     if not source_case_times or not candidate_case_times:
-        return None
+        return None, CASE_SCORE_UNAVAILABLE
     try:
-        return calculate_mean_case_speedup(candidate_case_times, source_case_times)
+        return calculate_mean_case_speedup(candidate_case_times, source_case_times), ""
     except CaseCoverageError:
-        # Coverage is already gated by check_case_coverage before a timing
-        # report is produced, so reaching here means the two paths disagree
-        # about their cases and no honest comparison exists.
-        return None
+        return None, CASE_SCORE_INCOMPARABLE
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -334,12 +353,21 @@ def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightR
 
 
 def _timing_report(reading: DriverReading) -> PreflightReport:
+    if reading.duplicate_case_ids:
+        # bench.py refuses a measurement with duplicate case timings, so the
+        # contract has to refuse it too; accepting here would let a suite the
+        # loop rejects be scored through the rewrite's own path.
+        return _failed(
+            DUPLICATE_CASE_TIMINGS,
+            "the driver reported more than one timing for "
+            f"{', '.join(reading.duplicate_case_ids)}",
+        )
     report = PreflightReport(
         ok=True,
         timing_ms=reading.timing_ms,
         timing_metric=reading.timing_metric,
         case_ids=reading.case_ids,
-        case_times=dict(reading.case_times),
+        case_times=reading.scored_case_times,
     )
     if reading.timing_metric == DEPRECATED_TIMING_METRIC:
         report.warnings.append(

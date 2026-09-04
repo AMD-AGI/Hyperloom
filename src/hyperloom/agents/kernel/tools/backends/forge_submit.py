@@ -2350,6 +2350,28 @@ def _validated_commit_lineage_and_timing(
     return best_commit, baseline_ms, best_ms
 
 
+def _rewrite_micro_speedup(applyback: dict) -> float | None:
+    """This route's validated micro gain, on the statistic the producer scored.
+
+    Prefers the producer's equal-weight mean over cases. Its aggregate pair is
+    the fallback for a driver that reported no per-case timings, and only that:
+    a suite whose cases span orders of magnitude has an aggregate set by its
+    largest case, so using the ratio here would grade the rewrite on one shape
+    while the search optimized all of them.
+    """
+    mean = applyback.get("mean_case_speedup")
+    if isinstance(mean, (int, float)) and math.isfinite(float(mean)) and float(mean) > 0:
+        return float(mean)
+    try:
+        baseline_ms = float(applyback["baseline_ms"])
+        best_ms = float(applyback["best_ms"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if baseline_ms <= 0 or best_ms <= 0:
+        return None
+    return baseline_ms / best_ms
+
+
 def _validated_forge_best_result(
     payload: dict | None,
     *,
@@ -2678,6 +2700,15 @@ def _validated_rewrite_applyback_result(
         "best_commit": best_commit,
         "baseline_ms": baseline_ms,
         "best_ms": best_ms,
+        # The producer's cross-language score. Present when its driver reported
+        # per-case timings, in which case it is the equal-weight mean over cases
+        # and the aggregate pair above is diagnostic; absent when the driver only
+        # produced aggregates. The consumer policy gate below reads this first,
+        # because an aggregate ratio on a suite whose cases span orders of
+        # magnitude is decided by the largest case alone.
+        "mean_case_speedup": manifest.get("mean_case_speedup"),
+        "baseline_case_times": dict(manifest.get("baseline_case_times") or {}),
+        "best_case_times": dict(manifest.get("best_case_times") or {}),
         "artifact_kind": _REWRITE_ARTIFACT_KIND,
         "artifact_schema_version": artifact_schema_version,
         "validation_scope": _REWRITE_VALIDATION_SCOPE,
@@ -3460,17 +3491,28 @@ def _run_rewrite_attempt(
     # A contract-valid apply-back that is not faster is a policy rejection, not
     # a malformed artifact. Naming it separately keeps the two apart in the log,
     # and keeps the producer's scratch unreclaimed on any rejection.
-    if applyback["best_ms"] >= applyback["baseline_ms"]:
+    #
+    # "Faster" is the equal-weight mean over cases when the producer measured
+    # them, and the aggregate ratio only when it did not. The two disagree on
+    # exactly the kernels this route exists to find: a rewrite that transforms
+    # the cheap shapes and leaves the expensive one alone is a large win on the
+    # mean and a wash on the aggregate, and the aggregate would reject it.
+    micro_speedup = _rewrite_micro_speedup(applyback)
+    if micro_speedup is None or micro_speedup <= 1.0:
         log.info(
-            "forge rewrite: rejecting a valid apply-back that is not faster (best=%sms baseline=%sms commit=%s)",
+            "forge rewrite: rejecting a valid apply-back that is not faster "
+            "(speedup=%s mean_case=%s best=%sms baseline=%sms commit=%s)",
+            micro_speedup,
+            applyback.get("mean_case_speedup"),
             applyback["best_ms"],
             applyback["baseline_ms"],
             applyback["best_commit"][:12],
         )
         return _rejected(
             "forge rewrite published a reference-verified apply-back that is not "
-            f"faster than the source: best={applyback['best_ms']}ms vs "
-            f"baseline={applyback['baseline_ms']}ms"
+            f"faster than the source: speedup={micro_speedup} "
+            f"(mean_case={applyback.get('mean_case_speedup')}, "
+            f"best={applyback['best_ms']}ms vs baseline={applyback['baseline_ms']}ms)"
         )
 
     salvaged = bool(outcome.error)
@@ -3485,9 +3527,6 @@ def _run_rewrite_attempt(
     _write_changed_files_index(output_dir, changed_files)
     baseline_ms = applyback["baseline_ms"]
     best_ms = applyback["best_ms"]
-    # The rewrite oracle reports one aggregate timing per implementation, so
-    # their ratio is this route's validated micro gain.
-    micro_speedup = baseline_ms / best_ms
     _write_report(
         output_dir,
         baseline_ms,
