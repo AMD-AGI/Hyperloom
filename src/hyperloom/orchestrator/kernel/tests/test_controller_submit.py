@@ -144,3 +144,45 @@ def test_run_controller_subprocess_recovers_after_hard_timeout(
     assert result["status"] == "failed"
     assert result["timed_out"] is True
     assert result["stderr_tail"] == "timed out"
+
+
+def test_forge_loop_spend_reaches_the_llm_ledger(tmp_path: Path) -> None:
+    # The Controller is a child process and cannot append to this ledger while it
+    # runs, so a campaign's model spend is only accounted for if what it recorded
+    # is filed after the child exits.
+    from hyperloom.orchestrator.trace.llm_trace import llm_calls_path
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    appended = controller_submit.record_controller_llm_usage(
+        result={
+            "forge_llm_usage": [
+                {
+                    "operator_id": "kernel:forge-loop:moe:sglang:0.5.16:flydsl:mi355x",
+                    "model": "claude-opus-5",
+                    "input_tokens": 1200,
+                    "output_tokens": 340,
+                    "cache_creation_input_tokens": 80,
+                    "cache_read_input_tokens": 5000,
+                    "calls": 7,
+                }
+            ]
+        },
+        session_dir=session_dir,
+    )
+
+    assert appended == 1
+    rows = [json.loads(line) for line in llm_calls_path(session_dir).read_text(encoding="utf-8").splitlines() if line]
+    assert len(rows) == 1
+    assert rows[0]["component"] == "forge"
+    assert rows[0]["task_id"] == "kernel:forge-loop:moe:sglang:0.5.16:flydsl:mi355x"
+    assert rows[0]["model"] == "claude-opus-5"
+    assert rows[0]["input_tokens"] == 1200
+    assert rows[0]["cache_read_input_tokens"] == 5000
+
+
+def test_a_controller_result_without_usage_files_nothing(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    assert controller_submit.record_controller_llm_usage(result={}, session_dir=session_dir) == 0

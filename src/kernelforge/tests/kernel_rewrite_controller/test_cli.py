@@ -120,8 +120,8 @@ def test_controller_summary_counts_prepared_task_results(
         lambda *_args, **_kwargs: ScheduleResult(
             task_count=2,
             results=(
-                SimpleNamespace(status="succeeded"),
-                SimpleNamespace(status="failed"),
+                SimpleNamespace(status="succeeded", task=None, forge_outcome=None),
+                SimpleNamespace(status="failed", task=None, forge_outcome=None),
             ),
         ),
     )
@@ -183,7 +183,7 @@ def test_analysis_failure_with_completed_tasks_is_partial_not_fatal(
         "dispatch_prepared_tasks",
         lambda *_args, **_kwargs: ScheduleResult(
             task_count=1,
-            results=(SimpleNamespace(status="failed"),),
+            results=(SimpleNamespace(status="failed", task=None, forge_outcome=None),),
         ),
     )
 

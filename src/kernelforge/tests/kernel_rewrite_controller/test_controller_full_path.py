@@ -128,6 +128,14 @@ def _successful_forge(invocation, *, on_checkpoint=None):
         "improved": True,
         "best_commit": best_commit,
         "mean_case_speedup": 1.2,
+        "agent_model": "claude-opus-5",
+        "llm_usage": {
+            "input_tokens": 1200,
+            "output_tokens": 340,
+            "cache_creation_input_tokens": 80,
+            "cache_read_input_tokens": 5000,
+            "calls": 7,
+        },
     }
     invocation.result_json.write_text(json.dumps(payload), encoding="utf-8")
     if on_checkpoint is not None:
@@ -190,6 +198,22 @@ def test_controller_full_path_publishes_a_shared_base_patch(
     assert state.skipped_task_count == 0
     persisted = json.loads((tmp_path / "output" / "controller" / "state.json").read_text(encoding="utf-8"))
     assert persisted["repository_pins"] == {str(repo): base_commit}
+
+    # A campaign spends nearly all its budget inside forge-loop, and the
+    # controller is the only place that sees both the spend and the operator it
+    # bought. It runs out of process, so the totals have to reach disk for
+    # Hyperloom's ledger to pick them up.
+    assert persisted["forge_llm_usage"] == [
+        {
+            "operator_id": operator_id,
+            "model": "claude-opus-5",
+            "input_tokens": 1200,
+            "output_tokens": 340,
+            "cache_creation_input_tokens": 80,
+            "cache_read_input_tokens": 5000,
+            "calls": 7,
+        }
+    ]
     summary = (tmp_path / "output" / "result" / "summary.md").read_text(encoding="utf-8")
     assert operator_id in summary
     assert f"`{repo}` @ `{base_commit}`" in summary

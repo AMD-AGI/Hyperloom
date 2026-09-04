@@ -25,6 +25,7 @@ from kernelforge.kernel_rewrite_controller.publisher import (
     PUBLICATION_FILENAME,
     published_operator_dirs,
 )
+from kernelforge.kernel_rewrite_controller.dispatcher import SingleTaskResult
 from kernelforge.kernel_rewrite_controller.recovery import (
     RecoveryResult,
     recover_all_task_results,
@@ -82,6 +83,11 @@ class ControllerRunState:
     #: when it hard-kills the controller on timeout, so a reason that lives only
     #: in the log is a reason nobody can read afterwards.
     recovery_failures: tuple[dict[str, str], ...] = ()
+    #: What each operator's forge-loop spent on the model, one row per run that
+    #: counted a call. The controller is the only place that sees both the spend
+    #: and the operator it bought, and it runs out of process, so the totals are
+    #: recorded here for Hyperloom to append to its LLM ledger afterwards.
+    forge_llm_usage: tuple[dict[str, Any], ...] = ()
     schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -104,6 +110,32 @@ def _recovery_failures(results: Iterable[RecoveryResult]) -> tuple[dict[str, str
         for result in results
         if not result.published and result.patch_dir is None and result.best_commit
     )
+
+
+def _forge_llm_usage(results: Iterable[SingleTaskResult]) -> tuple[dict[str, Any], ...]:
+    """Collect each forge-loop's token accounting, one row per operator.
+
+    A campaign spends nearly all of its budget inside these subprocesses, so
+    without this the per-attempt cost of a rewrite is invisible. A run that
+    counted no call is dropped rather than reported as zero spend, which is the
+    distinction ``UsageTotals.totals`` draws with its ``calls`` field.
+    """
+    rows: list[dict[str, Any]] = []
+    for result in results:
+        outcome = result.forge_outcome
+        if result.task is None or outcome is None:
+            continue
+        usage = outcome.llm_usage
+        if int(usage.get("calls") or 0) <= 0:
+            continue
+        rows.append(
+            {
+                "operator_id": result.task.operator_id,
+                "model": outcome.agent_model,
+                **usage,
+            }
+        )
+    return tuple(rows)
 
 
 def _validate_budget(budget_minutes: object) -> float:
@@ -299,6 +331,7 @@ def run_controller(
             "skipped_task_count": schedule.skipped_count,
             "repository_pins": schedule.repository_pins,
             "recovery_failures": _recovery_failures(recovered),
+            "forge_llm_usage": _forge_llm_usage(schedule.results),
         }
     )
     _write_state(layout, completed)

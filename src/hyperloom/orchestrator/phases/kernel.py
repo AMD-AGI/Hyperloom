@@ -4011,7 +4011,10 @@ class KernelPhase(PhaseHandler):
             forge_cycle_dir,
         )
 
-        from ..kernel.controller_submit import run_controller_subprocess
+        from ..kernel.controller_submit import (
+            record_controller_llm_usage,
+            run_controller_subprocess,
+        )
         from .machine_state import (
             ESCALATE_HINT_SKIP_TO_SWEEP,
             KERNEL_HEARTBEAT_SEC,
@@ -4062,6 +4065,9 @@ class KernelPhase(PhaseHandler):
             "budget_minutes": controller_budget_sec / 60.0,
             "hard_timeout_sec": hard_timeout_sec,
         }
+        # The Controller cannot reach this ledger from its own process, so its
+        # forge-loops' spend is filed here now that the child has exited.
+        record_controller_llm_usage(result=result, session_dir=self.session_dir)
         if int(result.get("patch_count") or 0) > 0:
             try:
                 from ..kernel.controller_patch_integration import (

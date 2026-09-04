@@ -67,6 +67,16 @@ class ForgeLoopOutcome:
     def improved(self) -> bool:
         return bool((self.result or {}).get("improved")) and bool(self.best_commit)
 
+    @property
+    def llm_usage(self) -> dict[str, Any]:
+        """The run's own token accounting, or ``{}`` when it counted no call."""
+        usage = (self.result or {}).get("llm_usage")
+        return dict(usage) if isinstance(usage, dict) else {}
+
+    @property
+    def agent_model(self) -> str:
+        return str((self.result or {}).get("agent_model") or "")
+
 
 def _local_src_root() -> Path:
     return Path(__file__).resolve().parents[2]
