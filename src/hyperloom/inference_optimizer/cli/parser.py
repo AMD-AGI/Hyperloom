@@ -14,22 +14,22 @@ from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import provider_model_defaults
+
+# Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
+# can read the same numbers without importing this module, which would close a
+# cycle. Only the ones this module quotes in help text are pulled in here.
+from hyperloom.common.workload_defaults import (
+    DEFAULT_CONC,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_PRECISION,
+    DEFAULT_TP,
+)
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
-
-# Workload knob fallbacks applied when the operator passes neither the CLI flag
-# nor an inherited value. Flags default to ``None`` so "omitted" is
-# distinguishable from "typed the default"; the resolver in ``cli`` applies
-# these constants only for genuinely-unset knobs (issue #903).
-DEFAULT_ISL = 1024
-DEFAULT_OSL = 1024
-DEFAULT_CONC = 64
-DEFAULT_TP = 1
-DEFAULT_EP = 1
-DEFAULT_PRECISION = "bf16"
 
 
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.

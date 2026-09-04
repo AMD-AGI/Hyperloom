@@ -16,7 +16,13 @@ import shutil
 import tempfile
 from pathlib import Path
 
-_ASSET_FILES = ("aiperf_client.sh", "map_aiperf.py", "aiperf_phase_gate.py")
+# The client the AgentX switch pins as ``benchmark_script``. Downstream consumers
+# that must tell "this recipe drives a client" from "this recipe launches a
+# server" match on this name, so it lives here beside the deployment that
+# publishes it rather than being spelled out again at each reader.
+AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
+
+_ASSET_FILES = (AGENTX_CLIENT_SCRIPT, "map_aiperf.py", "aiperf_phase_gate.py")
 
 
 def agentx_asset_dir() -> Path:

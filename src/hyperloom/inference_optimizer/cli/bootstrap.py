@@ -29,8 +29,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
-from .backends import _build_robustness_options
-from .parser import (
+from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
     DEFAULT_CONC,
@@ -38,6 +37,7 @@ from .parser import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
+from .backends import _build_robustness_options
 from ..session.paths import _SESSION_SKELETON
 from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags

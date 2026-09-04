@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
 )
+from ..actions.executors._workload_envs import geak_metric_axis
 from ..kernel import collective_recovery as _collective_recovery
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_COLLECTIVE_ONLY,
@@ -853,6 +854,198 @@ class KernelPhase(PhaseHandler):
                 protocol[proto_key] = val
         return protocol
 
+    @staticmethod
+    def _recipe_benchmark(recipe_path: str) -> dict[str, Any]:
+        """Parse a materialized recipe once and hand back its ``benchmark`` mapping.
+
+        Both handoff resolvers below need the same mapping out of the same file,
+        so the read, the YAML parse and the shape validation live here instead of
+        being repeated with their own fallbacks on each side.
+
+        Returns ``{}`` for a missing, unreadable or malformed recipe, which each
+        caller already treats as "nothing to advertise". Never raises.
+        """
+        try:
+            import yaml
+
+            if not recipe_path or not Path(recipe_path).is_file():
+                return {}
+            cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
+            if not isinstance(cfg, dict):
+                return {}
+            bench = cfg.get("benchmark") or {}
+            return bench if isinstance(bench, dict) else {}
+        except Exception:  # noqa: BLE001
+            log.warning("recipe: could not read %r", recipe_path, exc_info=True)
+            return {}
+
+    @staticmethod
+    def _resolve_workload_spec(bench: Mapping[str, Any]) -> dict[str, Any]:
+        """Read the orchestrator's self-describing workload off a parsed recipe.
+
+        Only AgentX materializations carry ``benchmark.workload_spec``; every other
+        recipe omits it so GEAK keeps today's synthetic path unchanged.
+        """
+        spec = bench.get("workload_spec")
+        return dict(spec) if isinstance(spec, dict) else {}
+
+    def _observed_replay_shape(self, target_tput: float) -> dict[str, Any]:
+        """Measure the trace replay's real sequence shape from OUR OWN baseline.
+
+        The AgentX handoff's ``workload.isl/osl`` are the CLI's synthetic
+        defaults (1024/1024) because a trace replay has no single ISL -- the
+        corpus spans roughly 89k at p50 past 500k at p99. GEAK does not measure
+        with them (the aiperf client ignores them outright), but the KERNEL
+        agents still read them as the analytic serving call model when they
+        synthesize GEMM/attention shapes. Left at 1024 they aim two orders of
+        magnitude below the load, so the search tunes a regime nobody serves.
+
+        Rather than hardcode corpus percentiles, derive the average shape from
+        the baseline result THIS run already measured: the canonical result
+        records ``total_input_tokens``/``total_output_tokens`` over ``completed``
+        requests. That keeps the number sourced from a measurement instead of a
+        constant that silently rots when the corpus is re-pinned.
+
+        Returns ``{}`` whenever no usable result is on disk, so an unmeasurable
+        run degrades to today's behavior rather than to a fabricated shape.
+        """
+        try:
+            import glob as _glob
+
+            from hyperloom.inference_optimizer.session.session_paths import runs_root
+
+            root = runs_root(self.session_dir)
+            if not Path(root).is_dir():
+                return {}
+            best: tuple[float, dict[str, Any], str] | None = None
+            for rp in _glob.glob(str(Path(root) / "**" / "inferencex_result.json"), recursive=True):
+                # GEAK's own results are not the orchestrator's baseline, and the
+                # overlay probe is not a served measurement. Match path COMPONENTS
+                # below the runs root, never the whole string: a substring test
+                # excludes every result the moment an ancestor directory happens
+                # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
+                # this), which silently degrades the shape to the 1024 default
+                # this method exists to replace.
+                try:
+                    rel_parts = Path(rp).relative_to(root).parts
+                except ValueError:
+                    continue
+                if "geak" in rel_parts or "_baseline_source_overlay" in rel_parts:
+                    continue
+                try:
+                    raw = json.loads(Path(rp).read_text(encoding="utf-8")) or {}
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not isinstance(raw, dict):
+                    continue
+                completed = int(raw.get("completed") or 0)
+                tin = int(raw.get("total_input_tokens") or 0)
+                tout = int(raw.get("total_output_tokens") or 0)
+                tput = float(raw.get("output_throughput") or 0.0)
+                if completed <= 0 or tin <= 0 or tout <= 0 or tput <= 0:
+                    continue
+                # Prefer the result whose throughput IS the baseline we handed
+                # over, so the shape describes the same measurement.
+                err = abs(tput - target_tput) / target_tput if target_tput > 0 else 1.0
+                if best is None or err < best[0]:
+                    best = (err, raw, rp)
+            if best is None:
+                return {}
+            err, raw, path = best
+            completed = int(raw["completed"])
+            isl = int(round(int(raw["total_input_tokens"]) / completed))
+            osl = int(round(int(raw["total_output_tokens"]) / completed))
+            if isl <= 0 or osl <= 0:
+                return {}
+            return {
+                "observed_isl": isl,
+                "observed_osl": osl,
+                "observed_requests": completed,
+                "observed_source": path,
+                # 1.0 => no baseline throughput to match against, so this is the
+                # best available replay result rather than a confirmed same-run one.
+                "observed_tput_match_err": round(err, 6),
+            }
+        except Exception:  # noqa: BLE001 — shape enrichment is strictly additive
+            log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
+            return {}
+
+    @staticmethod
+    def _resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
+        """Name the server-phase script GEAK should launch through Magpie.
+
+        GEAK infers its launcher from the recipe's ``benchmark_script``, which on
+        every non-AgentX run IS a server launcher. The AgentX switch replaces
+        that field with the aiperf client -- which boots a server, replays the
+        corpus for ``AGENTX_DURATION``, then tears the server down in its exit
+        trap. Run under ``MAGPIE_RUN_PHASE=server`` it therefore returns no pid,
+        and GEAK's bench aborts before it measures a single repeat.
+
+        Naming the builtin the client itself delegates to keeps GEAK on the
+        Magpie launch path -- the reason that launcher exists, since the platform
+        kernel preset, ``--trust-remote-code`` and the gpu-mem-util default are
+        not flags and so cannot be recovered from the accepted-flags handoff --
+        while letting its own bench repeats run again.
+
+        Resolution mirrors ``aiperf_client.sh``: the same ``AGENTX_SERVER_SCRIPT``
+        override, the same ``{framework}_{gpu}.sh`` fallback, the same
+        ``<checkout>/benchmarks/`` directory and deliberately no recursive
+        search, so what we advertise is the path that would have booted the
+        server rather than merely a plausible one. Recipe-recorded values beat
+        the ambient env because the recipe is the record of what actually ran.
+
+        Returns "" for any non-AgentX recipe -- there GEAK's own derivation names
+        the script that really launched the baseline, which is strictly better
+        than anything re-derived here -- and "" whenever the builtin cannot be
+        confirmed on disk, leaving current behaviour untouched. Never raises.
+        """
+        try:
+            from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
+
+            envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+
+            # Only the AgentX client misleads the inference; anything else in
+            # this field is the launcher GEAK should keep deriving for itself.
+            if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
+                return ""
+
+            builtin = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
+            if not builtin:
+                framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
+                if not framework:
+                    return ""
+                gpu = (
+                    str(
+                        envs.get("GPU_TYPE")
+                        or envs.get("RUNNER_TYPE")
+                        or bench.get("runner_type")
+                        or os.environ.get("GPU_TYPE")
+                        or os.environ.get("RUNNER_TYPE")
+                        or "mi300x"
+                    )
+                    .strip()
+                    .lower()
+                )
+                builtin = f"{framework}_{gpu}.sh"
+
+            for root in (
+                str(bench.get("inferencex_path") or "").strip(),
+                os.environ.get("INFERENCEX_PATH", "").strip(),
+            ):
+                if not root:
+                    continue
+                benchmarks = Path(root) / "benchmarks"
+                candidate = benchmarks / builtin
+                # The builtin sources benchmark_lib.sh from its own directory and
+                # dies without it, so a half-populated checkout has to degrade to
+                # GEAK's existing derivation instead of pinning a dead path.
+                if candidate.is_file() and (benchmarks / "benchmark_lib.sh").is_file():
+                    return str(candidate)
+            return ""
+        except Exception:  # noqa: BLE001
+            log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
+            return ""
+
     def _geak_timeouts(self) -> tuple[int, int, bool]:
         """Resolve the GEAK e2e timeouts from the live run budget.
 
@@ -999,6 +1192,11 @@ class KernelPhase(PhaseHandler):
             state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
         )
 
+        # GEAK's E2E_METRIC and the workload spec's metric_basis are the same
+        # decision, so they resolve through one helper: a handoff that named a
+        # different axis than the one KEEP is decided on would have GEAK searching
+        # against a reference it was never measured against.
+        e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
         handoff = {
             # v2 adds ``baseline_env_spec`` (the full layered env of current_best);
             # v1-only consumers ignore it and degrade to the flags/env-only baseline.
@@ -1043,7 +1241,7 @@ class KernelPhase(PhaseHandler):
             # Align GEAK's bench CLIENT to Hyperloom's exact one so final/sweep
             # numbers are cross-harness comparable.
             "bench_client": "auto",
-            "e2e_metric": "output",
+            "e2e_metric": e2e_metric,
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # Pin the serving GPU set: explicit visibility mask, else 0..tp-1.
             "gpu_ids": (
@@ -1054,6 +1252,29 @@ class KernelPhase(PhaseHandler):
         }
         if bench_protocol:
             handoff["bench_protocol"] = bench_protocol
+        # Parsed once for both resolvers below: they read the same recipe, so a
+        # second read could only disagree with the first.
+        recipe_bench = self._recipe_benchmark(str(getattr(state, "baseline_config_path", "") or ""))
+        workload_spec = self._resolve_workload_spec(recipe_bench)
+        if workload_spec:
+            # Give the kernel agents the shape they must actually optimize for;
+            # absence leaves GEAK on the handoff's synthetic isl/osl.
+            observed = self._observed_replay_shape(float(getattr(state, "baseline_tput", 0.0) or 0.0))
+            if observed:
+                workload_spec = {**workload_spec, **observed}
+                log.info(
+                    "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
+                    observed["observed_isl"],
+                    observed["observed_osl"],
+                    observed["observed_requests"],
+                    observed["observed_source"],
+                )
+            handoff["workload_spec"] = workload_spec
+        # Absent => GEAK keeps deriving the launcher from the recipe, which is
+        # correct everywhere except AgentX (see _resolve_launch_server_script).
+        launch_server_script = self._resolve_launch_server_script(recipe_bench)
+        if launch_server_script:
+            handoff["launch_server_script"] = launch_server_script
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.
         handoff.update(_serving_fidelity)
         # Full layered environment and its matching measurement identity.
@@ -1395,9 +1616,17 @@ class KernelPhase(PhaseHandler):
         # SIGKILL, instead of orphaning run_e2e + its servers.
         term_grace = int(os.environ.get("GEAK_TERM_GRACE_S", "180"))
 
+        # GEAK measures whatever axis Hyperloom grades on. An agentic replay is
+        # graded on total token throughput, so leaving this pinned to output aims
+        # GEAK's search at a number the session does not score -- on the AgentX
+        # corpus the two run ~140x apart, and a kernel that helps the decode-side
+        # output figure need not help the prefill-dominated total by the same
+        # margin. Synthetic runs resolve to "output" and are unaffected.
+        _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+
         def _run() -> subprocess.CompletedProcess:
             runner_env = dict(os.environ)
-            runner_env["E2E_METRIC"] = "output"
+            runner_env["E2E_METRIC"] = _geak_e2e_metric
             # Only injection point needed for the whole GEAK chain: geak_runner
             # and run_e2e both hand their full environment to the child, so the
             # tag reaches the Claude CLI that actually spends.
@@ -1638,7 +1867,21 @@ class KernelPhase(PhaseHandler):
             return
         accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         base = float(self.shared_state.baseline_tput or 0.0)
-        self_gain = ((new_tput - base) / base * 100.0) if base > 0 else None
+        # ``base`` is OUR measurement and ``new_tput`` is GEAK's, so this
+        # percentage is defined only when both were measured on the same
+        # workload. GEAK states that verdict in
+        # ``baseline_basis.workload_comparability``; when it reports the
+        # workloads differ, any gain computed here is the workload difference
+        # rather than the kernels. In AgentX mode the difference is enormous --
+        # our agentic baseline against a GEAK run that took the handoff's
+        # synthetic isl/osl at face value reads as roughly +175% with nothing
+        # optimized. The downstream rebench would eventually reject it, but the
+        # number would already be recorded, so refuse to compute it here.
+        # An ABSENT verdict means an older GEAK that only ever ran the synthetic
+        # path, which stays comparable and keeps today's value exactly.
+        comparability = (result.get("baseline_basis") or {}).get("workload_comparability") or {}
+        workloads_comparable = comparability.get("comparable") is not False
+        self_gain = ((new_tput - base) / base * 100.0) if (base > 0 and workloads_comparable) else None
         am = result.get("alignment_metrics") or {}
         self.shared_state.geak_pending = {
             "status": "awaiting_rebench",
@@ -1646,6 +1889,9 @@ class KernelPhase(PhaseHandler):
             "self_reported_tput": new_tput,
             "self_reported_speedup": result.get("throughput_speedup"),
             "self_reported_gain_pct": self_gain,
+            # Why the gain above is a number or None, so a reader never has to
+            # guess whether an absent gain means "no gain" or "not comparable".
+            "workload_comparability": comparability or None,
             "self_reported_basis": result.get("final_throughput_basis"),
             # Reproducible config the rebench launches from.
             "accepted_flags": accepted_flags,

@@ -129,6 +129,33 @@ def test_switch_on_passes_agentx_env(tmp_path, monkeypatch):
     assert envs["AIPERF_BIN"] == "/venv/bin/aiperf"
 
 
+def test_switch_on_materializes_workload_spec(tmp_path, monkeypatch):
+    """AgentX ON must stamp a self-describing workload_spec into the recipe."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setenv("AGENTX_DURATION", "3600")
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/Kimi-K3")
+    spec = bench.get("workload_spec") or {}
+    assert spec.get("kind") == "agentx_trace_replay"
+    assert spec.get("client") == "aiperf"
+    assert spec.get("scenario") == "inferencex-agentx-mvp"
+    assert spec.get("corpus") == "semianalysis_cc_traces_weka_062126"
+    assert spec.get("duration_s") == 3600
+    assert spec.get("geak_loop_duration_s") == 900
+    assert spec.get("concurrency") == 8
+    placeholder = spec.get("isl_osl_placeholder") or {}
+    assert placeholder.get("note")
+
+
+def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    src = _write(tmp_path / "base.yaml")
+    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    assert "workload_spec" not in bench
+
+
 def test_switch_forwards_weka_loader_override(tmp_path, monkeypatch):
     """Upstream's own corpus pin has no ``AGENTX_`` prefix.
 

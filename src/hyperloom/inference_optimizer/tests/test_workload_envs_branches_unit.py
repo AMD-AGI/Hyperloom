@@ -7,8 +7,10 @@ sizing."""
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -725,3 +727,101 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
+
+
+def test_agentx_workload_spec_concurrency_tracks_served_conc(monkeypatch, tmp_path):
+    # workload_spec.concurrency is the load GEAK replays with, so it MUST equal
+    # the CONC this recipe serves. apply_agentx_switch() runs before the resolved
+    # CONC is projected into envs, so reading envs would ship the base config's
+    # parser default to GEAK while the recipe served the operator's value -- GEAK
+    # then replays at a different operating point than the baseline it is meant
+    # to beat, and no downstream gate catches it because workload_spec.kind still
+    # reads agentx_trace_replay on both sides. The spec reads the resolved
+    # process env instead, so the two agree by construction.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "8")
+    src = _write(tmp_path / "cfg.yaml", envs={"CONC": 64})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["CONC"] == 8
+    assert bench["workload_spec"]["concurrency"] == 8
+
+
+def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch, tmp_path):
+    """The spec must carry the grace the CLIENT is bounded by, not the raw knob.
+
+    ``apply_agentx_switch`` overwrites ``AGENTX_WARMUP_GRACE_PERIOD`` in ``envs``
+    with the CONC-scaled value, because that is what ``aiperf_client.sh`` hands
+    aiperf as ``--warmup-grace-period``. Publishing before that overwrite would
+    record the operator's raw number in the GEAK handoff while the client ran
+    with the scaled one, so the order of the two is load-bearing.
+    """
+    from hyperloom.orchestrator.actions.executors.baseline import agentx_warmup_grace_sec
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("CONC", "32")
+    # A grace declared as measured at CONC=8; warmup is linear in CONC, so the
+    # bound this round runs at is 1800 * 32/8.
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "1800")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    src = _write(tmp_path / "cfg.yaml", envs={})
+    bench = _materialize(src, tmp_path / "out")
+
+    scaled = agentx_warmup_grace_sec()
+    assert scaled == 7200, "sanity: the scaling itself, so a failure below is the handoff"
+    assert int(bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"]) == scaled
+    assert bench["workload_spec"]["warmup_grace_period_s"] == scaled
+
+
+def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatch, tmp_path):
+    """metric_basis must follow the grader, in GEAK's own vocabulary.
+
+    An agentic replay is graded on total token throughput, which runs ~140x its
+    output figure on this corpus, so a handoff naming the output axis would aim
+    GEAK's search at a number the session never scores.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    src = _write(tmp_path / "cfg.yaml", envs={})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
+
+    # An explicit override wins in both directions, and the basis follows it.
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    bench = _materialize(src, tmp_path / "out2")
+    assert bench["workload_spec"]["metric_basis"] == "aggregate_output_tok_s"
+
+
+def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
+    """Both sides must resolve the same fallbacks without importing each other.
+
+    ``cli.parser`` imports from ``hyperloom.orchestrator``, so an orchestrator
+    module reaching back into the parser for these numbers closes an import
+    cycle. Keeping the constants in ``hyperloom.common`` is what lets a
+    materialized recipe and the workload spec beside it agree on "unset"; a
+    future edit that re-literals either side, or re-opens the cycle to share
+    them, fails here.
+    """
+    from hyperloom.common import workload_defaults
+    from hyperloom.inference_optimizer.cli import parser
+
+    canonical = (workload_defaults.DEFAULT_ISL, workload_defaults.DEFAULT_OSL, workload_defaults.DEFAULT_CONC)
+    assert we.cli_workload_defaults() == canonical
+    assert (parser.DEFAULT_ISL, parser.DEFAULT_OSL, parser.DEFAULT_CONC) == canonical
+
+    # The shared module has to stay a leaf, or it cannot break the cycle.
+    tree = ast.parse(Path(workload_defaults.__file__).read_text(encoding="utf-8"))
+    imported = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module] + [
+        alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    ]
+    assert imported == ["__future__"], imported
+
+    # And the orchestrator side must not import the CLI parser at any scope.
+    orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
+    assert "inference_optimizer.cli import parser" not in orchestrator_src
+    assert "inference_optimizer.cli.parser" not in orchestrator_src

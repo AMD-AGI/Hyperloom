@@ -261,7 +261,17 @@ async def sweep_via_geak(
             try:
                 proc = await asyncio.to_thread(_run)
                 summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
-                tput = summ.get("output_throughput_tok_s_median")
+                # ``throughput_tok_s_median`` is the metric-neutral median of
+                # whatever basis GEAK measured, and the only field populated in
+                # both modes: bench_e2e.sh nulls the output-named alias under
+                # E2E_METRIC=total precisely so nobody reads total throughput
+                # under an "output" name. In output mode the two are the same
+                # number, so this keeps synthetic sweeps byte-identical while
+                # letting an agentic one report at all. The output-named field
+                # stays as the fallback for summaries written before it existed.
+                tput = summ.get("throughput_tok_s_median")
+                if tput is None:
+                    tput = summ.get("output_throughput_tok_s_median")
                 ttft = summ.get("ttft_ms_median")
                 tpot = summ.get("tpot_ms_median")
                 e2el = summ.get("e2el_ms_median")
