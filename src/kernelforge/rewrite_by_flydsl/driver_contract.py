@@ -25,6 +25,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kernelforge.mcp_server.tools.bench import CaseCoverageError, calculate_mean_case_speedup
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
@@ -89,11 +90,19 @@ class DriverRun:
 
 @dataclass
 class DriverReading:
-    """Everything the contract reads out of one driver invocation's output."""
+    """Everything the contract reads out of one driver invocation's output.
+
+    ``case_times`` keeps the value on each ``case_ms:`` line, not just the id.
+    The aggregate is a sum over cases whose times can span orders of magnitude,
+    so a ratio of two aggregates is dominated by the largest case; the equal
+    weight per case that decides KEEP can only be computed from the per-case
+    times, which is why they are retained rather than reduced to coverage.
+    """
 
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_times: dict[str, float] = field(default_factory=dict)
     snr_db: float | None = None
     allclose: bool | None = None
 
@@ -116,6 +125,7 @@ class PreflightReport:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_times: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -139,9 +149,17 @@ def read_driver_output(text: str) -> DriverReading:
             reading.timing_metric = metric
 
     case_ids: list[str] = []
-    for case_id, _ms in _CASE_MS_RE.findall(text or ""):
+    for case_id, raw in _CASE_MS_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
+        # A repeated case id keeps the first reading, matching how the aggregate
+        # keys are read; a driver is expected to report each case once.
+        if case_id in reading.case_times:
+            continue
+        try:
+            reading.case_times[case_id] = float(raw)
+        except ValueError:
+            continue
     for case_id in _CASE_COMMENT_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
@@ -157,6 +175,36 @@ def read_driver_output(text: str) -> DriverReading:
     if allclose:
         reading.allclose = allclose.group(1).lower() == "true"
     return reading
+
+
+def cross_language_mean_case_speedup(
+    source_case_times: dict[str, float],
+    candidate_case_times: dict[str, float],
+) -> float | None:
+    """Score the FlyDSL candidate against the source with equal weight per case.
+
+    This is the same statistic forge-loop decides KEEP and REVERT on, computed
+    by the same function, so the number this pipeline reports for "did the
+    rewrite help?" answers the question the loop was optimizing. Dividing the
+    two aggregate timings instead answers a different one: the aggregate is a
+    sum over cases whose times routinely span an order of magnitude or two, so
+    it is dominated by the largest case, and a candidate that transforms the
+    cheap cases while leaving the expensive one alone scores near 1.0 on it
+    while scoring far above 1.0 on the mean.
+
+    Returns None when either side reported no per-case timings -- the reports
+    are then aggregate-only and the caller has to say so rather than quietly
+    presenting a different statistic under the same name.
+    """
+    if not source_case_times or not candidate_case_times:
+        return None
+    try:
+        return calculate_mean_case_speedup(candidate_case_times, source_case_times)
+    except CaseCoverageError:
+        # Coverage is already gated by check_case_coverage before a timing
+        # report is produced, so reaching here means the two paths disagree
+        # about their cases and no honest comparison exists.
+        return None
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -291,6 +339,7 @@ def _timing_report(reading: DriverReading) -> PreflightReport:
         timing_ms=reading.timing_ms,
         timing_metric=reading.timing_metric,
         case_ids=reading.case_ids,
+        case_times=dict(reading.case_times),
     )
     if reading.timing_metric == DEPRECATED_TIMING_METRIC:
         report.warnings.append(

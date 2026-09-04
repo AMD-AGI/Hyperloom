@@ -12,7 +12,8 @@ import textwrap
 
 import pytest
 
-from kernelforge.rewrite_by_flydsl import ingest, report, seed
+from kernelforge.mcp_server.tools.bench import calculate_mean_case_speedup
+from kernelforge.rewrite_by_flydsl import driver_contract, ingest, report, seed
 from kernelforge.rewrite_by_flydsl.port_loop import (
     _validation_error_tail,
     check_flydsl_port,
@@ -343,6 +344,105 @@ def test_speedup_only_when_port_ok_and_both_times():
 
     failed = report.build_result(op_name="op", port_ok=False, port_attempts=3, source_ms=2.0, optimize_result={})
     assert failed.speedup is None and not failed.correct
+
+
+def test_case_timings_are_read_off_the_driver_not_just_case_ids():
+    # The aggregate cannot reconstruct them: a ratio of two sums is dominated by
+    # the largest case, so the per-case values have to survive parsing.
+    reading = driver_contract.read_driver_output(
+        "case_ms: m_1 0.012818\ncase_ms: m_4096 0.229021\nmean_ms: 0.120920\n"
+    )
+    assert reading.case_ids == ("m_1", "m_4096")
+    assert reading.case_times == {"m_1": pytest.approx(0.012818), "m_4096": pytest.approx(0.229021)}
+    assert reading.timing_ms == pytest.approx(0.120920)
+
+
+def test_rewrite_speedup_is_the_mean_over_cases_not_the_ratio_of_aggregates():
+    # Measured aiter a16w16 baseline at n=k=6144, whose per-case times span 18x.
+    source = {
+        "m_1": 0.012818, "m_2": 0.013138, "m_4": 0.013352, "m_8": 0.013153,
+        "m_16": 0.013757, "m_32": 0.015211, "m_64": 0.018329, "m_128": 0.020830,
+        "m_256": 0.039681, "m_512": 0.045687, "m_1024": 0.075407,
+        "m_2048": 0.114414, "m_4096": 0.229021,
+    }
+    # A candidate 5x faster on the eight cheap cases and 20% slower on the five
+    # expensive ones: the shape a FlyDSL port takes when it beats aiter's own
+    # small-M kernels but not hipBLASLt at large M.
+    cheap = ("m_1", "m_2", "m_4", "m_8", "m_16", "m_32", "m_64", "m_128")
+    candidate = {
+        case: (ms / 5.0 if case in cheap else ms / 0.8) for case, ms in source.items()
+    }
+    source_ms = sum(source.values()) / len(source)
+    candidate_ms = sum(candidate.values()) / len(candidate)
+
+    result = report.build_result(
+        op_name="op",
+        port_ok=True,
+        port_attempts=1,
+        source_ms=source_ms,
+        optimize_result={"best_ms": candidate_ms},
+        source_case_times=source,
+        flydsl_best_case_times=candidate,
+    )
+    assert result.speedup_basis == report.SPEEDUP_BASIS_MEAN_CASE
+    assert result.speedup == pytest.approx(3.385, abs=1e-3)
+    # The aggregate ratio calls the same candidate a regression, which is the
+    # verdict this pipeline used to publish.
+    assert source_ms / candidate_ms == pytest.approx(0.955, abs=1e-3)
+    # Both readings are true; the contradiction is named rather than hidden, and
+    # an improvement the aggregate does not support is not badged as one.
+    assert result.aggregate_regression
+    assert result.improved is False
+    assert result.source_case_times == source
+
+
+def test_rewrite_speedup_matches_the_statistic_forge_loop_keeps_on():
+    # The reported number has to be the one the loop optimized, or the pipeline
+    # publishes a verdict on a different objective than it searched.
+    source = {"a": 4.0, "b": 1.0}
+    candidate = {"a": 2.0, "b": 0.25}
+    result = report.build_result(
+        op_name="op",
+        port_ok=True,
+        port_attempts=1,
+        source_ms=2.5,
+        optimize_result={"best_ms": 1.125},
+        source_case_times=source,
+        flydsl_best_case_times=candidate,
+    )
+    assert result.speedup == pytest.approx(calculate_mean_case_speedup(candidate, source))
+    assert result.speedup == pytest.approx(3.0)  # mean(2x, 4x), not 2.222x
+
+
+def test_aggregate_ratio_is_used_and_named_when_a_driver_reports_no_cases():
+    result = report.build_result(
+        op_name="op",
+        port_ok=True,
+        port_attempts=1,
+        source_ms=2.0,
+        optimize_result={"best_ms": 1.0},
+        source_case_times={},
+        flydsl_best_case_times={},
+    )
+    assert result.speedup == pytest.approx(2.0)
+    assert result.speedup_basis == report.SPEEDUP_BASIS_AGGREGATE
+    # A ratio of aggregates cannot contradict itself, so nothing to report.
+    assert result.aggregate_regression == ""
+
+
+def test_a_case_set_mismatch_refuses_to_score_rather_than_comparing_subsets():
+    result = report.build_result(
+        op_name="op",
+        port_ok=True,
+        port_attempts=1,
+        source_ms=2.0,
+        optimize_result={"best_ms": 1.0},
+        source_case_times={"a": 2.0, "b": 2.0},
+        flydsl_best_case_times={"a": 1.0},
+    )
+    # Falls back to the aggregate rather than scoring 'a' alone, which would
+    # publish a partial workload's speedup as the whole suite's.
+    assert result.speedup_basis == report.SPEEDUP_BASIS_AGGREGATE
 
 
 def test_applyback_is_required_only_for_framework_repositories():

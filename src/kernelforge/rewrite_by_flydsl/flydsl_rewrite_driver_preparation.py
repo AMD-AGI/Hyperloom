@@ -88,6 +88,11 @@ class DriverPreflight:
     def reference_case_ids(self) -> tuple[str, ...]:
         return self.reference.case_ids if self.reference is not None else ()
 
+    @property
+    def reference_case_times(self) -> dict[str, float]:
+        """The source's per-case timings, which the reported speedup is built on."""
+        return dict(self.reference.case_times) if self.reference is not None else {}
+
 
 @dataclass
 class DriverPreparationResult:

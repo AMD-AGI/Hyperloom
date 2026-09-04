@@ -423,6 +423,7 @@ def run_rewrite(
     # The same run completes the driver contract: the candidate must now be
     # timeable over the cases the source was timed on.
     flydsl_baseline_ms = None
+    flydsl_baseline_case_times: dict[str, float] = {}
     if time.time() < search_stop_unix:
         flydsl_budget = max(1, min(600, int(search_stop_unix - time.time())))
         candidate = driver_contract.preflight_candidate(
@@ -435,6 +436,7 @@ def run_rewrite(
             print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
         if candidate.ok:
             flydsl_baseline_ms = candidate.timing_ms
+            flydsl_baseline_case_times = dict(candidate.case_times)
         elif candidate.failure_class in _FATAL_CANDIDATE_FAILURES:
             return _setup_failed(candidate.detail, candidate.failure_class)
         else:
@@ -474,6 +476,8 @@ def run_rewrite(
         port_attempts=port.attempts,
         source_ms=source_ms,
         optimize_result={"best_ms": flydsl_baseline_ms},
+        source_case_times=preflight.reference_case_times,
+        flydsl_best_case_times=flydsl_baseline_case_times,
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
         kb_experience={
@@ -488,7 +492,7 @@ def run_rewrite(
     print(
         f"  [forge-rewrite] interim (port only): flydsl={flydsl_baseline_ms} ms "
         f"vs source={source_ms} ms -> speedup={f'{sp0:.3f}x' if sp0 else 'unknown'} "
-        f"(persisted; OPTIMIZE will improve)",
+        f"({interim.speedup_basis or 'unavailable'}; persisted, OPTIMIZE will improve)",
         flush=True,
     )
 
@@ -523,6 +527,42 @@ def run_rewrite(
         opt = {**opt, "best_ms": flydsl_baseline_ms}
     if not opt.get("best_commit"):
         opt = {**opt, "best_commit": port_commit}
+
+    # Re-time whatever the workspace now holds, to score the rewrite on per-case
+    # timings rather than on a ratio of aggregates.
+    #
+    # forge-loop's own mean_case_speedup cannot be reused for this: its anchor is
+    # the port, so it measures what OPTIMIZE added, not the port-plus-OPTIMIZE
+    # result against the original source. The source's per-case timings come from
+    # preflight, so the missing half is one more candidate measurement.
+    #
+    # Measuring the restored kernel is also stronger than trusting the loop's
+    # reported best. The loop may have been hard-killed after publishing a better
+    # kernel, and _restore_best_kernel puts a commit back into the worktree; this
+    # confirms what is actually there still reproduces.
+    flydsl_best_case_times = flydsl_baseline_case_times
+    if time.time() < deadline_unix:
+        final_budget = max(1, min(600, int(deadline_unix - time.time())))
+        final = driver_contract.preflight_candidate(
+            spec,
+            driver_path,
+            reference_case_ids=preflight.reference_case_ids,
+            timeout_sec=final_budget,
+        )
+        if final.ok and final.case_times:
+            flydsl_best_case_times = dict(final.case_times)
+            if final.timing_ms:
+                opt = {**opt, "best_ms": final.timing_ms}
+        else:
+            # Not fatal: the port already passed this same check before OPTIMIZE,
+            # so the interim per-case timings remain a truthful reading of a
+            # correct kernel. Say which measurement the report rests on.
+            print(
+                "  [forge-rewrite] final candidate re-measurement unavailable "
+                f"[{final.failure_class or 'no per-case timings'}]; reporting the "
+                "port-only per-case timings",
+                flush=True,
+            )
 
     if rewrite_kb_enabled:
         kb_write = write_flydsl_kb_solution(
@@ -572,6 +612,8 @@ def run_rewrite(
         port_attempts=port.attempts,
         source_ms=source_ms,
         optimize_result=opt,
+        source_case_times=preflight.reference_case_times,
+        flydsl_best_case_times=flydsl_best_case_times,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
         kb_experience={
@@ -584,8 +626,11 @@ def run_rewrite(
     sp = result.speedup
     print(
         f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "
-        f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'}",
+        f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'} "
+        f"({result.speedup_basis or 'unavailable'})",
         flush=True,
     )
+    if result.aggregate_regression:
+        print(f"  [forge-rewrite] NOTE: {result.aggregate_regression}", flush=True)
     print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
     return result.to_dict()

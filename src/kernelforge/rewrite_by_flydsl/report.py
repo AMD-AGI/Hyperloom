@@ -4,19 +4,34 @@
 """Assemble the final forge-rewrite result.
 
 The cross-language speedup (FlyDSL vs the original source kernel) is computed
-HERE from the source baseline (preflight stage) and the FlyDSL best (optimize
-stage) — forge-loop itself only minimizes the FlyDSL wall time against its own
-anchor, so this is where the "did the rewrite help?" number is produced.
+HERE — forge-loop itself only improves the FlyDSL kernel against its own anchor,
+which is the port, so the loop's own speedup answers "how much did OPTIMIZE
+add?" and not "did the rewrite help?".
+
+It is the equal-weight mean of per-case speedups, the same statistic forge-loop
+decides KEEP on, computed from the per-case timings both driver paths report.
+Dividing the two aggregate timings answers a different question: the aggregate
+sums cases whose times span orders of magnitude, so it is dominated by the
+largest one, and on a suite spanning m=1..4096 the two statistics disagree by
+enough to invert the verdict. Only when a driver reports no per-case timings
+does this fall back to the aggregate ratio, and then ``speedup_basis`` says so.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
-from kernelforge.rewrite_by_flydsl import protocol
+from kernelforge.loop.scoring import aggregate_regression_detail
+from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.durable_io import atomic_write_text
+
+# How the reported speedup was obtained. The mean over cases is authoritative;
+# the aggregate ratio is what remains when a driver reports no per-case times,
+# and it is named so a consumer never mistakes one for the other.
+SPEEDUP_BASIS_MEAN_CASE = "mean_case_speedup"
+SPEEDUP_BASIS_AGGREGATE = "aggregate_ratio"
 
 # The nested forge-loop sentinel is suppressed while its stdout is streamed by
 # rewrite_by_flydsl.optimize, so this is the only one a caller sees.
@@ -39,6 +54,18 @@ class RewriteResult:
     source_ms: float | None
     flydsl_best_ms: float | None
     speedup: float | None
+    # Which statistic `speedup` is, so a consumer can tell an equal-weight mean
+    # over cases from a ratio of two aggregates that happen to share a unit.
+    speedup_basis: str
+    # The per-case timings the mean was built from, kept as the evidence for a
+    # reported speedup rather than only its scalar result.
+    source_case_times: dict
+    flydsl_best_case_times: dict
+    # Set when the mean claims an improvement the aggregate contradicts. Both
+    # can be true at once and it is not an error: a suite spanning orders of
+    # magnitude can get faster on most cases and slower in total. Naming it is
+    # what stops the pair from reading as an inconsistency.
+    aggregate_regression: str
     experiment_id: str | None
     port_attempts: int
     # Forge-loop-compatible result view consumed by Hyperloom.
@@ -84,6 +111,8 @@ def build_result(
     port_attempts: int,
     source_ms: float | None,
     optimize_result: dict,
+    source_case_times: dict[str, float] | None = None,
+    flydsl_best_case_times: dict[str, float] | None = None,
     applyback_result: dict | None = None,
     applyback_required: bool = False,
     kb_experience: dict | None = None,
@@ -101,9 +130,28 @@ def build_result(
     # else; the standalone best is reported only as flydsl_best_commit.
     best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
 
+    source_cases = dict(source_case_times or {})
+    candidate_cases = dict(flydsl_best_case_times or {})
     speedup = None
-    if port_ok and source_ms and flydsl_best_ms and flydsl_best_ms > 0:
-        speedup = source_ms / flydsl_best_ms
+    speedup_basis = ""
+    if port_ok:
+        speedup = driver_contract.cross_language_mean_case_speedup(source_cases, candidate_cases)
+        if speedup is not None:
+            speedup_basis = SPEEDUP_BASIS_MEAN_CASE
+        elif source_ms and flydsl_best_ms and flydsl_best_ms > 0:
+            speedup = source_ms / flydsl_best_ms
+            speedup_basis = SPEEDUP_BASIS_AGGREGATE
+
+    # Only meaningful for the mean; the aggregate ratio cannot contradict itself.
+    regression = (
+        aggregate_regression_detail(
+            baseline_ms=source_ms,
+            best_ms=flydsl_best_ms,
+            mean_case_speedup=speedup,
+        )
+        if speedup_basis == SPEEDUP_BASIS_MEAN_CASE
+        else ""
+    )
 
     return RewriteResult(
         logical_op_name=op_name,
@@ -119,6 +167,10 @@ def build_result(
         source_ms=source_ms,
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
+        speedup_basis=speedup_basis,
+        source_case_times=source_cases,
+        flydsl_best_case_times=candidate_cases,
+        aggregate_regression=regression,
         experiment_id=experiment_id,
         port_attempts=port_attempts,
         success=bool(
@@ -126,7 +178,10 @@ def build_result(
         ),
         baseline_ms=source_ms,
         best_ms=flydsl_best_ms,
-        improved=bool(speedup and speedup > 1.0),
+        # Withdrawn when the aggregate contradicts the mean, matching how
+        # forge-loop badges its own iterations: the contradiction is reported by
+        # name rather than carried as a pass.
+        improved=bool(speedup and speedup > 1.0) and not regression,
         total_speedup=speedup,
         base_commit=str(applyback.get("base_commit") or ""),
         best_commit=best_commit,
