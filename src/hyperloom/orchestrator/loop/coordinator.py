@@ -1052,6 +1052,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_maybe_record_enablement_human_review": "enablement_lane",
         "_enablement_in_flight": "enablement_lane",
         "_maybe_rearm_enablement": "enablement_lane",
+        "_maybe_close_enablement_event": "enablement_lane",
         "_maybe_escalate_to_targeted_build": "enablement_build",
         "_maybe_enqueue_specialist_requested_build": "enablement_build",
         "_maybe_route_build_outcomes": "enablement_build",
@@ -1592,6 +1593,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             await self._pump_framework_agent_phase_safely(caller="tick")
             # Phase-independent enablement pump: repair a non-runnable combo.
             await self._pump_enablement_safely(caller="tick")
+            self._maybe_close_enablement_event()
             # phase machine advance at tick boundary.
             await self._await_within_session_bound(
                 self._advance_phase_if_needed,
@@ -1798,6 +1800,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         await self._pump_framework_agent_phase_safely(caller="run")
                         # Phase-independent enablement pump.
                         await self._pump_enablement_safely(caller="run")
+                    # Outside the guard above: an eval-origin KEEP can promote on
+                    # the tick that sets closing_phase, and its event would then
+                    # never be closed.
+                    self._maybe_close_enablement_event()
                     # phase machine advance; runs even in_closing so CLOSE is recorded.
                     try:
                         await self._await_within_session_bound(

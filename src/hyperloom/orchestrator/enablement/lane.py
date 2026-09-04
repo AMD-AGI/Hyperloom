@@ -21,6 +21,10 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
+#: Reason on the result the lane synthesises for a round that went terminal
+#: without reporting one.
+_REASON_SILENT_FINISH = "round_finished_without_rearm"
+
 
 class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
@@ -48,7 +52,11 @@ class EnablementLane(CoordinatorCollaborator):
         Returns:
             str: The dispatched specialist ``task_id`` (empty when skipped).
         """
-        from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
+        from ..actions.executors._accuracy_gate import (
+            eval_enablement_allowed,
+            launch_enablement_allowed,
+            resolve_enablement_mode,
+        )
 
         state = self.shared_state
         origin = str(state.enablement.origin or "")
@@ -65,9 +73,7 @@ class EnablementLane(CoordinatorCollaborator):
             if await self._enablement_in_flight():
                 return ""
             # Round ended without calling _maybe_rearm_enablement — count as stall.
-            self._maybe_rearm_enablement(
-                {"enablement": True, "status": "reverted", "reason": "round_finished_without_rearm"}
-            )
+            self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": _REASON_SILENT_FINISH})
             if state.stop_reason:
                 return ""
         if float(getattr(state, "baseline_tput", 0.0) or 0.0) > 0:
@@ -121,6 +127,16 @@ class EnablementLane(CoordinatorCollaborator):
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         state.enablement.attempts = attempt + 1
         state.enablement.inflight_task_id = spec_tid
+        recorder = self._enablement_recorder(create=True)
+        if recorder is not None:
+            # ``origin`` is empty for the boot-origin lane, and an empty string
+            # on the wire means "recorded with nothing in it" rather than a
+            # category, so it is named here.
+            recorder.begin(mode=resolve_enablement_mode(state), origin=origin or "launch")
+            recorder.round_dispatched(
+                task_id=spec_tid,
+                failure_kind=str(params.get("enablement_failure_kind") or ""),
+            )
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -419,6 +435,17 @@ class EnablementLane(CoordinatorCollaborator):
         archived_config = role_path(archived, "launch_config")
         if status == "kept" and archived_config:
             state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
+        # A round the lane declared finished carries no task id of its own, but
+        # it is a real round and the in-flight guard still names it. Recorded
+        # under that id so it does not sit on the timeline as in flight forever.
+        recorded_tid = _spec_tid or (
+            str(state.enablement.inflight_task_id or "")
+            if str(res.get("reason") or "") == _REASON_SILENT_FINISH
+            else ""
+        )
+        recorder = self._enablement_recorder()
+        if recorder is not None and recorded_tid:
+            recorder.round_settled(task_id=recorded_tid, result=res, files=archived)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:
@@ -436,6 +463,84 @@ class EnablementLane(CoordinatorCollaborator):
             int(state.enablement.attempts or 0),
             f" stop_reason={stop_set}" if stop_set else "",
         )
+
+    def _enablement_recorder(self, *, create: bool = False) -> Any:
+        """Build a recorder for this session's enablement event, or ``None``.
+
+        The event id is minted once and persisted rather than recomputed. The
+        live phase is not stable between a round's dispatch and its settle:
+        ``exit_time_exhausted_prelude`` leaves PRELUDE while ``baseline_tput``
+        is still zero, and a stop reason routes to CLOSE from anywhere. A round
+        whose two writes land under two ids is split across two events, neither
+        complete.
+
+        Args:
+            create: Mint and persist an id when the effort has none. Only the
+                dispatch that opens the event passes this; every later caller
+                declines rather than starting a second event.
+
+        Returns:
+            Any: An ``EnablementEventRecorder``, or ``None`` when there is no
+                session to record into and no event to record for.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.enablement_event import (
+            PRODUCER,
+            enablement_event_id,
+            make_enablement_recorder,
+        )
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.session.session_binding import session_is_bound
+
+        try:
+            if not session_is_bound():
+                return None
+            state = self.shared_state
+            event = str(getattr(state.enablement, "timeline_event_id", "") or "")
+            if not event:
+                if not create:
+                    return None
+                event = enablement_event_id(
+                    str(getattr(state, "phase", "") or "unphased"),
+                    int(getattr(state, "macro_cycle", 0) or 0),
+                )
+                state.enablement.timeline_event_id = event
+            return make_enablement_recorder(make_sink(event, producer=PRODUCER))
+        except Exception:  # noqa: BLE001 — observability cannot change enablement behavior
+            log.warning(
+                "enablement timeline: could not resolve an event to record into; this "
+                "effort's rounds will be missing from the breakdown",
+                exc_info=True,
+            )
+            return None
+
+    def _maybe_close_enablement_event(self) -> None:
+        """Close the enablement event once the effort has reached a verdict.
+
+        Called from the tick and not from the writers, because the two terminal
+        states are set in two places: this lane's rearm KEEPs a launch-origin
+        patch or trips the stall cap, while the baseline writeback resolves the
+        revalidation an eval-origin KEEP waits on.
+
+        Any other stop reason leaves the event open for finalize to report as
+        interrupted.
+        """
+        try:
+            state = self.shared_state
+            succeeded = bool(state.enablement.succeeded)
+            if not succeeded and str(state.stop_reason or "") != "enablement_stalled":
+                return
+            if getattr(self, "_enablement_event_done", False):
+                return
+            recorder = self._enablement_recorder()
+            if recorder is None:
+                return
+            if not recorder.is_closed():
+                recorder.finish(succeeded=succeeded, stop_reason=str(state.stop_reason or ""))
+            # Memoizes the spool read, which is the guard that matters; this
+            # only keeps it off every tick for the rest of the session.
+            self._enablement_event_done = True
+        except Exception:  # noqa: BLE001 — observability cannot change enablement behavior
+            log.warning("enablement timeline: closing the event failed", exc_info=True)
 
     async def _pump_enablement_safely(self, *, caller: str) -> None:
         """Phase-independent enablement pump — runs every tick.

@@ -59,6 +59,9 @@ class EnablementRound:
     stall_streak: int = 0
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     human_review_logged: list = field(default_factory=list)
+    # SBD V6 timeline event this effort's rounds are recorded into, minted on the
+    # first dispatch and persisted so both writes of a round name one event.
+    timeline_event_id: str = ""
     # Path to the materialized config produced by the KEEP'd candidate bench.
     accepted_config_path: str = ""
     # Env/arg layers the KEEP'd bench ran with; replayed by the revalidation baseline.

@@ -331,6 +331,13 @@ def _enqueue_self(**state_kw):
         Coordinator._maybe_record_enablement_human_review, fake
     )
     fake._maybe_rearm_enablement = types.MethodType(Coordinator._maybe_rearm_enablement, fake)
+    # Real recorder resolution: with no session bound it declines, which is the
+    # path every test here takes. Bound off the lane rather than the Coordinator
+    # because only the lane itself calls it.
+    from hyperloom.orchestrator.enablement.lane import EnablementLane
+
+    fake._enablement_recorder = types.MethodType(EnablementLane._enablement_recorder, fake)
+    fake._maybe_close_enablement_event = types.MethodType(Coordinator._maybe_close_enablement_event, fake)
     fake._maybe_enqueue_enablement_baseline_revalidation = types.MethodType(
         Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
     )

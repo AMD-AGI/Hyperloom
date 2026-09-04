@@ -241,6 +241,9 @@ def test_kept_stack_action_survives_rearm(monkeypatch):
     state = SharedState()
     coord = types.SimpleNamespace(shared_state=state, session_dir=Path("/tmp/does-not-matter"))
     coord.save = lambda *a, **k: None
+    # The rearm records the round on the V6 timeline. No session is bound here,
+    # so the real resolver declines and the recording is a no-op.
+    coord._enablement_recorder = lambda **_kw: None
 
     action_state = _candidate()
     runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()

@@ -28,7 +28,7 @@ _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
 # is dispatchable on its own: roofline's profile / analysis are atomic halves of
 # one action, a kernel event's lanes only exist inside a phase entry, and a
 # baseline's rounds only exist inside a measurement.
-_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline")
+_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline", "enablement")
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 

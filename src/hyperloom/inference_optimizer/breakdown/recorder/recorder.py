@@ -149,6 +149,11 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "baseline_action": "item",  # one per measurement dispatched, keyed by its task id
     "baseline_run": "item",  # one per pass through the executor's core
     "baseline_round": "item",  # one per Magpie round within a pass
+    # SBD v6 enablement substreams. A round's row is written twice from two
+    # call sites, so it needs a section of its own for the same R11 reason the
+    # kernel rows above do.
+    "enablement_event": "item",  # one per enablement event, holding its timeline sequence
+    "enablement_round": "item",  # one per repair round, keyed by its specialist task id
 }
 
 # Sections computed at finalize from in-memory state, never written as
