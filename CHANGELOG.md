@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **BREAKING — KernelForge decides which operators to rewrite.** Hyperloom no
+  longer nominates kernels, reviews candidates, or dispatches one `forge-loop`
+  per kernel. It writes a per-cycle handoff (workload, serving context, trace
+  evidence, source repositories) and runs one
+  `kernelforge kernel-rewrite-controller` for the KERNEL phase; the controller
+  analyzes that evidence, selects operators, prepares and validates each task,
+  schedules `forge-loop` runs inside the shared budget, and publishes
+  provenance-bearing patch bundles that Hyperloom applies one at a time behind
+  its serving throughput and accuracy gate.
+  `src/hyperloom/agents/kernel/tools/kernel_optimization.py`, the `kernel_opt`
+  action, and the candidate-review LLM stage are removed, so a run no longer
+  stops at KERNEL because trace analysis or candidate resolution came back
+  empty. `KERNEL_OPT_BACKEND_ORDER=forge` still selects this route and GEAK
+  still owns the phase for every other value.
+  **`KERNEL_OPT_BACKEND_BUDGET_MIN` is removed with no replacement env var**: the
+  phase now derives the controller's budget from the session and phase clocks and
+  passes it as `--budget-minutes`, so a per-backend override would contradict the
+  allocation it is dispatched under. Operators who set it should size the phase
+  with `--max-hours` and `--phase-budget-kernel-pct` instead.
+  `gemm_tuning` also stops being model-proposable, joining the fusion and
+  collective lanes: the Coordinator dispatches it once at KERNEL entry from a
+  lane budget, and PolicyGate refuses it on every model channel.
+  `reports/kernel_optimization_summary.json` drops its `unattempted` total, its
+  six unattempted reason codes, `dispatch_skip_reason`, and
+  `totals.top_candidates`, all of which described a decision Hyperloom no longer
+  makes.
+
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
   dependency and `install.sh` already owned that install, but it was gated on a
@@ -723,6 +750,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `valid_env_key` shape check applied here. The pass dropped nothing in
   production and its warning log could never fire.
 
+- **BREAKING — the two tool-free LLM source tiers are gone**, along with
+  `HYPERLOOM_LLM_SOURCE_PROVIDER` and `HYPERLOOM_LLM_SOURCE_PREVIEW` and the
+  `llm_fallback_*` reason codes they produced. A per-kernel fallback picking a
+  path off a grep shortlist and a whole-table pass auditing the result were both
+  shown a prompt assembled in advance, so neither could see what a kernel
+  actually is — and the deterministic tiers' failure mode is not coming up empty
+  but coming up confidently wrong, which ranking paths by keyword cannot tell
+  apart. One tool-enabled review session on the agent analysis route replaces
+  both: it is handed locations rather than contents and opens what the evidence
+  leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
+  **Operators on `--analysis-route deterministic` should note that route now has
+  no model assistance of any kind** — it keeps its no-model guarantee by not
+  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
+  miss stays unresolved instead of being completed by a model.
+
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and
   `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
@@ -775,6 +817,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
   stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
   timestamped logging shim pipes through.
+
+- **`--continue-kernel-after-gemm` is now `--auto-kernel-opt`.** The switch gates
+  the KERNEL-entry source-level `kernel_opt` dispatch, which runs on both entry
+  routes — tuning GEMM shape tables and rewriting kernel source are unrelated —
+  so the old name described a dependency that does not exist and read as a no-op
+  on a run that never tunes GEMM. The old spelling still works and still opts
+  out, with a `DeprecationWarning`; the current flag wins when both are passed.
+  `SharedState.continue_kernel_after_gemm` became `auto_kernel_opt_enabled`
+  (state schema v6, migrated on load, so a resumed opt-out keeps opting out).
+  The switch covers that dispatch only: orchestration can still request
+  `kernel_opt`, and the forge-fusion and collective lanes keep their own gates.
+
+- **The hot-kernel dispatch floor defaults to 5% of GPU time, was 10%.** On a
+  decode trace with a flat kernel distribution nothing but a graph-launch
+  wrapper reaches double digits, so the 10% floor admitted no real kernel and
+  left the batch dispatcher idle while the orchestrator picked candidates one at
+  a time. Expect more candidates dispatched per run, and correspondingly more
+  GPU time spent in KERNEL. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides it.
 
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
@@ -885,6 +945,11 @@ for the user-facing summary.
   workload-uid env keys was ever set, so the endpoints could only 404; the
   `cluster_fault` and `pod_not_running` symptoms went with them, having had no
   other producer.
+
+- **BREAKING — `kernel_optimization.py` no longer accepts `--test-command` or
+  `--test-harness-path`.** The unittest-harness contract they fed had no
+  reachable caller; an external invoker still passing either flag now fails in
+  argparse rather than being silently ignored.
 
 - **BREAKING — four write-only artifacts are no longer produced**:
   `agent_transcript.jsonl`, `orchestration_turns.jsonl`,
