@@ -128,9 +128,6 @@ def publish_operator_result(
     destination = layout.patch_dir(publication.operator_id)
     if destination.exists() and not destination.is_symlink():
         raise PublicationError(f"operator publication path is not an atomic pointer: {destination}")
-    previous_target: Path | None = None
-    if destination.is_symlink():
-        previous_target = (destination.parent / os.readlink(destination)).resolve()
 
     pointer = (
         destination.parent / f".{hashlib.sha256(publication.operator_id.encode()).hexdigest()}.tmp-{uuid.uuid4().hex}"
@@ -143,8 +140,13 @@ def publish_operator_result(
     finally:
         pointer.unlink(missing_ok=True)
 
-    if previous_target is not None and previous_target != version and previous_target.is_dir():
-        shutil.rmtree(previous_target, ignore_errors=True)
+    # A superseded version stays. Everything else treats `.versions/<digest>/
+    # <commit>` as content-addressed and immutable -- _validate_version refuses
+    # any divergence rather than rewriting -- so reclaiming one contradicts that,
+    # and the rename is atomic while the removal is not: a reader that has
+    # already resolved the old pointer would lose the tree underneath it. Each
+    # version is a patch and two small files, so keeping them costs nothing worth
+    # the race.
     return destination
 
 

@@ -894,12 +894,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     )
     history = history[-10:]
     entry["attempts"] = int(entry.get("attempts", 0)) + 1
-    # Per-source attempts so a Python wrapper and its device file don't share a
-    # retry quota.
-    per_source = dict(entry.get("attempts_per_source") or {})
-    src_key = source_file or ""
-    per_source[src_key] = int(per_source.get(src_key, 0)) + 1
-    entry["attempts_per_source"] = per_source
     if decision == "PARTIAL":
         entry["partial_count"] = int(entry.get("partial_count", 0)) + 1
     elif decision == "KEEP":

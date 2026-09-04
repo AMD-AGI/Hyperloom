@@ -68,8 +68,12 @@ def test_new_keep_atomically_replaces_the_public_operator_result(
 
     assert destination.resolve() != first_target
     assert (destination / "change.patch").read_text(encoding="utf-8") == "second patch\n"
-    assert not first_target.exists()
+    # Only one operator is exposed, and the superseded version survives: the
+    # version store is content-addressed and immutable, and the pointer swap is
+    # atomic where removing the old tree would not be, so a reader that already
+    # resolved it keeps what it resolved.
     assert len(publisher.published_operator_dirs(layout)) == 1
+    assert (first_target / "change.patch").read_text(encoding="utf-8") == "first patch\n"
 
 
 def test_failure_while_writing_staging_keeps_the_previous_result(
