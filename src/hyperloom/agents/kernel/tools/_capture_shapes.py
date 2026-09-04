@@ -21,10 +21,17 @@ useless to a steady-state splitter and must never be mistaken for the workload
 trace beside it.
 
 Matching is by *shape*, not by an exact name, because the profile's layout
-varies with framework and patch level: an SGLang carrying Hyperloom's profiler
-patch writes ``capture_traces/bs_<batch>_rank<n>``, an unpatched one writes
-``graph_capture_profile/cuda_graph_capture-<runner>-TP-<n>``, and vLLM writes
-``graph_capture_*``. An exact-name whitelist silently misses the shapes it has
+varies with the framework and with which exporter the run selected. SGLang has
+three, all of them upstream: ``capture_traces/bs_<batch>_rank<n>`` predates
+sgl-project/sglang#24370, and since that PR the choice is between
+``graph_capture_profile/<runner>_bs_<batch>_rank<n>`` (per batch size,
+``SGLANG_GRAPH_BATCH_CAPTURE``) and
+``graph_capture_profile/cuda_graph_capture-<runner>-TP-<n>`` (one combined file
+per rank, ``SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE``, which takes precedence
+when both are set). vLLM writes ``graph_capture_*``. None of these indicates a
+patch level, so a reader that treats one as "unpatched" misreads a
+configuration choice as a deployment defect.
+An exact-name whitelist silently misses the shapes it has
 not been taught, and a missed sidecar is not merely ranked late: it shares the
 default discovery bucket with the workload trace, where the tie-break is
 descending file size, and a capture is the larger file.
