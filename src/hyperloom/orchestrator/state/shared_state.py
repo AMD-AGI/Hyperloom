@@ -830,13 +830,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only _refresh_gaps; CORE_STATE_FIELDS); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
-    # Orchestration working memory — durable compacted reasoning snapshot for compaction + crash-recovery rebuild; Coordinator-only writer.
+    # Orchestration working memory — macro-cycle handoff summary, pasted back into the projection and used on crash-recovery rebuild; Coordinator-only writer.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
-    # Bounded rollback ring (cap 10) of prior good ``orchestration_memory`` records; recovers a later degenerate
-    # compaction from a prior snapshot.
+    # Bounded ring (cap 10) of prior ``orchestration_memory`` records, so a cycle that captures nothing usable can fall
+    # back to an earlier one.
     orchestration_memory_history: list[dict[str, Any]] = field(default_factory=list)
-
 
     # Bounded ring (cap 10) of per-macro-cycle directives injected into the orchestration system prompt; entries:
     # {cycle, directive, source, ts}.
@@ -2183,7 +2182,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return entry
 
     def record_failure_evidence(self, fe: "dict[str, Any]") -> None:
-        """Append one structured failure packet to :attr:`failures` (last-wins on ``failure_id``)."""
+        """Append one structured failure packet to :attr:`failures` (last-wins on ``failure_id``); mirrored to ``<session_dir>/reports/failures/`` so it survives the bounded list."""
         fid = str(fe.get("failure_id") or "")
         history = [e for e in (self.failures or []) if e.get("failure_id") != fid]
         history.append(fe)

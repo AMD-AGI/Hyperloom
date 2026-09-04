@@ -13,7 +13,6 @@ from .envelope import (
     build_update_state,
 )
 from .prompt_inputs import (
-    ConversationProgress,
     InboxItem,
     PhaseBudgetRow,
     ReactorContext,
@@ -22,7 +21,6 @@ from .prompt_inputs import (
 )
 
 __all__ = [
-    "ConversationProgress",
     "InboxItem",
     "Intent",
     "IntentType",

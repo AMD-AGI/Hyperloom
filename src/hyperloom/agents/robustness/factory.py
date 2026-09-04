@@ -44,7 +44,6 @@ from .signals.preflight import (
     ColdStartConfig,
     ModelGpuFitConfig,
 )
-from .signals.conversation_progress import ConversationProgressConfig
 from .signals.phase_budget import PhaseBudgetConfig
 from .signals.progress import ProgressConfig
 from .signals.repeated_payload import RepeatedPayloadConfig
@@ -230,9 +229,6 @@ def build_reactor_components(
         ),
         "phase_budget": PhaseBudgetConfig(
             warn_used_pct=config.phase_budget_warn_used_pct,
-        ),
-        "conversation_progress": ConversationProgressConfig(
-            enabled=config.conversation_progress_enabled,
         ),
     }
     classifier = Classifier(configs=signal_configs, state_store=state_store)

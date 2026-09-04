@@ -128,7 +128,7 @@ async def test_message_bus_unknown_topic_rejected(db):
 @pytest.mark.asyncio
 async def test_message_bus_priority_out_of_range(db):
     bus = MessageBus(db)
-    msg = Message.new("Orchestration", "Kernel", "heartbeat", {}, priority=99)
+    msg = Message.new("orchestration", "critic", "observation", {}, priority=99)
     with pytest.raises(ValueError, match="priority must be 0..3"):
         await bus.append_and_seq(msg)
 
@@ -154,10 +154,10 @@ async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
 async def test_message_bus_replay_for_returns_ascending(db):
     bus = MessageBus(db)
     seqs = []
-    for topic in ("heartbeat", "observation", "decision"):
-        s = await bus.append_and_seq(Message.new("Orchestration", "Kernel", topic, {}))
+    for topic in ("observation", "event", "decision"):
+        s = await bus.append_and_seq(Message.new("critic", "orchestration", topic, {}))
         seqs.append(s)
-    msgs = await bus.replay_for("Kernel", after_seq=0)
+    msgs = await bus.replay_for("orchestration", after_seq=0)
     assert [m.seq for m in msgs] == sorted(seqs)
 
 

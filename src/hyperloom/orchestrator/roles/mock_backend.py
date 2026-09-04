@@ -50,6 +50,7 @@ class MockBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Record the call and play back the next scripted turn."""
         self.calls.append(
@@ -95,7 +96,7 @@ _PROPOSAL_RE = re.compile(
 
 
 class MockRowScanBackend:
-    """Row-scanning reactor mock: one intent per matched inbox row, else heartbeat."""
+    """Row-scanning reactor mock: one intent per matched inbox row, else idle."""
 
     def __init__(
         self,
@@ -103,7 +104,7 @@ class MockRowScanBackend:
         name: str,
         row_regex: re.Pattern[str],
         intent_builder: Callable[[re.Match[str]], Intent],
-        heartbeat_body: str,
+        idle_body: str,
         raw_text: str,
         dedup_key: Callable[[re.Match[str]], str] = lambda m: m.group(2),
     ):
@@ -111,7 +112,7 @@ class MockRowScanBackend:
         self.name = name
         self._row_regex = row_regex
         self._intent_builder = intent_builder
-        self._heartbeat_body = heartbeat_body
+        self._idle_body = idle_body
         self._raw_text = raw_text
         self._dedup_key = dedup_key
         self.calls: list[dict[str, Any]] = []
@@ -126,8 +127,9 @@ class MockRowScanBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
-        """Emit one intent per not-yet-seen matched row, else a heartbeat."""
+        """Emit one intent per not-yet-seen matched row, else an idle message."""
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
         for match in self._row_regex.finditer(prompt):
@@ -140,7 +142,7 @@ class MockRowScanBackend:
             intents.append(
                 Intent(
                     type=IntentType.SEND_MESSAGE,
-                    payload={"topic": "observation", "body_md": self._heartbeat_body},
+                    payload={"topic": "observation", "body_md": self._idle_body},
                 )
             )
         return BackendTurnResult(intents=intents, raw_text=self._raw_text)
@@ -165,7 +167,7 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
         name=name,
         row_regex=_PROPOSAL_RE,
         intent_builder=_approve,
-        heartbeat_body="ok (mock critic, no proposals)",
+        idle_body="ok (mock critic, no proposals)",
         raw_text="(mock critic)",
     )
 

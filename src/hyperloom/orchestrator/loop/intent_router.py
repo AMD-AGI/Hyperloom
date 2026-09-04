@@ -30,7 +30,7 @@ from .coordinator_helpers import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..bus.message_bus import Message, TOPIC_ALLOWLIST as _TOPIC_ALLOWLIST
+from ..bus.message_bus import Message, TOPIC_ALLOWLIST
 from ..policy.gate import (
     patch_verdict_subject,
     PolicyDenied,
@@ -1087,7 +1087,7 @@ class IntentRouter:
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
         """Publish a free-form message onto the bus."""
         topic = intent.payload.get("topic", "observation")
-        if topic not in _TOPIC_ALLOWLIST:
+        if topic not in TOPIC_ALLOWLIST:
             # Soft-degrade unknown topic.
             topic = "observation"
         to_agent = intent.payload.get("to") or "*"

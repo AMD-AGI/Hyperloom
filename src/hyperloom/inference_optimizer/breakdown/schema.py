@@ -610,10 +610,13 @@ class LaneTimelineEntry(TypedDict, total=False):
 
 
 class OrchestrationContext(TypedDict, total=False):
-    """Summary of orchestration turns for this session."""
+    """Orchestration turn count for this session.
+
+    Attributes:
+        tick_count (int): Coordinator ticks executed.
+    """
 
     tick_count: int
-
 
 
 class Telemetry(TypedDict, total=False):
@@ -627,7 +630,6 @@ class Telemetry(TypedDict, total=False):
     gpu_monitor_aggregate: GpuMonitorAggregate
     # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
-    # SEED/DELTA census + compaction rate for the orchestration conversation.
     orchestration_context: OrchestrationContext
 
 

@@ -332,7 +332,7 @@ async def test_specialist_adapter_synthesises_empty_done_on_runner_failure(
 
     assert result_dict["runner_status"] == "empty_synthesised"
     sd = result_dict["specialist_done"]
-    assert sd["empty"] is True
+    assert sd["proposal_set"] == []
     assert sd["proposal_set"] == []
     # Transcript + done file still on disk (some specialist_done is always written).
     workspace = tmp_path / "runs" / "specialist" / "task-stale-1"

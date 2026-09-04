@@ -54,7 +54,11 @@ def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
-    always_emit_line = "- ALWAYS emit at least one intent." if _IT.SEND_MESSAGE in set(allowed_intents) else "- ALWAYS emit exactly one intent; the schema requires it."
+    always_emit_line = (
+        "- ALWAYS emit at least one intent."
+        if _IT.SEND_MESSAGE in set(allowed_intents)
+        else "- ALWAYS emit exactly one intent; the schema requires it."
+    )
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 Your final message MUST be exactly one JSON object matching the enforced
@@ -130,8 +134,6 @@ class CodexBackend:
     name: str = "codex"
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    # Every turn runs on one held SDK thread, so the Coordinator's delta gating
-    # and checkpoint compaction both apply.
     # Which prompt modules describe a surface this backend actually has. Read
     # by the prompt builder, which cannot infer it from the role: the
     # orchestration role is Claude on paper and Codex in an OpenAI-only run.
@@ -140,8 +142,6 @@ class CodexBackend:
     _session: CodexSession | None = field(default=None, init=False, repr=False)
     # Developer instructions the open thread was started with.
     _thread_instructions: str = field(default="", init=False, repr=False)
-    # Whether the open thread has carried a turn.
-    _thread_seeded: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""
@@ -201,7 +201,6 @@ class CodexBackend:
             raise LLMCallFailed(f"Codex Agent SDK turn failed: {redact_secret_values(str(exc))}") from exc
         if sdk_result.error:
             raise LLMCallFailed("Codex Agent SDK turn failed: " + redact_secret_values(sdk_result.error))
-        self._thread_seeded = True
 
         usage = dict(sdk_result.usage or {})
         input_tokens = safe_int(usage.get("input_tokens"))
@@ -250,17 +249,6 @@ class CodexBackend:
             raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
         return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
 
-    # ------------------------------------------------------------------
-    @property
-    def needs_seed(self) -> bool:
-        """True when the open conversation has no history to build a delta on.
-
-        The caller decides between a full push and a delta, but only this
-        backend knows when the thread underneath was replaced — by a reset, by
-        a re-scoped system prompt, or by a turn that never landed.
-        """
-        return not self._thread_seeded
-
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
@@ -270,7 +258,6 @@ class CodexBackend:
     async def aclose(self) -> None:
         """Release the held session: SDK client, child process, ``CODEX_HOME``."""
         session, self._session = self._session, None
-        self._thread_seeded = False
         if session is not None:
             await session.aclose()
 
@@ -289,7 +276,6 @@ class CodexBackend:
                 component="orchestration",
                 operation="orchestrate_turn",
             )
-            self._thread_seeded = False
             try:
                 await self._session.start()
             except CodexSessionUnavailableError as exc:
@@ -303,7 +289,6 @@ class CodexBackend:
         elif instructions != self._thread_instructions:
             self._session.developer_instructions = instructions
             self._session.reset_thread()
-            self._thread_seeded = False
         self._thread_instructions = instructions
         return self._session
 

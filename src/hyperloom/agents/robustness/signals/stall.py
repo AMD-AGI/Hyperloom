@@ -19,6 +19,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
+
 from ..role.prompt_inputs import ReactorContext
 from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
@@ -28,6 +30,8 @@ log = logging.getLogger(__name__)
 
 
 # Reactor roles tracked for stall detection; robustness excludes itself.
+# ``kernel_agent`` is not one — it has no reactor turn, only a completion
+# receipt the Coordinator signs for it.
 _TRACKED_AGENTS: frozenset[str] = frozenset(
     {
         "orchestration",
@@ -52,7 +56,7 @@ def evaluate_stall_signals(
 ) -> list[Symptom]:
     """Report each tracked agent that has gone silent past the stall timeout."""
     cfg = config or StallConfig()
-    last_seen = dict(ctx.shared_state.agent_last_active_unix or {})
+    last_seen = ctx.shared_state.agent_last_active_unix or {}
     out: list[Symptom] = []
     for agent in _TRACKED_AGENTS:
         ts = last_seen.get(agent)

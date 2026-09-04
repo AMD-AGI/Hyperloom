@@ -30,11 +30,7 @@ from ..specialists.runner import SpecialistFailureType
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
-from ..state.orchestration_memory import (
-    CHECKPOINT_REQUEST_PROMPT,
-    parse_checkpoint_reply,
-    build_memory_record,
-)
+from ..state.orchestration_memory import MEMORY_REQUEST_PROMPT, build_memory_record, parse_memory_reply
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
     FORCE_STALLED_SPECIALIST_ROUNDS,
@@ -230,8 +226,8 @@ class ExplorePhase(CoordinatorCollaborator):
             log_rows.append(planned)
         state.cycle_strategy_log = log_rows[-50:]
 
-    def _cycle_strategy_seed_block(self) -> str:
-        """Render persisted cycle focus facts for orchestration SEED prompts."""
+    def _cycle_strategy_block(self) -> str:
+        """Render persisted cycle focus facts for the orchestration prompt."""
         rows = [r for r in (getattr(self.shared_state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
         if not rows:
             return ""
@@ -258,10 +254,42 @@ class ExplorePhase(CoordinatorCollaborator):
         lines.append("Advisory only: use this as a prior, not a dispatch gate.")
         return "\n".join(lines)
 
+    async def _capture_cycle_memory(self) -> bool:
+        """Ask Orchestration for the finished cycle's working memory and persist it.
+
+        The turn is stateless, so it carries the same full state projection a
+        reactor pass does; the reply is the only place
+        ``orchestration_memory.next_cycle_directive`` is produced.
+
+        Returns:
+            ``True`` when a record was persisted, ``False`` when no
+            orchestration backend is configured.
+        """
+        backend = self.backends.get("orchestration")
+        if backend is None:
+            return False
+        result = await backend.run(
+            prompt=f"{await self._compose_prompt('orchestration')}\n\n{MEMORY_REQUEST_PROMPT}",
+            system_prompt=await self._load_system_prompt("orchestration"),
+            tools=[],
+            max_turns=0,
+            allow_no_intent=True,
+        )
+        state = self.shared_state
+        record = build_memory_record(
+            parse_memory_reply(getattr(result, "raw_text", "") or ""),
+            seq=0,
+            tick=int(state.tick or 0),
+            previous=dict(state.orchestration_memory or {}),
+        )
+        state.orchestration_memory = record
+        state.orchestration_memory_history = [*(state.orchestration_memory_history or []), record][-10:]
+        return True
+
     def _cycle_directive_fallback(self) -> str:
         """Render a deterministic cycle focus from ``_plan_cycle_focus``.
 
-        Used when the LLM checkpoint produced no ``next_cycle_directive``; keeps
+        Used when the memory capture produced no ``next_cycle_directive``; keeps
         every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
         """
         try:
@@ -406,7 +434,7 @@ class ExplorePhase(CoordinatorCollaborator):
         """Medium-intensity soft restart at a macro-cycle boundary.
 
         Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
-        caches, conversation reset) without losing accumulated optimization state;
+        caches, re-scoped system prompt) without losing accumulated optimization state;
         ``current_best`` / ``optimization_stack`` / ``explore_search`` are
         preserved. Idempotent and best-effort: every step is independently
         guarded so one failure never aborts the run loop.
@@ -425,34 +453,16 @@ class ExplorePhase(CoordinatorCollaborator):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Ask the orchestration LLM to produce its working-memory JSON, then
-        # rebuild the system prompt for the new cycle.
+        # 1) Capture the cycle's working memory, then rebuild the system prompt
+        # for the new cycle around the directive that capture produced.
         try:
-            try:
-                backend = (getattr(self, "backends", {}) or {}).get("orchestration")
-                if backend is not None:
-                    _mem_result = await backend.run(
-                        CHECKPOINT_REQUEST_PROMPT,
-                        tools=[],
-                        max_turns=0,
-                        allow_no_intent=True,
-                    )
-                    _parsed = parse_checkpoint_reply(getattr(_mem_result, "raw_text", "") or "")
-                    _prior = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-                    _tick = int(getattr(self.shared_state, "tick", 0) or 0)
-                    _record = build_memory_record(_parsed, seq=0, tick=_tick, previous=_prior)
-                    self.shared_state.orchestration_memory = _record
-                    _history = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
-                    _history.append(_record)
-                    self.shared_state.orchestration_memory_history = _history[-10:]
-            except Exception:  # noqa: BLE001 — best-effort
-                log.exception("cycle soft-restart: orchestration memory capture failed")
-            try:
-                summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
-            except Exception:  # noqa: BLE001 — reseed is best-effort
-                log.exception("cycle soft-restart: orchestration prompt reseed failed")
-        except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
-            log.exception("cycle soft-restart: conversation reset failed")
+            summary["memory_captured"] = await self._capture_cycle_memory()
+        except Exception:  # noqa: BLE001 — capture never aborts the run loop
+            log.exception("cycle soft-restart: orchestration memory capture failed")
+        try:
+            summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
+        except Exception:  # noqa: BLE001 — reseed is best-effort
+            log.exception("cycle soft-restart: orchestration prompt reseed failed")
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         # 4) Deep-clean any lingering inference-server processes.

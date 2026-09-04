@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Periodic Coordinator maintenance: lease reaping, DB retention, disk trim."""
 
 from __future__ import annotations
 from typing import Any
@@ -57,7 +57,7 @@ class MaintenanceCollaborator:
         *,
         tick: int,
     ) -> dict[str, Any] | None:
-        """Periodic in-process maintenance (R5 reaper + R4 DB retention); the coordinator's time gate owns the cadence."""
+        """Reap expired leases, prune the DB, and trim ``runs/`` when disk is low; the Coordinator's wall-clock gate owns the cadence."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self, summary, reason="maintenance_watchdog")
         try:
@@ -127,4 +127,3 @@ class MaintenanceCollaborator:
                 removed,
             )
         return summary
-

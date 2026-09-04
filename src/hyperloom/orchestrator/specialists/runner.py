@@ -391,7 +391,7 @@ def build_empty_specialist_done(
 ) -> dict[str, Any]:
     """Return the canonical empty ``specialist_done`` payload.
 
-    Shape: ``empty=true``, ``proposal_set=[]``, non-empty summary.
+    Shape: ``proposal_set=[]`` with a non-empty summary and reason.
 
     Args:
         gap_canonical_id: Canonical id of the gap the specialist addressed.
