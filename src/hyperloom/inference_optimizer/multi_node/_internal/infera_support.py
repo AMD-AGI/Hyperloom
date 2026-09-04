@@ -26,9 +26,6 @@ INFERA_FRONTEND_PORT = 8000
 INFERA_SSH_PORT_ROLE_STRIDE = 10
 _INFERA_IDLE_SCRIPT = "/usr/local/bin/mn-idle.sh"
 
-# Substrings that mark a pod as the Infera worker (LWS) role vs the frontend.
-_WORKER_PODID_HINTS = ("worker", "-lws-", "lws-")
-
 
 def ssh_role_port_offset(role: str) -> int:
     """Return the SSH port offset for a GPU service role.
@@ -83,84 +80,6 @@ def idle_worker_entrypoint(*, role: str, ssh_port_base: int = DEFAULT_SSH_PORT) 
     return f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); exec {_INFERA_IDLE_SCRIPT}"
 
 
-def _service_roles_for(pd_mode: str) -> list[str]:
-    """Positional serviceRoles list for the deployment topology (matches
-    the platform's deployment): PD -> [frontend, prefill, decode];
-    aggregated -> [frontend, worker].
-
-    Args:
-        pd_mode: Deployment topology mode (``"disaggregated"`` or
-            ``"aggregated"``).
-
-    Returns:
-        The positional service roles for the topology.
-    """
-    if (pd_mode or "").lower() == "disaggregated":
-        return ["frontend", "prefill", "decode"]
-    return ["frontend", "worker"]
-
-
-def _parse_role_index(pod_id: str) -> int | None:
-    """Parse the slot index from a IDEP pod name ``<wid>-role<N>-<hash>``.
-
-    Args:
-        pod_id: The IDEP pod name.
-
-    Returns:
-        The parsed role slot index, or ``None`` when the pattern is absent.
-    """
-    import re
-
-    m = re.search(r"-role(\d+)-", pod_id)
-    return int(m.group(1)) if m else None
-
-
-def _classify_pod_role(
-    pod_id: str,
-    resource_id: Any,
-    service_roles: list[str],
-) -> str | None:
-    """Classify a IDEP pod into frontend / prefill / decode / worker.
-
-    Priority:
-      1. Explicit role substrings in podId (prefillworker / decodeworker /
-         frontend) — present when SaFE renames the pods.
-      2. Slot index -> ``service_roles[index]``. The index comes from
-         ``resourceId`` (SaFE sets it per IDEP pod) or, as a fallback, the
-         ``-role<N>-`` suffix in the pod name (SaFE keeps role0/role1/role2
-         deployment names). This is the robust path for the observed
-         ``<wid>-role<N>-<hash>`` naming.
-
-    Args:
-        pod_id: The IDEP pod name.
-        resource_id: SaFE-provided resource id (fallback slot index when an
-            integer).
-        service_roles: Positional service roles to map a slot index onto.
-
-    Returns:
-        The classified role (``frontend`` / ``prefill`` / ``decode`` /
-        ``worker``), or ``None`` for an unclassifiable pod.
-    """
-    pl = pod_id.lower()
-    if "prefill" in pl:
-        return "prefill"
-    if "decode" in pl:
-        return "decode"
-    if "frontend" in pl:
-        return "frontend"
-    # The IDEP pod NAME reliably encodes the slot (``<wid>-role<N>-<hash>``);
-    # prefer it over resourceId, which SaFE leaves 0 for IDEP pods (no
-    # resource.id annotation) and would otherwise map every pod to role 0.
-    idx = _parse_role_index(pod_id)
-    if idx is None and isinstance(resource_id, int):
-        idx = resource_id
-    if isinstance(idx, int) and 0 <= idx < len(service_roles):
-        return service_roles[idx]
-    if any(h in pl for h in _WORKER_PODID_HINTS):
-        return "worker"
-    return None
-
-
 def pod_targets_from_lists(
     pods: list[dict[str, Any]] | None,
     ips: list[str] | None,
@@ -209,22 +128,6 @@ def gpu_ssh_targets_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
         default_port=base,
         default_role="worker",
     )
-
-
-def _parse_lws_ordinal(pod_id: str) -> int | None:
-    """Parse the trailing ``-<n>`` ordinal from an LWS pod name, else None.
-
-    LWS pods are named ``<group>-<ordinal>`` (leader = 0). KubeRay-style random
-    suffixes (``-x6fkf``) are non-numeric and return None.
-
-    Args:
-        pod_id: The LWS pod name.
-
-    Returns:
-        The trailing ordinal as an int, or ``None`` when it is non-numeric.
-    """
-    tail = pod_id.rsplit("-", 1)[-1] if "-" in pod_id else ""
-    return int(tail) if tail.isdigit() else None
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).

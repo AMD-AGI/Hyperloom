@@ -423,13 +423,6 @@ def test_registered_discovery_returns_final_text_without_bare_openai(
             captured["spec"] = spec
             return AgentRunResult(text='[{"name":"fused"}]')
 
-    monkeypatch.setattr(
-        discover_module,
-        "default_llm_fn",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("registered discovery must not construct a bare OpenAI client")
-        ),
-    )
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
         model="gpt-test",

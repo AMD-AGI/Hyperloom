@@ -62,11 +62,6 @@ _INTERPRETER_PACKAGE_DIRS: frozenset[str] = frozenset({"dist-packages", "site-pa
 
 PROBE_FILE_GLOB = "hl_host_probe_rank*.json"
 
-# Reports whose host-call table is empty carry no evidence but do carry a rank, so
-# counting them would understate the per-rank averages. A launcher or a re-exec
-# inherits ``RANK`` and installs its own probe, so these are expected.
-_MIN_USEFUL_ROWS = 1
-
 # Category ids. Stable strings: they cross into the specialist prompt, the
 # switch manifest a specialist returns, and the KB, so renaming one is a
 # contract change.

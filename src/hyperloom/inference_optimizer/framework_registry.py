@@ -45,8 +45,6 @@ class FrameworkSpec:
             analytic diffusion ceiling needs, and it is not implied by ``kind``:
             ``custom`` is scriptable but its model arrives from the operator, so
             nothing about it can be read ahead of the run.
-        magpie_script_fmt: Format string for the Magpie benchmark script name,
-            resolved with ``framework`` and ``runner_type``.
     """
 
     name: str
@@ -56,7 +54,6 @@ class FrameworkSpec:
     supports_server_reuse: bool
     throughput_unit: str
     has_denoiser_config: bool = False
-    magpie_script_fmt: str = "{framework}_{runner_type}.sh"
 
 
 SERVING = "serving"

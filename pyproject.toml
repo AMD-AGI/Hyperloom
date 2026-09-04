@@ -475,9 +475,11 @@ extend-exclude = [
     ".venv",
     "TraceLens-internal",
     "InferenceX",
+    "src/hyperloom/orchestrator/knowledge/remote_recipe/_vendor/kb_store_client.py",
     # Knowledge base / examples / serving patches, not source we own the style
     # of. The example drivers are .py and would otherwise be reformatted.
     "src/kernelforge/data",
+    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
 ]
 
 [tool.ruff.lint]
