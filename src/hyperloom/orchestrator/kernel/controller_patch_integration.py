@@ -78,6 +78,14 @@ def _git_output(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def _head_commit(repo: Path) -> str:
+    """Return the repository's HEAD, or an empty string when it cannot be read."""
+    try:
+        return _git_output(repo, "rev-parse", "HEAD").lower()
+    except Exception:  # noqa: BLE001 - an unreadable HEAD reads as "no commit landed"
+        return ""
+
+
 def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult) -> None:
     atomic_write_json(
         results_dir / f"{index:04d}.json",
@@ -380,12 +388,18 @@ async def integrate_controller_patches(
             f"hyperloom: keep KernelForge rewrite {publication.operator_id}",
             touched,
         )
-        if not committed or commit_note:
+        # A KEEP is only durable once HEAD carries it, so ask Git rather than the
+        # note. The callee reports a benign no-op -- nothing staged, or staged
+        # content already matching HEAD -- as success with a note and no commit,
+        # and it documents that note as carrying "any detail", so a note alone
+        # must neither admit an uncommitted patch nor discard a committed one.
+        keep_commit = _head_commit(repo)
+        if not committed or not keep_commit or keep_commit == head_before:
             _git_checkout_clean(repo)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_commit_failed",
-                reason=commit_note or "git commit failed",
+                reason=commit_note or "git commit did not advance HEAD",
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -395,7 +409,6 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
-        keep_commit = _git_output(repo, "rev-parse", "HEAD").lower()
         try:
             _record_keep(
                 shared_state,

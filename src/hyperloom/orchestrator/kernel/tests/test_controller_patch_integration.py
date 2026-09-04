@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
+from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
     integrate_controller_patches,
 )
@@ -307,6 +309,105 @@ async def test_dirty_integration_worktree_is_skipped_without_cleanup(tmp_path: P
 
     assert summary.results[0].status == "skipped_dirty_worktree"
     assert (repo / "second.py").read_text(encoding="utf-8") == "USER_CHANGE = True\n"
+
+
+@pytest.mark.asyncio
+async def test_a_note_alongside_a_real_commit_does_not_revert_the_keep(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # _git_commit_kept documents its note as carrying "any detail", so a caller
+    # that reads any note as failure would revert a KEEP that did commit and had
+    # already passed the serving gate.
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="noted",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    def _commit_with_advisory_note(repo_root, message, paths):
+        committed, _note = _git_commit_kept(repo_root, message, paths)
+        return committed, "staged 1 path"
+
+    monkeypatch.setattr(integration, "_git_commit_kept", _commit_with_advisory_note)
+
+    async def _keep(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_keep,
+    )
+
+    assert [result.status for result in summary.results] == ["kept"]
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_commit_that_never_lands_reverts_without_poisoning_the_next_patch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # The benign no-op shape: success, a note, and no commit. Admitting it would
+    # record a keep_commit that does not carry the change and leave the worktree
+    # dirty, which makes every later publication fail the dirty-worktree check.
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="first",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="second",
+        kernel_path="second.py",
+        patch=_patch(repo, "second.py", "VALUE = 3\n"),
+    )
+
+    def _no_op_for_first(repo_root, message, paths):
+        if "first" in message:
+            return True, "nothing to commit"
+        return _git_commit_kept(repo_root, message, paths)
+
+    monkeypatch.setattr(integration, "_git_commit_kept", _no_op_for_first)
+
+    async def _keep(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, repo)
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_keep,
+    )
+
+    assert [result.status for result in summary.results] == ["reverted_commit_failed", "kept"]
+    assert summary.results[0].reason == "nothing to commit"
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 3\n"
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 2
+    assert [entry["operator_id"] for entry in state.optimization_stack] == [
+        "kernel:forge-loop:second:standalone:unknown:triton:mi355x"
+    ]
 
 
 @pytest.mark.asyncio
