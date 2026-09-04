@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -24,6 +25,8 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
 )
+
+log = logging.getLogger(__name__)
 
 _RESULT_SENTINEL = "__FORGE_RESULT__"
 _TERMINATE_GRACE_SEC = 5.0
@@ -170,11 +173,15 @@ def _read_result(path: Path, stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def _notify_checkpoint(callback: Callable[[], None] | None) -> None:
+def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:
+    """Run one checkpoint probe. Returns whether it completed without raising."""
     if callback is None:
-        return
-    with contextlib.suppress(Exception):
+        return True
+    try:
         callback()
+    except Exception:  # noqa: BLE001 - a probe failure must not end the campaign
+        return False
+    return True
 
 
 def run_forge_loop(
@@ -203,6 +210,10 @@ def run_forge_loop(
         start_new_session=True,
     )
     timed_out = False
+    # Counted rather than logged per tick: the probe fires about once a second
+    # for up to ninety minutes, so one line each would bury the run while none
+    # at all hides a probe that never worked and cost every interim publication.
+    probe_failures = 0
     while True:
         remaining = invocation.deadline_unix - time.time()
         if remaining <= 0:
@@ -213,8 +224,14 @@ def run_forge_loop(
             stdout, stderr = process.communicate(timeout=min(remaining, _CHECKPOINT_POLL_SEC))
             break
         except subprocess.TimeoutExpired:
-            _notify_checkpoint(on_checkpoint)
-    _notify_checkpoint(on_checkpoint)
+            probe_failures += not _notify_checkpoint(on_checkpoint)
+    probe_failures += not _notify_checkpoint(on_checkpoint)
+    if probe_failures:
+        log.warning(
+            "checkpoint recovery probe failed %d time(s) for %s; interim patches were not published",
+            probe_failures,
+            invocation.workspace,
+        )
     return ForgeLoopOutcome(
         returncode=int(process.returncode if process.returncode is not None else -1),
         stdout=stdout,

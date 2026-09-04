@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -22,6 +23,8 @@ from kernelforge.knowledge.implementation_identity import normalize_operator_nam
 from kernelforge.knowledge.kernel_identity import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.llm.git import GitError, git
 
+
+log = logging.getLogger(__name__)
 
 #: How long a staged directory must stop changing before it is taken. The agent
 #: writes task.json and driver.py in separate tool calls and neither write is
@@ -204,7 +207,15 @@ def publish_complete_staged_tasks(
         # revision. Wait for the tree to go quiet instead.
         if float(now()) - _newest_mtime(entry) < float(quiescent_sec):
             continue
-        results.append(publish_staged_task(layout, entry))
+        result = publish_staged_task(layout, entry)
+        if result.published:
+            log.info("published operator task %s from %s", result.operator_id, entry.name)
+        else:
+            # The agent gets no feedback channel, so a rejected draft is
+            # otherwise invisible: it stays in staging and the run just reports
+            # one fewer task than the agent believes it wrote.
+            log.warning("rejected staged task %s: %s", entry.name, result.reason)
+        results.append(result)
     return tuple(results)
 
 

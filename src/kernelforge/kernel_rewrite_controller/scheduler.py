@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ from kernelforge.kernel_rewrite_controller.task import (
     load_task,
     sort_tasks,
 )
+
+log = logging.getLogger(__name__)
 
 ANALYSIS_BUDGET_SEC = 60 * 60
 FORGE_LOOP_BUDGET_SEC = 90 * 60
@@ -70,6 +73,7 @@ def _skipped_result(task, reason: str) -> SingleTaskResult:
 
 
 def _skip_task(task_dir: Path, task, reason: str) -> SingleTaskResult:
+    log.warning("skipping operator task %s: %s", task_dir.name, reason)
     TaskStateStore(task_dir).mark_skipped(reason)
     return _skipped_result(task, reason)
 

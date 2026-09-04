@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -194,3 +195,29 @@ def test_runner_polls_for_durable_checkpoints_while_child_is_running(tmp_path: P
     assert outcome.timed_out is True
     assert outcome.result == payload
     assert callbacks
+
+
+def test_a_checkpoint_probe_that_always_raises_is_reported_once(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    # The probe fires about once a second for up to ninety minutes. A per-tick
+    # line would bury the run, and none at all is what let a probe fail for a
+    # whole campaign while every interim patch went unpublished.
+    invocation = ForgeLoopInvocation(
+        command=(sys.executable, "-c", "import time; time.sleep(60)"),
+        workspace=tmp_path,
+        result_json=tmp_path / "missing.json",
+        deadline_unix=time.time() + 1.5,
+    )
+
+    def _always_raises() -> None:
+        raise RuntimeError("recovery is broken")
+
+    with caplog.at_level(logging.WARNING, logger="kernelforge.kernel_rewrite_controller.forge_runner"):
+        outcome = run_forge_loop(invocation, on_checkpoint=_always_raises)
+
+    assert outcome.timed_out is True
+    probe_warnings = [record for record in caplog.records if "checkpoint recovery probe failed" in record.message]
+    assert len(probe_warnings) == 1
+    assert probe_warnings[0].args[0] >= 2

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +25,13 @@ from kernelforge.kernel_rewrite_controller.publisher import (
     PUBLICATION_FILENAME,
     published_operator_dirs,
 )
-from kernelforge.kernel_rewrite_controller.recovery import recover_all_task_results
+from kernelforge.kernel_rewrite_controller.recovery import (
+    RecoveryResult,
+    recover_all_task_results,
+)
 from kernelforge.kernel_rewrite_controller.scheduler import dispatch_prepared_tasks
+
+log = logging.getLogger(__name__)
 
 CONTROLLER_STATE_SCHEMA_VERSION = 1
 
@@ -67,10 +74,33 @@ class ControllerRunState:
     #: A task naming a repository already pinned to a different commit is skipped,
     #: so this records what the campaign actually built against.
     repository_pins: dict[str, str] = field(default_factory=dict)
+    #: Validated forge-loop best results that could not be turned into a patch.
+    #: Durable on purpose: Hyperloom discards this process's stdout and stderr
+    #: when it hard-kills the controller on timeout, so a reason that lives only
+    #: in the log is a reason nobody can read afterwards.
+    recovery_failures: tuple[dict[str, str], ...] = ()
     schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _recovery_failures(results: Iterable[RecoveryResult]) -> tuple[dict[str, str], ...]:
+    """Keep the recoveries that found a validated best result and could not ship it.
+
+    A task that produced nothing, and one whose patch was already published, are
+    both ordinary outcomes. What deserves a record is a trusted best commit that
+    never became a patch, because the export or the publication raised.
+    """
+    return tuple(
+        {
+            "operator_id": result.operator_id,
+            "best_commit": result.best_commit,
+            "reason": result.reason,
+        }
+        for result in results
+        if not result.published and result.patch_dir is None and result.best_commit
+    )
 
 
 def _validate_budget(budget_minutes: object) -> float:
@@ -113,6 +143,14 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
     if state.repository_pins:
         lines.extend(["## Pinned Source Repositories", ""])
         lines.extend(f"- `{root}` @ `{commit}`" for root, commit in sorted(state.repository_pins.items()))
+        lines.append("")
+    if state.recovery_failures:
+        lines.extend(["## Unpublishable Validated Results", ""])
+        lines.extend(
+            f"- `{failure.get('operator_id', '')}` @ `{failure.get('best_commit', '')}`: "
+            f"{failure.get('reason', '')}"
+            for failure in state.recovery_failures
+        )
         lines.append("")
     patches = published_operator_dirs(layout)
     if patches:
@@ -194,7 +232,7 @@ def run_controller(
         )
 
     try:
-        recover_all_task_results(layout)
+        recovered = list(recover_all_task_results(layout))
         analysis = run_opportunity_analysis(
             handoff=handoff,
             layout=layout,
@@ -204,7 +242,7 @@ def run_controller(
             layout,
             controller_deadline_unix=running.deadline_unix,
         )
-        recover_all_task_results(layout)
+        recovered.extend(recover_all_task_results(layout))
         patch_count = len(published_operator_dirs(layout))
     except Exception as error:
         _raise_controller_failure(
@@ -249,10 +287,19 @@ def run_controller(
             "patch_count": patch_count,
             "skipped_task_count": schedule.skipped_count,
             "repository_pins": schedule.repository_pins,
+            "recovery_failures": _recovery_failures(recovered),
         }
     )
     _write_state(layout, completed)
     _write_summary(layout, completed)
+    log.info(
+        "kernel rewrite controller finished: status=%s tasks=%s patches=%s skipped=%s reason=%s",
+        completed.status,
+        completed.task_count,
+        completed.patch_count,
+        completed.skipped_task_count,
+        completed.reason,
+    )
     return completed
 
 

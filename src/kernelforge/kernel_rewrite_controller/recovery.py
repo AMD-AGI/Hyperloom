@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     export_patch_from_base,
 )
 from kernelforge.loop.reporting import BestResultPublisher
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,16 @@ def recover_task_result(
             best_commit=best_commit,
         )
     except Exception as error:
+        # A validated best commit that cannot be shipped is the one recovery
+        # outcome that says something went wrong rather than that nothing was
+        # found, so it is worth a line of its own.
+        log.warning(
+            "could not publish %s for %s at %s: %s",
+            source,
+            task.operator_id,
+            best_commit,
+            error,
+        )
         return RecoveryResult(
             operator_id=task.operator_id,
             published=False,
