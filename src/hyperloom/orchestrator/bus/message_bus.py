@@ -18,40 +18,62 @@ from .storage.connection import SqliteConnection
 
 TOPIC_ALLOWLIST = frozenset(
     {
-        # Optimization-loop topics
         "proposal",
         "observation",
         "event",
         "decision",
         "alert",
-        "historical_warning",
-        "reflection_tick",
-        "do_postmortem",
-        "do_strategic_review",
-        "do_emergency_rca",
-        "synthesize_for_kb",
-        "graceful_stop",
-        "heartbeat",
         "delegated_result",
-        "intent_emitted",
-        "rca_done",
-        # Storage-layer events
         "lease_expired",
-        "lease_acquire_failed",
-        # Agent-to-agent RPC (REQUEST / RESPONSE intents).
         "request",
         "response",
-        # Critic Review Protocol verdict broadcast.
         "review_verdict",
         "advice",
         "strategy_change",
-        # Reserved for a dynamic-specialist dispatch audit trail; no emitter in-tree yet.
-        "dynamic_specialist_dispatched",
-        "dynamic_specialist_status",
-        "dynamic_specialist_results",
-        "dynamic_specialist_error",
     }
 )
+
+# Per-role subscription map.  A message is delivered to an agent's inbox only when
+# its topic appears in the agent's subscription set AND the sender is not the agent
+# itself.  Raw-DB readers (lookup_by_id, tail, replay_for_resume) bypass this and
+# always see every row.
+ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
+    "orchestration": frozenset(
+        {
+            "delegated_result",
+            "review_verdict",
+            "observation",
+            "event",
+            "decision",
+            "alert",
+            "advice",
+            "strategy_change",
+            "response",
+            "lease_expired",
+            "proposal",
+        }
+    ),
+    "critic": frozenset(
+        {
+            "proposal",
+            "review_verdict",
+            "advice",
+            "delegated_result",
+            "observation",
+        }
+    ),
+    "robustness": frozenset(
+        {
+            "delegated_result",
+            "review_verdict",
+            "proposal",
+            "observation",
+            "alert",
+            "strategy_change",
+        }
+    ),
+    "kernel_agent": frozenset({"request"}),
+}
 
 
 _now_iso = now_iso
@@ -238,22 +260,37 @@ class MessageBus:
         after_seq: int,
         limit: int = DEFAULT_EVENTS_KEEP_RECENT,
     ) -> list[Message]:
-        """Used at resume — returns events in monotonic seq order.
+        """Return inbox messages for an agent, applying subscription and self-echo rules.
+
+        Messages are excluded if:
+        - the topic is not in the agent's subscription set, or
+        - the sender is the agent itself.
+
+        Raw-DB readers (lookup_by_id, tail) bypass this and see every row.
 
         Args:
             to_agent (str): Recipient agent id (broadcasts are included).
             after_seq (int): Only return messages with ``seq`` greater than
                 this.
-            limit (int): Maximum rows to return, matching the bus retention
-                watermark so a large backlog is not loaded at once.
+            limit (int): Maximum rows to return.
 
         Returns:
             list[Message]: Matching messages ordered by ascending ``seq``.
         """
-        rows = await self.db.fetchall(
-            "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC LIMIT ?",
-            (after_seq, to_agent, limit),
-        )
+        subscribed = ROLE_SUBSCRIPTIONS.get(to_agent)
+        if subscribed is None:
+            rows = await self.db.fetchall(
+                "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"
+                " AND from_agent != ? ORDER BY seq ASC LIMIT ?",
+                (after_seq, to_agent, to_agent, limit),
+            )
+        else:
+            placeholders = ",".join("?" * len(subscribed))
+            rows = await self.db.fetchall(
+                f"SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*')"  # nosec B608
+                f" AND from_agent != ? AND topic IN ({placeholders}) ORDER BY seq ASC LIMIT ?",
+                (after_seq, to_agent, to_agent, *subscribed, limit),
+            )
         return [Message.from_row(r) for r in rows]
 
     async def lookup_by_id(self, msg_id: str) -> Message | None:
@@ -269,4 +306,4 @@ class MessageBus:
         return Message.from_row(row) if row else None
 
 
-__all__ = ["Message", "MessageBus", "TOPIC_ALLOWLIST"]
+__all__ = ["Message", "MessageBus", "ROLE_SUBSCRIPTIONS", "TOPIC_ALLOWLIST"]
