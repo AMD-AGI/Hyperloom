@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from hyperloom.common import llm_attribution
 from hyperloom.orchestrator.roles._llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
@@ -22,6 +23,13 @@ from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _too
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
 from .conftest import chatty_child, suppression_window_s
+
+
+@pytest.fixture(autouse=True)
+def _reset_published_phase():
+    """The phase is a module global; leaving one set would label later tests."""
+    yield
+    llm_attribution.set_current_phase("")
 
 
 def test_apply_llm_stability_env_sets_defaults():
@@ -75,6 +83,46 @@ async def test_run_subprocess_leaves_an_operator_chosen_buffering_alone(monkeypa
     rc, stdout, _stderr = await _run_subprocess(_ECHO_UNBUFFERED, timeout_sec=30)
     assert rc == 0
     assert stdout.strip() == "0"
+
+
+_ECHO_TAGS = [
+    "python3",
+    "-c",
+    "import os; print(os.environ.get('ANTHROPIC_CUSTOM_HEADERS', '(unset)'))",
+]
+
+
+async def test_run_subprocess_carries_the_phase_into_its_child(monkeypatch):
+    """The kernel tools spend a phase's money and cannot name the phase.
+
+    It is a module global of the orchestrator, so the child interpreter starts
+    with none; without this the tools that do name themselves still reach the
+    gateway unplaceable in the run.
+    """
+    monkeypatch.setenv(llm_attribution.ATTRIBUTION_ENV, "litellm")
+    monkeypatch.setenv(llm_attribution.CLAW_SESSION_ID_ENV, "claw-abc")
+    monkeypatch.setenv(llm_attribution.ANTHROPIC_CUSTOM_HEADERS_ENV, "Ocp-Apim-Subscription-Key: secret")
+    llm_attribution.set_current_phase("KERNEL_AGENT")
+
+    rc, stdout, _stderr = await _run_subprocess(_ECHO_TAGS, timeout_sec=30)
+
+    assert rc == 0
+    assert "phase=KERNEL_AGENT" in stdout
+    assert "session=claw-abc" in stdout
+    # The operator's own header has to survive being joined, not be replaced.
+    assert "Ocp-Apim-Subscription-Key" in stdout
+
+
+async def test_run_subprocess_leaves_an_unconfigured_deployment_alone(monkeypatch):
+    """No gateway selected means the child sees the env it always did."""
+    monkeypatch.delenv(llm_attribution.ATTRIBUTION_ENV, raising=False)
+    monkeypatch.delenv(llm_attribution.ANTHROPIC_CUSTOM_HEADERS_ENV, raising=False)
+    llm_attribution.set_current_phase("KERNEL_AGENT")
+
+    rc, stdout, _stderr = await _run_subprocess(_ECHO_TAGS, timeout_sec=30)
+
+    assert rc == 0
+    assert stdout.strip() == "(unset)"
 
 
 async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):

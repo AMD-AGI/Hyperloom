@@ -55,6 +55,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_attribution import set_current_phase
 from hyperloom.common.subprocess_bridge import RuntimeAdapterError, emit_json, read_json
 
 from ..config import Config
@@ -175,6 +176,15 @@ async def _run_tick(request: dict[str, Any]) -> dict[str, Any]:
         tick_index=tick_index,
         now_unix=now_unix,
     )
+
+    # This runs one process below the orchestrator, where the published phase is
+    # empty, so the RCA calls this tick makes would reach the gateway with no
+    # phase on them. The Coordinator prompt carries the phase for exactly this
+    # tick, which makes it the only honest value here -- and the reactor is
+    # re-entered per tick, so re-publishing tracks a run that moves on. An
+    # absent block parses to "", which suppresses the field rather than pinning
+    # a stale one.
+    set_current_phase(reactor_ctx.phase)
 
     bundle = build_reactor_components(config, session_id=session_id)
     try:

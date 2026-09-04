@@ -88,6 +88,55 @@ async def test_run_tick_emits_alert_on_high_crash_count(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase_block, expected",
+    [
+        ("=== Phase ===\nphase     : FRAMEWORK_AGENT\n", "FRAMEWORK_AGENT"),
+        # No block is the honest absence of a phase, not a reason to keep the
+        # last one: this process is re-entered per tick and a run moves on.
+        ("", ""),
+    ],
+)
+async def test_run_tick_publishes_the_phase_the_prompt_carries(tmp_path: Path, phase_block: str, expected: str):
+    """RCA spends from a process one below the orchestrator.
+
+    The published phase is a module global, so this interpreter starts with
+    none and every RCA call would reach the gateway unplaceable in the run.
+    The Coordinator prompt is the only transport that knows the phase here.
+    """
+    from hyperloom.common.llm_attribution import current_phase, set_current_phase
+    from hyperloom.agents.robustness.runtime.cli import _coerce_request, _run_tick
+
+    set_current_phase("STALE_PHASE")
+    try:
+        request = _coerce_request(
+            {
+                "kind": "coordinator_inbox",
+                "session_id": "sess-phase",
+                "raw_prompt": (
+                    f"{phase_block}"
+                    "=== Shared session state ===\n"
+                    "session_id=sess-phase\n"
+                    "crash_count=0\n"
+                    "=== Inbox for robustness ===\n"
+                    "(no new messages)\n"
+                ),
+                "context": {"tick_index": 0, "now_unix": 1700000000.0},
+                "options": {
+                    "session_dir": str(tmp_path),
+                    "auto_probe_inference_server": False,
+                    "ray_probe_enabled": False,
+                    "external_deps_enabled": False,
+                },
+            }
+        )
+        await _run_tick(request)
+        assert current_phase() == expected
+    finally:
+        set_current_phase("")
+
+
+@pytest.mark.asyncio
 async def test_run_tick_hands_the_parsed_snapshot_to_the_reactor(tmp_path: Path, monkeypatch):
     """Every parsed shared-state field must survive the trip into the reactor."""
     captured: dict[str, object] = {}
