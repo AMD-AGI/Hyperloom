@@ -77,6 +77,10 @@ _GEAK_RESIDUAL_MIN_RATIO = 1.001
 # a transient cause plus the original attempt.
 MAX_FUSION_INFRA_RETRIES = 2
 
+# One lane ceiling covers both fusion pipelines, so a round can leave targets
+# unfunded. Retrying re-runs discovery, so the re-arming it grants is capped.
+MAX_FUSION_WITHHELD_RETRIES = 2
+
 # Why KERNEL entry dispatched no kernel_opt at all, recorded on
 # ``last_kernel_opt_dispatch_skip`` and surfaced by the summary as
 # ``dispatch_skip_reason``. A wholesale skip is invisible in the summary's
@@ -95,6 +99,21 @@ def _as_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _withheld_targets(result: object) -> int:
+    """How many discovered targets a fusion round's lane ceiling never funded.
+
+    Absent on the combine path and on every pre-contract record, which read as
+    fully funded rather than as unfunded.
+    """
+    if not isinstance(result, dict):
+        return 0
+    nomination = result.get("nomination")
+    if not isinstance(nomination, dict):
+        return 0
+    withheld = nomination.get("withheld")
+    return max(0, withheld) if isinstance(withheld, int) and not isinstance(withheld, bool) else 0
 
 
 def _as_float(value: object, default: float) -> float:
@@ -4124,6 +4143,10 @@ class KernelPhase(PhaseHandler):
             return False
         last = getattr(self.shared_state, "last_fusion", None)
         if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
+            # A round that kept nothing and left targets unfunded answers only for
+            # the ones it ran, so it re-arms fusion until the retry cap is spent.
+            if not last.get("kept") and _withheld_targets(last) > 0:
+                return _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0)) < MAX_FUSION_WITHHELD_RETRIES
             return False
         if isinstance(last, dict) and last.get("infrastructure_abort"):
             # An abort judged nothing, so it must stay retryable -- but not
@@ -4807,6 +4830,13 @@ class KernelPhase(PhaseHandler):
             spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
             try:
                 self.shared_state.fusion_infra_aborts = spent + 1
+            except Exception:  # noqa: BLE001 - state shape tolerant, as below
+                pass
+        if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
+            # Counted on the session for the same reason as the aborts above.
+            withheld_spent = _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0))
+            try:
+                self.shared_state.fusion_withheld_retries = withheld_spent + 1
             except Exception:  # noqa: BLE001 - state shape tolerant, as below
                 pass
         try:

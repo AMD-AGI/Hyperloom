@@ -985,6 +985,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # silently reset the cap. Monotonic -- every outcome that would justify a reset
     # already stops the gate on its own.
     fusion_infra_aborts: int = 0
+    # How many times a fusion round left targets its lane ceiling never funded,
+    # counted here for the same reason as the aborts above.
+    fusion_withheld_retries: int = 0
     # Most recent collective campaign and capped integration audit.
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)
