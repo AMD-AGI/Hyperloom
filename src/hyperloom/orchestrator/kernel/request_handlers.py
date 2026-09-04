@@ -1049,6 +1049,54 @@ def _artifact_paths_from_payload(payload: dict) -> list[str]:
     return []
 
 
+def _final_content_snapshot(
+    *,
+    patch_path: str,
+    snapshot_dir: str | None,
+    repo_root: str | None,
+) -> str | None:
+    """Return a snapshot dir holding the patch's FINAL bytes, materializing if needed.
+
+    ``snapshot_dir`` means two different things on the two sides of the
+    nomination wire. The fusion exporter records its *pre-authoring pristine*
+    snapshot -- the baseline it diffed AGAINST -- on ``RecipePatch.snapshot_dir``,
+    and that value rides the envelope into the pending record. ``apply_kernel_patch``
+    reads the same field as the *post-patch final* contents it copies FROM. A
+    pristine dir can never satisfy that: it is missing, by construction, every
+    module the fusion authored, so the apply pre-flight refuses the whole patch
+    with "snapshot missing content for <...>_fused_<recipe>.py" and a real KEEP
+    is lost. (The collective lane never hit this only because its record carries
+    no ``snapshot_dir`` at all, so it always took the materialize path.)
+
+    Rather than trust the field, check it: a usable snapshot has the final bytes
+    for every path the patch writes. When it does not, materialize one from the
+    patch itself. Materialization failure returns the original value so apply
+    reports the real error instead of this helper's.
+    """
+    if not (patch_path.endswith(".patch") and repo_root):
+        return snapshot_dir
+    try:
+        descriptors = _load_apply_tool().parse_patch_manifest(
+            Path(patch_path).read_text(encoding="utf-8", errors="replace")
+        )
+        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
+    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+        return snapshot_dir
+    if not writes:
+        return snapshot_dir
+    if snapshot_dir and all((Path(snapshot_dir) / rel).exists() for rel in writes):
+        return snapshot_dir
+    try:
+        return materialize_unified_patch_snapshot(
+            patch_path=patch_path,
+            repo_root=repo_root,
+            snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
+        )
+    except Exception:  # noqa: BLE001 — fall back so apply surfaces the real failure.
+        log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
+        return snapshot_dir
+
+
 def _maybe_apply_kernel_patch(
     payload: dict,
     *,
@@ -1089,6 +1137,11 @@ def _maybe_apply_kernel_patch(
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
+    snapshot_dir = _final_content_snapshot(
+        patch_path=patch_path,
+        snapshot_dir=snapshot_dir,
+        repo_root=repo_root,
+    )
     return tool.apply_kernel_patch(
         patch_path=patch_path,
         target_file=target_file,
