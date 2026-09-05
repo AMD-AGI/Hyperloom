@@ -28,140 +28,61 @@ from hyperloom.orchestrator.state.round_store import (
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TerminalTaskReuse, create_in_cursor
 
 _LEASE = 600.0
-_GRACE = 90.0
 
 
 @pytest.fixture
 def store(tmp_path):
     """A :class:`RoundStore` over a real temp session database."""
     db = SqliteConnection(tmp_path / "coordinator.db")
-    yield RoundStore(db, reap_grace_sec=_GRACE)
+    yield RoundStore(db)
     db.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("outcome", "settle_after", "confirm_kill", "permanent", "still_holds", "until"),
-    [
-        # The lease ran out and nothing ever confirmed the holder dead: the one
-        # round that has to be excluded forever, whatever its lease said.
-        pytest.param(
-            EXPIRED_UNREAPED,
-            _LEASE + 1.0,
-            False,
-            True,
-            True,
-            lambda opened, killed: opened + _LEASE,
-            id="unreaped-never-releases",
-        ),
-        # A confirmed kill dates the exclusion from the confirmation: a GPU
-        # allocation outlives the process that made it.
-        pytest.param(
-            EXPIRED_REAPED,
-            _LEASE + 10.0,
-            True,
-            False,
-            True,
-            lambda opened, killed: killed + _GRACE,
-            id="reaped-holds-for-its-grace",
-        ),
-        # Confirmed minutes into an hour-long lease, the grace still runs from
-        # the kill; keeping the unspent remainder excluded would wedge exactly
-        # the session an early expiry exists to free.
-        pytest.param(
-            EXPIRED_REAPED,
-            30.0,
-            True,
-            False,
-            True,
-            lambda opened, killed: killed + _GRACE,
-            id="reaped-early-drops-the-unspent-lease",
-        ),
-        # The release arm excludes the two expiries rather than listing the
-        # terminals, so an outcome added after the store was written releases
-        # instead of holding the machine for the rest of the lease.
-        pytest.param(
-            ABANDONED,
-            30.0,
-            True,
-            False,
-            False,
-            lambda opened, killed: 0.0,
-            id="non-expiry-releases-at-once",
-        ),
-    ],
-)
-async def test_the_outcome_and_its_confirmation_decide_how_long_a_round_holds_the_machine(
-    store,
-    virtual_clock,
-    outcome,
-    settle_after,
-    confirm_kill,
-    permanent,
-    still_holds,
-    until,
-):
-    """What a settled round leaves behind: forever, a grace, or nothing."""
+@pytest.mark.parametrize("outcome", [EXPIRED_UNREAPED, EXPIRED_REAPED, ABANDONED, BOOTED])
+async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store, virtual_clock, outcome):
+    """Settling releases. No outcome buys a round exclusion it did not pay a lease for.
+
+    An exclusion that outlives every reader is what trapped a session before:
+    the row said the machine was held and nothing could say otherwise.
+    """
+    clock = virtual_clock
+    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+
+    clock.advance(30.0)
+    settled_at = clock.wall()
+    assert (
+        await store.settle("r", holder_task_id="t-1", fence=1, outcome=outcome, now_unix=settled_at, request_id="q2")
+    ).ok
+
+    row = await store.get("r")
+    assert row is not None and row.outcome == outcome
+    assert row.excludes_at(settled_at) is False
+    assert await store.excluding(settled_at) == []
+    # And the next round is admitted at once, on the same instant.
+    assert (await store.open("next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=settled_at, request_id="q3")).ok
+
+
+@pytest.mark.asyncio
+async def test_an_open_round_holds_the_machine_only_while_its_lease_is_live(store, virtual_clock):
+    """The exclusion is time-bounded, so a round nobody settles frees itself."""
     clock = virtual_clock
     opened_at = clock.wall()
     assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")).ok
 
-    clock.advance(settle_after)
-    settled_at = clock.wall()
-    assert (
-        await store.settle(
-            "r",
-            holder_task_id="t-1",
-            fence=1,
-            outcome=outcome,
-            now_unix=settled_at,
-            request_id="q2",
-            kill_confirmed_unix=settled_at if confirm_kill else None,
-            reap_backend="pgid" if confirm_kill else "",
-        )
-    ).ok
-
     row = await store.get("r")
     assert row is not None
-    assert row.kill_confirmed_unix == (settled_at if confirm_kill else None)
-    assert row.exclusion_permanent is permanent
-    assert row.exclusion_until == pytest.approx(until(opened_at, settled_at))
+    assert row.excludes_at(opened_at + _LEASE - 1.0) is True
+    assert row.excludes_at(opened_at + _LEASE + 1.0) is False
+    assert [r.round_id for r in await store.excluding(opened_at)] == ["r"]
+    assert await store.excluding(opened_at + _LEASE + 1.0) == []
 
-    # Both sides of the instant the exclusion names, and one far past every
-    # lease this session could ever hand out.
-    free_at = max(row.exclusion_until, settled_at)
-    assert row.excludes_at(free_at - 1.0) is still_holds
-    assert row.excludes_at(free_at + 1.0) is permanent
-    assert row.excludes_at(settled_at + 365 * 24 * 3600.0) is permanent
-
-    clock.advance(free_at - settled_at + 1.0)
-    assert [r.round_id for r in await store.excluding(clock.wall())] == (["r"] if permanent else [])
-    retry = await store.open("next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q3")
-    assert retry.ok is not permanent
-    assert retry.reason == (rs.EXCLUDED if permanent else "")
-
-
-@pytest.mark.asyncio
-async def test_a_reaped_claim_with_nothing_to_date_it_from_is_refused(store, virtual_clock):
-    """``expired_reaped`` needs the confirmation its grace is measured from.
-
-    Accepted without one it would release the machine the instant the lease ran
-    out -- no grace at all -- which is the behaviour the reaped outcome exists
-    to prevent. Refusing the combination is what keeps it unrepresentable.
-    """
-    clock = virtual_clock
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
-    with pytest.raises(ValueError, match=rs.EXPIRED_UNREAPED):
-        await store.settle(
-            "r",
-            holder_task_id="t-1",
-            fence=1,
-            outcome=rs.EXPIRED_REAPED,
-            now_unix=clock.wall(),
-            request_id="q2",
+    # A holder that never settled cannot keep the next round out for good.
+    assert (
+        await store.open(
+            "next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=opened_at + _LEASE + 1.0, request_id="q2"
         )
-    row = await store.get("r")
-    assert row is not None and row.state == rs.OPEN
+    ).ok
 
 
 @pytest.mark.asyncio
@@ -377,7 +298,6 @@ async def test_settling_twice_records_the_replay_without_changing_the_round(stor
     )
     assert contradicting.ok is False
     assert contradicting.reason == rs.ALREADY_SETTLED
-    assert (await store.get("r")).exclusion_permanent is False
 
 
 @pytest.mark.asyncio

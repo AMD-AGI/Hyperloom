@@ -132,9 +132,11 @@ class ResourceFacts:
     acquire.
 
     Attributes:
+        read: Whether anything has read these from their sources. False denies
+            nothing: a gate with no repair pass behind it must not refuse a
+            dispatch on a pool size nobody looked up.
         excluding_round_id: The bring-up round denying an acquire, if any.
         excluding_round_holder: The task holding that round.
-        excluding_round_permanent: Whether that round excludes for good.
         serving_tp: Tensor parallelism the served model runs at.
         gpu_specialist_capacity: Configured GPU specialist capacity.
         gpu_specialist_pool: Cards available to a serving-disjoint specialist.
@@ -143,9 +145,9 @@ class ResourceFacts:
             looked yet.
     """
 
+    read: bool = False
     excluding_round_id: str = ""
     excluding_round_holder: str = ""
-    excluding_round_permanent: bool = False
     serving_tp: int = 0
     gpu_specialist_capacity: int = 0
     gpu_specialist_pool: int = 0
@@ -173,10 +175,10 @@ class ResourceFacts:
             live_task_ids: Tasks observed running; ``None`` leaves the set
                 unknown.
         """
+        self.read = True
         excluding = rounds[0] if rounds else None
         self.excluding_round_id = "" if excluding is None else excluding.round_id
         self.excluding_round_holder = "" if excluding is None else excluding.holder_task_id
-        self.excluding_round_permanent = False if excluding is None else bool(excluding.exclusion_permanent)
         self.serving_tp = serving_tp_for_policy(shared_state)
         self.gpu_specialist_capacity = gpu_specialist_ceiling(shared_state)
         self.gpu_specialist_pool = effective_gpu_specialist_pool_size(shared_state)

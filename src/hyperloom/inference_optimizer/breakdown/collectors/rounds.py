@@ -49,7 +49,7 @@ def collect_round_ledger(session_dir: Path, warnings: list[str]) -> dict[str, An
         rows = _query(
             conn,
             "SELECT round_id, state, outcome, holder_task_id, fence, opened_unix,"
-            "       settled_unix, exclusion_permanent, provisional, correctness_verified,"
+            "       settled_unix, provisional, correctness_verified,"
             "       probe_origin, reap_backend, stage_high_water"
             "  FROM bringup_rounds ORDER BY opened_unix DESC",
         )
@@ -120,7 +120,6 @@ def _round_summary(row: sqlite3.Row) -> dict[str, Any]:
         "fence": _int(row["fence"]),
         "opened_unix": _float(row["opened_unix"]),
         "settled_unix": None if settled is None else _float(settled),
-        "excludes_permanently": bool(row["exclusion_permanent"]),
         "provisional": bool(row["provisional"]),
         "correctness_verified": bool(row["correctness_verified"]),
         "probe_origin": _str_or_empty(row["probe_origin"]),
