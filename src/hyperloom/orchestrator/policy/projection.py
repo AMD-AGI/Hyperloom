@@ -152,23 +152,6 @@ class ResourceFacts:
     whole_machine_pool: int = 0
     live_task_ids: frozenset[str] | None = None
 
-    @classmethod
-    def of(
-        cls,
-        shared_state: Any | None,
-        *,
-        rounds: Sequence[Round] = (),
-        live_task_ids: Iterable[str] | None = None,
-    ) -> "ResourceFacts":
-        """Build facts already read from their sources.
-
-        Returns:
-            ResourceFacts: The facts, updated once.
-        """
-        facts = cls()
-        facts.update(shared_state, rounds=rounds, live_task_ids=live_task_ids)
-        return facts
-
     @property
     def round_excludes(self) -> bool:
         """bool: Whether a bring-up round was holding the machine at the update."""
