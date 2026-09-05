@@ -15,8 +15,8 @@ Advisory review. Flag only what static gates can't.
   exists. Point to the existing one and ask to extend it.
 - **Failure-hiding error handling**: a `try`/fallback that swallows an error and returns
   a default or `None`, so the caller can't tell success from silent failure. This includes
-  a new broad `except Exception` / bare `except` that hides the failure rather than catching
-  a specific, expected error (ruff's `E`/`F`/`W` and `pylint --errors-only` catch neither).
+  a new broad `except Exception` that hides the failure rather than catching a specific,
+  expected error — neither ruff's `E`/`F`/`W` nor `pylint --errors-only` flags it.
 - **Concurrency**: missing/incorrect `await`, races on shared state, unawaited tasks,
   blocking calls on the event loop.
 - **Unused abstraction**: a flag, strategy, or generic helper added for a single caller,
@@ -31,7 +31,7 @@ Advisory review. Flag only what static gates can't.
 
 ## What NOT to flag
 
-- Formatting, import order, naming, line length → ruff.
+- Bare `except:`, formatting, import order, naming, line length → ruff.
 - Cyclomatic complexity, unused variables → ruff/pylint.
 - Known-vuln patterns, injection, secrets → CodeQL / gitleaks / bandit.
 
