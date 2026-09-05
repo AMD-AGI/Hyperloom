@@ -377,7 +377,6 @@ def _done():
         "domain": "serving_specialist",
         "gap_canonical_id": "gap.framework.cuda_graph.session-1",
         "proposal_set": list(_PROPOSALS),
-        "empty": False,
         "summary": "explored",
         "reason": "kb_evidence",
         "confidence": 0.7,
@@ -440,7 +439,6 @@ async def test_coordinator_empty_proposals_not_scored(tmp_path):
     c = _coord(tmp_path, scorer)
     payload = _done()
     payload["proposal_set"] = []
-    payload["empty"] = True
     task = _StubTask(task_id="t1", params={})
     await c._record_specialist_result(
         task=task,

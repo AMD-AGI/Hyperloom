@@ -369,7 +369,7 @@ async def test_specialist_requested_build_noop_without_request(coord, monkeypatc
     tid = "spec-plain"
     wd = coord.session_dir / "runs" / "specialist" / tid
     wd.mkdir(parents=True, exist_ok=True)
-    (wd / "specialist_done.json").write_text(json.dumps({"empty": False, "patches_written": ["p.patch"]}))
+    (wd / "specialist_done.json").write_text(json.dumps({"patches_written": ["p.patch"]}))
     coord.shared_state.enablement.last_specialist_task_id = tid
 
     await Coordinator._maybe_enqueue_specialist_requested_build(coord)

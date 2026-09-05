@@ -72,7 +72,6 @@ def test_genuine_empty_deliverable_is_still_authored_empty(tmp_path: Path):
         stub,
         task=_task("local_explore:1"),
         done_payload={
-            "empty": True,
             "patches_written": [],
             "proposal_set": [],
             "summary": "no host-side redundancy left in the rollout loop",

@@ -155,7 +155,7 @@ Each specialist subprocess sees:
 * The exit contract:
   - one `specialist_done` intent (the SpecialistRunner harvests it from
     stdout's stream-json transcript) with payload schema
-    `{ gap_canonical_id, domain, tags, proposal_set, empty, summary, ... }`.
+    `{ gap_canonical_id, domain, tags, proposal_set, summary, ... }`.
   - optionally `patches_written: [<paths in worktree/patches/>]`.
   - `new_findings`, `residual_questions`, `confidence` (0..1).
 
@@ -170,7 +170,6 @@ Each specialist subprocess sees:
     ...
   ],
   "patches_written": ["patches/001_cuda_graph_fix.patch"],   // PR-A2+: optional
-  "empty":            false,
   "summary":          "short one-liner ≤ 480 chars",
   "confidence":       0.7,
   "new_findings":     ["..."],
@@ -179,8 +178,8 @@ Each specialist subprocess sees:
 ```
 
 When the specialist times out / dies / fails parse, SpecialistRunner
-synthesises an empty `specialist_done` payload (`empty=true`,
-`proposal_set=[]`, reason filled). The Coordinator never blocks waiting
+synthesises an empty `specialist_done` payload (`proposal_set=[]`,
+`summary` and `reason` filled). The Coordinator never blocks waiting
 for a missing specialist result.
 
 ## Followup action

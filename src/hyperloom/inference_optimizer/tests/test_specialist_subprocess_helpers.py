@@ -185,8 +185,8 @@ def test_read_done_non_dict(tmp_path: Path) -> None:
 
 def test_read_done_flat_dict(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
-    p.write_text(json.dumps({"empty": True, "proposal_set": []}), encoding="utf-8")
-    assert SpecialistSubprocessDispatcher._read_done(p) == {"empty": True, "proposal_set": []}
+    p.write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(p) == {"proposal_set": []}
 
 
 def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
@@ -196,7 +196,7 @@ def test_read_done_unwraps_intent_envelope(tmp_path: Path) -> None:
             {
                 "intent_type": "specialist_done",
                 "domain": "kernel_switch_specialist",
-                "payload": {"proposal_set": [{"name": "v1"}], "empty": False},
+                "payload": {"proposal_set": [{"name": "v1"}]},
             }
         ),
         encoding="utf-8",

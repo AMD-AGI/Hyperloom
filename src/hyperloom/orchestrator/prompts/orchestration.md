@@ -411,12 +411,11 @@ about to be refreshed.
 The SharedState dump carries the full TraceLens `analysis.md` in an
 `analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,
 gain = X.XX%) ===` bookends. Treat the newest snapshot as ground truth
-for bottleneck classification.
-Read it as a perf report: Executive
+for bottleneck classification. Read it as a perf report: Executive
 Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`),
-Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
-map to actions — **follow them**:
+`kernel_id` strings for `trace_analyze`), Recommendations (candidate
+actions). Priority markers `🔴`/`🟡`/`🟢` map to actions — **follow
+them**:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
   → the Coordinator-owned `kernel_opt` lane in KERNEL_AGENT (`🔴` before
