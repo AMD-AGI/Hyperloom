@@ -150,3 +150,64 @@ def test_pointer_swap_failure_keeps_the_previous_public_pointer(
         publisher.publish_operator_result(layout, second)
 
     assert (destination / "change.patch").read_text(encoding="utf-8") == "first patch\n"
+
+
+def test_republishing_the_same_commit_is_idempotent(tmp_path: Path, task_dir: Path) -> None:
+    """A recovery pass that re-reads the same checkpoint must not fail on it."""
+    layout = ControllerLayout(tmp_path / "output")
+    publication = _publication(task_dir, "b" * 40, "same patch\n")
+
+    first = publisher.publish_operator_result(layout, publication)
+    second = publisher.publish_operator_result(layout, publication)
+
+    assert first.resolve() == second.resolve()
+    assert (second / "change.patch").read_text(encoding="utf-8") == "same patch\n"
+
+
+def test_a_version_directory_that_disagrees_with_its_commit_is_refused(
+    tmp_path: Path,
+    task_dir: Path,
+) -> None:
+    """One commit means one patch. A version that says otherwise is corrupt.
+
+    The version directory is keyed by best commit and treated as immutable, so a
+    second publication claiming the same commit with different bytes cannot be
+    reconciled -- publishing either one would misreport what the commit contains.
+    """
+    layout = ControllerLayout(tmp_path / "output")
+    publisher.publish_operator_result(layout, _publication(task_dir, "b" * 40, "original\n"))
+
+    with pytest.raises(publisher.PublicationError, match="patch conflicts with existing version"):
+        publisher.publish_operator_result(layout, _publication(task_dir, "b" * 40, "rewritten\n"))
+
+
+def test_an_incomplete_version_directory_is_refused(tmp_path: Path, task_dir: Path) -> None:
+    """A half-written version is not a version, even if the pointer survived."""
+    layout = ControllerLayout(tmp_path / "output")
+    publication = _publication(task_dir, "b" * 40, "patch\n")
+    destination = publisher.publish_operator_result(layout, publication)
+    (destination.resolve() / "report.md").unlink()
+
+    with pytest.raises(publisher.PublicationError, match="incomplete operator publication"):
+        publisher.publish_operator_result(layout, publication)
+
+
+def test_unreadable_version_metadata_is_refused(tmp_path: Path, task_dir: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    publication = _publication(task_dir, "b" * 40, "patch\n")
+    destination = publisher.publish_operator_result(layout, publication)
+    (destination.resolve() / "publication.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(publisher.PublicationError, match="invalid operator publication metadata"):
+        publisher.publish_operator_result(layout, publication)
+
+
+def test_a_plain_directory_where_the_pointer_belongs_is_refused(tmp_path: Path, task_dir: Path) -> None:
+    """The public path must stay a symlink, or the swap stops being atomic."""
+    layout = ControllerLayout(tmp_path / "output")
+    publication = _publication(task_dir, "b" * 40, "patch\n")
+    squatter = layout.patch_dir(publication.operator_id)
+    squatter.mkdir(parents=True)
+
+    with pytest.raises(publisher.PublicationError, match="not an atomic pointer"):
+        publisher.publish_operator_result(layout, publication)

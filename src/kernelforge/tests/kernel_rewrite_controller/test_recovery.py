@@ -256,3 +256,81 @@ def test_a_newer_sidecar_still_wins_over_an_older_manifest(tmp_path: Path) -> No
 
     assert recovered.published is True
     assert recovered.best_commit == newer_commit
+
+
+def test_a_sidecar_that_did_not_improve_is_not_published(tmp_path: Path) -> None:
+    """``improved`` is the whole claim; without it there is nothing to integrate."""
+    layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
+    (task_dir / "forge-result.json").write_text(
+        json.dumps({"improved": False, "best_commit": best_commit}),
+        encoding="utf-8",
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is False
+    assert not published_operator_dirs(layout)
+
+
+def test_a_sidecar_without_a_best_commit_is_not_published(tmp_path: Path) -> None:
+    """An improvement with no commit names no patch."""
+    layout, task_dir, _worktree, _best_commit = _prepared_workspace(tmp_path)
+    (task_dir / "forge-result.json").write_text(
+        json.dumps({"improved": True, "best_commit": ""}),
+        encoding="utf-8",
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is False
+    assert not published_operator_dirs(layout)
+
+
+def test_an_unvalidated_checkpoint_cannot_stand_in_for_a_best_commit(tmp_path: Path) -> None:
+    """The checkpoint fallback is gated on validation, not on carrying a commit."""
+    layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
+    (task_dir / "forge-result.json").write_text(
+        json.dumps(
+            {
+                "improved": True,
+                "best_commit": "",
+                "checkpoint": {"validation_passed": False, "best_commit": best_commit},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is False
+    assert not published_operator_dirs(layout)
+
+
+def test_a_validated_checkpoint_supplies_the_missing_best_commit(tmp_path: Path) -> None:
+    """A forge-loop killed after validation still has a result worth keeping."""
+    layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
+    (task_dir / "forge-result.json").write_text(
+        json.dumps(
+            {
+                "improved": True,
+                "best_commit": "",
+                "checkpoint": {"validation_passed": True, "best_commit": best_commit},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is True
+    assert recovered.patch_dir is not None
+
+
+def test_a_task_with_no_forge_output_at_all_publishes_nothing(tmp_path: Path) -> None:
+    layout, task_dir, _worktree, _best_commit = _prepared_workspace(tmp_path)
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is False
+    assert recovered.reason == "no trusted forge-loop best result"
+    assert not published_operator_dirs(layout)

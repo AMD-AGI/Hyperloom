@@ -634,3 +634,297 @@ async def test_publication_outside_configured_roots_is_rejected(tmp_path: Path) 
 
     assert summary.results[0].status == "skipped_invalid"
     assert "outside the configured patch target roots" in summary.results[0].reason
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_publication_is_skipped_and_the_next_one_still_lands(tmp_path: Path) -> None:
+    """One bad publication must not cost the patches queued behind it."""
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    broken = _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="aaa_broken",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    (broken / "publication.json").write_text("{not json", encoding="utf-8")
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="zzz_good",
+        kernel_path="second.py",
+        patch=_patch(repo, "second.py", "VALUE = 3\n"),
+    )
+
+    async def _validate(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    statuses = {result.status for result in summary.results}
+    assert "skipped_invalid" in statuses
+    assert summary.kept_count == 1
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 3\n"
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_does_not_apply_is_reverted_not_left_half_staged(tmp_path: Path) -> None:
+    """A malformed diff fails at ``git apply``; the tree must come back clean."""
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="malformed",
+        kernel_path="first.py",
+        patch="diff --git a/first.py b/first.py\n@@ this is not a hunk @@\n",
+    )
+    validated = False
+
+    async def _validate(_publication):
+        nonlocal validated
+        validated = True
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 0
+    assert [r.status for r in summary.results] == ["reverted_apply_conflict"]
+    # A patch that never applied must not reach the benchmark.
+    assert validated is False
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_validator_that_raises_reverts_its_patch_and_continues(tmp_path: Path) -> None:
+    """An E2E that dies is a failed patch, not a failed integration run."""
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="aaa_raises",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="zzz_survives",
+        kernel_path="second.py",
+        patch=_patch(repo, "second.py", "VALUE = 3\n"),
+    )
+
+    async def _validate(publication):
+        if publication.identity["kernel_name"] == "aaa_raises":
+            raise RuntimeError("serving benchmark died")
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    statuses = [r.status for r in summary.results]
+    assert statuses[0] == "reverted_e2e_failed"
+    assert "serving benchmark died" in (summary.results[0].reason or "")
+    assert summary.kept_count == 1
+    # The raising patch left nothing behind; the next one still landed.
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 3\n"
+
+
+@pytest.mark.asyncio
+async def test_a_repo_root_outside_the_allowed_targets_is_refused(tmp_path: Path) -> None:
+    """Integration may only stage into repositories the session declared."""
+    repo, base = _repo(tmp_path)
+    other, other_base = _named_repo(tmp_path, "other", "third.py")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        other,
+        other_base,
+        kernel_name="foreign",
+        kernel_path="third.py",
+        patch=_patch(other, "third.py", "VALUE = 9\n"),
+    )
+
+    async def _validate(_publication):
+        raise AssertionError("a foreign repository must never reach validation")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 0
+    assert [r.status for r in summary.results] == ["skipped_invalid"]
+
+
+@pytest.mark.asyncio
+async def test_a_keep_carries_the_server_settings_its_validation_measured(tmp_path: Path) -> None:
+    """The KEEP is only reproducible with the args and envs it was measured under."""
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="tuned",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {
+            "decision": "KEEP",
+            "new_tput": 120.0,
+            "gain_pct": 20.0,
+            "extra_server_args": "--enable-foo",
+            "extra_envs": {"FOO": "1"},
+        }
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, repo)
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 1
+    assert state.current_best["extra_server_args"] == "--enable-foo"
+    assert state.current_best["extra_envs"] == {"FOO": "1"}
+
+
+@pytest.mark.asyncio
+async def test_a_commit_that_lands_is_reported_even_if_the_ledger_write_fails(tmp_path: Path) -> None:
+    """The Git commit and the SharedState write are not one transaction.
+
+    Losing the ledger write must not be reported as a lost patch: the commit is
+    in the repository either way, and calling it anything but ``kept`` would send
+    the next patch at a HEAD the result says does not exist.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="landed",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, repo)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("state file is read-only")
+
+    state.save = _boom  # type: ignore[method-assign]
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 1
+    result = summary.results[0]
+    assert result.status == "kept"
+    assert "SharedState recording failed" in (result.reason or "")
+    # The commit is real regardless of what the ledger managed to record.
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 2
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def _patch_adding_a_file(repo: Path, modified: str, created: str) -> str:
+    """A diff that both edits a tracked file and introduces a new one."""
+    original = (repo / modified).read_text(encoding="utf-8")
+    (repo / modified).write_text("VALUE = 2\n", encoding="utf-8")
+    (repo / created).write_text("HELPER = True\n", encoding="utf-8")
+    _git(repo, "add", "-N", created)
+    patch = _git(repo, "diff", "--binary", "--", modified, created)
+    (repo / modified).write_text(original, encoding="utf-8")
+    _git(repo, "rm", "--quiet", "--cached", "--force", created)
+    (repo / created).unlink()
+    return patch + "\n"
+
+
+@pytest.mark.asyncio
+async def test_a_revert_the_diff_cannot_undo_restores_what_head_knows(tmp_path: Path) -> None:
+    """A validation that edits the source leaves a patch reverse-apply refuses.
+
+    That is the state a partially applied patch is in too. The fallback restores
+    every path HEAD still has a version of and leaves the ones the patch created
+    alone -- by then nothing can prove such a file was not already the operator's.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="creates_a_file",
+        kernel_path="first.py",
+        patch=_patch_adding_a_file(repo, "first.py", "helper.py"),
+    )
+
+    async def _validate(_publication):
+        # Something in the E2E path rewrites the source under the patch.
+        (repo / "first.py").write_text("VALUE = 999  # instrumented\n", encoding="utf-8")
+        return {"decision": "REVERT", "reason": "no gain"}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 0
+    result = summary.results[0]
+    assert result.status == "reverted_e2e_failed"
+    assert "left files the patch created in place: helper.py" in (result.reason or "")
+    # The tracked file is back at its committed content...
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    # ...and the file the patch created is still on disk, unstaged.
+    assert (repo / "helper.py").exists()
+    assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
