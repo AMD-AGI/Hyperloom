@@ -310,7 +310,11 @@ async def test_a_non_owner_cannot_settle_a_round_it_does_not_hold(store, virtual
     )
     assert refused.ok is False
     assert refused.reason == rs.NOT_OWNER
-    recorded = [(e.op, e.result, e.reason) for e in await store.events("r")]
+    rows = await store.db.fetchall(
+        "SELECT op, result, reason FROM round_events WHERE round_id = ? ORDER BY event_id",
+        ("r",),
+    )
+    recorded = [(r["op"], r["result"], r["reason"]) for r in rows]
     assert recorded == [("open", "applied", ""), ("settle", "rejected", rs.NOT_OWNER)]
 
 
