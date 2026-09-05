@@ -7,7 +7,8 @@
 Tables: ``leases`` (composite PK ``(lane, holder_id)`` for multi-holder
 lanes), ``lane_capacity``, ``events`` (A2A bus), ``cursors`` (idempotent
 replay), ``tasks`` (lifecycle state machine), ``gpu_leases`` (specialist GPU
-pool, separate from serving lanes).
+pool, separate from serving lanes), ``bringup_rounds`` (the durable bring-up
+mutex) and ``round_events`` (its append-only outbox).
 
 No FK constraints between ``tasks`` and ``leases``/``events``: lifetimes
 differ (a task's leases may be reaped before its events are pruned), so
@@ -22,7 +23,7 @@ import sqlite3
 # version already in the DB, so a database written by an older version keeps its
 # own columns and is read as-is. Rows are addressed by column name, so a column
 # this version no longer writes is inert rather than a migration hazard.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane
@@ -121,6 +122,54 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
+    # bringup_rounds — the durable mutex deciding whether another round may
+    # start. The admission predicate reads only exclusion_permanent and
+    # exclusion_until, both NOT NULL so no NULL can reach a WHERE clause that
+    # would read it as false.
+    """
+    CREATE TABLE IF NOT EXISTS bringup_rounds (
+        round_id             TEXT    PRIMARY KEY,
+        state                TEXT    NOT NULL CHECK (state IN ('open','settled')),
+        outcome              TEXT    NOT NULL DEFAULT '',
+        holder_task_id       TEXT    NOT NULL,
+        fence                INTEGER NOT NULL DEFAULT 1,
+        opened_unix          REAL    NOT NULL,
+        renewed_unix         REAL    NOT NULL,
+        expires_unix         REAL    NOT NULL,
+        settled_unix         REAL,
+        kill_confirmed_unix  REAL,
+        reap_grace_sec       REAL    NOT NULL DEFAULT 0,
+        exclusion_permanent  INTEGER NOT NULL DEFAULT 0,
+        exclusion_until      REAL    NOT NULL DEFAULT 0,
+        reap_backend         TEXT    NOT NULL DEFAULT '',
+        probe_origin         TEXT    NOT NULL DEFAULT '',
+        provisional          INTEGER NOT NULL DEFAULT 0,
+        correctness_verified INTEGER NOT NULL DEFAULT 0,
+        stage_high_water     INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_exclusion ON bringup_rounds(exclusion_permanent, exclusion_until)",
+    "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_state ON bringup_rounds(state, opened_unix)",
+    # round_events — append-only outbox. Every attempt lands here with its
+    # outcome, evidence and request id, applied or rejected, so a rejected
+    # settle can be re-driven from what the caller asked for.
+    """
+    CREATE TABLE IF NOT EXISTS round_events (
+        event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id      TEXT    NOT NULL,
+        request_id    TEXT    NOT NULL,
+        op            TEXT    NOT NULL,
+        result        TEXT    NOT NULL CHECK (result IN ('applied','rejected','duplicate')),
+        outcome       TEXT    NOT NULL DEFAULT '',
+        fence         INTEGER NOT NULL DEFAULT 0,
+        actor_task_id TEXT    NOT NULL DEFAULT '',
+        reason        TEXT    NOT NULL DEFAULT '',
+        evidence      TEXT    NOT NULL DEFAULT '{}',
+        recorded_unix REAL    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_round_events_round ON round_events(round_id, event_id)",
+    "CREATE INDEX IF NOT EXISTS idx_round_events_redrive ON round_events(op, result, event_id)",
     # schema_version — tracks future migrations
     """
     CREATE TABLE IF NOT EXISTS schema_version (
@@ -138,6 +187,8 @@ _MANAGED_TABLES = (
     "events",
     "cursors",
     "tasks",
+    "bringup_rounds",
+    "round_events",
     "schema_version",
 )
 

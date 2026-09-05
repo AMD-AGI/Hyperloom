@@ -135,6 +135,119 @@ class TaskNotFound(RuntimeError):
     pass
 
 
+class TerminalTaskReuse(RuntimeError):
+    """An idempotency key already names a task in a terminal state."""
+
+
+def _insert_queued_task(
+    cur: Any,
+    *,
+    kind: str,
+    params: dict,
+    idempotency_key: str,
+    requires_lanes: list[str] | None,
+    side_effects: list[str] | None,
+    lease_ttl_sec: int,
+    task_id: str | None,
+) -> Task:
+    """INSERT one ``queued`` row on ``cur`` and return the task it holds.
+
+    The row and the returned :class:`Task` are built from the same values, so
+    an in-memory task never describes a row that was written differently.
+    ``cur`` belongs to the caller's write transaction.
+    """
+    now = _now_iso()
+    task = Task(
+        task_id=task_id or uuid.uuid4().hex,
+        kind=kind,
+        state="queued",
+        params=params,
+        idempotency_key=idempotency_key,
+        requires_lanes=[] if requires_lanes is None else list(requires_lanes),
+        side_effects=[] if side_effects is None else list(side_effects),
+        lease_ttl_sec=lease_ttl_sec,
+        history=[],
+        created_at=now,
+        updated_at=now,
+    )
+    cur.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, "
+        "requires_lanes, side_effects, lease_ttl_sec, "
+        "history, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            task.task_id,
+            task.kind,
+            task.state,
+            json.dumps(task.params),
+            task.idempotency_key,
+            json.dumps(task.requires_lanes),
+            json.dumps(task.side_effects),
+            task.lease_ttl_sec,
+            "[]",
+            task.created_at,
+            task.updated_at,
+        ),
+    )
+    return task
+
+
+def create_in_cursor(
+    cur: Any,
+    *,
+    kind: str,
+    params: dict,
+    idempotency_key: str,
+    requires_lanes: list[str] | None = None,
+    side_effects: list[str] | None = None,
+    lease_ttl_sec: int = 0,
+    task_id: str | None = None,
+) -> tuple[Task, bool]:
+    """Create (or adopt) a task row on a cursor the caller already owns.
+
+    Unlike :meth:`TaskRegistry.create_or_return_existing`, which opens its own
+    transaction, the row commits with the caller's work or not at all.
+
+    Args:
+        cur: Open cursor inside the caller's write transaction.
+        kind: Task kind tag.
+        params: Task parameters serialised into the row.
+        idempotency_key: UNIQUE key used to detect an existing task.
+        requires_lanes: Lanes the task must hold while running.
+        side_effects: Declared side effects of the task.
+        lease_ttl_sec: Lease time-to-live in seconds.
+        task_id: Optional explicit task id; generated when omitted.
+
+    Returns:
+        tuple[Task, bool]: ``(task, was_existing)``.
+
+    Raises:
+        TerminalTaskReuse: When the key already names a task in a terminal
+            state.
+    """
+    cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
+    existing = cur.fetchone()
+    if existing is not None:
+        task = Task.from_row(existing)
+        if task.state in TERMINAL_STATES:
+            raise TerminalTaskReuse(f"idempotency key {idempotency_key!r} already names a {task.state} task")
+        return task, True
+
+    return (
+        _insert_queued_task(
+            cur,
+            kind=kind,
+            params=params,
+            idempotency_key=idempotency_key,
+            requires_lanes=requires_lanes,
+            side_effects=side_effects,
+            lease_ttl_sec=lease_ttl_sec,
+            task_id=task_id,
+        ),
+        False,
+    )
+
+
 def _is_progress_note(entry: Any) -> bool:
     """Report whether a ``history`` entry is a progress note.
 
@@ -226,44 +339,18 @@ class TaskRegistry:
         if existing is not None:
             return Task.from_row(existing), True
 
-        task_id = task_id or uuid.uuid4().hex
-        now = _now_iso()
         async with self.db.transaction() as cur:
-            cur.execute(
-                "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, "
-                "requires_lanes, side_effects, lease_ttl_sec, "
-                "history, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    task_id,
-                    kind,
-                    "queued",
-                    json.dumps(params),
-                    idempotency_key,
-                    json.dumps(requires_lanes or []),
-                    json.dumps(side_effects or []),
-                    lease_ttl_sec,
-                    "[]",
-                    now,
-                    now,
-                ),
-            )
-        return (
-            Task(
-                task_id=task_id,
+            task = _insert_queued_task(
+                cur,
                 kind=kind,
-                state="queued",
                 params=params,
                 idempotency_key=idempotency_key,
-                requires_lanes=requires_lanes or [],
-                side_effects=side_effects or [],
+                requires_lanes=requires_lanes,
+                side_effects=side_effects,
                 lease_ttl_sec=lease_ttl_sec,
-                history=[],
-                created_at=now,
-                updated_at=now,
-            ),
-            False,
-        )
+                task_id=task_id,
+            )
+        return task, False
 
     async def create(
         self,
@@ -748,4 +835,6 @@ __all__ = [
     "Task",
     "TaskNotFound",
     "TaskRegistry",
+    "TerminalTaskReuse",
+    "create_in_cursor",
 ]
