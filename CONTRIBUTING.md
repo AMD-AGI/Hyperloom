@@ -1,6 +1,6 @@
 # Contributing to Hyperloom
 
-Thank you for helping improve Hyperloom. This guide covers the expected workflow, local setup, and quality checks.
+Thank you for helping improve Hyperloom. This guide covers the expected workflow, local setup, and quality checks. The authoring rules that a change is reviewed against live in [`AGENTS.md`](AGENTS.md).
 
 ## Pull Request workflow
 - Create a feature branch off `main`.
@@ -10,7 +10,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 
 ## Proposing a new framework or platform
 
-Hyperloom includes external components (GEAK, Magpie, TraceLens, IntelliKit, frameworks). Building for a new framework or platform must work bring-up through the owning-components before integration code lands, and open a tracking issue for it. Owners are named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
+Hyperloom includes external components (GEAK, Magpie, TraceLens, IntelliKit, frameworks). Work bring-up for a new framework or platform through the owning components before integration code lands, and open a tracking issue for it. Owners are named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
 
 ## CI and documentation-only changes
 
