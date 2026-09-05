@@ -382,7 +382,8 @@ async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_dirty_integration_worktree_is_skipped_without_cleanup(tmp_path: Path) -> None:
+async def test_a_dirty_patch_path_is_skipped_without_cleaning_the_repository(tmp_path: Path) -> None:
+    """The refusal must leave the operator's own edits exactly where they are."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -393,7 +394,8 @@ async def test_dirty_integration_worktree_is_skipped_without_cleanup(tmp_path: P
         kernel_path="first.py",
         patch=_patch(repo, "first.py", "VALUE = 2\n"),
     )
-    (repo / "second.py").write_text("USER_CHANGE = True\n", encoding="utf-8")
+    (repo / "first.py").write_text("USER_CHANGE = True\n", encoding="utf-8")
+    (repo / "second.py").write_text("UNRELATED = True\n", encoding="utf-8")
 
     async def _must_not_validate(_publication):
         raise AssertionError("dirty worktree must not reach E2E")
@@ -408,7 +410,8 @@ async def test_dirty_integration_worktree_is_skipped_without_cleanup(tmp_path: P
     )
 
     assert summary.results[0].status == "skipped_dirty_worktree"
-    assert (repo / "second.py").read_text(encoding="utf-8") == "USER_CHANGE = True\n"
+    assert (repo / "first.py").read_text(encoding="utf-8") == "USER_CHANGE = True\n"
+    assert (repo / "second.py").read_text(encoding="utf-8") == "UNRELATED = True\n"
 
 
 @pytest.mark.asyncio
@@ -928,3 +931,119 @@ async def test_a_revert_the_diff_cannot_undo_restores_what_head_knows(tmp_path: 
     # ...and the file the patch created is still on disk, unstaged.
     assert (repo / "helper.py").exists()
     assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
+
+
+@pytest.mark.asyncio
+async def test_dirt_on_a_file_the_patch_never_touches_does_not_block_it(tmp_path: Path) -> None:
+    """Hyperloom dirties the framework tree itself; a repo-wide check never passes.
+
+    ``ensure_sglang_patched_for_tracelens`` and its ck-blockscale sibling patch
+    the serving source in place and leave it uncommitted for the whole session,
+    and every other lane leaves its own KEEP uncommitted too. A repository-wide
+    admission check therefore refuses every patch that reaches it -- which is how
+    a 4.5-hour campaign's only micro-validated patch was thrown away on a file it
+    never opened.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="target",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    # Stand-in for the in-place instrumentation: a tracked file the patch does
+    # not name, modified and left uncommitted.
+    (repo / "second.py").write_text("INSTRUMENTED = True\n", encoding="utf-8")
+
+    async def _validate(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 1
+    assert summary.results[0].status == "kept"
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    # The unrelated edit is still there, uncommitted and unharmed.
+    assert (repo / "second.py").read_text(encoding="utf-8") == "INSTRUMENTED = True\n"
+    assert _git(repo, "status", "--porcelain", "--untracked-files=no", "--", "second.py").strip()
+
+
+@pytest.mark.asyncio
+async def test_dirt_on_a_file_the_patch_does_touch_still_blocks_it(tmp_path: Path) -> None:
+    """Scoping the check narrows it; it does not remove it.
+
+    An uncommitted edit on a path the patch modifies cannot be told apart from
+    the patch's own change afterwards, so the patch is still refused.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="target",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    (repo / "first.py").write_text("VALUE = 41  # someone else's edit\n", encoding="utf-8")
+
+    async def _validate(_publication):
+        raise AssertionError("a patch on a dirty path must never reach validation")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 0
+    result = summary.results[0]
+    assert result.status == "skipped_dirty_worktree"
+    assert "first.py" in (result.reason or "")
+    # The other edit is left exactly as it was.
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 41  # someone else's edit\n"
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_admitted_nothing_does_not_report_as_completed(tmp_path: Path) -> None:
+    """A phase that dropped every patch at the door must not read as a clean run."""
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="target",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    (repo / "first.py").write_text("VALUE = 41\n", encoding="utf-8")
+
+    async def _validate(_publication):
+        raise AssertionError("unreachable")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.status == "no_patch_admitted"
+    assert summary.kept_count == 0
+    assert summary.skipped_count == 1

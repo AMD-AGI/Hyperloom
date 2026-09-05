@@ -343,9 +343,22 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
+        # Scoped to the paths this patch touches, not to the whole repository.
+        # Hyperloom dirties the framework tree itself -- the TraceLens and
+        # ck-blockscale instrumentation are patched in place and stay uncommitted
+        # for the life of the session, and every other lane leaves its own KEEP
+        # uncommitted too -- so a repository-wide check is unsatisfiable in a real
+        # session and threw away every patch that reached it. The narrower
+        # question is the one that matters anyway: apply, commit and revert are
+        # each already scoped to these paths, so dirt anywhere else cannot be
+        # confused with this patch's own change.
+        touched = _patch_touched_paths(repo, [publication.patch_path])
         try:
             head_before = _git_output(repo, "rev-parse", "HEAD").lower()
-            clean = _git_output(repo, "status", "--porcelain", "--untracked-files=no")
+            # A patch whose paths cannot be read is one nothing can be scoped to,
+            # so it falls back to asking about the whole tree.
+            scope = ["--", *sorted(touched)] if touched else []
+            clean = _git_output(repo, "status", "--porcelain", "--untracked-files=no", *scope)
         except Exception as error:
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
@@ -359,10 +372,11 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
         if clean:
+            changed = ", ".join(sorted(touched)) if touched else "the repository"
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="skipped_dirty_worktree",
-                reason="integration repository has uncommitted tracked changes",
+                reason=f"uncommitted tracked changes on the paths this patch modifies: {changed}",
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -447,7 +461,6 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
-        touched = _patch_touched_paths(repo, [publication.patch_path])
         committed, commit_note = _git_commit_kept(
             repo,
             f"hyperloom: keep KernelForge rewrite {publication.operator_id}",
@@ -504,8 +517,17 @@ async def integrate_controller_patches(
     kept = sum(result.status == "kept" for result in results)
     reverted = sum(result.status.startswith("reverted_") for result in results)
     skipped = len(results) - kept - reverted
+    # "completed" says the loop ran, which is not the same as the loop having
+    # done anything. A run whose every patch was refused before it was even
+    # measured is an environment failure, and reporting it the same way as a run
+    # that graded its patches and kept none hides hours of work having been
+    # dropped at the door.
+    if results and kept == 0 and reverted == 0:
+        status = "no_patch_admitted"
+    else:
+        status = "completed"
     summary = ControllerIntegrationSummary(
-        status="completed",
+        status=status,
         results=tuple(results),
         kept_count=kept,
         reverted_count=reverted,
