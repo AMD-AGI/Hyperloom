@@ -49,6 +49,7 @@ from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ..actions.stop_attribution import stopped_by_the_run_class
+from ..bringup import ARGV_INVALID, ENV_FAULT
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -72,6 +73,7 @@ from .coordinator_helpers import (
 from ..policy.gate import (
     PolicyDenied,
 )
+from ..state.round_store import ABANDONED, BOOTED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..actions.executors._accuracy_gate import (
@@ -89,7 +91,6 @@ from ..knowledge.agent_kb import PatchKB
 from .coordinator import (
     _BASELINE_MAX_TOTAL_FAILURES,
     _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
-    _ENABLEMENT_MAX_STALL,
     _SEVERITY_CRASH,
     _SEVERITY_REGRESS,
     PendingProposal,
@@ -916,13 +917,10 @@ class WritebackCollaborator:
         )
         state.enablement.origin = "eval"
         state.enablement.pending = True
-        # A failed revalidation reopens the authoring loop and counts as a
-        # no-progress round so the enablement_stalled cap can still terminate.
+        # A failed revalidation reopens the authoring loop; its cost is charged
+        # against the round ledger by the caller that settles the round.
         if was_validation_pending:
             state.enablement.validation_pending = False
-            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
-            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
-                state.set_stop_reason("enablement_stalled")
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
             state.enablement.accuracy_floor = float(floor)
@@ -953,17 +951,13 @@ class WritebackCollaborator:
         if evidence:
             state.enablement.baseline_eval_evidence = evidence[:4000]
             state.enablement.launch_log = evidence
+            state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
 
-    def _reopen_revalidation_window(self) -> None:
+    async def _reopen_revalidation_window(self) -> None:
         """Leave an enablement revalidation window open for a round the run stopped.
 
-        A round the run stopped measured nothing, so it says nothing about whether
-        the KEEP'd patch still revalidates. The window therefore stays open --
-        only an eval-origin KEEP ever opens one, and closing it here would strand
-        a patch nothing revalidated -- and the stall streak is not charged,
-        because reaching the ``enablement_stalled`` cap on the evidence of a clock
-        is exactly what the baseline failure streak already exempts this round
-        from.
+        A round the run stopped measured nothing, so the window stays open and
+        no observation is charged.
 
         The generation advances for the same reason opening a window does: the
         next enqueue's idempotency key must not resolve to the row the run
@@ -977,9 +971,9 @@ class WritebackCollaborator:
         state = self.shared_state
         state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
         state.enablement.revalidation_task_id = ""
-        state.enablement.inflight_task_id = ""
+        await self._settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
 
-    def _record_revalidation_not_promoted(
+    async def _record_revalidation_not_promoted(
         self,
         *,
         task: Task,
@@ -989,10 +983,9 @@ class WritebackCollaborator:
     ) -> None:
         """Close out an enablement revalidation baseline that did not promote.
 
-        A genuine failure -- boot, OOM, timeout, eval -- is a no-progress round:
-        it closes the revalidation window, reopens the authoring loop, and counts
-        toward the ``enablement_stalled`` cap so repeated KEEP-then-fail cycles
-        terminate.
+        A genuine failure -- boot, OOM, timeout, eval -- closes the revalidation
+        window, reopens the authoring loop, and charges its observation to the
+        round ledger.
 
         A round the run stopped is none of those things; what it gets instead, and
         why, is :meth:`_reopen_revalidation_window`.
@@ -1006,24 +999,23 @@ class WritebackCollaborator:
         """
         state = self.shared_state
         if stopped_by_the_run:
-            self._reopen_revalidation_window()
+            await self._reopen_revalidation_window()
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
-            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
-            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
+            budget = await self._charge_round_observation(result_payload)
+            if budget.exhausted and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
-            else:
-                state.enablement.inflight_task_id = ""
+            await self._settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
         launch_log = _extract_enablement_launch_log(result_payload)
         if launch_log:
             state.enablement.launch_log = launch_log
+            state.enablement.launch_observation_path = str(result_payload.get("boot_observation_path") or "")
         log.warning(
-            "enablement revalidation task %s %s (error_class=%s); stall_streak=%d pending=%s rearm=%s",
+            "enablement revalidation task %s %s (error_class=%s); pending=%s rearm=%s",
             task.task_id,
             "was stopped by the run" if stopped_by_the_run else "failed",
             err_class,
-            int(state.enablement.stall_streak or 0),
             bool(state.enablement.validation_pending),
             not bool(state.stop_reason),
         )
@@ -1147,6 +1139,21 @@ class WritebackCollaborator:
                     provenance="executor",
                     extra={"status": str(result_payload.get("status") or "")},
                 )
+        if task.kind == "boot_probe":
+            # Where the observation landed, plus the evidence the enablement
+            # pump classifies from.
+            observation_path = str(result_payload.get("boot_observation_path") or "")
+            if observation_path:
+                self.shared_state.enablement.launch_observation_path = observation_path
+            launch_log = _extract_enablement_launch_log(result_payload)
+            if launch_log:
+                self.shared_state.enablement.launch_log = launch_log
+            if str(result_payload.get("error_class") or "") == ENV_FAULT:
+                # A host fault no patch repairs and a retry re-finds: terminal on
+                # the first occurrence.
+                self.shared_state.set_stop_reason(ENV_FAULT)
+            any_changed = True
+
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors get their own streak so they don't burn the
         # slow-baseline retry budget on deterministic failures.
@@ -1161,14 +1168,6 @@ class WritebackCollaborator:
             # ``baseline_failed``, blaming the model for the clock. The executor
             # already refuses to grade such a round; the ledger has to agree.
             stopped_by_the_run = stopped_by_the_run_class(err_class) is not None
-            # While a serial enablement is actively engaged, baseline boots
-            # re-fail on purpose (each round clears a deeper gap), so the
-            # ``baseline_failed`` fast-fail must NOT fire here; the
-            # ``enablement_stalled`` cap is the correct fast-fail instead.
-            # ``fast_exit_arg_error`` stays gated on its own streak regardless.
-            from ..phases.machine_state import enablement_engaged as _enablement_engaged  # noqa: PLC0415
-
-            enablement_engaged = _enablement_engaged(self.shared_state)
             eval_failed = bool(result_payload.get(BASELINE_EVAL_FAILED_KEY))
             # Revalidation task failed for any reason (boot/OOM/timeout/eval): clear
             # pending state, preserve the frozen trigger identity, increment stall.
@@ -1178,7 +1177,7 @@ class WritebackCollaborator:
                 or (reval_tid and reval_tid == str(task.task_id or ""))
             )
             if is_revalidation and bool(getattr(self.shared_state.enablement, "validation_pending", False)):
-                self._record_revalidation_not_promoted(
+                await self._record_revalidation_not_promoted(
                     task=task,
                     result_payload=result_payload,
                     err_class=err_class,
@@ -1204,6 +1203,10 @@ class WritebackCollaborator:
                     err_class,
                     self.shared_state.baseline_failure_streak,
                 )
+            elif err_class == ARGV_INVALID:
+                # A retry recomposes the same argv the installed parser already
+                # refused: terminal on the first occurrence, with no streak.
+                self.shared_state.set_stop_reason(ARGV_INVALID)
             elif err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
@@ -1231,13 +1234,11 @@ class WritebackCollaborator:
                 )
                 self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
             else:
+                # ``baseline_arg_error_streak`` is deliberately left alone: a boot
+                # that failed some other way is no evidence the arguments were
+                # fixed.
                 self.shared_state.baseline_failure_streak += 1
-                self.shared_state.baseline_arg_error_streak = 0
-                if (
-                    self.shared_state.baseline_failure_streak >= 3
-                    and not enablement_engaged
-                    and not eval_pending_suppress
-                ):
+                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1246,7 +1247,6 @@ class WritebackCollaborator:
             if (
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
-                and not enablement_engaged
                 and not eval_pending_suppress
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
@@ -1267,6 +1267,9 @@ class WritebackCollaborator:
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
                     self.shared_state.enablement.launch_log = launch_log
+                    self.shared_state.enablement.launch_observation_path = str(
+                        result_payload.get("boot_observation_path") or ""
+                    )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
                 "task_id": task.task_id,
@@ -3231,7 +3234,6 @@ class WritebackCollaborator:
                     promoting_tid,
                 )
             self.shared_state.baseline_failure_streak = 0
-            self.shared_state.baseline_arg_error_streak = 0
             # A genuine baseline may revalidate an eval-origin enablement.
             if bool(getattr(self.shared_state.enablement, "validation_pending", False)):
                 if is_revalidation:
@@ -3243,6 +3245,7 @@ class WritebackCollaborator:
                         self.shared_state.enablement.revalidation_task_id = ""
                         self.shared_state.enablement.origin = ""
                         self.shared_state.enablement.pending = False
+                        await self._settle_enablement_round(BOOTED, reason="revalidation_promoted")
                     else:
                         # Sub-floor accuracy on the tracked revalidation: rearm the
                         # specialist loop without clearing the frozen trigger identity.
@@ -3253,16 +3256,10 @@ class WritebackCollaborator:
                         )
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
-                        self.shared_state.enablement.stall_streak = (
-                            int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
-                        )
-                        if (
-                            self.shared_state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL
-                            and not self.shared_state.stop_reason
-                        ):
+                        budget = await self._charge_round_observation(result)
+                        if budget.exhausted and not self.shared_state.stop_reason:
                             self.shared_state.set_stop_reason("enablement_stalled")
-                        else:
-                            self.shared_state.enablement.inflight_task_id = ""
+                        await self._settle_enablement_round(FAILED, reason="revalidation_below_floor")
                 else:
                     # An unrelated baseline promoted while revalidation is pending.
                     # Only anchor tput; do not consume or clear the pending state.
@@ -5480,7 +5477,8 @@ class WritebackCollaborator:
         and produced no result to route, so it is no evidence about the baseline
         and gets :meth:`_reopen_revalidation_window`, the same verdict the
         writeback reaches for the same round. Anything else ended having had its
-        chance: the window closes and the round is charged to the stall streak.
+        chance: the window closes and the round charges an observation carrying
+        no evidence, which spends an evidence-stall credit.
         """
         state = self.shared_state
         if not bool(state.enablement.validation_pending):
@@ -5501,19 +5499,18 @@ class WritebackCollaborator:
             if not is_terminal:
                 return
             if row_state == "cancelled":
-                self._reopen_revalidation_window()
+                await self._reopen_revalidation_window()
                 report["fixes"].append({"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid})
                 log.info(
                     "resume: revalidation task %s was cancelled by the run; window left open "
-                    "at generation %d without charging the stall streak",
+                    "at generation %d without charging the progress budget",
                     tracked_tid,
                     int(state.enablement.revalidation_generation or 0),
                 )
                 return
             state.enablement.validation_pending = False
             state.enablement.revalidation_task_id = ""
-            state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
-            state.enablement.inflight_task_id = ""
+            await self._charge_round_observation({})
             report["fixes"].append({"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid})
             log.info(
                 "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",

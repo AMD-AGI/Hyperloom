@@ -39,7 +39,9 @@ Fields::
     pruned_families     list[str]  — set by Robustness via PRUNE_BRANCH
     start_ts            str   — ISO timestamp
     max_minutes         int   — wall-clock budget (0 = unlimited)
-    deadline_unix       float — absolute session deadline (0 = unset/unbounded)
+    elapsed_charged_sec float — budget seconds already summed over finished legs
+    leg_anchor_unix     float — wall instant elapsed was last charged up to
+    budget_extensions   list  — operator budget grants, each with a reason
     last_profile_trace  str   — set by Coordinator when `profile` returns a
                                 trace path; consumed by Orch to populate
                                 `trace_analyze` REQUEST `trace_input` param
@@ -63,6 +65,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
@@ -392,6 +395,11 @@ _DEFAULT_LAST_FAILURES = 30
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
+
+# How many ``skip_to_close`` hints the pre-enablement guard may drop before it
+# stops dropping them. Matches the stall-streak terminal, so a run that keeps
+# asking to close reaches an exit on the same order as one that stalls out.
+MAX_SKIP_TO_CLOSE_SUPPRESSIONS: int = 5
 
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
@@ -840,7 +848,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Absolute unix deadline for a bounded session. Stamped once from
     # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
     # ``0.0`` means unset or unbounded.
-    deadline_unix: float = 0.0
+    elapsed_charged_sec: float = 0.0
+    leg_anchor_unix: float = 0.0
+    budget_extensions: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock seconds spent in post-deadline teardown, keyed by step.
     teardown_timings_sec: dict[str, float] = field(default_factory=dict)
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
@@ -1555,6 +1565,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             filtered["phase_elapsed_totals"] = phase_elapsed_totals_from_history(
                 filtered.get("phase_history"),
             )
+        # The charge anchor belongs to a live leg, not to the file: only
+        # ``begin_leg`` arms it, so ``elapsed_charged_sec`` alone survives a load.
+        filtered["leg_anchor_unix"] = 0.0
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
         if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
@@ -1565,6 +1578,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
         )
+
+        # A state written before the budget was charged forward records spend
+        # only as ``start_ts``; carry ``now - start_ts`` across so a resume does
+        # not hand the session its whole budget again.
+        if "elapsed_charged_sec" not in raw:
+            started = to_unix(raw.get("start_ts"))
+            filtered["elapsed_charged_sec"] = max(0.0, time.time() - started) if started else 0.0
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -1695,10 +1715,14 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         same directory before an atomic rename, so concurrent readers never
         observe a partial blob. The temp file is cleaned up on failure.
 
+        Charges the elapsed budget first, so every save is a durable record of
+        spend and a leg that dies abruptly loses only the time since the last.
+
         Args:
             session_dir (Path): The session root directory; created if it
                 does not already exist.
         """
+        self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput``
         # so current_best carries the primary latency metric. Best-effort.
         self._backfill_scriptable_latency()
@@ -2033,10 +2057,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         ``prelude_baseline_failed``, the wall-clock/time-exhausted exits, or hard
         aborts).
 
+        The suppression count bounds the guard. Every input it reads is set by
+        one path and cleared by several, so any missed clear would otherwise make
+        this the sole authority denying a session its last exit.
+
         Returns:
             bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
-            has never gone positive and enablement has not yet succeeded.
+            has never gone positive and enablement has not yet succeeded, or
+            while a revalidation window is open, until the bound is spent.
         """
+        if self.enablement.skip_to_close_suppressions >= MAX_SKIP_TO_CLOSE_SUPPRESSIONS:
+            return False
         phase = (self.phase or "").strip().upper()
         return (
             phase in ("PRELUDE", "FRAMEWORK_AGENT")
@@ -3737,81 +3768,104 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct
 
-    # Time-budget helpers (consumed by Coordinator._compose_prompt)
+    # Session budget: elapsed is summed forward across legs.
+    def begin_leg(self, *, now_unix: float | None = None) -> None:
+        """Open a run leg: start charging elapsed time from this instant.
+
+        A leg is one process's turn at the session. Time between legs is not
+        charged; every second inside one is, folded into
+        :attr:`elapsed_charged_sec` by :meth:`charge_elapsed`. How the previous
+        leg ended is deliberately not consulted, so no leg can begin by handing
+        itself a fresh budget.
+
+        Args:
+            now_unix: Wall instant the leg starts; defaults to ``time.time()``.
+        """
+        self.leg_anchor_unix = float(time.time() if now_unix is None else now_unix)
+
+    def charge_elapsed(self, *, now_unix: float | None = None) -> float:
+        """Fold the time since the last charge into the session's elapsed total.
+
+        Called on every state save. A no-op until :meth:`begin_leg` opens a
+        leg, so reading and re-saving a state bills the session nothing.
+
+        Args:
+            now_unix: Wall instant to charge up to; defaults to ``time.time()``.
+
+        Returns:
+            float: The new :attr:`elapsed_charged_sec`.
+        """
+        anchor = self.leg_anchor_unix
+        if anchor <= 0.0:
+            return self.elapsed_charged_sec
+        now = float(time.time() if now_unix is None else now_unix)
+        self.elapsed_charged_sec += max(0.0, now - anchor)
+        self.leg_anchor_unix = now
+        return self.elapsed_charged_sec
+
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:
-        """Wall-clock minutes since ``start_ts`` (0.0 when empty/unparseable).
+        """Minutes of budget this session has consumed, summed over every leg.
+
+        The charged total plus whatever the live leg has run since the last
+        charge.
 
         Args:
             now (datetime | None): Reference time; defaults to the current UTC
                 time.
 
         Returns:
-            float: Minutes elapsed since ``start_ts`` (clamped at 0.0; 0.0
-                when ``start_ts`` is empty or unparseable).
+            float: Minutes consumed; never negative.
         """
-        if not self.start_ts:
-            return 0.0
-        try:
-            start = datetime.fromisoformat(self.start_ts)
-        except ValueError:
-            return 0.0
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
+        charged = max(0.0, self.elapsed_charged_sec)
+        anchor = self.leg_anchor_unix
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
-        delta = (now_dt - start).total_seconds() / 60.0
-        return max(0.0, delta)
+        if anchor > 0.0:
+            return (charged + max(0.0, now_dt.timestamp() - anchor)) / 60.0
+        if charged > 0.0:
+            return charged / 60.0
+        started = to_unix(self.start_ts.strip())
+        if started is None:
+            return 0.0
+        return max(0.0, now_dt.timestamp() - started) / 60.0
 
-    def stamp_deadline_unix(
-        self,
-        *,
-        now_unix: float | None = None,
-        budget_minutes: float | None = None,
-    ) -> float:
-        """Persist the absolute session deadline if a bounded session has none.
+    def extend_budget_minutes(self, minutes: float, *, reason: str = "") -> float:
+        """Grant more wall-clock budget to this session, on the record.
 
-        A resume must not reissue a full ``max_minutes`` from the moment
-        ``Coordinator.run`` is entered. The first stamp — ``start_ts`` plus the
-        budget — is what every remaining-time check reads.
-
-        ``budget_minutes`` is the run() argument before it is stored as
-        ``int(max_minutes)``. Tests pass fractional minutes; truncating first
-        would make this a no-op and leave the loop with no persisted deadline.
+        The grant raises :attr:`max_minutes` and is appended to
+        :attr:`budget_extensions`; elapsed time is untouched.
 
         Args:
-            now_unix: Clock used only when ``start_ts`` cannot be parsed;
-                defaults to ``time.time()``.
-            budget_minutes: Minutes to add to ``start_ts``; ``None`` uses
-                :attr:`max_minutes`.
+            minutes: Minutes to add; non-positive is a no-op.
+            reason: Operator's stated reason, recorded with the grant.
 
         Returns:
-            The unix deadline, or ``0.0`` when the session is unbounded.
+            float: The session's budget in minutes after the grant; ``0.0``
+                when the session is unbounded and nothing was granted.
         """
-        minutes = float(self.max_minutes or 0) if budget_minutes is None else float(budget_minutes)
-        existing = float(self.deadline_unix or 0.0)
-        if minutes <= 0:
-            # A truncated stored budget must not erase a stamp this process or
-            # an earlier one already wrote.
-            if existing > 0.0:
-                return existing
-            self.deadline_unix = 0.0
+        added = float(minutes)
+        if added <= 0.0:
+            return float(self.max_minutes)
+        if not self.max_minutes:
+            # Granting an unbounded session a budget would bound it.
             return 0.0
-        if existing > 0.0:
-            return existing
-        start = to_unix(self.start_ts, None)
-        origin = float(start) if start else float(now_unix if now_unix is not None else time.time())
-        self.deadline_unix = origin + minutes * 60.0
-        return self.deadline_unix
+        self.max_minutes = int(float(self.max_minutes) + added)
+        self.budget_extensions.append(
+            {
+                "granted_unix": float(time.time()),
+                "minutes": added,
+                "max_minutes_after": int(self.max_minutes),
+                "reason": reason,
+            }
+        )
+        return float(self.max_minutes)
 
     def remaining_minutes(self, *, now: datetime | None = None) -> float | None:
         """Minutes left in the wall-clock budget; ``None`` when unbounded, else clamped at 0.
 
-        When :attr:`deadline_unix` is stamped, remaining time is derived from
-        it so the Coordinator loop, admission, and the grid cannot disagree —
-        including when the persisted ``max_minutes`` was truncated to 0.
-        Otherwise this falls back to ``max_minutes - elapsed`` so tests that
-        inject elapsed without a stamp keep working.
+        :meth:`session_deadline` keeps the sign, for a caller that must tell
+        "just expired" from "expired an hour ago".
 
         Args:
             now (datetime | None): Reference time; defaults to the current UTC
@@ -3821,29 +3875,27 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             float | None: Minutes remaining in the budget (clamped at 0.0), or
                 ``None`` when the session is unbounded.
         """
-        deadline = float(self.deadline_unix or 0.0)
-        if deadline > 0.0:
-            now_dt = now or datetime.now(timezone.utc)
-            if now_dt.tzinfo is None:
-                now_dt = now_dt.replace(tzinfo=timezone.utc)
-            return max(0.0, (deadline - now_dt.timestamp()) / 60.0)
         if not self.max_minutes:
             return None
         return max(0.0, float(self.max_minutes) - self.elapsed_minutes(now=now))
 
-    def monotonic_session_deadline_sec(self) -> float | None:
-        """``time.monotonic()`` instant the session budget is spent, or ``None`` if unbounded.
+    def session_deadline(self, *, now: datetime | None = None) -> Deadline | None:
+        """The absolute instant this session's budget runs out.
 
-        Converts the persisted unix deadline into the clock the Coordinator
-        loop already consults, so a resume cannot pick a fresh full budget.
+        ``None`` means unbounded, and only that: an exhausted session returns a
+        :class:`Deadline` already in the past.
+
+        Args:
+            now (datetime | None): Reference time for the elapsed sum; defaults
+                to the current UTC time.
 
         Returns:
-            A monotonic deadline, or ``None`` when ``max_minutes`` is unset.
+            Deadline | None: The stop instant, or ``None`` when unbounded.
         """
-        remaining = self.remaining_minutes()
-        if remaining is None:
+        if not self.max_minutes:
             return None
-        return time.monotonic() + remaining * 60.0
+        spent_min = self.elapsed_minutes(now=now)
+        return Deadline.after((float(self.max_minutes) - spent_min) * 60.0)
 
     def record_teardown_timing(self, step: str, elapsed_sec: float) -> None:
         """Record one post-deadline teardown step's duration.

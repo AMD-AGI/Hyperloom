@@ -784,7 +784,7 @@ class KernelPhase(PhaseHandler):
         deadline = self._run_deadline
         if deadline is None:
             return env_default_timeout, env_default_timeout + 600, False
-        remaining = deadline - time.monotonic()
+        remaining = deadline.remaining()
         grace = self.shared_state.closing_reserve_sec()
         margin = float(os.environ.get("GEAK_BUDGET_MARGIN_S", "300"))
         # Reserve the closing window: kill the subprocess with at least ``grace`` left.

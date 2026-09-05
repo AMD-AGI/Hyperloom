@@ -36,7 +36,7 @@ def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())
 
 
-# -- WS1: explicit specialist wall-clock budget ----------------------------
+# -- The specialist wall-clock deadline ------------------------------------
 def test_specialist_wall_budget_base_no_macro_cycle(coord: Coordinator) -> None:
     # macro_cycle == 0 → base lane values (cpu 10min / gpu 60min).
     coord.shared_state.macro_cycle = 0
@@ -68,22 +68,40 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
     )
 
     assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
-    assert coord._gpu_lease_ttl_sec(params=params) == int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
+    assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
 
 
-def test_specialist_budget_does_not_outlast_session(coord: Coordinator, monkeypatch) -> None:
-    """A profile floor cannot extend a finite session's wall-clock budget."""
-    monkeypatch.setattr(coord.shared_state, "remaining_minutes", lambda: 30.0)
+def test_specialist_deadline_does_not_outlast_the_session(coord: Coordinator) -> None:
+    """A profile floor cannot extend a finite session past its own budget."""
+    coord.shared_state.max_minutes = 30
+    coord.shared_state.begin_leg()
 
-    budget = coord._specialist_wall_budget_sec(
+    deadline = coord._specialist_deadline(
         needs_gpu=True,
         params={"scope": "domain", "mode": "patch", "bench": True},
     )
 
-    assert budget == 30 * 60
+    assert deadline.remaining() == pytest.approx(30 * 60, abs=2)
 
 
-# -- WS2: GPU lease TTL re-source + structured-finally release --------------
+def test_a_spent_session_yields_an_expired_specialist_deadline(coord: Coordinator) -> None:
+    """An exhausted budget must tighten the specialist bound, never remove it."""
+    import time as _time
+
+    coord.shared_state.max_minutes = 30
+    coord.shared_state.begin_leg(now_unix=_time.time() - 3_600.0)
+
+    ample = coord._specialist_deadline(needs_gpu=True)
+    coord.shared_state.max_minutes = 240
+    coord.shared_state.begin_leg()
+    fresh = coord._specialist_deadline(needs_gpu=True)
+
+    assert ample.expired()
+    assert not fresh.expired()
+    assert ample.remaining() < fresh.remaining()
+
+
+# -- GPU lease TTL re-source + structured-finally release -------------------
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     # TTL = wall_budget × (1 + grace); lease must outlive the kill.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
@@ -93,6 +111,7 @@ def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     ttl = int(budget * (1.0 + GPU_LEASE_TTL_GRACE))
     assert ttl == int(3600 * 1.1)
     assert ttl >= budget
+    assert coord._gpu_lease_ttl_sec() == pytest.approx(ttl, abs=2)
 
 
 def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> None:

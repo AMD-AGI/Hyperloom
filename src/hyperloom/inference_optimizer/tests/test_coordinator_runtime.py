@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+
 from hyperloom.orchestrator.actions.executors import (
     _multi_node_server_lifecycle,
     report_executor,
@@ -1372,7 +1373,6 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
         # it must not hold the baseline_failed budget open.
         c.shared_state.enablement_mode = "off"
         c.shared_state.enablement.attempts = 2
-        c.shared_state.enablement.inflight_task_id = "spec-off"
         for i in range(3):
             await c._handle_unpromotable_result(
                 _mk_task("baseline", f"t-off-{i}"),
@@ -1430,8 +1430,22 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
         await c.stop()
 
 
+async def _charged(coordinator) -> int:
+    """Return how many observations the session has charged to the round ledger.
+
+    Args:
+        coordinator: The Coordinator whose round store holds the ledger.
+
+    Returns:
+        int: Observations recorded so far.
+    """
+    from hyperloom.orchestrator.bringup.budget import session_budget
+
+    return (await session_budget(coordinator.rounds)).observations
+
+
 @pytest.mark.asyncio
-async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
+async def test_promote_baseline_sub_floor_accuracy_charges_an_observation(session_dir):
     """Tracked revalidation baseline with sub-floor accuracy should rearm, not succeed."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1449,14 +1463,14 @@ async def test_promote_baseline_sub_floor_accuracy_rearmes_stall(session_dir):
         assert c.shared_state.baseline_tput == 1000.0
         assert c.shared_state.enablement.succeeded is False
         assert c.shared_state.enablement.validation_pending is False
-        assert c.shared_state.enablement.stall_streak == 1
+        assert await _charged(c) == 1
         assert c.shared_state.enablement.revalidation_task_id == ""
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
-async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir, monkeypatch):
+async def test_persist_eval_failure_clears_pending_and_charges_an_observation(session_dir, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1465,7 +1479,7 @@ async def test_persist_eval_failure_clears_pending_and_counts_stall(session_dir,
         c.shared_state.enablement.revalidation_task_id = "t-reval-fail"
         await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
         assert c.shared_state.enablement.validation_pending is False
-        assert c.shared_state.enablement.stall_streak == 1
+        assert await _charged(c) == 1
     finally:
         await c.stop()
 
@@ -1552,7 +1566,7 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
 
 @pytest.mark.asyncio
 async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir, monkeypatch):
-    """Any revalidation failure (including plain boot failures) clears pending and increments stall."""
+    """Any revalidation failure (including plain boot failures) clears pending and charges the ledger."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1566,7 +1580,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
             {"status": "failed", "error_class": "oom"},
         )
         assert c.shared_state.enablement.validation_pending is False
-        assert c.shared_state.enablement.stall_streak == 1
+        assert await _charged(c) == 1
         assert c.shared_state.enablement.revalidation_task_id == ""
         # Frozen trigger identity must be preserved.
         assert c.shared_state.enablement.eval_contract_fingerprint == "frozen-fp"
@@ -1577,7 +1591,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
-async def test_a_revalidation_the_run_stopped_does_not_burn_the_stall_streak(
+async def test_a_revalidation_the_run_stopped_charges_no_observation(
     session_dir,
     monkeypatch,
     error_class,
@@ -1586,9 +1600,9 @@ async def test_a_revalidation_the_run_stopped_does_not_burn_the_stall_streak(
 
     A reaped revalidation baseline is exempted from the baseline failure streak
     because nothing about the baseline was measured. Charging it to the
-    enablement stall streak reaches the cap on the evidence of a clock, and the
-    session's terminal reason becomes ``enablement_stalled`` for rounds nobody
-    ever ran.
+    enablement progress budget spends that budget on the evidence of a clock,
+    and the session's terminal reason becomes ``enablement_stalled`` for rounds
+    nobody ever ran.
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -1597,12 +1611,11 @@ async def test_a_revalidation_the_run_stopped_does_not_burn_the_stall_streak(
         st = c.shared_state
         st.enablement.validation_pending = True
         st.enablement.revalidation_task_id = "t-reval-stopped"
-        st.enablement.stall_streak = 4
         await c._handle_unpromotable_result(
             _mk_task("baseline", "t-reval-stopped"),
             {"status": "failed", "error_class": error_class, "error": "reaped"},
         )
-        assert st.enablement.stall_streak == 4
+        assert await _charged(c) == 0
         assert st.stop_reason in ("", None)
         assert st.baseline_failure_streak == 0
     finally:
@@ -1634,7 +1647,8 @@ async def test_a_reaped_revalidation_leaves_the_window_open_for_a_resume(session
         assert st.enablement.validation_pending is True
         assert st.enablement.revalidation_task_id == ""
         assert st.enablement.revalidation_generation == 3
-        assert st.enablement.inflight_task_id == ""
+        # The round the run stopped is given up, not left holding the machine.
+        assert await c.rounds.held() is None
     finally:
         await c.stop()
 
@@ -1713,11 +1727,11 @@ async def test_resume_does_not_charge_a_revalidation_the_run_cancelled(
 ):
     """The exemption the reap grants must not be charged back by the resume.
 
-    The reap path leaves the window open without charging the stall streak,
+    The reap path leaves the window open without charging an observation,
     because a round the run stopped measured nothing. The resume-time recovery saw
-    only "tracked row is terminal" and closed the window with the increment the
-    reap went out of its way to avoid -- reaching the ``enablement_stalled`` cap on
-    the evidence of a clock, one resume later.
+    only "tracked row is terminal" and closed the window with the charge the
+    reap went out of its way to avoid -- spending the progress budget on the
+    evidence of a clock, one resume later.
     """
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -1727,12 +1741,11 @@ async def test_resume_does_not_charge_a_revalidation_the_run_cancelled(
         st.enablement.validation_pending = True
         st.enablement.revalidation_task_id = cancelled.task_id
         st.enablement.revalidation_generation = 3
-        st.enablement.stall_streak = 4
 
         report: dict[str, Any] = {"fixes": []}
         await c.writeback._resume_recover_pending_revalidation(report)
 
-        assert st.enablement.stall_streak == 4
+        assert await _charged(c) == 0
         assert st.stop_reason in ("", None)
         # And the window is left usable rather than merely uncharged.
         assert st.enablement.validation_pending is True
@@ -1759,14 +1772,13 @@ async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(ses
         await c.tasks.transition(task.task_id, "succeeded")
         st.enablement.validation_pending = True
         st.enablement.revalidation_task_id = task.task_id
-        st.enablement.stall_streak = 1
 
         report: dict[str, Any] = {"fixes": []}
         await c.writeback._resume_recover_pending_revalidation(report)
 
         assert st.enablement.validation_pending is False
         assert st.enablement.revalidation_task_id == ""
-        assert st.enablement.stall_streak == 2
+        assert await _charged(c) == 1
         assert [f["kind"] for f in report["fixes"]] == ["cleared_orphaned_revalidation_pending"]
     finally:
         await c.stop()

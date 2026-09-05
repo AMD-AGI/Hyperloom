@@ -568,11 +568,10 @@ class IntentRouter:
             )
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
             # A Critic-rejected ENABLEMENT integrate_patch never reaches the
-            # executor, so the normal integrate-result rearm never fires. Without
-            # this, the stall streak would never advance toward enablement_stalled.
-            # Treat the rejection as a no-progress round.
+            # executor, so the normal integrate-result rearm never fires and the
+            # round would charge nothing. Treat the rejection as its end.
             try:
-                self._coord._maybe_rearm_enablement(
+                await self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
             except Exception:  # noqa: BLE001 — accounting must never wedge the loop
@@ -715,7 +714,7 @@ class IntentRouter:
                         )
                     except Exception:  # noqa: BLE001 — fall back to registry ttl
                         log.exception(
-                            "WS2: failed to re-source gpu_research_lane TTL; using registry default",
+                            "failed to re-source gpu_research_lane TTL; using registry default",
                         )
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind=action_name,
@@ -1284,6 +1283,7 @@ class IntentRouter:
         # Pre-enablement close guard: drop a premature ``skip_to_close`` while
         # the model is not yet runnable and let the enablement loop continue.
         if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
+            self.shared_state.enablement.skip_to_close_suppressions += 1
             log.info(
                 "escalate_strategy_change: dropping premature skip_to_close from %s "
                 "(pre-enablement: baseline not established; enablement loop still active)",
@@ -1298,6 +1298,7 @@ class IntentRouter:
                         "kind": "enablement_skip_to_close_suppressed",
                         "source": source,
                         "phase": (self.shared_state.phase or ""),
+                        "suppressions": self.shared_state.enablement.skip_to_close_suppressions,
                     },
                 )
             )

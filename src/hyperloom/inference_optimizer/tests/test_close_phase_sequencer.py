@@ -808,6 +808,83 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     assert "done" in steps
 
 
+class TestEveryTerminalReachesAWrittenReport:
+    """The close sequence must not depend on the phase machine advancing.
+
+    A run that cannot advance a phase -- because the machine has no next phase,
+    because the step raised, or because the deadline it would have advanced at
+    has already passed -- used to end with no report at all, since the sequencer
+    was reachable only as a side effect of entering CLOSE.
+    """
+
+    @staticmethod
+    def _coordinator(session_dir: Path) -> Coordinator:
+        """A coordinator whose roles say nothing, so only the loop drives it."""
+        session_dir.mkdir(exist_ok=True)
+        idle = ScriptedPlan(turns=[MockTurn(intents=[])])
+        return Coordinator(
+            session_dir=session_dir,
+            backends={name: MockBackend(idle) for name in ("orchestration", "critic", "robustness")},
+            role_registry=default_role_registry(),
+            recipe_kb=None,
+            knowledge_plane=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_never_advances_a_phase_still_closes(self, tmp_path: Path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+
+        async def _cannot_advance() -> None:
+            raise RuntimeError("the phase machine has no next phase")
+
+        monkeypatch.setattr(coord, "_advance_phase_if_needed", _cannot_advance)
+        try:
+            reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+        finally:
+            await coord.stop()
+
+        assert reason == "max_ticks"
+        assert coord.shared_state.close_sequence_done is True
+
+    @pytest.mark.asyncio
+    async def test_a_spent_session_closes_even_though_every_step_is_skipped(self, tmp_path: Path):
+        coord = self._coordinator(tmp_path / "session")
+        coord.shared_state.max_minutes = 60
+        coord.shared_state.elapsed_charged_sec = 120 * 60.0
+
+        try:
+            reason = await coord.run(max_minutes=60, closing_grace_sec=0.0, max_ticks=4)
+        finally:
+            await coord.stop()
+
+        assert reason == "time_exhausted"
+        assert coord.shared_state.close_sequence_done is True
+
+    @pytest.mark.asyncio
+    async def test_the_close_sequence_runs_once_and_not_again(self, tmp_path: Path):
+        coord = self._coordinator(tmp_path / "session")
+        coord.shared_state.record_phase_transition(
+            to_phase="CLOSE",
+            reason="sweep_done",
+            evidence={"trigger": "test"},
+        )
+        await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+        assert coord.shared_state.close_sequence_done is True
+
+        assert await coord.ensure_close_sequence(reason="terminal") is False
+
+    @pytest.mark.asyncio
+    async def test_a_closing_phase_with_no_report_task_does_not_wait_on_one(self, tmp_path: Path):
+        coord = self._coordinator(tmp_path / "session")
+        coord.shared_state.closing_phase = True
+        coord.shared_state.closing_report_task_id = ""
+
+        # Absence is finished, not pending: waiting on a task nobody created is
+        # how a session sat in CLOSE until its grace ran out with no report.
+        assert await coord._closing_report_terminal() is True
+        await coord.stop()
+
+
 @pytest.mark.asyncio
 async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     tmp_path: Path,

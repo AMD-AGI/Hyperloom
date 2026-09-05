@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
@@ -41,6 +42,7 @@ from .domains import (
     normalize_dispatch_tags,
 )
 from .subprocess_ import (
+    UNBOUNDED_REAP_CAP_SEC,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     SpecialistSubprocessResult,
@@ -58,6 +60,26 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
+    """Read the dispatch deadline off a task context.
+
+    Args:
+        ctx: The specialist task context carrying dispatcher-supplied extras.
+
+    Returns:
+        Deadline | None: The dispatch deadline; ``None`` is the only spelling
+        of unbounded. A duration is never coerced into one, since re-anchoring
+        it here would move the bound.
+
+    Raises:
+        TypeError: When ``specialist_deadline`` is neither a Deadline nor None.
+    """
+    value = ctx.extra.get("specialist_deadline")
+    if value is None or isinstance(value, Deadline):
+        return value
+    raise TypeError(f"specialist_deadline must be a Deadline or None, got {type(value).__name__}")
 
 
 def resolve_specialist_max_turns(raw: Any, *, default: int) -> int:
@@ -566,7 +588,7 @@ class SpecialistRunner:
             notes.append(f"worktree_setup_failed:{worktree_err}")
         workspace_for_prompt = worktree or workspace
 
-        allocated_gpu_ids = tuple(int(g) for g in ((ctx.extra or {}).get("gpu_ids") or []))
+        allocated_gpu_ids = tuple(int(g) for g in (ctx.extra.get("gpu_ids") or []))
 
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
@@ -626,8 +648,11 @@ class SpecialistRunner:
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
-                # WS1 wall-clock budget so the specialist can self-throttle.
-                wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
+                # The same instant the reaper kills at, as a duration.
+                wall_budget_sec=seconds_until(
+                    _ctx_deadline(ctx),
+                    unbounded_cap=UNBOUNDED_REAP_CAP_SEC,
+                ),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
                 baseline_tput=float(params.get("baseline_tput") or 0.0),
                 current_tput=float(params.get("current_tput") or 0.0),
@@ -669,8 +694,7 @@ class SpecialistRunner:
         Returns ``(None, None)`` when unavailable.
         """
         try:
-            extra = getattr(ctx, "extra", None) or {}
-            ss = extra.get("shared_state")
+            ss = (ctx.extra if ctx is not None else {}).get("shared_state")
             if ss is None:
                 return None, None
             tick = ss.tick
@@ -1018,8 +1042,8 @@ class SpecialistRunner:
                 else:
                     tool_violations.append(intent.type.value)
 
-            # WS1 incremental checkpoint: rewrite the partial after every turn so
-            # a budget kill leaves the best-so-far result on disk.
+            # Rewrite the partial after every turn so a deadline kill leaves
+            # the best-so-far result on disk.
             if specialist_done_intent is not None:
                 self._write_specialist_done_partial(
                     workspace,
@@ -1108,11 +1132,8 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             status="subprocess_starting",
         )
-        # WS1: explicit wall-clock budget injected by the Coordinator; when
-        # present it overrides the legacy ``max_turns × per_turn`` ceiling.
-        wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
-        wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
-        # Ray-managed GPU execution (§12 T4): when the dispatcher acquired a
+        deadline = _ctx_deadline(ctx)
+        # Ray-managed GPU execution: when the dispatcher acquired a
         # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
         # so any GPU command lands within Ray's assigned devices. ``None`` keeps
         # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
@@ -1125,10 +1146,10 @@ class SpecialistRunner:
             user_prompt=prep.user_prompt,
             disallowed_tools=SPECIALIST_TOOL_DENYLIST,
             max_turns=prep.max_turns,
-            gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
-            wall_budget_sec=wall_budget_sec,
-            gpu_lease=(ctx.extra or {}).get("gpu_specialist_lease"),
-            progress_cb=(ctx.extra or {}).get("specialist_progress_cb"),
+            gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
+            deadline=deadline,
+            gpu_lease=ctx.extra.get("gpu_specialist_lease"),
+            progress_cb=ctx.extra.get("specialist_progress_cb"),
         )
         self._append_transcript(
             workspace,
@@ -1270,7 +1291,7 @@ class SpecialistRunner:
         gap = prep.gap
         workspace = prep.workspace
         notes = list(extra_notes)
-        gpu_ids = [int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])]
+        gpu_ids = [int(g) for g in (ctx.extra.get("gpu_ids") or [])]
 
         if specialist_done_payload is None:
             reason = backend_error or (
@@ -1505,13 +1526,13 @@ class SpecialistRunner:
         under the session directory.
 
         Args:
-            ctx: Runner context for the current dispatch.
+            ctx: Runner context for the current dispatch; an unset ``extra``
+                resolves against the session directory.
 
         Returns:
             The workspace path, or ``None`` if no session directory is set.
         """
-        extra = getattr(ctx, "extra", None) or {}
-        ws = extra.get("workspace")
+        ws = (ctx.extra or {}).get("workspace")
         if ws:
             p = Path(str(ws))
             p.mkdir(parents=True, exist_ok=True)

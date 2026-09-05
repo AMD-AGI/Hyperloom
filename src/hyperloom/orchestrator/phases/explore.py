@@ -1573,18 +1573,15 @@ class ExplorePhase(CoordinatorCollaborator):
                     integrate_params["framework_agent_candidate_id"] = fa_cand
                 if fa_batch:
                     integrate_params["framework_batch_id"] = fa_batch
-            # Propagate the enablement marker (+ optional launch probe) so
-            # integrate_patch applies the runnable_decision gate.
+            # Propagate the enablement marker so integrate_patch applies the
+            # runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
                 _forward_enablement_carriers(spec_params, integrate_params)
-                probe = str(spec_params.get("launch_probe") or "").strip()
-                if probe:
-                    integrate_params["launch_probe"] = probe
-                # Forward the pre-patch failure signature for the runnable gate.
-                before_sig = spec_params.get("enablement_before_signature")
-                if isinstance(before_sig, dict):
-                    integrate_params["enablement_before_signature"] = before_sig
+                # Forward the pre-patch boot observation for the runnable gate.
+                before_path = str(spec_params.get("enablement_before_observation_path") or "")
+                if before_path:
+                    integrate_params["enablement_before_observation_path"] = before_path
                 # Forward the stacked base patches for integrate_patch to re-apply.
                 base_patches = spec_params.get("enablement_base_patches")
                 if isinstance(base_patches, list) and base_patches:
@@ -1683,12 +1680,9 @@ class ExplorePhase(CoordinatorCollaborator):
             and not done_payload.get("artifacts_written")
         ):
             return
-        # Normally route only when there are config levers to test. For an
-        # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
-        # integrate_patch owns the enablement stall accounting, so an enablement
-        # round must reach it to bump ``enablement_stall_streak`` / clear
-        # ``enablement_stall_streak`` and eventually fire ``enablement_stalled``.
-        # Non-enablement config deliverables keep the strict "levers required" gate.
+        # Route only when there are config levers to test, except for an
+        # ENABLEMENT round, which always routes: a round that does not reach
+        # integrate_patch charges no observation against the progress budget.
         if not config_levers and not is_enablement:
             return
         sid = str(task.task_id or "").strip()
@@ -1737,18 +1731,15 @@ class ExplorePhase(CoordinatorCollaborator):
             integrate_params["framework_batch_id"] = fa_batch
         # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
         # config-lever-only enablement deliverable MUST still flow the enablement
-        # marker + setup_commands into integrate_patch, otherwise the result never
+        # marker + setup_commands into integrate_patch, or the result never
         # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
-        # the enablement stall streak is only advanced via _maybe_rearm_enablement.
+        # the round is never settled or charged.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)
-            probe = str(spec_params.get("launch_probe") or "").strip()
-            if probe:
-                integrate_params["launch_probe"] = probe
-            before_sig = spec_params.get("enablement_before_signature")
-            if isinstance(before_sig, dict):
-                integrate_params["enablement_before_signature"] = before_sig
+            before_path = str(spec_params.get("enablement_before_observation_path") or "")
+            if before_path:
+                integrate_params["enablement_before_observation_path"] = before_path
             base_patches = spec_params.get("enablement_base_patches")
             if isinstance(base_patches, list) and base_patches:
                 integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]

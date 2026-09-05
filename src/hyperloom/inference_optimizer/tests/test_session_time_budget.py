@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.common.deadline import Deadline
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -1370,7 +1371,7 @@ class TestATickCannotOutliveTheSessionBound:
 
     @pytest.mark.asyncio
     async def test_a_spent_bound_does_not_start_the_next_step(self, coord: Coordinator):
-        coord._run_deadline = time.monotonic() - 1.0
+        coord._run_deadline = Deadline.after(-1.0)
         started: list[bool] = []
 
         async def _must_not_run() -> None:
@@ -1391,8 +1392,8 @@ class TestATickCannotOutliveTheSessionBound:
 
     @pytest.mark.asyncio
     async def test_closing_uses_the_grace_bound_not_the_session_deadline(self, coord: Coordinator):
-        coord._run_deadline = time.monotonic() - 10.0
-        coord._closing_deadline = time.monotonic() + 60.0
+        coord._run_deadline = Deadline.after(-10.0)
+        coord._closing_deadline = Deadline.after(60.0)
         coord.shared_state.closing_phase = True
         started: list[bool] = []
 
@@ -1403,61 +1404,39 @@ class TestATickCannotOutliveTheSessionBound:
         assert started == [True]
 
 
-class TestThePersistedDeadlineIsTheLoopDeadline:
-    """Coordinator.run must not reissue a full max_minutes on a spent session.
+class TestTheSessionBudgetIsSummedForwardOverLegs:
+    """A leg gets what the session has left, never a fresh full budget.
 
-    The GPU CI e2e run is a smoke check, not a wall-clock assertion. This is
-    the in-process stand-in for #1146 item 5: a session whose deadline is
-    already in the past must stop as ``time_exhausted`` instead of running out
-    the remaining ticks against a freshly computed budget.
+    A leg that ends without recording why -- killed from outside, or lost with
+    its host -- must be charged exactly like one that stopped cleanly, or the
+    difference becomes a way to be granted the budget again.
     """
 
     @pytest.mark.asyncio
-    async def test_run_stamps_deadline_unix_from_start_ts(self, coord: Coordinator):
-        from hyperloom.common.coerce import to_unix
-
+    async def test_a_leg_charges_its_time_to_the_session(self, coord: Coordinator):
         try:
             await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
         finally:
             await coord.stop()
-        stamped = coord.shared_state.deadline_unix
-        start = to_unix(coord.shared_state.start_ts)
-        assert stamped == pytest.approx(start + 3600.0, abs=2.0)
+        assert coord.shared_state.leg_anchor_unix > 0.0
+        assert coord.shared_state.elapsed_charged_sec >= 0.0
+        assert coord.shared_state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
 
     @pytest.mark.asyncio
-    async def test_run_stamps_a_fractional_budget_before_int_truncation(self, coord: Coordinator):
-        from hyperloom.common.coerce import to_unix
-
-        try:
-            await coord.run(max_ticks=1, max_minutes=0.0001, closing_grace_sec=0.0)
-        finally:
-            await coord.stop()
-        start = to_unix(coord.shared_state.start_ts)
-        assert coord.shared_state.deadline_unix == pytest.approx(start + 0.006, abs=0.05)
-
-    @pytest.mark.asyncio
-    async def test_run_keeps_a_deadline_stamped_before_this_process(self, coord: Coordinator):
-        from datetime import datetime, timedelta, timezone
-
-        start = datetime.now(timezone.utc) - timedelta(hours=3)
-        original = start.timestamp() + 180 * 60.0
-        coord.shared_state.start_ts = start.isoformat()
+    async def test_a_second_leg_does_not_reissue_what_the_first_spent(self, coord: Coordinator):
         coord.shared_state.max_minutes = 180
-        coord.shared_state.deadline_unix = original
+        coord.shared_state.elapsed_charged_sec = 120 * 60.0
         try:
             await coord.run(max_ticks=1, max_minutes=180, closing_grace_sec=0.0)
         finally:
             await coord.stop()
-        assert coord.shared_state.deadline_unix == pytest.approx(original)
+        assert coord.shared_state.elapsed_charged_sec >= 120 * 60.0
+        assert coord.shared_state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
 
     @pytest.mark.asyncio
     async def test_a_spent_session_stops_instead_of_reissuing_the_budget(self, coord: Coordinator):
-        from datetime import datetime, timedelta, timezone
-
-        start = datetime.now(timezone.utc) - timedelta(hours=3)
-        coord.shared_state.start_ts = start.isoformat()
         coord.shared_state.max_minutes = 180
-        coord.shared_state.deadline_unix = start.timestamp() + 180 * 60.0
+        coord.shared_state.elapsed_charged_sec = 180 * 60.0
         started = time.monotonic()
         try:
             reason = await coord.run(

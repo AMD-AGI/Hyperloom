@@ -1038,15 +1038,21 @@ def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
 
 
 def _make_policy_gate(*, shared_state):
-    """Plain PolicyGate wired to the role registry + the test's SharedState double."""
+    """PolicyGate wired to the role registry, with a projection of the state double.
+
+    The resource rules read the projection, never the state, so the snapshot is
+    taken here -- which is where a coordinator tick would take it.
+    """
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
     from hyperloom.orchestrator.policy.gate import PolicyGate
+    from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
 
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=shared_state,
+        advisory=AdvisoryLedger(ResourceProjection.of(shared_state)),
     )
 
 
