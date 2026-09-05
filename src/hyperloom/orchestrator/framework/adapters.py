@@ -170,6 +170,20 @@ class BaseAdapter:
         """Return the argv that re-installs an editable checkout, or None."""
         return None
 
+    def argv_parser_source(self) -> str:
+        """Return Python source defining ``_build_parser()`` for this framework.
+
+        The source runs in the interpreter that will serve, so an argv is judged
+        by the installed parser that would actually reject it rather than by a
+        table of accepted spellings kept here.
+
+        Returns:
+            str: The function source, or ``""`` when this framework exposes no
+            parser the probe can reach -- which is an unavailable verdict, not
+            an accepting one.
+        """
+        return ""
+
     def source_import_root(self, framework_root: str) -> str:
         """Return the import root relative to a source snapshot's ``files/`` dir."""
         return ""
@@ -268,6 +282,22 @@ class VllmRocmAdapter(_VenvProvisionMixin):
     """vLLM ROCm adapter: wheel install from a host-allowlisted ROCm index only."""
 
     framework = "vllm"
+
+    def argv_parser_source(self) -> str:
+        """Return the source that builds vLLM's OpenAI-server parser.
+
+        The parser class moved packages between releases, so both spellings are
+        tried; a release answering to neither raises out of ``_build_parser``.
+        """
+        return (
+            "def _build_parser():\n"
+            "    from vllm.entrypoints.openai.cli_args import make_arg_parser\n"
+            "    try:\n"
+            "        from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
+            "    except ImportError:\n"
+            "        from vllm.utils import FlexibleArgumentParser\n"
+            "    return make_arg_parser(FlexibleArgumentParser())\n"
+        )
 
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""
@@ -375,6 +405,10 @@ class SglangAdapter(_VenvProvisionMixin):
             return ""
         root = Path(framework_root)
         return "python" if (root / "python" / "sglang").is_dir() else ""
+
+    def argv_parser_source(self) -> str:
+        """Return the source that builds sglang's ``launch_server`` parser."""
+        return "def _build_parser():\n    from sglang.launch_server import parser\n    return parser\n"
 
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""
@@ -485,6 +519,17 @@ class AtomAdapter(BaseAdapter):
     """Atom adapter: no runtime acquisition, but Python localization."""
 
     framework = "atom"
+
+    def argv_parser_source(self) -> str:
+        """Return the source that builds atom's engine-args parser."""
+        return (
+            "def _build_parser():\n"
+            "    import argparse\n"
+            "    from atom.model_engine.arg_utils import EngineArgs\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    EngineArgs.add_cli_args(parser)\n"
+            "    return parser\n"
+        )
 
     def build_localization_action(
         self,
