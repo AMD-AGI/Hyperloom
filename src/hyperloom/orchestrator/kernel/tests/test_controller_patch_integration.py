@@ -1047,3 +1047,87 @@ async def test_a_run_that_admitted_nothing_does_not_report_as_completed(tmp_path
     assert summary.status == "no_patch_admitted"
     assert summary.kept_count == 0
     assert summary.skipped_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_repo_root_git_cannot_read_is_skipped_not_applied(tmp_path: Path) -> None:
+    """An unreadable HEAD leaves no baseline, so nothing can be measured against it."""
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    (plain / "first.py").write_text("VALUE = 1\n", encoding="utf-8")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        plain,
+        "a" * 40,
+        kernel_name="target",
+        kernel_path="first.py",
+        patch="--- a/first.py\n+++ b/first.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n",
+    )
+
+    async def _validate(_publication):
+        raise AssertionError("a repository without a HEAD must never reach validation")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, plain),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 0
+    assert summary.results[0].status == "skipped_baseline_mismatch"
+    assert "could not read integration Git HEAD" in summary.results[0].reason
+    assert (plain / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def _patch_only_adding_a_file(repo: Path, created: str) -> str:
+    """A diff that introduces a new file and touches nothing HEAD already has."""
+    (repo / created).write_text("HELPER = True\n", encoding="utf-8")
+    _git(repo, "add", "-N", created)
+    patch = _git(repo, "diff", "--binary", "--", created)
+    _git(repo, "rm", "--quiet", "--cached", "--force", created)
+    (repo / created).unlink()
+    return patch + "\n"
+
+
+@pytest.mark.asyncio
+async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -> None:
+    """When the patch only adds files, HEAD holds no version to restore them to.
+
+    A reverse apply refuses a file whose content has moved on, and a file HEAD
+    never knew cannot be checked out from it. The revert then genuinely cannot
+    finish, and the run has to say so rather than report a clean rejection.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="target",
+        kernel_path="first.py",
+        patch=_patch_only_adding_a_file(repo, "helper.py"),
+    )
+
+    async def _validate(_publication):
+        # Stand-in for anything that rewrites the tree during validation: the
+        # added file no longer matches the diff, so it cannot be reverse applied.
+        (repo / "helper.py").write_text("HELPER = False\n", encoding="utf-8")
+        return {"decision": "REJECT", "new_tput": 90.0, "gain_pct": -10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 0
+    assert summary.results[0].status == "reverted_e2e_failed"
+    assert "revert failed" in summary.results[0].reason
+    assert _git(repo, "rev-parse", "HEAD").lower() == base

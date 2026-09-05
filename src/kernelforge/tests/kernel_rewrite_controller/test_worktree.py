@@ -53,7 +53,7 @@ def _source_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _task(tmp_path: Path, repo: Path, base_commit: str):
+def _task_payload(tmp_path: Path, repo: Path, base_commit: str):
     identity_mapping = {
         "producer": "forge-loop",
         "kernel_name": "fused_moe",
@@ -81,6 +81,11 @@ def _task(tmp_path: Path, repo: Path, base_commit: str):
         "reason": "",
         "evidence": [],
     }
+    return payload, task_dir
+
+
+def _task(tmp_path: Path, repo: Path, base_commit: str):
+    payload, task_dir = _task_payload(tmp_path, repo, base_commit)
     return parse_task_payload(payload, task_dir=task_dir), task_dir
 
 
@@ -173,4 +178,63 @@ def test_missing_kernel_at_base_removes_partial_worktree(tmp_path: Path) -> None
     with pytest.raises(WorktreeError, match="kernel path is not a file"):
         create_operator_worktree(task, layout)
 
+    assert not layout.workspace_dir(task.operator_id).exists()
+
+
+def test_a_repo_root_that_is_not_a_git_checkout_is_refused(tmp_path: Path) -> None:
+    """A worktree can only be cut from a repository."""
+    plain = tmp_path / "not-a-repo"
+    (plain / "sglang" / "kernels").mkdir(parents=True)
+    (plain / "sglang" / "kernels" / "fused_moe.py").write_text("VALUE = 1\n", encoding="utf-8")
+    task, _ = _task(tmp_path, plain, "a" * 40)
+    layout = ControllerLayout(tmp_path / "output")
+
+    with pytest.raises(WorktreeError, match="not a Git checkout"):
+        create_operator_worktree(task, layout)
+
+
+def test_a_repo_root_below_the_top_level_is_refused(tmp_path: Path) -> None:
+    """A subdirectory would pin the base to the wrong tree's HEAD."""
+    repo, base_commit = _source_repo(tmp_path)
+    task, _ = _task(tmp_path, repo / "sglang", base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    with pytest.raises(WorktreeError, match="must be the Git top-level directory"):
+        create_operator_worktree(task, layout)
+
+
+def test_a_base_commit_the_repository_does_not_have_is_refused(tmp_path: Path) -> None:
+    """The pin has to name a commit, or every patch is cut against nothing."""
+    repo, _base_commit = _source_repo(tmp_path)
+    task, _ = _task(tmp_path, repo, "b" * 40)
+    layout = ControllerLayout(tmp_path / "output")
+
+    with pytest.raises(WorktreeError, match="base commit does not exist"):
+        create_operator_worktree(task, layout)
+
+
+def test_an_existing_workspace_is_refused_rather_than_resumed(tmp_path: Path) -> None:
+    """Reusing a workspace would measure against a tree of unknown provenance."""
+    repo, base_commit = _source_repo(tmp_path)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    squatter = layout.workspace_dir(task.operator_id)
+    squatter.mkdir(parents=True)
+
+    with pytest.raises(WorktreeError, match="cannot be resumed"):
+        create_operator_worktree(task, layout)
+
+
+def test_a_source_file_absent_from_the_base_commit_is_refused(tmp_path: Path) -> None:
+    """A source file the base does not carry cannot be what forge-loop edits."""
+    repo, base_commit = _source_repo(tmp_path)
+    payload, task_dir = _task_payload(tmp_path, repo, base_commit)
+    task = parse_task_payload(
+        {**payload, "source_files": ["sglang/kernels/fused_moe.py", "sglang/kernels/absent.py"]},
+        task_dir=task_dir,
+    )
+    layout = ControllerLayout(tmp_path / "output")
+
+    with pytest.raises(WorktreeError, match="source file is not a file in the base commit"):
+        create_operator_worktree(task, layout)
     assert not layout.workspace_dir(task.operator_id).exists()
