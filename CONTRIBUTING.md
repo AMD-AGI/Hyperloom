@@ -6,7 +6,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 - Create a feature branch off `main`.
 - Keep changes focused and include context in the PR description (problem, approach, test coverage).
 - Ensure merge requirements and applicable GitHub checks pass before requesting review (see [CI and documentation-only changes](#ci-and-documentation-only-changes)).
-- Avoid committing generated artifacts; keep diffs minimal.
+- Avoid committing generated artifacts.
 
 ## Proposing a new framework or platform
 
