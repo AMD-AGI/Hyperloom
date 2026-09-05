@@ -9,12 +9,22 @@ param builder, and the one-shot ``_maybe_enqueue_enablement_specialist`` gate.
 
 from __future__ import annotations
 
+import json
+import tempfile
+import time
 import types
+from pathlib import Path
 
 import pytest
 
+from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.bringup import observation_summary
+from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.state.round_store import RoundStore
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, create_in_cursor
 
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
@@ -122,6 +132,7 @@ def test_enablement_discovery_honors_pr_monitor_gate(
 def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
+    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["domain"] == "enablement_specialist"
@@ -130,7 +141,9 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True
     assert params["enablement_failure_kind"] == "missing_model_arch"
-    assert params["enablement_before_signature"]["kind"] == "missing_model_arch"
+    # The pre-patch half of the gate travels as the persisted observation's
+    # path, never as a re-classifiable blob of text.
+    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
     # Mandate body is rendered by _section_enablement_playbook; notes only carries per-dispatch context.
     assert params.get("notes", "") == ""  # fresh attempt with no stacked patches or build failure
     # Boot-origin: no eval carriers.
@@ -232,39 +245,58 @@ def test_build_params_none_for_blank_log():
 # ---- _maybe_enqueue_enablement_specialist (one-shot gate) ----
 
 
-class _FakeTasks:
-    def __init__(self, queued=None, running=None):
-        self.created = []
-        self._queued = list(queued or [])
-        self._running = list(running or [])
+def _scratch_db() -> SqliteConnection:
+    """A real session database, so an acquire and its task row share one."""
+    db = SqliteConnection(Path(tempfile.mkdtemp(prefix="enablement-wiring-")) / "coordinator.db")
+    ensure_schema(db.raw)
+    return db
 
-    async def create_or_return_existing(self, **kwargs):
-        self.created.append(kwargs)
-        task = types.SimpleNamespace(task_id=f"spec-{len(self.created)}", state="queued")
-        return task, False
 
-    async def get(self, task_id: str):
-        from hyperloom.orchestrator.state.task_registry import TaskNotFound
+async def _seed_task(fake, task_id: str, *, kind: str, state: str = "queued", params: dict | None = None):
+    """Put a real registry row in the state a case needs, under a chosen id."""
+    async with fake.db.transaction() as cur:
+        create_in_cursor(
+            cur,
+            kind=kind,
+            params=params or {},
+            idempotency_key=f"seed:{task_id}",
+            task_id=task_id,
+        )
+    if state != "queued":
+        if state != "running":
+            await fake.tasks.transition(task_id, "running")
+        await fake.tasks.transition(task_id, state)
 
-        for t in self._running:
-            if getattr(t, "task_id", None) == task_id:
-                return types.SimpleNamespace(task_id=task_id, state="running")
-        for t in self._queued:
-            if getattr(t, "task_id", None) == task_id:
-                return types.SimpleNamespace(task_id=task_id, state="queued")
-        raise TaskNotFound(task_id)
 
-    async def queued(self):
-        return list(self._queued)
+async def _hold_round(fake, holder: str, *, holder_state: str = ""):
+    """Open a real round held by ``holder``, the way a dispatch would.
 
-    async def running(self):
-        return list(self._running)
+    ``holder_state`` empty leaves the holder with no registry row at all, which
+    is the shape a round has once its specialist is gone.
+    """
+    if holder_state:
+        await _seed_task(fake, holder, kind="specialist", state=holder_state)
+    acquired = await fake.rounds.open(
+        f"enablement-{holder}",
+        holder_task_id=holder,
+        lease_sec=3600.0,
+        now_unix=time.time(),
+        request_id=f"seed:{holder}",
+    )
+    assert acquired.ok, acquired.reason
+
+
+async def _queued_of_kind(fake, kind: str) -> list:
+    """Every queued row of ``kind``, oldest first."""
+    rows = [t for t in await fake.tasks.queued() if t.kind == kind and not t.idempotency_key.startswith("seed:")]
+    return sorted(rows, key=lambda t: (t.created_at, t.task_id))
 
 
 def _enqueue_self(**state_kw):
     state = types.SimpleNamespace(
         framework=state_kw.get("framework", "sglang"),
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
+        model_path=state_kw.get("model_path", ""),
         gpu_type=state_kw.get("gpu_type", "mi300x"),
         # Admission is exercised separately; these cases target the dispatch machinery.
         enablement_mode=state_kw.get("enablement_mode", "all"),
@@ -273,9 +305,7 @@ def _enqueue_self(**state_kw):
             attempts=state_kw.get("enablement_attempts", 0),
             human_review_logged=state_kw.get("enablement_human_review_logged", []),
             kept_patches=state_kw.get("enablement_kept_patches", []),
-            stall_streak=state_kw.get("enablement_stall_streak", 0),
             launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
-            inflight_task_id=state_kw.get("enablement_inflight_task_id", ""),
             origin=state_kw.get("enablement_origin", ""),
             validation_pending=state_kw.get("enablement_validation_pending", False),
             probe_config_path=state_kw.get("enablement_probe_config_path", ""),
@@ -304,9 +334,12 @@ def _enqueue_self(**state_kw):
     async def _record_obs(_source, _topic, payload):
         observations.append(payload)
 
+    db = _scratch_db()
     fake = types.SimpleNamespace(
         shared_state=state,
-        tasks=_FakeTasks(),
+        db=db,
+        tasks=TaskRegistry(db),
+        rounds=RoundStore(db),
         session_dir=state_kw.get("session_dir", "/tmp/session"),
         _run_deadline=state_kw.get("run_deadline", None),
         _warm_specialist_params=_warm,
@@ -335,16 +368,58 @@ def _enqueue_self(**state_kw):
         Coordinator._maybe_enqueue_enablement_baseline_revalidation, fake
     )
     fake._open_revalidation_row = types.MethodType(Coordinator._open_revalidation_row, fake)
-    fake._open_row_past_spent_generations = types.MethodType(Coordinator._open_row_past_spent_generations, fake)
+    fake._open_round_past_spent_generations = types.MethodType(Coordinator._open_round_past_spent_generations, fake)
     # Admission on the session wall-clock is exercised in test_coordinator_runtime
     # against a real coordinator; here nothing is ever denied for want of budget.
     fake._time_budget_denial_for_action = lambda _action: None
     from hyperloom.orchestrator.enablement.lane import EnablementLane
 
-    fake._enablement_in_flight = types.MethodType(EnablementLane._enablement_in_flight, fake)
+    for name in (
+        "_enablement_in_flight",
+        "_refused_argv_is_terminal",
+        "_environment_fault_is_terminal",
+        "_environment_verdict",
+        "_round_has_live_work",
+        "_open_authoring_round",
+        "_renew_enablement_round",
+        "_settle_enablement_round",
+        "_charge_round_observation",
+    ):
+        setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
     # _enablement_in_flight reads the coordinator's ephemeral pending_proposals.
     fake.state = types.SimpleNamespace(pending_proposals={})
     return fake
+
+
+async def _charged(fake):
+    """Return the progress budget the fake's round ledger currently supports."""
+    from hyperloom.orchestrator.bringup.budget import session_budget
+
+    return await session_budget(fake.rounds)
+
+
+def _observation_at(root: Path, name: str, stage: LadderStage, *, detail: str) -> str:
+    """Write a boot observation artifact and return its path.
+
+    Args:
+        root: Directory to write into.
+        name: File stem.
+        stage: The ladder stage the boot stopped at.
+        detail: Text that makes this wall's digest distinct from another's.
+
+    Returns:
+        str: The artifact path, as a rearm result would carry it.
+    """
+    observation = BootObservation(
+        producer="test",
+        stage_reached=stage,
+        stage_failed=stage,
+        terminal_frame=TerminalFrame(exc_type="RuntimeError", module="srt.model", file_rel="srt/model.py", line=7),
+        excerpt=Excerpt(text=detail, stream="server_log", byte_start=0, byte_end=len(detail)),
+    )
+    target = root / f"{name}.json"
+    target.write_text(json.dumps(observation_summary(observation)), encoding="utf-8")
+    return str(target)
 
 
 @pytest.mark.asyncio
@@ -355,13 +430,15 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self()
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    assert tid == "spec-1"
-    # In-flight guard set; attempt counter advanced for candidate rotation.
-    assert bool(fake.shared_state.enablement.inflight_task_id)
+    assert tid
+    # The round was acquired by the specialist itself, and both landed.
+    held = await fake.rounds.held()
+    assert held is not None and held.holder_task_id == tid
     assert fake.shared_state.enablement.attempts == 1
-    assert len(fake.tasks.created) == 1
-    assert fake.tasks.created[0]["params"]["enablement"] is True
-    assert fake.tasks.created[0]["params"]["enablement_attempt"] == 0
+    rows = await _queued_of_kind(fake, "specialist")
+    assert [r.task_id for r in rows] == [tid]
+    assert rows[0].params["enablement"] is True
+    assert rows[0].params["enablement_attempt"] == 0
 
 
 @pytest.mark.asyncio
@@ -386,7 +463,7 @@ async def test_enqueue_admission_follows_mode_and_origin(monkeypatch, mode, orig
     fake = _enqueue_self(enablement_mode=mode, enablement_origin=origin)
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert bool(tid) is dispatched
-    assert bool(fake.shared_state.enablement.inflight_task_id) is dispatched
+    assert (await fake.rounds.held() is not None) is dispatched
 
 
 @pytest.mark.asyncio
@@ -396,21 +473,20 @@ async def test_enqueue_noop_when_already_succeeded(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(enablement_succeeded=True)
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    assert len(fake.tasks.created) == 0
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 @pytest.mark.asyncio
 async def test_enqueue_noop_when_run_deadline_passed(monkeypatch):
-    import time as _time
-
+    from hyperloom.common.deadline import Deadline
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
     # Deadline already in the past -> no new enablement work is opened.
-    fake = _enqueue_self(run_deadline=_time.monotonic() - 1.0)
+    fake = _enqueue_self(run_deadline=Deadline.after(-1.0))
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    assert len(fake.tasks.created) == 0
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 @pytest.mark.asyncio
@@ -427,68 +503,96 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     fake = _enqueue_self()
     # First dispatch.
     tid1 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    assert tid1 == "spec-1"
+    assert tid1
     assert fake.shared_state.enablement.attempts == 1
-    first_idem = fake.tasks.created[0]["idempotency_key"]
+    first_idem = (await fake.tasks.get(tid1)).idempotency_key
 
-    # Simulate the authored patch being REVERTED -> re-arm clears in-flight.
-    fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert not fake.shared_state.enablement.inflight_task_id
+    # Simulate the authored patch being REVERTED -> the rearm settles the round.
+    await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    assert await fake.rounds.held() is None
     assert fake.shared_state.enablement.succeeded is False
 
     # Next tick re-dispatches with a new attempt index + distinct idempotency.
     tid2 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    assert tid2 == "spec-2"
+    assert tid2 and tid2 != tid1
     assert fake.shared_state.enablement.attempts == 2
-    second_idem = fake.tasks.created[1]["idempotency_key"]
-    assert first_idem != second_idem
-    assert fake.tasks.created[1]["params"]["enablement_attempt"] == 1
+    second = await fake.tasks.get(tid2)
+    assert first_idem != second.idempotency_key
+    assert second.params["enablement_attempt"] == 1
     # Retry mandate flags the prior revert.
-    assert "RETRY" in fake.tasks.created[1]["params"]["notes"]
+    assert "RETRY" in second.params["notes"]
 
 
 @pytest.mark.asyncio
-async def test_watchdog_rearms_silently_finished_round(monkeypatch):
-    """A round whose inflight_task_id maps to a terminal task counts as a stall
-    and clears the guard so a fresh round can dispatch."""
+async def test_the_lane_leaves_a_silently_finished_round_to_the_repair_pass(monkeypatch):
+    """The lane refuses to open a second round and repairs nothing.
+
+    Repairing here would put the repair back behind this method's admission
+    guards, which is where a stuck round keeps it from running.
+    """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
-    fake = _enqueue_self(
-        enablement_stall_streak=1,
-        enablement_inflight_task_id="spec-stuck",
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-stuck", holder_state="succeeded")
+
+    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+
+    assert (await fake.rounds.get("enablement-spec-stuck")).state == "open"
+    assert (await _charged(fake)).observations == 0
+
+
+@pytest.mark.asyncio
+async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monkeypatch):
+    """The round is charged and given up, so a fresh round can dispatch.
+
+    The round left no observation, which is the strongest case for stopping:
+    it spends an evidence-stall credit rather than costing nothing.
+    """
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-stuck", holder_state="succeeded")
+    reconciler = Reconciler(
+        rounds=fake.rounds,
+        tasks=fake.tasks,
+        locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db)),
+        shared_state=fake.shared_state,
+        proposals=lambda: fake.state.pending_proposals,
     )
 
-    async def _in_flight_false(self=fake):
-        return False
+    await reconciler.run(time.time() + 3600.0)
 
-    fake._enablement_in_flight = _in_flight_false
-    await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    # Stall streak should have advanced.
-    assert fake.shared_state.enablement.stall_streak == 2
+    settled = await fake.rounds.get("enablement-spec-stuck")
+    assert settled.state == "settled"
+    assert settled.outcome == "expired_reaped", "the holder's own row records the end of its work"
+    budget = await _charged(fake)
+    assert (budget.observations, budget.stall_spent) == (1, 1)
+    # The machine comes back, but only once the reap grace has run: a kill is
+    # confirmed before the kernel and the GPU allocator have finished with it.
+    assert settled.excludes_at(time.time() + 3600.0) is True
+    assert settled.excludes_at(time.time() + 7200.0) is False
 
 
 @pytest.mark.asyncio
 async def test_watchdog_does_not_fire_when_task_running(monkeypatch):
-    """When the inflight_task_id maps to a running task, the round is not
-    counted as a stall — the specialist is still working."""
+    """When the round's holder is still running, the round is not counted as a
+    stall — the specialist is still working."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
-    fake = _enqueue_self(
-        enablement_stall_streak=1,
-        enablement_inflight_task_id="spec-running",
-    )
-
-    async def _in_flight_true(self=fake):
-        return True
-
-    fake._enablement_in_flight = _in_flight_true
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-running", holder_state="running")
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    # Streak unchanged; still blocked on the running task.
-    assert fake.shared_state.enablement.stall_streak == 1
+    # Nothing charged; still blocked on the running task.
+    assert (await _charged(fake)).observations == 0
 
 
 def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
@@ -506,8 +610,9 @@ def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
 async def test_in_flight_defers_on_undecided_integrate_proposal():
     """The specialist goes terminal a tick before the Critic sees the integrate
     proposal; the round must still count as in flight."""
-    # No task rows, so the specialist lookup raises TaskNotFound (terminal).
-    fake = _enqueue_self(enablement_inflight_task_id="spec-done")
+    # No task row for the holder, so the lookup raises TaskNotFound (terminal).
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
     assert await fake._enablement_in_flight() is True
 
@@ -516,7 +621,8 @@ async def test_in_flight_defers_on_undecided_integrate_proposal():
 async def test_in_flight_ignores_decided_integrate_proposal():
     """Once the Critic has ruled, the proposal stops deferring so a dropped
     proposal cannot hold the round open forever."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-done")
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done", decided=True)
     assert await fake._enablement_in_flight() is False
 
@@ -524,58 +630,46 @@ async def test_in_flight_ignores_decided_integrate_proposal():
 @pytest.mark.asyncio
 async def test_in_flight_defers_on_queued_integrate_task():
     """An approved integrate_patch task for this specialist keeps the round open."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-done")
-    fake.tasks = _FakeTasks(
-        queued=[
-            types.SimpleNamespace(
-                task_id="ip-1",
-                kind="integrate_patch",
-                params={"specialist_task_id": "spec-done"},
-            )
-        ]
-    )
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-done")
+    await _seed_task(fake, "ip-1", kind="integrate_patch", params={"specialist_task_id": "spec-done"})
     assert await fake._enablement_in_flight() is True
 
 
 @pytest.mark.asyncio
 async def test_in_flight_ignores_integrate_task_for_other_specialist():
-    fake = _enqueue_self(enablement_inflight_task_id="spec-done")
-    fake.tasks = _FakeTasks(
-        queued=[
-            types.SimpleNamespace(
-                task_id="ip-1",
-                kind="integrate_patch",
-                params={"specialist_task_id": "spec-other"},
-            )
-        ]
-    )
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-done")
+    await _seed_task(fake, "ip-1", kind="integrate_patch", params={"specialist_task_id": "spec-other"})
     assert await fake._enablement_in_flight() is False
 
 
 @pytest.mark.asyncio
 async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
     """Regression: a terminal specialist with an unreviewed integrate proposal
-    must not bump the stall streak nor dispatch a second concurrent round."""
+    must not charge the progress budget nor dispatch a second concurrent round."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     _stub_enumerate(monkeypatch, [])
-    fake = _enqueue_self(
-        enablement_stall_streak=1,
-        enablement_inflight_task_id="spec-done",
-    )
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    assert fake.shared_state.enablement.stall_streak == 1
-    assert fake.shared_state.enablement.inflight_task_id == "spec-done"
-    assert fake.tasks.created == []
+    assert (await _charged(fake)).observations == 0
+    held = await fake.rounds.held()
+    assert held is not None and held.holder_task_id == "spec-done"
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 @pytest.mark.asyncio
 async def test_rearm_kept_is_terminal(monkeypatch):
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
-    fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-1")
+    await fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     assert fake.shared_state.enablement.succeeded is True
+    settled = await fake.rounds.get("enablement-spec-1")
+    assert settled is not None and settled.outcome == "booted"
     # A subsequent enqueue attempt is a no-op.
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -585,14 +679,14 @@ async def test_rearm_kept_is_terminal(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
-    fake = _enqueue_self(
-        enablement_inflight_task_id="spec-1", enablement_origin="eval", enablement_revalidation_generation=1
-    )
-    fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
+    fake = _enqueue_self(enablement_origin="eval", enablement_revalidation_generation=1)
+    await _hold_round(fake, "spec-1")
+    await fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
     # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
     assert fake.shared_state.enablement.validation_pending is True
     assert fake.shared_state.enablement.succeeded is False
-    assert not fake.shared_state.enablement.inflight_task_id
+    # The authoring round is over, so the revalidation can take the machine.
+    assert await fake.rounds.held() is None
     # Generation is incremented to get a fresh idempotency key.
     assert fake.shared_state.enablement.revalidation_generation == 2
     # Tracked task_id is cleared for the new window.
@@ -614,11 +708,14 @@ async def test_revalidation_enqueues_genuine_baseline():
     )
     tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
     assert tid
-    created = fake.tasks.created[-1]
-    assert created["kind"] == "baseline"
-    assert created["params"]["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created["params"]["disable_run_eval"] is False
-    assert created["params"]["enablement_origin"] == "eval"
+    # The revalidation is a bring-up, so it holds a round of its own.
+    held = await fake.rounds.held()
+    assert held is not None and held.holder_task_id == tid
+    created = await fake.tasks.get(tid)
+    assert created.kind == "baseline"
+    assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
+    assert created.params["disable_run_eval"] is False
+    assert created.params["enablement_origin"] == "eval"
 
 
 @pytest.mark.asyncio
@@ -633,8 +730,8 @@ async def test_revalidation_prefers_accepted_config_over_probe():
     )
     tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
     assert tid
-    created = fake.tasks.created[-1]
-    assert created["params"]["config_path"] == "/runs/specialist/accepted.yaml"
+    created = await fake.tasks.get(tid)
+    assert created.params["config_path"] == "/runs/specialist/accepted.yaml"
 
 
 @pytest.mark.asyncio
@@ -652,8 +749,8 @@ async def test_revalidation_carries_active_runtime():
     )
     tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
     assert tid
-    created = fake.tasks.created[-1]
-    rt_override = created["params"].get("runtime_override")
+    created = await fake.tasks.get(tid)
+    rt_override = created.params.get("runtime_override")
     assert isinstance(rt_override, dict) and rt_override
     assert rt_override.get("framework_bin") == "/attempt/bin"
 
@@ -667,28 +764,24 @@ async def test_revalidation_skips_when_already_tracked():
         enablement_revalidation_task_id="existing-spec-1",
     )
     # Put the tracked task in the running list so it appears alive.
-    import types as _types
-
-    fake.tasks = _FakeTasks(running=[_types.SimpleNamespace(kind="baseline", task_id="existing-spec-1")])
+    await _seed_task(fake, "existing-spec-1", kind="baseline", state="running")
     result = await fake._maybe_enqueue_enablement_baseline_revalidation()
     assert result == "existing-spec-1"
-    assert fake.tasks.created == []
+    assert await _queued_of_kind(fake, "baseline") == []
 
 
 @pytest.mark.asyncio
 async def test_revalidation_skips_when_tracked_task_in_flight():
     """Skip enqueue when the tracked revalidation task is still running."""
-    import types as _types
-
     fake = _enqueue_self(
         enablement_validation_pending=True,
         enablement_origin="eval",
         enablement_revalidation_task_id="reval-in-flight",
     )
-    fake.tasks = _FakeTasks(running=[_types.SimpleNamespace(kind="baseline", task_id="reval-in-flight")])
+    await _seed_task(fake, "reval-in-flight", kind="baseline", state="running")
     result = await fake._maybe_enqueue_enablement_baseline_revalidation()
     assert result == "reval-in-flight"
-    assert fake.tasks.created == []
+    assert await _queued_of_kind(fake, "baseline") == []
 
 
 @pytest.mark.asyncio
@@ -709,8 +802,8 @@ async def test_revalidation_forwards_accepted_config(accepted_config):
         enablement_accepted_config_path="/runs/specialist/accepted.yaml",
         enablement_accepted_config=accepted_config,
     )
-    await fake._maybe_enqueue_enablement_baseline_revalidation()
-    params = fake.tasks.created[-1]["params"]
+    tid = await fake._maybe_enqueue_enablement_baseline_revalidation()
+    params = (await fake.tasks.get(tid)).params
     for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
         assert params.get(key) == accepted_config.get(key), key
 
@@ -718,9 +811,10 @@ async def test_revalidation_forwards_accepted_config(accepted_config):
 @pytest.mark.asyncio
 async def test_rearm_kept_stores_accepted_config():
     """A KEEP's effective config is persisted on the round for the revalidation to replay."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval")
+    fake = _enqueue_self(enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
     effective = {"extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0"}, "args_mode": "append"}
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -737,13 +831,13 @@ async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     cfg = tmp_path / "runs" / "integrate_patch" / "t1" / "integrate_patch.with_envs.yaml"
     cfg.parent.mkdir(parents=True)
     cfg.write_text("tp: 8\n", encoding="utf-8")
-    fake = _enqueue_self(session_dir=tmp_path, enablement_inflight_task_id="spec-1")
+    fake = _enqueue_self(session_dir=tmp_path)
+    await _hold_round(fake, "spec-1")
     # Read by the setting-script write that shares the rearm's archive block.
-    fake.shared_state.model_path = "/models/M"
     fake.shared_state.reference_model = ""
     fake.shared_state.tp = 8
     fake.shared_state.max_model_len = 0
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -760,8 +854,9 @@ async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
 @pytest.mark.asyncio
 async def test_rearm_kept_holds_the_source_path_when_the_copy_does_not_land(tmp_path):
     """With no copy there is no archive path to record, so the live one stands."""
-    fake = _enqueue_self(session_dir=tmp_path, enablement_inflight_task_id="spec-1")
-    fake._maybe_rearm_enablement(
+    fake = _enqueue_self(session_dir=tmp_path)
+    await _hold_round(fake, "spec-1")
+    await fake._maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -776,9 +871,9 @@ async def test_rearm_kept_holds_the_source_path_when_the_copy_does_not_land(tmp_
 @pytest.mark.asyncio
 async def test_rearm_kept_records_patches_in_stack():
     """KEEP patches are added to kept_patches so a revalidation-rearmed round inherits them."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_origin="eval")
+    fake = _enqueue_self(enablement_origin="eval")
     fake.shared_state.enablement.kept_rounds = [{"patches": ["/prior/advance.patch"], "artifacts": []}]
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "status": "kept",
             "enablement": True,
@@ -792,22 +887,23 @@ async def test_rearm_kept_records_patches_in_stack():
 
 @pytest.mark.asyncio
 async def test_rearm_ignores_non_enablement(monkeypatch):
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
-    fake._maybe_rearm_enablement({"status": "reverted"})
-    # No enablement marker -> state untouched.
-    assert bool(fake.shared_state.enablement.inflight_task_id)
+    fake = _enqueue_self()
+    await _hold_round(fake, "spec-1")
+    await fake._maybe_rearm_enablement({"status": "reverted"})
+    # No enablement marker -> state untouched, and the round is still held.
+    assert await fake.rounds.held() is not None
     assert fake.shared_state.enablement.succeeded is False
 
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
     """A patch that clears one gap and reveals a new gap is STACKED, not reverted."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_stall_streak=2)
+    fake = _enqueue_self()
     new_gap_log = (
         "ValueError: Following weights were not initialized from checkpoint: "
         "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
     )
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -820,10 +916,8 @@ async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
     # Not terminal; not stalled.
     assert st.enablement.succeeded is False
     assert st.stop_reason == ""
-    # Progressing patch is recorded for stacking; stall streak reset; guard cleared.
+    # Progressing patch is recorded for stacking; guard cleared.
     assert st.enablement.kept_patches == ["/s/runs/specialist/t1/patches/001_qk_rope.patch"]
-    assert st.enablement.stall_streak == 0
-    assert not st.enablement.inflight_task_id
     # Launch log now points at the NEW (deeper) gap so the next round targets it.
     assert "not initialized from checkpoint" in st.enablement.launch_log
 
@@ -832,10 +926,9 @@ async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch):
 async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
     """Re-applied base patches are not double-recorded; only the new one is added."""
     fake = _enqueue_self(
-        enablement_inflight_task_id="spec-1",
         enablement_kept_patches=["/s/runs/specialist/t1/patches/001_qk_rope.patch"],
     )
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -855,51 +948,55 @@ async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rearm_stall_cap_stops_run(monkeypatch):
-    """N consecutive no-progress reverts stop the run with enablement_stalled."""
-    from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_STALL
+async def test_the_evidence_stall_budget_stops_a_run_that_shows_nothing(monkeypatch):
+    """Rounds that record no observation spend the stall budget and end the run."""
+    from hyperloom.orchestrator.bringup.budget import EVIDENCE_STALL_BUDGET
 
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake = _enqueue_self()
     st = fake.shared_state
-    # First _ENABLEMENT_MAX_STALL-1 reverts: bump streak, keep retrying.
-    for i in range(_ENABLEMENT_MAX_STALL - 1):
-        fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    for _ in range(EVIDENCE_STALL_BUDGET - 1):
+        await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
         assert st.stop_reason == ""
-        assert not st.enablement.inflight_task_id
-        assert st.enablement.stall_streak == i + 1
-    # The final revert trips the cap -> terminal stop_reason.
-    fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert st.enablement.stall_streak == _ENABLEMENT_MAX_STALL
+    await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    assert (await _charged(fake)).stall_spent == EVIDENCE_STALL_BUDGET
     assert st.stop_reason == "enablement_stalled"
 
 
 @pytest.mark.asyncio
-async def test_rearm_advanced_then_revert_streak_resets(monkeypatch):
-    """A progressing round resets the stall streak so serial gaps aren't capped early."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+async def test_an_advance_does_not_hand_back_a_spent_stall_credit(tmp_path, monkeypatch):
+    """A credit the ledger recorded as spent stays spent however the next round goes.
+
+    The predicate this replaced reset a counter on every round that claimed
+    progress, and a round that peels one blocker per attempt claims it forever,
+    so the cap it guarded was never reached.
+    """
+    fake = _enqueue_self()
     st = fake.shared_state
-    fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert st.enablement.stall_streak == 1
-    # Progress resets the streak.
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    assert (await _charged(fake)).stall_spent == 1
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
             "advanced": True,
             "patches_applied": ["/p/a.patch"],
             "enablement_launch_log": "ValueError: not initialized from checkpoint",
+            "enablement_observation_path": _observation_at(
+                tmp_path, "after", LadderStage.WEIGHTS_LOADING, detail="weights missing"
+            ),
         }
     )
-    assert st.enablement.stall_streak == 0
+    budget = await _charged(fake)
+    assert (budget.advances, budget.stall_spent) == (1, 1)
     assert st.stop_reason == ""
 
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
     """Q3: applied setup commands are stacked on advance for durable replay next round."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake = _enqueue_self()
     fake.shared_state.enablement.setup_commands = []
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -915,9 +1012,9 @@ async def test_rearm_advanced_stacks_setup_commands(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_kept_stacks_setup_commands(monkeypatch):
     """Q3: a runnable KEEP also records the setup commands it relied on."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake = _enqueue_self()
     fake.shared_state.enablement.setup_commands = ["apt-get install -y gh"]
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "kept",
@@ -963,6 +1060,38 @@ def test_enablement_close_guard_active_during_validation_pending():
     assert s.enablement_close_guard_active() is False
 
 
+def test_the_close_guard_stops_dropping_skip_to_close_once_its_bound_is_spent():
+    """The guard may delay a close; it may not be the reason one never happens.
+
+    Every input the guard reads is set by one path and cleared by several, so a
+    missed clear would otherwise leave it the sole authority refusing the last
+    exit a run that cannot be promoted has.
+    """
+    from hyperloom.orchestrator.state.shared_state import (
+        MAX_SKIP_TO_CLOSE_SUPPRESSIONS,
+        SharedState,
+    )
+
+    for phase, tput, pending in (("PRELUDE", 0.0, False), ("SWEEP", 100.0, True)):
+        s = SharedState()
+        s.phase = phase
+        s.baseline_tput = tput
+        s.enablement.succeeded = False
+        s.enablement.validation_pending = pending
+        assert s.enablement_close_guard_active() is True
+        s.enablement.skip_to_close_suppressions = MAX_SKIP_TO_CLOSE_SUPPRESSIONS
+        assert s.enablement_close_guard_active() is False, f"{phase} latched past its bound"
+
+
+def test_the_suppression_count_survives_a_resume():
+    """A bound that reset on load would let a resumed session latch again."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    s = SharedState()
+    s.enablement.skip_to_close_suppressions = 3
+    assert SharedState.from_dict(s.to_dict()).enablement.skip_to_close_suppressions == 3
+
+
 def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
     """Q3: stacked base setup commands are passed to the next round + noted."""
     _stub_enumerate(monkeypatch, [])
@@ -1001,9 +1130,10 @@ async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch):
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(enablement_launch_log="some totally unrelated noise line")
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
-    assert tid == "spec-1"
-    assert len(fake.tasks.created) == 1
-    assert fake.tasks.created[0]["params"]["enablement"] is True
+    assert tid
+    rows = await _queued_of_kind(fake, "specialist")
+    assert [r.task_id for r in rows] == [tid]
+    assert rows[0].params["enablement"] is True
     # No human-review dead-end for a non-blank log.
     reviews = [o for o in fake.observations if o.get("kind") == "enablement_needs_human_review"]
     assert reviews == []
@@ -1014,12 +1144,12 @@ async def test_enqueue_noop_when_already_dispatched(monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
-    # Simulate the task being actively running in the registry.
-    fake.tasks = _FakeTasks(running=[types.SimpleNamespace(task_id="spec-1")])
+    fake = _enqueue_self()
+    # Simulate the round's holder being actively running in the registry.
+    await _hold_round(fake, "spec-1", holder_state="running")
     tid = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid == ""
-    assert len(fake.tasks.created) == 0
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1177,7 @@ async def test_enqueue_noop_on_multi_node(monkeypatch):
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     fake = _enqueue_self()
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    assert len(fake.tasks.created) == 0
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 # ---- _derive_checkpoint_weight_facts (auto-feedback structural grounding) ----
@@ -1214,22 +1344,24 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
     return Coordinator(session_dir, backends=backends)
 
 
-def test_rearm_authored_lane_delegates_enablement(session_dir):
+@pytest.mark.asyncio
+async def test_rearm_authored_lane_delegates_enablement(session_dir):
     """_maybe_rearm_authored_lane with lane=enablement calls _maybe_rearm_enablement."""
     coord = _make_coord_with_phase(session_dir)
     called = []
 
-    def _fake_rearm(res):
+    async def _fake_rearm(res):
         called.append(res)
 
     coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     res = {"status": "apply_failed", "lane": "enablement", "enablement": True}
-    coord._maybe_rearm_authored_lane(res)
+    await coord._maybe_rearm_authored_lane(res)
     assert len(called) == 1 and called[0] is res
 
 
-def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
+@pytest.mark.asyncio
+async def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
     """apply_failed on perf_framework lane increments apply_fail_reauthor_attempts."""
     coord = _make_coord_with_phase(session_dir)
     cand_id = "https://github.com/example/repo/pull/99"
@@ -1241,7 +1373,7 @@ def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
         "retry_feedback": [],
         "prior_patches": [],
     }
-    coord._maybe_rearm_authored_lane(res)
+    await coord._maybe_rearm_authored_lane(res)
     attempts = getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
     assert attempts.get(cand_id) == 1
     # A pending retry context should be queued.
@@ -1251,7 +1383,8 @@ def test_rearm_authored_lane_perf_framework_increments_counter(session_dir):
     assert pending[0]["attempt"] == 1
 
 
-def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
+@pytest.mark.asyncio
+async def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
     """After _AUTHORED_LANE_MAX_ATTEMPTS, the next call stamps a terminal row."""
     from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
 
@@ -1270,7 +1403,7 @@ def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
     # Clear any pending from prior.
     coord.shared_state.apply_fail_retry_pending = []
 
-    coord._maybe_rearm_authored_lane(res)
+    await coord._maybe_rearm_authored_lane(res)
 
     progress = getattr(coord.shared_state, "framework_agent_phase_progress", [])
     cap_rows = [p for p in progress if p.get("status") == "apply_fail_cap"]
@@ -1280,19 +1413,20 @@ def test_rearm_authored_lane_perf_framework_stamps_terminal_at_cap(session_dir):
     assert pending == []
 
 
-def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_perf(session_dir):
+@pytest.mark.asyncio
+async def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_perf(session_dir):
     """Enablement apply_failed (with enablement:True) does NOT increment apply_fail counter."""
     coord = _make_coord_with_phase(session_dir)
     rearm_called = []
 
-    def _fake_rearm(res):
+    async def _fake_rearm(res):
         rearm_called.append(res)
 
     coord.phase_framework._maybe_rearm_enablement = _fake_rearm  # type: ignore[method-assign]
 
     # Even when lane=enablement is absent but enablement=True is present, should delegate.
     res = {"status": "apply_failed", "enablement": True}
-    coord._maybe_rearm_authored_lane(res)
+    await coord._maybe_rearm_authored_lane(res)
     assert len(rearm_called) == 1
     # apply_fail_reauthor_attempts not touched.
     assert not getattr(coord.shared_state, "apply_fail_reauthor_attempts", {})
@@ -1301,8 +1435,8 @@ def test_rearm_authored_lane_enablement_apply_failed_is_not_counted_as_perf(sess
 @pytest.mark.asyncio
 async def test_rearm_advanced_accumulates_config_only_envs(monkeypatch):
     """An advanced round that carries only env changes (no patch) is recorded."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
-    fake._maybe_rearm_enablement(
+    fake = _enqueue_self()
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1321,8 +1455,8 @@ async def test_rearm_advanced_accumulates_config_only_envs(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch):
     """Successive advanced rounds accumulate envs without overwriting prior ones."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
-    fake._maybe_rearm_enablement(
+    fake = _enqueue_self()
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1332,8 +1466,7 @@ async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch):
             "setup_commands_applied": [],
         }
     )
-    fake.shared_state.enablement.inflight_task_id = "spec-2"
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1353,14 +1486,9 @@ async def test_rearm_advanced_merges_repeated_config_rounds(monkeypatch):
 @pytest.mark.asyncio
 async def test_rearm_advanced_merges_args_by_flag_not_substring():
     """A prefix flag survives, and a restated flag overrides instead of duplicating."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
-    for tid, args in (
-        ("spec-1", "--enable-chunked-prefill --tp 4"),
-        ("spec-2", "--enable-chunked"),
-        ("spec-3", "--tp 8"),
-    ):
-        fake.shared_state.enablement.inflight_task_id = tid
-        fake._maybe_rearm_enablement(
+    fake = _enqueue_self()
+    for args in ("--enable-chunked-prefill --tp 4", "--enable-chunked", "--tp 8"):
+        await fake._maybe_rearm_enablement(
             {
                 "enablement": True,
                 "status": "advanced",
@@ -1385,7 +1513,7 @@ async def test_rearm_advanced_stacks_artifacts(monkeypatch):
     so that _replay_base_artifacts re-installs them at the start of the next round.
     Before the fix, the advanced result had no 'artifacts_applied' key, so
     _stack_kept_artifacts() always saw an empty list."""
-    fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_stall_streak=0)
+    fake = _enqueue_self()
     art = {
         "target": "/sgl-workspace/sglang/srt/server_args.py",
         "rel_target": "srt/server_args.py",
@@ -1394,7 +1522,7 @@ async def test_rearm_advanced_stacks_artifacts(monkeypatch):
         "backup": "/s/runs/integrate_patch/t1/artifact_backups/000_server_args.py.bak",
         "source": "/s/runs/specialist/spec-1/worktree/artifacts/server_args.py",
     }
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",
@@ -1407,7 +1535,6 @@ async def test_rearm_advanced_stacks_artifacts(monkeypatch):
     st = fake.shared_state
     assert len(st.enablement.kept_artifacts) == 1
     assert st.enablement.kept_artifacts[0]["target"] == "/sgl-workspace/sglang/srt/server_args.py"
-    assert st.enablement.stall_streak == 0
 
 
 @pytest.mark.asyncio
@@ -1419,11 +1546,11 @@ async def test_rearm_advanced_deduplicates_artifacts(monkeypatch):
         "kind": "python_source",
         "source": "/s/runs/specialist/spec-1/worktree/artifacts/server_args.py",
     }
-    fake = _enqueue_self(enablement_inflight_task_id="spec-2")
+    fake = _enqueue_self()
     # Pre-load the prior round's artifact into state.
     fake.shared_state.enablement.kept_artifacts = [art]
     # Second advanced round returns the same artifact (the base was re-applied).
-    fake._maybe_rearm_enablement(
+    await fake._maybe_rearm_enablement(
         {
             "enablement": True,
             "status": "advanced",

@@ -20,6 +20,14 @@ from hyperloom.inference_optimizer.session.session_paths import (
     enablement_round_dir,
     runs_dir,
 )
+from hyperloom.orchestrator.delivery.archive import (
+    ROLE_LAUNCH_CONFIG,
+    ROLE_PATCH,
+    ROLE_PROMPT,
+    ROLE_SERVER_LOG,
+    ROLE_SPECIALIST_RESULT,
+    RoundArchive,
+)
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
@@ -79,16 +87,8 @@ def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -
     return True
 
 
-def role_path(files: list[dict[str, str]], role: str) -> str:
-    """The session-relative path recorded for ``role``, or ``""`` when absent.
-
-    For the single-valued roles: ``patch`` repeats and needs the list itself.
-    """
-    return next((entry["path"] for entry in files if entry["role"] == role), "")
-
-
-def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[str, str]]:
-    """Archive one enablement round's patches, specialist result and launch config.
+def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive:
+    """Archive one enablement round's deliverables and report what landed.
 
     Rounds the phase synthesises carry no task id and no deliverables, and are
     skipped rather than colliding on a shared directory.
@@ -98,21 +98,17 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
         res: The ``integrate_patch`` result for an enablement round.
 
     Returns:
-        One ``{"path", "role"}`` entry per deliverable that landed, ``path``
-        session-relative POSIX. Roles: ``patch`` (any number),
-        ``specialist_result``, ``prompt``, ``launch_config``, ``server_log``.
-        A copy the size ceiling refused is absent rather than listed.
+        RoundArchive: One record per deliverable that landed. A copy the size
+        ceiling refused leaves no record, so no consumer is handed a path that
+        resolves to nothing.
     """
     task_id = str(res.get("specialist_task_id") or "").strip()
-    if not task_id:
-        return []
     root = Path(session_dir)
+    archive = RoundArchive(root)
+    if not task_id:
+        return archive
     round_dir = enablement_round_dir(root, task_id)
     round_dir.mkdir(parents=True, exist_ok=True)
-    written: list[dict[str, str]] = []
-
-    def _record(role: str, dest: Path) -> None:
-        written.append({"path": dest.relative_to(root).as_posix(), "role": role})
 
     patches_dir = round_dir / "patches"
     copied: set[str] = set()
@@ -120,15 +116,15 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
         src = Path(str(applied))
         dest = patches_dir / src.name
         if _copy(src, dest):
-            _record("patch", dest)
+            archive.record(ROLE_PATCH, dest)
         # Marked seen even when refused, so the sweep below does not retry it.
         copied.add(src.name)
 
     workspace = runs_dir(root, "specialist", task_id)
-    for name, role in (("specialist_done.json", "specialist_result"), ("prompt.md", "prompt")):
+    for name, role in (("specialist_done.json", ROLE_SPECIALIST_RESULT), ("prompt.md", ROLE_PROMPT)):
         dest = round_dir / name
         if _copy(workspace / name, dest):
-            _record(role, dest)
+            archive.record(role, dest)
 
     # Patches the round did not apply still explain what was attempted.
     for base in (workspace, workspace / "worktree"):
@@ -138,23 +134,26 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
                     continue
                 dest = patches_dir / src.name
                 if _copy(src, dest):
-                    _record("patch", dest)
+                    archive.record(ROLE_PATCH, dest)
                 copied.add(src.name)
 
     accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
     if accepted_config:
         dest = round_dir / "launch_config.yaml"
         if _copy(Path(accepted_config), dest):
-            _record("launch_config", dest)
+            archive.record(ROLE_LAUNCH_CONFIG, dest)
 
     # Only a round that reached a bench has one: a rejected patch or a broken
-    # build never started a server, so an absent log is normal.
+    # build never started a server, so an absent log is normal. The excerpt
+    # below is of the bench's error string; the traceback naming the deeper gap
+    # is written at the end of the server's own log, which is why a tail of it
+    # is archived rather than only that excerpt.
     bench = res.get("bench_result")
     server_log = str(bench.get("server_log_path") or "").strip() if isinstance(bench, dict) else ""
     if server_log:
         dest = round_dir / "server.log"
         if _copy_log_tail(Path(server_log), dest):
-            _record("server_log", dest)
+            archive.record(ROLE_SERVER_LOG, dest)
 
     launch_log = str(res.get("enablement_launch_log") or "")
     # Written last so the config path it names is the copy that just landed
@@ -180,12 +179,14 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
             "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
             "framework_switch_problems": res.get("framework_switch_problems") or [],
             "after_signature": res.get("after_signature") or {},
-            "enablement_accepted_config_path": role_path(written, "launch_config"),
+            "env_grants_applied": res.get("env_grants_applied") or [],
+            "env_grants_refused": res.get("env_grants_refused") or [],
+            "enablement_accepted_config_path": archive.path_for(ROLE_LAUNCH_CONFIG),
             "enablement_effective_config": res.get("enablement_effective_config") or {},
             "launch_log_excerpt": launch_log[:_LAUNCH_LOG_EXCERPT_CHARS],
         },
     )
-    return written
+    return archive
 
 
 def write_setting_script(
@@ -208,7 +209,11 @@ def write_setting_script(
     Patches are copied to ``reports/enablement/patches/`` under a stack-ordered
     name, since specialists across rounds pick colliding file names, and are
     referenced only once the copy lands. Patches are dropped entirely without a
-    framework root, because ``git apply`` would have no target to run against.
+    framework root, because there would be no tree to apply them to.
+
+    The emitted apply channel matches the framework root's kind: a root with no
+    git of its own gets the POSIX ``patch`` ladder, since the script runs under
+    ``set -e``.
 
     Whole-file artifacts are copied to ``reports/enablement/artifacts/`` and
     become ``install -D`` lines. Each one's pre-image is copied alongside as
@@ -227,6 +232,7 @@ def write_setting_script(
         Session-relative path of the written script.
     """
     from hyperloom.inference_optimizer.reference_script import render_reference_script
+    from hyperloom.orchestrator.bringup.trees import tree_kind
 
     framework_root = str(enablement.framework_root or "").strip()
     patches_dest = enablement_dir(Path(session_dir)) / "patches"
@@ -277,6 +283,7 @@ def write_setting_script(
         gpu_type=gpu_type,
         setup_commands=list(enablement.setup_commands or []) or None,
         framework_root=framework_root if any(r.get("patches") for r in script_rounds) else None,
+        framework_root_vcs=tree_kind(framework_root) if framework_root else "",
         runtime=runtime_path or None,
         rounds=script_rounds or None,
     )
@@ -286,4 +293,4 @@ def write_setting_script(
     return str(out.relative_to(session_dir))
 
 
-__all__ = ["role_path", "snapshot_round", "write_setting_script"]
+__all__ = ["snapshot_round", "write_setting_script"]

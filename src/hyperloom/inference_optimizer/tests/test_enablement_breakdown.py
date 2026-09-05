@@ -241,7 +241,6 @@ def test_collect_enablement_boot_origin_round_surfaced():
         _state(
             enablement_mode="launch",
             enablement_attempts=1,
-            enablement_inflight_task_id="spec-1",
             enablement_succeeded=True,
             enablement_last_specialist_task_id="spec-1",
             enablement_launch_log="EngineCore failed to start.\nTraceback (most recent call last):",
@@ -253,12 +252,46 @@ def test_collect_enablement_boot_origin_round_surfaced():
     assert out
     assert out["mode"] == "launch"
     assert out["engaged"] is True
-    assert out["dispatched"] is True
+    # No session database under this root, so no round is reported as open.
+    assert out["dispatched"] is False
     assert out["origin"] == "boot"
     assert out["attempts"] == 1
     assert out["succeeded"] is True
     assert out["last_specialist_task_id"] == "spec-1"
     assert "EngineCore failed to start." in out["launch_log_excerpt"]
+
+
+def test_collect_enablement_reads_the_open_round_from_the_store(tmp_path):
+    """The in-flight round is read from the session database, not from state.json.
+
+    The round outlives the process that took it, so it lives in the store; a
+    breakdown that re-read a mirrored field would report whatever the last
+    write happened to leave there.
+    """
+    import asyncio
+
+    from hyperloom.orchestrator.bus.storage import SqliteConnection
+    from hyperloom.orchestrator.state.round_store import RoundStore
+
+    (tmp_path / "storage").mkdir()
+    db = SqliteConnection(tmp_path / "storage" / "coordinator.db")
+    try:
+        opened = asyncio.run(
+            RoundStore(db).open(
+                "enablement-spec-1",
+                holder_task_id="spec-1",
+                lease_sec=3600.0,
+                now_unix=1000.0,
+                request_id="q1",
+            )
+        )
+        assert opened.ok
+        out = collect_enablement(tmp_path, _state(enablement_mode="launch", enablement_attempts=1), [])
+    finally:
+        db.close()
+    assert out["dispatched"] is True
+    assert out["round_id"] == "enablement-spec-1"
+    assert out["round_holder_task_id"] == "spec-1"
 
 
 def test_collect_enablement_opt_out_recorded_but_armed_idle_hidden():
@@ -279,7 +312,6 @@ def test_collect_enablement_kept_patches_relativized_and_log_bounded():
         _state(
             enablement_mode="all",
             enablement_attempts=2,
-            enablement_stall_streak=1,
             enablement_kept_patches=["/tmp/sess/patches/001_fix.patch"],
             enablement_kept_stack_action={"kind": "runtime_candidate", "framework": "vllm"},
             enablement_candidate_refs=["PR:901"],
@@ -294,7 +326,6 @@ def test_collect_enablement_kept_patches_relativized_and_log_bounded():
     assert out["candidate_refs"] == ["PR:901"]
     assert out["setup_commands"] == ["pip install -e ."]
     assert out["human_review_count"] == 2
-    assert out["stall_streak"] == 1
     assert len(out["launch_log_excerpt"]) == 2000
 
 
@@ -342,7 +373,6 @@ def test_collect_enablement_kept_artifacts_included():
     out = collect_enablement(
         Path("/tmp/sess"),
         _state(
-            enablement_engaged=True,
             enablement_attempts=1,
             enablement_kept_artifacts=[
                 {
@@ -369,7 +399,6 @@ def test_collect_enablement_kept_artifacts_tolerates_dirty_entries():
     out = collect_enablement(
         Path("/tmp/sess"),
         _state(
-            enablement_engaged=True,
             enablement_attempts=1,
             enablement_kept_artifacts=[
                 "a plain string",
@@ -384,3 +413,100 @@ def test_collect_enablement_kept_artifacts_tolerates_dirty_entries():
     arts = out.get("kept_artifacts", [])
     assert len(arts) == 1
     assert arts[0]["target"] == "/sgl-workspace/sglang/srt/real.py"
+
+
+def _ledger(session_dir, *, rounds):
+    """Play ``rounds`` through the real store into ``session_dir``'s database."""
+    import asyncio
+
+    from hyperloom.orchestrator.bus.storage import SqliteConnection
+    from hyperloom.orchestrator.state.round_store import RoundStore
+
+    (session_dir / "storage").mkdir(parents=True, exist_ok=True)
+    db = SqliteConnection(session_dir / "storage" / "coordinator.db")
+
+    async def _play():
+        store = RoundStore(db)
+        for index, (holder, outcome, stage) in enumerate(rounds):
+            opened = await store.open(
+                f"enablement-{holder}",
+                holder_task_id=holder,
+                lease_sec=600.0,
+                now_unix=1000.0 + index,
+                request_id=f"open:{holder}",
+            )
+            assert opened.ok
+            await store.observe(
+                f"enablement-{holder}",
+                actor_task_id=holder,
+                stage=stage,
+                failure_digest=f"digest-{index}",
+                now_unix=1001.0 + index,
+                request_id=f"observe:{holder}",
+            )
+            if outcome:
+                settled = await store.settle(
+                    f"enablement-{holder}",
+                    holder_task_id=holder,
+                    fence=opened.fence,
+                    outcome=outcome,
+                    now_unix=1002.0 + index,
+                    request_id=f"settle:{holder}",
+                )
+                assert settled.ok
+
+    try:
+        asyncio.run(_play())
+    finally:
+        db.close()
+
+
+def test_collect_enablement_survives_when_the_rounds_live_only_in_the_ledger(tmp_path):
+    """A session whose whole enablement history is rounds still gets a section.
+
+    The lifecycle moved out of session state and into the round ledger, and the
+    emission gate reads the fields that moved. Sourced only from those fields
+    the section goes empty here -- which a reader cannot tell apart from a
+    session where the lane never ran at all.
+    """
+    _ledger(tmp_path, rounds=[("spec-1", "failed", 3), ("spec-2", "booted", 5)])
+
+    out = collect_enablement(tmp_path, _state(), [])
+
+    assert out, "a session that ran two bring-up rounds must not report an empty enablement section"
+    assert out["engaged"] is True
+    assert out["round_count"] == 2
+    assert out["round_outcomes"] == {"failed": 1, "booted": 1}
+    assert out["round_observations"] == 2
+    assert out["stage_high_water"] == 5
+    assert [r["round_id"] for r in out["rounds"]] == ["enablement-spec-2", "enablement-spec-1"]
+    assert out["rounds"][0]["outcome"] == "booted"
+    assert out["rounds"][0]["holder_task_id"] == "spec-2"
+    # Every round settled, so nothing holds the machine and no round id is
+    # reported as in flight.
+    assert out["dispatched"] is False
+    assert "round_id" not in out
+
+
+def test_collect_enablement_reports_the_round_that_still_holds_the_machine(tmp_path):
+    """An unsettled round is the one the section names as in flight."""
+    _ledger(tmp_path, rounds=[("spec-1", "", 2)])
+
+    out = collect_enablement(tmp_path, _state(), [])
+
+    assert out["dispatched"] is True
+    assert out["round_id"] == "enablement-spec-1"
+    assert out["round_holder_task_id"] == "spec-1"
+    assert out["rounds"][0]["state"] == "open"
+
+
+def test_collect_enablement_ignores_a_database_without_the_round_tables(tmp_path):
+    """A session predating the ledger reports no rounds rather than a warning."""
+    import sqlite3
+
+    (tmp_path / "storage").mkdir()
+    sqlite3.connect(tmp_path / "storage" / "coordinator.db").close()
+    warnings: list[str] = []
+
+    assert collect_enablement(tmp_path, _state(), warnings) == {}
+    assert warnings == []

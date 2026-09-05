@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
+from ..bringup import recorded_verdict, session_root
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -78,26 +79,28 @@ class EnablementBuild(CoordinatorCollaborator):
 
         if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
             return
-        try:
-            from ..actions.executors._multi_node_env import is_multi_node
+        from ..actions.executors._multi_node_env import is_multi_node
 
-            if is_multi_node():
-                return
-        except Exception:  # noqa: BLE001
+        if is_multi_node():
             return
         try:
             from hyperloom.agents.framework.enablement import (
                 MISSING_MODEL_ARCH,
                 MISSING_WEIGHT,
                 NOT_IMPLEMENTED,
-                classify_failure,
                 is_targeted_build_candidate,
             )
             from ..framework.build_actions import TargetedBuildAction
 
-            signature = classify_failure(launch_log)
-
             state = self.shared_state
+            # The round's own filed observation; wrapper text is the fallback,
+            # named by ``degraded`` in the log line below.
+            verdict, loaded = recorded_verdict(
+                state.enablement.launch_observation_path,
+                wrapper_text=launch_log,
+                session_dir=session_root(self),
+            )
+            signature = verdict.signature
             framework = (getattr(state, "framework", "") or "").strip().lower()
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
 
@@ -206,12 +209,17 @@ class EnablementBuild(CoordinatorCollaborator):
             )
             task_id = await self.enqueue_targeted_build(action)
             if task_id:
+                from hyperloom.common.bringup import failure_digest
+
                 log.info(
-                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s gpu_arch=%s task=%s",
+                    "ENABLEMENT: enqueued targeted_build kind=%s component=%s arch_stall=%s "
+                    "gpu_arch=%s digest=%s degraded=%s task=%s",
                     signature.kind,
                     component,
                     bool(arch_stall and not is_compiled_gap),
                     action.gpu_arch,
+                    failure_digest(verdict.observation)[:12],
+                    loaded.degraded or "-",
                     task_id,
                 )
         except Exception:  # noqa: BLE001 — escalation is best-effort; never wedge dispatch
@@ -339,11 +347,11 @@ class EnablementBuild(CoordinatorCollaborator):
 
         Called every tick from _pump_enablement_safely.  Reads succeeded/failed
         rows, synthesises the rearm res dict (status='kept'/'reverted'/'advanced'),
-        and delegates to the existing stall-gate machinery.
+        and delegates to the rearm.
 
         Novelty: a 'timeout' or 'preflight_budget' failure_class maps to
         'advanced' (novel attempt, time vs defect distinction — keep going); all
-        real defects map to 'reverted' (advance stall streak).
+        real defects map to 'reverted'.
 
         A succeeded build no longer synthesises status='kept' directly. Instead
         it enqueues an integrate_patch launch probe so the runtime must actually
@@ -443,7 +451,7 @@ class EnablementBuild(CoordinatorCollaborator):
         )
         # Rearm, ledger append, and manifest ack must stay together: a failed
         # rearm leaves the build unrouted and the novelty ledger unchanged.
-        self._maybe_rearm_enablement(res)
+        await self._maybe_rearm_enablement(res)
         if novelty_key is not None:
             ledger = list(state.enablement.build_novelty or [])
             ledger.append(novelty_key)
@@ -487,7 +495,9 @@ class EnablementBuild(CoordinatorCollaborator):
         # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
             log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            self._maybe_rearm_enablement({"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
+            await self._maybe_rearm_enablement(
+                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
+            )
             self._note_build_routed(task_id)
             return
 
@@ -596,8 +606,6 @@ class EnablementBuild(CoordinatorCollaborator):
             The probe ``task_id`` and the generation it sits on; the id is empty
             when nothing was enqueued.
         """
-        from hyperloom.agents.framework.enablement import classify_failure
-
         denied = self._time_budget_denial_for_action("integrate_patch")
         if denied is not None:
             log.info(
@@ -608,15 +616,15 @@ class EnablementBuild(CoordinatorCollaborator):
             return "", generation
         state = self.shared_state
         runtime_override = br.runtime.to_runtime_override()
-        launch_log = str(state.enablement.launch_log or "")
-        before_sig = classify_failure(launch_log).to_dict()
         params: dict[str, Any] = {
             "enablement": True,
             "enablement_launch_only": True,
             "lever_kind": LEVER_ENABLEMENT,
             "runtime_override": runtime_override,
             "framework": str(getattr(state, "framework", "") or ""),
-            "enablement_before_signature": before_sig,
+            # The pre-patch half of the gate: the observation the round that
+            # watched this failure persisted.
+            "enablement_before_observation_path": state.enablement.launch_observation_path,
             "source": "coordinator_internal",
             **self._framework_gpu_params(),
             **_enablement_carrier_params(state),

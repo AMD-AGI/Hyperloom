@@ -29,15 +29,18 @@ class EnablementRound:
     # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline
     # must revalidate accuracy before the run is considered enabled.
     validation_pending: bool = False
+    # How many times the pre-enablement guard has dropped a ``skip_to_close``.
+    # Bounds the guard so it can delay a close but never forbid one.
+    skip_to_close_suppressions: int = 0
     # ``launch_log``: captured launch/traceback text when baseline cannot launch.
+    # ``launch_observation_path``: the persisted boot observation behind that
+    # text; the pre-patch half of the enablement before/after comparison.
     # ``attempts``: number of dispatches (candidate rotation / idempotency).
     # ``succeeded``: terminal KEEP guard.
     launch_log: str = ""
+    launch_observation_path: str = ""
     attempts: int = 0
     succeeded: bool = False
-    # Identity of the currently-running authoring specialist; empty when no round
-    # is in flight. In-flight status is derived from the task registry, not stored.
-    inflight_task_id: str = ""
     # Task id of the most recently completed enablement specialist round.
     last_specialist_task_id: str = ""
     # Authoritative per-round record: list of {"patches": [...], "artifacts": [...]}
@@ -53,10 +56,10 @@ class EnablementRound:
     # Ordered, deduped allowlisted env-setup shell commands prior rounds ran;
     # re-run idempotently by integrate_patch before applying patches and booting.
     setup_commands: list = field(default_factory=list)
-    # Consecutive enablement rounds that neither became runnable nor advanced to
-    # a new failure signature; at _ENABLEMENT_MAX_STALL the loop stops with
-    # stop_reason enablement_stalled.
-    stall_streak: int = 0
+    # Digests of server argvs that have already spent their one drop-only
+    # preflight repair. A distinct argv gets exactly one; the same argv failing
+    # again is terminal.
+    argv_repairs: list = field(default_factory=list)
     # Launch-log hashes already recorded as needs_human_review; one record per log.
     human_review_logged: list = field(default_factory=list)
     # Path to the materialized config produced by the KEEP'd candidate bench.

@@ -1347,9 +1347,9 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
 def _section_execution_budget(inp: SpecialistPromptInputs) -> list[str]:
     """Render the wall-clock budget block so the specialist can self-throttle.
 
-    Renders the concrete WS1 budget (seconds + minutes) and the dispatch start
-    timestamp. Returns ``[]`` when no budget was supplied (legacy turn-bounded
-    path), so the section is omitted entirely rather than emitting a placeholder.
+    Renders the time left on the dispatch deadline (seconds + minutes) and the
+    dispatch start timestamp. Returns ``[]`` when no budget was supplied, so the
+    section is omitted entirely rather than emitting a placeholder.
 
     Args:
         inp: The specialist prompt inputs (reads ``wall_budget_sec`` /
@@ -1994,7 +1994,14 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
 
     if authors_patches:
         patch_fields = [
-            "- ``patches_written`` (PR-A2) lists paths (relative to your",
+            "- ``deliverable`` declares what the round produced and is",
+            "  REQUIRED whenever you changed anything: ``{tree_id, targets,",
+            "  patches, artifacts, envs, server_args, setup_commands}``.",
+            "  ``targets`` lists every file you edited, relative to your",
+            "  worktree — the harvest is scoped to it, so a file you changed",
+            "  and did not declare is not shipped. Do NOT put hashes in it;",
+            "  the harness computes them where your work was validated.",
+            "- ``patches_written`` lists paths (relative to your",
             "  workspace or worktree) of any unified-diff patch files you",
             "  authored this round. Empty list = no patches; downstream",
             "  ``integrate_patch`` action skips when empty.",

@@ -392,7 +392,7 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
             "framework_agent_candidate_id": "cand-e",
             "framework_batch_id": "batch-e",
             "enablement": True,
-            "enablement_before_signature": {"kind": "unregistered_arch"},
+            "enablement_before_observation_path": "/s/reports/bringup/round-abc-000.json",
             "enablement_setup_commands": ["pip install -U vllm==0.21.0"],
         },
     )
@@ -416,7 +416,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
     assert params.get("enablement") is True
-    assert params["enablement_before_signature"] == {"kind": "unregistered_arch"}
+    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
     # Base setup (from spec_params) + new setup (from done_payload), deduped/merged.
     assert params["enablement_setup_commands"] == ["pip install -U vllm==0.21.0", "pip install -U aiter"]
 

@@ -51,7 +51,7 @@ def coord(build_coord):
     # admits everything, so a test that wants a denial sets one.
     build_coord.action_registry = ACTION_CATALOGUE
 
-    def _maybe_rearm_enablement(res):
+    async def _maybe_rearm_enablement(res):
         build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})
 
     async def _enqueue_targeted_build(action):
@@ -683,11 +683,11 @@ async def test_route_failed_build_not_acked_when_rearm_raises(coord):
     attempts = {"n": 0}
     real_rearm = coord._maybe_rearm_enablement
 
-    def _flaky_rearm(res):
+    async def _flaky_rearm(res):
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise RuntimeError("rearm failed")
-        real_rearm(res)
+        await real_rearm(res)
 
     coord._maybe_rearm_enablement = _flaky_rearm
 
@@ -739,7 +739,7 @@ def _make_params_fake(**kw):
     )
     fake = types.SimpleNamespace(shared_state=state, session_dir="/tmp")
     fake._build_enablement_specialist_params = types.MethodType(Coordinator._build_enablement_specialist_params, fake)
-    fake._discover_enablement_candidate_refs = lambda req, plan: []
+    fake._discover_enablement_candidate_refs = lambda req, plan, *, deadline=None: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     fake._framework_gpu_params = lambda: {}

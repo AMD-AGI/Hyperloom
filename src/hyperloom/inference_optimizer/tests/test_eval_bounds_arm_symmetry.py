@@ -172,7 +172,7 @@ def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path
     with (
         patch(f"{_PATCHER}.ensure_eval_probe_patched", side_effect=recording_ensure),
         patch(
-            f"{_PATCHER}.run_with_session_kill",
+            f"{_PATCHER}.launch",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
         ),
     ):
@@ -201,7 +201,7 @@ def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_p
         patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
         patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(
-            f"{_PATCHER}.run_with_session_kill",
+            f"{_PATCHER}.launch",
             side_effect=lambda cmd, *a, **k: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "ok", ""),
         ),
     ):
@@ -230,7 +230,7 @@ def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch
         patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
         patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=False),
         patch(
-            f"{_PATCHER}.run_with_session_kill",
+            f"{_PATCHER}.launch",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
         ),
     ):
@@ -257,7 +257,7 @@ def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path,
         patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
         patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(
-            f"{_PATCHER}.run_with_session_kill",
+            f"{_PATCHER}.launch",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
         ),
     ):
@@ -286,7 +286,7 @@ async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp
         patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
         patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(
-            f"{_PATCHER}.run_with_session_kill",
+            f"{_PATCHER}.launch",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
         ),
     ):
