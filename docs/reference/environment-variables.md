@@ -101,7 +101,8 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
-- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
+- **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
+  `--extend-hours`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
 
 Run `inference_optimizer optimize --help` for the exhaustive flag list.
@@ -677,6 +678,31 @@ otherwise `score >= floor` passes.
 
 ---
 
+## Host safety: reaping, GPU claims, and the out-of-band supervisor
+
+Three mechanisms protect a host from a run that ended badly. All three default
+to the weakest, most conservative setting, because the deployment is mixed and a
+guarantee that varies silently by host is not a guarantee.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_REAP_BACKEND` | `process_group` | Which unit ends a bring-up round's processes: `process_group`, `cgroup` or `container`. Only `cgroup` and `container` produce a reap that is *proof* the tree is gone — the kernel (or the container runtime) owns the membership list, so nothing can leave it by forking or re-parenting. `process_group` reaches only what it could enumerate from procfs before it signalled. A unit that cannot run on this host falls back to `process_group`, which weakens the claim rather than faking it. |
+| `HYPERLOOM_DEVICE_LOCK` | `1` | Whether a server launch takes a host-level `flock` on each card it will use. The descriptor is inherited by the serving process, so the claim lasts as long as the serving tree — not as long as the coordinator. Set to `0` on a host where this cannot work. |
+| `HYPERLOOM_DEVICE_LOCK_DIR` | `/var/tmp/hyperloom/device-locks` | Where those lock files live. Every optimizer on a host must agree on this path or they lock different files and exclude nothing. |
+| `HYPERLOOM_SUPERVISOR` | `1` | Whether the optimizer starts an out-of-band supervisor process that watches for a coordinator that died or whose tick stopped advancing. |
+| `HYPERLOOM_SUPERVISOR_ENFORCE` | unset (off) | Whether the supervisor may end a process tree. A wedged coordinator is sent SIGTERM regardless — that is the channel its signal drain reads while the loop is busy. Off by default, a coordinator that does not answer that stop, and a dead one's leftovers, are left alone and the refusal is recorded in `runtime/supervisor/status.json`. Ending a tree additionally requires a reap backend whose success is proof, so enforcement with the default `process_group` unit will refuse to kill and say so. |
+| `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC` | half of `--max-hours`, capped at `3600` and floored at `1800` | How long the coordinator's tick may go without advancing before the supervisor calls it wedged. Derived from the session budget so the window always fits inside the run it watches; setting this overrides the derivation. |
+
+The supervisor never opens `coordinator.db` — it sits on a network filesystem
+where a second writer risks the message bus and the task registry — and never
+transitions round state while the coordinator is alive. Its files live under
+`<session>/runtime/supervisor/`. When it finds the coordinator's process gone it
+writes `reports/final.json` itself, marked `producer: "supervisor"`; that record
+never replaces a full report, and the coordinator's own crash-safe fallback never
+replaces it.
+
+---
+
 ## Framework / source-tree discovery
 
 The following variables configure framework source discovery and path overrides.
@@ -996,6 +1022,12 @@ internal-only — do not set them by hand:
 
 * `HYPERLOOM_KERNEL_AGENT_ROOT`: internal CLI-only handoff to the
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
+* `HYPERLOOM_HOST_PROBE`, `HYPERLOOM_HOST_PROBE_DEEP`,
+  `HYPERLOOM_HOST_PROBE_DIR`, `HYPERLOOM_HOST_PROBE_ROOTS` (and the
+  `..._MAX_SITES` / `..._ARG_SAMPLES` caps): the same for the host-stall
+  evidence probe, armed by the profile leg that collects the evidence. The deep
+  tier inflates host time by design, so setting it by hand distorts any trace
+  collected alongside it.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 
