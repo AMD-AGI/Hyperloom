@@ -204,7 +204,7 @@ def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -248,7 +248,7 @@ def test_operator_pinned_backend_is_also_dropped_on_retry(tmp_path, monkeypatch)
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -298,7 +298,7 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
         session_dir=tmp_path,
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(_make_ctx(params)))
@@ -342,7 +342,7 @@ def test_moe_fallback_keeps_eval_disabled_by_earlier_fallback(tmp_path, monkeypa
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -389,7 +389,7 @@ def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkey
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -431,7 +431,7 @@ def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch)
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -468,7 +468,7 @@ def test_fallback_fires_only_once(tmp_path, monkeypatch):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -503,7 +503,7 @@ def test_unrelated_failure_does_not_retry(tmp_path, monkeypatch):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

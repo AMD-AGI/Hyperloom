@@ -41,15 +41,17 @@ from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
+    DEVICES_BUSY_ERROR_CLASS,
+    DEVICES_BUSY_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
+from .launch_backend import launch
 from .benchmark_result import (
     estimate_killed_variant_throughput,
     extract_benchmark_measurement,
@@ -64,6 +66,7 @@ from ._inferencex_patcher import (
     eval_probe_targets_exist,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._server_argv import seal_server_argv
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -145,9 +148,14 @@ def _resolve_magpie_python() -> str:
     def _can_import_magpie(py: str) -> bool:
         """Whether an interpreter can import Magpie and its ``yaml`` dep."""
         try:
-            # Probe with ``importlib.util.find_spec`` rather than a bare ``import`` so a missing module returns a
-            # non-zero exit code WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
-            proc = run_with_session_kill(
+            # Probe with ``importlib.util.find_spec`` rather than a bare
+            # ``import`` so a missing module returns a non-zero exit code
+            # WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
+            # The launch mirrors child stderr to the parent stream, so a bare
+            # ``import Magpie`` on a candidate that lacks it would leak an
+            # alarming traceback into the run log even though the probe failing
+            # is an expected, benign step of interpreter resolution.
+            proc = launch(
                 [
                     py,
                     "-c",
@@ -549,6 +557,8 @@ def _build_variant_yaml(
             port=int(server_lifecycle["port"]),
         )
 
+    # The final write to the argument env; nothing below may touch it.
+    seal_server_argv(envs, bench.get("framework"))
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:
@@ -866,9 +876,9 @@ def _run_magpie(
         config_path=config_path,
         output_dir=output_dir,
     )
-    # run_with_session_kill launches Magpie in its own POSIX session and tears down the whole descendant tree on every
-    # exit path.
-    proc = run_with_session_kill(
+    # The launch puts Magpie in its own POSIX session and tears down the whole
+    # descendant tree on every exit path.
+    proc = launch(
         cmd,
         env=env,
         cwd=cwd,
@@ -2129,7 +2139,9 @@ async def run_grid(
                 # Last resort: report.errors when the pipe and on-disk logs are all empty.
                 if not error.strip():
                     error = redact_secret_values(_report_errors_summary(report))
-                invalid_class = "magpie_nonzero_invalid_measurement"
+                invalid_class = (
+                    DEVICES_BUSY_ERROR_CLASS if rc == DEVICES_BUSY_RETURNCODE else "magpie_nonzero_invalid_measurement"
+                )
             elif not report:
                 error = death_excerpt or "benchmark_report missing"
                 invalid_class = "benchmark_report_missing"

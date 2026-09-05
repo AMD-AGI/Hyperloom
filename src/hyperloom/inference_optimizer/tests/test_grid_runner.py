@@ -563,7 +563,7 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -600,7 +600,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -640,7 +640,7 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -690,7 +690,7 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
         return subprocess.CompletedProcess(cmd, 1, "", "benchmark failed")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -882,7 +882,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -906,7 +906,7 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -930,7 +930,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -958,7 +958,7 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
 
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -994,7 +994,7 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
 
     grid = [GridVariant("v0"), GridVariant("v1")]
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         await run_grid(
@@ -1028,7 +1028,7 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
 
     grid = [GridVariant("vA"), GridVariant("vB")]
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         await run_grid(
@@ -1071,7 +1071,7 @@ async def test_run_grid_benchmark_runs_inside_the_session_that_owns_it(tmp_path)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         await run_grid(
@@ -1140,7 +1140,7 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
         fake_restart_server_for_round,
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         await run_grid(
@@ -1517,7 +1517,7 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -1550,7 +1550,7 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
     # Deadline leaves less than one variant_timeout_sec of budget, so no variant should start and all are skipped
     # (last-variant overrun guard).
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -1580,7 +1580,7 @@ async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = await run_grid(
@@ -1633,7 +1633,7 @@ async def _launch_every_pass_of_one_variant(
     recorded: list[dict] = []
     with (
         patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ),
         patch(
@@ -1728,7 +1728,7 @@ class TestSessionBudgetAdmission:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
@@ -1751,7 +1751,7 @@ class TestSessionBudgetAdmission:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
@@ -1775,7 +1775,7 @@ class TestSessionBudgetAdmission:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
@@ -1803,7 +1803,7 @@ class TestSessionBudgetAdmission:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
@@ -1830,7 +1830,7 @@ class TestSessionBudgetTimeoutClamp:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
@@ -1858,7 +1858,7 @@ class TestSessionBudgetTimeoutClamp:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
@@ -1880,7 +1880,7 @@ class TestSessionBudgetTimeoutClamp:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
@@ -1908,7 +1908,7 @@ class TestSessionKillAttribution:
             return subprocess.CompletedProcess(cmd, SESSION_TIME_EXHAUSTED_RETURNCODE, "", "")
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=fake_run,
         ):
             results = await run_grid(
@@ -1935,7 +1935,7 @@ class TestSessionKillAttribution:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
@@ -2009,7 +2009,7 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
 
         with (
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
                 side_effect=fake_run,
             ),
             patch(
@@ -2042,7 +2042,7 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
 
         with (
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
                 side_effect=fake_run,
             ),
             patch(
@@ -2084,7 +2084,7 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
         fake_run, launched = _reaping_round(ORCHESTRATOR_CANCELLED_RETURNCODE, slot_name="mn_warmup")
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=fake_run,
         ):
             results = await run_grid(
@@ -2114,7 +2114,7 @@ class TestSessionBudgetWarmupRounds:
 
         with (
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
                 side_effect=_capture_launches(recorded),
             ),
             patch(
@@ -2160,7 +2160,7 @@ class TestSessionBudgetWarmupRounds:
         recorded: list[dict] = []
 
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
@@ -2187,7 +2187,7 @@ class TestSessionBudgetWarmupRounds:
 
         with (
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
                 side_effect=_capture_launches(recorded),
             ),
             patch(
@@ -2232,7 +2232,7 @@ class TestSessionBudgetWarmupRounds:
 
         with (
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
                 side_effect=fake_run,
             ),
             patch(

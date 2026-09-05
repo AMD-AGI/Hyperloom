@@ -38,7 +38,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    _stamp_server_ready,
+    stamp_server_ready,
 )
 from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -143,7 +143,7 @@ def _cold_then_hot_fake_run(
                 clock.advance(boot_sec)
                 if server_log_path:
                     Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                    _stamp_server_ready(server_log_path, boot_sec)
+                    stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         state["calls"] += 1
         _fake_workspace(slot, tput=tput)
@@ -184,7 +184,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -223,7 +223,7 @@ def _run_capturing_rounds(executor, ctx, notes):
     with (
         progress_scope(_sink_into(notes)),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=fake_run,
         ),
     ):
@@ -286,7 +286,7 @@ def test_a_round_is_handed_the_liveness_callback_its_heartbeat_needs(tmp_path):
     executor = _executor(base, tmp_path, baseline_double_run=False)
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -310,7 +310,7 @@ def test_a_round_keeps_reporting_while_its_benchmark_blocks(tmp_path, progress_c
     with (
         progress_scope(progress_cadence.sink()),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=chatty_child(progress_cadence, inner, blocks_for_s=600.0, line_every_s=30.0),
         ),
     ):
@@ -331,7 +331,7 @@ def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, p
     with (
         progress_scope(progress_cadence.sink()),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=chatty_child(progress_cadence, inner, blocks_for_s=600.0, line_every_s=30.0),
         ),
     ):
@@ -353,7 +353,7 @@ def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
     with (
         progress_scope(_sink_into(notes)),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "", "boom"),
         ),
     ):
@@ -416,7 +416,7 @@ def _run_double_run_baseline(
     with (
         _passes_time_the_executor_believes(clock or _AClockOnlyThePassesMove()),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=fake_run,
         ),
     ):
@@ -554,7 +554,7 @@ def test_a_rounds_boot_is_priced_even_though_no_cap_bounded_it(tmp_path):
     with (
         _passes_time_the_executor_believes(clock),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=fake_run,
         ),
     ):
@@ -602,7 +602,7 @@ def test_a_measured_round_the_clock_takes_mid_flight_keeps_the_cold_warmup(tmp_p
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -639,7 +639,7 @@ def test_a_measured_round_that_fails_on_its_own_is_still_a_failure(tmp_path):
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -880,7 +880,7 @@ def test_deferred_accuracy_skips_eval_when_hot_throughput_regresses(
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -936,7 +936,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -970,7 +970,7 @@ def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path):
     ctx.extra["shared_state"] = SimpleNamespace(eval_disabled=True, baseline_double_run=True)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1021,7 +1021,7 @@ def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1052,7 +1052,7 @@ def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1091,7 +1091,7 @@ def test_replay_warm_recipe_double_run_forces_warmup_eval(tmp_path):
     )
     ctx = SimpleNamespace(task=task, extra={})
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1127,7 +1127,7 @@ def test_replay_warm_recipe_honours_no_eval(tmp_path):
     )
     ctx = SimpleNamespace(task=task, extra={"shared_state": shared})
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1159,7 +1159,7 @@ def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1198,7 +1198,7 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     fake_run, state = _cold_then_hot_fake_run(captured)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = _run(
@@ -1239,7 +1239,7 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
     fake_run, state = _cold_then_hot_fake_run(captured)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         results = _run(
@@ -1282,7 +1282,7 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1314,7 +1314,7 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1344,7 +1344,7 @@ def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1390,7 +1390,7 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1426,7 +1426,7 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1468,7 +1468,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1508,7 +1508,7 @@ def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1551,7 +1551,7 @@ def test_baseline_nonzero_rc_with_valid_measurement_fails(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1594,7 +1594,7 @@ def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1636,7 +1636,7 @@ def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1678,7 +1678,7 @@ def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, m
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1716,7 +1716,7 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1754,7 +1754,7 @@ def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypa
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1934,7 +1934,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -1974,7 +1974,7 @@ def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -2003,7 +2003,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -2045,7 +2045,7 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
     )
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -2208,7 +2208,7 @@ def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseli
     with (
         patch.object(type(executor), "_pre_start_cleanup", side_effect=fake_cleanup),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=fake_run,
         ),
     ):
@@ -2355,7 +2355,7 @@ def _capturing_fake_run(
             server_log_path = kwargs.get("server_log_path")
             if server_log_path:
                 Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                _stamp_server_ready(server_log_path, boot_sec)
+                stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         if state is not None:
             state.charge(charge_sec if charge_sec is not None else ran_sec)
@@ -2432,7 +2432,7 @@ def _run_baseline_under_budget(
     # The live state arrives on the context, the way the coordinator passes it.
     ctx.extra["shared_state"] = state
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -2458,7 +2458,7 @@ def _launch_one_grid_variant_under_budget(
     _write_yaml(base, framework="vllm")
     fake_run, calls = _capturing_fake_run()
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run(
@@ -2577,7 +2577,7 @@ class TestTheSessionBudgetReachesTheBaselineRound:
             }
         )
         with patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=fake_run,
         ):
             result = _run(executor(ctx))
