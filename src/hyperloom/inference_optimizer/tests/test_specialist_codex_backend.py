@@ -61,7 +61,6 @@ _DONE_PAYLOAD: dict[str, object] = {
     "domain": "research_scout_specialist",
     "proposal_set": [{"name": "codex_variant", "extra_args": "", "extra_envs": {}, "reason": "fake"}],
     "patches_written": [],
-    "empty": False,
     "summary": "fake codex specialist run",
     "confidence": 0.5,
 }
@@ -195,7 +194,7 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
     _write_executable(
         bin_dir / "codex",
         "#!/usr/bin/env bash\nset -e\n"
-        'printf \'{"codex_home":"%s","proposal_set":[],"empty":true}\\n\' "$CODEX_HOME"'
+        'printf \'{"codex_home":"%s","proposal_set":[]}\\n\' "$CODEX_HOME"'
         ' > "$PWD/specialist_done.json"\nexit 0\n',
     )
     workspace = tmp_path / "workspace"
@@ -754,7 +753,7 @@ def _successful_codex_script(path: Path) -> Path:
         "set -e\n"
         "cat >/dev/null\n"
         "cat > \"$PWD/specialist_done.json\" <<'EOF'\n"
-        '{"proposal_set":[],"empty":true,"summary":"ok"}\n'
+        '{"proposal_set":[],"summary":"ok"}\n'
         "EOF\n",
     )
 
@@ -976,7 +975,7 @@ class _RecordingGpuLease:
         self.started = {"cmd": list(cmd), **kwargs}
         Path(kwargs["log_path"]).write_text("", encoding="utf-8")
         (self.workspace / "specialist_done.json").write_text(
-            '{"proposal_set":[],"empty":true,"summary":"ray"}',
+            '{"proposal_set":[],"summary":"ray"}',
             encoding="utf-8",
         )
 
@@ -1446,7 +1445,6 @@ async def test_codex_agent_backend_preserves_roles_and_returns_validated_usage(
         "gap_canonical_id": "gap.sdk",
         "domain": "serving_specialist",
         "proposal_set": [],
-        "empty": True,
         "summary": "sdk result",
     }
     captured: dict[str, Any] = {}
