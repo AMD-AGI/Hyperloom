@@ -21,12 +21,18 @@ from .schema import ensure_schema
 log = logging.getLogger(__name__)
 
 
-# Journal mode is env-overridable; WAL default.
-_JOURNAL_MODE = os.environ.get("INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE", "WAL").strip() or "WAL"
+#: Journal mode used unless the environment names another one.
+DEFAULT_JOURNAL_MODE = "WAL"
+
+#: The journal modes SQLite accepts. An unrecognised mode leaves SQLite in its
+#: current mode rather than failing, so it is checked before opening.
+JOURNAL_MODES = frozenset({"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"})
+
+#: Environment variable naming the journal mode for every session database.
+JOURNAL_MODE_ENV = "INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE"
 
 
 _PRAGMAS = (
-    f"PRAGMA journal_mode = {_JOURNAL_MODE}",
     "PRAGMA synchronous = FULL",
     "PRAGMA foreign_keys = ON",
     "PRAGMA busy_timeout = 30000",
@@ -34,18 +40,72 @@ _PRAGMAS = (
 )
 
 
-def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    """Apply the WAL / durability pragmas to a connection."""
+class JournalModeError(RuntimeError):
+    """The journal mode asked for is not the one the database ended up in."""
+
+
+def resolve_journal_mode(requested: str | None = None) -> str:
+    """Return the journal mode a session database must be opened in.
+
+    WAL's ``-shm`` mapping can corrupt a database on a networked filesystem
+    (WekaFS / NFS), so :data:`JOURNAL_MODE_ENV` overrides it per deployment.
+
+    Args:
+        requested: Explicit mode; the environment is consulted when omitted.
+
+    Returns:
+        str: The upper-cased mode to open with.
+
+    Raises:
+        JournalModeError: When the mode is not one SQLite defines.
+    """
+    raw = requested if requested is not None else os.environ.get(JOURNAL_MODE_ENV, "")
+    mode = raw.strip().upper() or DEFAULT_JOURNAL_MODE
+    if mode not in JOURNAL_MODES:
+        raise JournalModeError(f"unknown SQLite journal mode {mode!r}; expected one of {sorted(JOURNAL_MODES)}")
+    return mode
+
+
+def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
+    """Apply the journal mode and durability pragmas, and verify the mode took.
+
+    SQLite refuses a journal mode by leaving the old one in force rather than
+    by raising, so ``PRAGMA journal_mode`` is read back and
+    :class:`JournalModeError` raised when it differs.
+    """
     cur = conn.cursor()
     try:
+        cur.execute(f"PRAGMA journal_mode = {journal_mode}")  # nosec B608 - validated against JOURNAL_MODES.
         for pragma in _PRAGMAS:
             cur.execute(pragma)
+        cur.execute("PRAGMA journal_mode")
+        actual = str(cur.fetchone()[0]).strip().upper()
+        if actual != journal_mode:
+            raise JournalModeError(f"database opened in journal mode {actual!r}, not the requested {journal_mode!r}")
     finally:
         cur.close()
 
 
-def open_connection(db_path: str | Path) -> sqlite3.Connection:
-    """Open one synchronous connection with WAL pragmas + schema applied."""
+def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> sqlite3.Connection:
+    """Open one synchronous connection with the durability pragmas + schema applied.
+
+    Creates the parent directory if needed, opens with autocommit
+    (``isolation_level=None``) and cross-thread access, sets a ``Row`` row
+    factory, applies and verifies the pragmas, and ensures the schema exists.
+
+    Args:
+        db_path (str | Path): Path to the SQLite database file.
+        journal_mode (str | None): Journal mode to enforce; resolved from the
+            environment when omitted.
+
+    Returns:
+        sqlite3.Connection: A ready-to-use connection.
+
+    Raises:
+        JournalModeError: When the mode is unknown, or the database did not
+            enter it.
+    """
+    mode = resolve_journal_mode(journal_mode)
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
@@ -56,7 +116,7 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
     )
     try:
         conn.row_factory = sqlite3.Row
-        _apply_pragmas(conn)
+        _apply_pragmas(conn, mode)
         ensure_schema(conn)
     except Exception:
         conn.close()
@@ -67,10 +127,18 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
 class SqliteConnection:
     """Async-friendly wrapper over a single SQLite connection."""
 
-    def __init__(self, db_path: str | Path):
-        """Open the wrapped connection and create its locks."""
+    def __init__(self, db_path: str | Path, *, journal_mode: str | None = None):
+        """Open the wrapped connection and create its locks.
+
+        Args:
+            db_path (str | Path): Path to the SQLite database file;
+                opened via :func:`open_connection`.
+            journal_mode (str | None): Journal mode to enforce; resolved from
+                the environment when omitted.
+        """
         self.db_path = Path(db_path)
-        self._conn = open_connection(self.db_path)
+        self.journal_mode = resolve_journal_mode(journal_mode)
+        self._conn = open_connection(self.db_path, journal_mode=self.journal_mode)
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.RLock()
 
