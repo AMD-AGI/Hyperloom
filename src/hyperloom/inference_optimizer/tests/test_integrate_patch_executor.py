@@ -28,7 +28,9 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _run_setup_commands,
     _with_skipped_setup_reason,
 )
+from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -828,6 +830,16 @@ async def test_executor_accepts_explicit_server_args_and_envs(tmp_path: Path):
 # Enablement runnable gate: the bench is the launch probe; positive throughput
 # means the server booted -> KEEP; else -> REVERT. The perf/accuracy KEEP gate is
 # bypassed for enablement-tagged integrations.
+def _persist_observation(session_dir: Path, slot: str, log_text: str) -> str:
+    """Observe ``log_text`` as a server log and persist it the way a round does."""
+    from hyperloom.orchestrator.bringup import observe_bringup, write_boot_observation
+
+    out = session_dir / slot
+    out.mkdir(parents=True, exist_ok=True)
+    verdict = observe_bringup(server_log=log_text, server_elapsed_sec=5.0, session_dir=session_dir)
+    return write_boot_observation(verdict.observation, session_dir=session_dir, output_dir=out, attempt=0)
+
+
 async def _run_enablement_integrate(
     tmp_path: Path,
     monkeypatch,
@@ -835,7 +847,8 @@ async def _run_enablement_integrate(
     booted: bool,
     enablement_accuracy=None,
     bench_error: str = "",
-    before_signature=None,
+    before_log: str = "",
+    after_log: str = "",
     enablement_origin: str = "",
     accuracy_floor=None,
     accuracy_task: str = "gsm8k",
@@ -851,12 +864,23 @@ async def _run_enablement_integrate(
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
+    # Every bench records what its boot did; the gate's verdict on whether the
+    # combo runs is that observation's, not the throughput's. A round that did
+    # not boot and names no earlier wall re-hits the same one, which is what a
+    # round with nothing to compare against actually looks like.
+    wall = boot_log_for(LadderStage.ENGINE_INIT)
+    after_text = after_log or (boot_log_for(None) if booted else wall)
+    before_text = before_log or ("" if booted else wall)
+
     async def _fake_bench(**_kwargs):
         bench_result = {
             "output_throughput": 137.0 if booted else 0.0,
             "error": bench_error,
             "effective_config": dict(bench_effective_config or {}),
         }
+        # Every bench records what its boot did; the gate's verdict on whether
+        # the combo runs is that observation's, not the throughput's.
+        bench_result["boot_observation_path"] = _persist_observation(session_dir, "after", after_text)
         return bench_result, {
             "accuracy_pass": None,
             "enablement_accuracy": enablement_accuracy,
@@ -876,8 +900,8 @@ async def _run_enablement_integrate(
         "framework_source_root": str(repo),
         "enablement": True,
     }
-    if before_signature is not None:
-        params["enablement_before_signature"] = before_signature
+    if before_text:
+        params["enablement_before_observation_path"] = _persist_observation(session_dir, "before", before_text)
     if enablement_origin:
         params["enablement_origin"] = enablement_origin
     if accuracy_floor is not None:
@@ -1016,27 +1040,20 @@ async def test_enablement_reverts_when_accuracy_nan(tmp_path: Path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, monkeypatch):
-    """Booted, but the same actionable failure re-appears post-patch -> REVERT."""
-    before = {
-        "kind": "hip_kernel_missing",
-        "offending_file": "",
-        "offending_symbol": "",
-        "raw_excerpt": "",
-        "confidence": 0.85,
-        "bridge_layer": "rocm_hip",
-    }
+async def test_enablement_reverts_when_the_same_wall_is_still_there(tmp_path: Path, monkeypatch):
+    """The patch changed nothing the boot could get past -> REVERT, no advance."""
+    same_wall = "hipErrorNoBinaryForGpu: no kernel image is available\n"
     result, repo = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
-        booted=True,
+        booted=False,
         enablement_accuracy=0.5,
-        bench_error="hipErrorNoBinaryForGpu: no kernel image is available",
-        before_signature=before,
+        before_log=same_wall,
+        after_log=same_wall,
     )
     assert result["status"] == "reverted"
     assert result["runnable"] is False
-    assert "persists" in result["reason"]
+    assert not result.get("advanced")
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
@@ -1049,24 +1066,17 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
     is recorded for stacking, the new failure log is surfaced, and the working
     tree is reverted to clean for deterministic re-application next round.
     """
-    before = {
-        "kind": "shape_mismatch",
-        "offending_file": "vllm/model_executor/parameter.py",
-        "offending_symbol": "",
-        "raw_excerpt": "",
-        "confidence": 0.7,
-        "bridge_layer": "framework",
-    }
     new_gap = (
         "ValueError: Following weights were not initialized from checkpoint: "
-        "{'model.layers.19.self_attn.indexer.k_norm.weight'}"
+        "{'model.layers.19.self_attn.indexer.k_norm.weight'}\n"
     )
     result, repo = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
         booted=False,
         bench_error=new_gap,
-        before_signature=before,
+        before_log="RuntimeError: shape mismatch loading vllm/model_executor/parameter.py\n",
+        after_log=new_gap,
     )
     assert result["status"] == "advanced"
     assert result["advanced"] is True
@@ -1097,7 +1107,11 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
     async def _fake_bench(**_kwargs):
-        return {"output_throughput": 200.0, "error": ""}, {
+        return {
+            "output_throughput": 200.0,
+            "error": "",
+            "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
+        }, {
             "accuracy_pass": None,
             "enablement_accuracy": 0.5,
             "timed_out": False,
@@ -1375,7 +1389,11 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
 
     async def _fake_bench(**_kwargs):
-        return {"output_throughput": 150.0, "error": ""}, {
+        return {
+            "output_throughput": 150.0,
+            "error": "",
+            "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
+        }, {
             "accuracy_pass": None,
             "enablement_accuracy": 0.5,
             "timed_out": False,
