@@ -23,7 +23,6 @@ from hyperloom.common.proctree import collect_tree, group_alive, kill_tree, sign
 
 from .bypass_analysis import parse_server_log_throughput
 
-from ...bringup.device_lock import DeviceClaim, DevicesBusy, claim_devices
 from ..cancel_channel import CancelScope, cancel_scope_listener
 
 log = logging.getLogger(__name__)
@@ -216,18 +215,6 @@ SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
 # Sentinel ``returncode`` when the orchestrator cancelled the action this child was launched for -- a shutdown, or a
 # budget that is spent.
 ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
-
-# Sentinel ``returncode`` when another process on this host already holds the
-# cards this launch would have served on. The child is never started, so this is
-# the one sentinel that reports a round which did not run at all: it says
-# nothing about the variant, and re-running it once the holder is gone is the
-# whole remedy.
-DEVICES_BUSY_RETURNCODE: int = -918
-
-#: Error class for :data:`DEVICES_BUSY_RETURNCODE`. Named, because the generic
-#: nonzero classes read as a fault in the variant, and this is a fault in the
-#: host: nothing a patch or a rung change answers.
-DEVICES_BUSY_ERROR_CLASS: str = "devices_busy"
 
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
@@ -646,42 +633,15 @@ def run_with_session_kill(
     empty: str | bytes = "" if text else b""
     try:
         with cancel_scope_listener() as cancel_scope:
-            # A server launch claims its cards host-wide and hands the claim to
-            # the child. A client-only launch claims nothing: it talks to an
-            # already-serving process, and claiming would deadlock the session
-            # against its own server.
-            try:
-                claim = (
-                    claim_devices(
-                        env,
-                        session_dir=(env or os.environ).get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", ""),
-                    )
-                    if server_log_path
-                    else DeviceClaim((), ())
-                )
-            except DevicesBusy as exc:
-                log.error("_subprocess_kill: %s; not launching.", exc)
-                return subprocess.CompletedProcess(
-                    args=cmd,
-                    returncode=DEVICES_BUSY_RETURNCODE,
-                    stdout=empty,
-                    stderr=str(exc) if text else str(exc).encode("utf-8"),
-                )
-            try:
-                proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=text,
-                    env=env,
-                    cwd=cwd,
-                    pass_fds=claim.fds,
-                    **new_session_kwargs(),
-                )
-            finally:
-                # The child holds its own copy of the description, which is
-                # what the lock lives on, so the claim outlives this process.
-                claim.release()
+            proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=text,
+                env=env,
+                cwd=cwd,
+                **new_session_kwargs(),
+            )
             capture = _StreamCapture(proc, text=text, on_output=on_output)
             capture.start()
             try:
@@ -1000,8 +960,6 @@ __all__ = [
     "AGENTX_PREFLIGHT_RETURNCODE",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
-    "DEVICES_BUSY_ERROR_CLASS",
-    "DEVICES_BUSY_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
