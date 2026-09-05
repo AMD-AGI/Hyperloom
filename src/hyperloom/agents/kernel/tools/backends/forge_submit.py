@@ -105,6 +105,9 @@ _FORGE_EXPERIMENT_ID = "hyperloom"
 # Mirrors kernelforge.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
 # runtime budget rather than running a non-productive campaign.
 _FORGE_MIN_BUDGET_SEC = 3600
+# Longer than the shared SIGTERM-to-SIGKILL grace: on SIGTERM the forge loop
+# writes back the best kernel it has, and a campaign killed before that write
+# lands loses every iteration it ran.
 _FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
@@ -1924,77 +1927,30 @@ def _read_forge_checkpoint(experiments_dir: Path) -> dict | None:
     return checkpoint if isinstance(checkpoint, dict) else None
 
 
-def _proc_identity(pid: int) -> tuple[int, int] | None:
-    """Return ``(parent_pid, start_time_ticks)`` from Linux procfs."""
-    try:
-        stat_text = Path(f"/proc/{pid}/stat").read_text()
-        closing_paren = stat_text.rfind(")")
-        fields_after_name = stat_text[closing_paren + 2 :].split()
-        return int(fields_after_name[1]), int(fields_after_name[19])
-    except (OSError, ValueError, IndexError):
-        return None
+# Reaping walks procfs via :mod:`hyperloom.common.proctree`, imported inside
+# each wrapper like every other first-party import here so the module stays
+# loadable as a bare script.
 
 
 def _descendant_processes(root_pid: int) -> list[tuple[int, int]]:
     """Return ``(pid, start_time)`` descendants, deepest first."""
-    children: dict[int, list[tuple[int, int]]] = {}
-    try:
-        proc_entries = list(Path("/proc").iterdir())
-    except OSError:
-        return []
-    for entry in proc_entries:
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        identity = _proc_identity(pid)
-        if identity is None:
-            continue
-        parent_pid, start_time = identity
-        children.setdefault(parent_pid, []).append((pid, start_time))
+    from hyperloom.common.proctree import descendants  # noqa: PLC0415 - keep module import-light
 
-    descendants: list[tuple[int, int]] = []
-
-    def _walk(parent_pid: int) -> None:
-        for child_pid, start_time in children.get(parent_pid, []):
-            _walk(child_pid)
-            descendants.append((child_pid, start_time))
-
-    _walk(root_pid)
-    return descendants
+    return descendants(root_pid)
 
 
 def _signal_processes(processes: list[tuple[int, int]], sig: int) -> None:
     """Signal captured processes only while their procfs identity still matches."""
-    for pid, expected_start_time in processes:
-        identity = _proc_identity(pid)
-        if identity is None or identity[1] != expected_start_time:
-            continue
-        try:
-            os.kill(pid, sig)
-        except (ProcessLookupError, PermissionError):
-            continue
+    from hyperloom.common.proctree import signal_processes  # noqa: PLC0415 - keep module import-light
+
+    signal_processes(processes, sig)
 
 
 def _process_group_members(pgid: int) -> list[tuple[int, int, str]]:
     """Return live ``(pid, start_time, state)`` members of one process group."""
-    members: list[tuple[int, int, str]] = []
-    try:
-        proc_entries = list(Path("/proc").iterdir())
-    except OSError:
-        return members
-    for entry in proc_entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            stat_text = (entry / "stat").read_text()
-            closing_paren = stat_text.rfind(")")
-            fields = stat_text[closing_paren + 2 :].split()
-            if int(fields[2]) != pgid:
-                continue
-            members.append((int(entry.name), int(fields[19]), fields[0]))
-        except (OSError, ValueError, IndexError):
-            continue
-    return members
+    from hyperloom.common.proctree import group_members  # noqa: PLC0415 - keep module import-light
+
+    return group_members(pgid)
 
 
 def _signal_process_group(
@@ -2004,20 +1960,9 @@ def _signal_process_group(
     phase: str,
 ) -> bool | None:
     """Signal a Forge-owned process group and warn on non-race failures."""
-    try:
-        os.killpg(pgid, sig)
-        return True
-    except ProcessLookupError:
-        return None
-    except (PermissionError, OSError) as exc:
-        log.warning(
-            "forge process-group %s failed: pgid=%d signal=%d error=%s",
-            phase,
-            pgid,
-            sig,
-            exc,
-        )
-        return False
+    from hyperloom.common.proctree import signal_group  # noqa: PLC0415 - keep module import-light
+
+    return signal_group(pgid, sig, what=f"forge process-group {phase}")
 
 
 def _terminate_forge_process(

@@ -18,7 +18,6 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -26,17 +25,19 @@ import time
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+# ``TERM_GRACE_SECONDS`` is this module's name for the shared SIGTERM-to-SIGKILL
+# grace: a driver-side teardown of a server a round left behind waits for the
+# same thing on the same signal, so it waits exactly as long.
+from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
+from hyperloom.common.proctree import collect_tree, group_alive, kill_tree, signal_group
+
 from .bypass_analysis import parse_server_log_throughput
 
+from ...bringup.device_lock import DeviceClaim, DevicesBusy, claim_devices
 from ..cancel_channel import CancelScope, cancel_scope_listener
 
 log = logging.getLogger(__name__)
 
-
-# Grace window between SIGTERM and SIGKILL, here and for a driver-side teardown
-# of a server a round left behind: the same signal, the same thing being waited
-# for.
-TERM_GRACE_SECONDS: float = 5.0
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
@@ -80,9 +81,6 @@ def new_session_kwargs() -> dict:
 def _process_group_alive(pgid: int) -> bool:
     """Return True iff at least one process is still in ``pgid``.
 
-    ``killpg(pgid, 0)`` raises ``ProcessLookupError`` once the group is empty;
-    any other ``OSError`` (e.g. sandbox ``EPERM``) is treated as "still alive".
-
     Args:
         pgid: The POSIX process-group id to probe.
 
@@ -90,15 +88,7 @@ def _process_group_alive(pgid: int) -> bool:
         True if the group still has at least one member (or liveness is
         indeterminate), False once the group is empty or on non-POSIX.
     """
-    if os.name != "posix":
-        return False
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
+    return group_alive(pgid)
 
 
 def _signal_group(pgid: int, sig: int) -> None:
@@ -108,19 +98,7 @@ def _signal_group(pgid: int, sig: int) -> None:
         pgid (int): The POSIX process-group id to signal.
         sig (int): The signal number to send.
     """
-    if os.name != "posix":
-        return
-    try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass
-    except OSError as exc:
-        log.warning(
-            "_subprocess_kill: killpg(%d, %d) failed: %s",
-            pgid,
-            sig,
-            exc,
-        )
+    signal_group(pgid, sig, what="_subprocess_kill")
 
 
 def kill_my_spawned_server(
@@ -130,11 +108,11 @@ def kill_my_spawned_server(
 ) -> None:
     """Tear down the entire process tree rooted at ``proc``.
 
-    No-op when ``proc`` is ``None`` or already exited. SIGTERM the group, wait
-    up to ``grace_seconds``, then SIGKILL survivors. Never raises (logs a
-    warning on unexpected signalling failure). Requires the child to have been
-    launched with :func:`new_session_kwargs` so its pgid is distinct from
-    Hyperloom's own; asserted defensively below.
+    No-op when ``proc`` is ``None`` or already exited. SIGTERM the tree, wait up
+    to ``grace_seconds``, then SIGKILL survivors. Never raises (logs a warning on
+    unexpected signalling failure). Requires the child to have been launched with
+    :func:`new_session_kwargs` so its pgid is distinct from Hyperloom's own;
+    asserted defensively below.
 
     Args:
         proc: The spawned process whose tree should be reaped; ``None`` is a
@@ -186,16 +164,14 @@ def kill_my_spawned_server(
         )
         return
 
-    _signal_group(pgid, signal.SIGTERM)
-
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
-        if not _process_group_alive(pgid):
-            break
-        time.sleep(0.05)
-
-    if _process_group_alive(pgid):
-        _signal_group(pgid, signal.SIGKILL)
+    try:
+        tree = collect_tree([proc.pid])
+    except OSError as exc:
+        # Every caller reaps from a ``finally:``, so an unreadable procfs has to
+        # be reported rather than raised on top of whatever sent us here.
+        log.error("_subprocess_kill: cannot enumerate the tree under pid=%d: %s", proc.pid, exc)
+        return
+    kill_tree(tree, grace_sec=grace_seconds, confirm_sec=grace_seconds)
 
     try:
         proc.wait(timeout=_REAP_COLLECT_SECONDS)
@@ -320,6 +296,18 @@ SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
 # same session resumes. Distinct from ``OVERTIME_KILL_RETURNCODE`` for the reason
 # that one already carries: neither says anything about the variant.
 ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
+
+# Sentinel ``returncode`` when another process on this host already holds the
+# cards this launch would have served on. The child is never started, so this is
+# the one sentinel that reports a round which did not run at all: it says
+# nothing about the variant, and re-running it once the holder is gone is the
+# whole remedy.
+DEVICES_BUSY_RETURNCODE: int = -918
+
+#: Error class for :data:`DEVICES_BUSY_RETURNCODE`. Named, because the generic
+#: nonzero classes read as a fault in the variant, and this is a fault in the
+#: host: nothing a patch or a rung change answers.
+DEVICES_BUSY_ERROR_CLASS: str = "devices_busy"
 
 # Server-ready markers: their appearance in ``server.log`` means the server has
 # finished startup and is accepting traffic. Only after one is observed does the
@@ -611,7 +599,7 @@ def _ready_stamp_path(server_log_path: str) -> Path:
     return Path(server_log_path).parent / _READY_STAMP_NAME
 
 
-def _stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
+def stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
     """Record, beside ``server_log_path``, that the server just reported ready.
 
     Two numbers, because they answer two questions and one clock cannot answer
@@ -990,6 +978,12 @@ def run_with_session_kill(
         session_deadline_sec: Absolute ``time.monotonic()`` instant at which the
             session budget expires. Reaps the tree and returns
             ``SESSION_TIME_EXHAUSTED_RETURNCODE``.
+
+    Returns:
+        subprocess.CompletedProcess: The finished child, or one carrying
+        ``DEVICES_BUSY_RETURNCODE`` and an empty stdout when another process on
+        this host holds the cards a serving launch needs, in which case nothing
+        was started.
     """
     if server_dead_grace_sec is None:
         try:
@@ -1013,17 +1007,45 @@ def run_with_session_kill(
             detok_stall_grace_sec = _DETOK_STALL_GRACE_SEC_DEFAULT
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
+    empty: str | bytes = "" if text else b""
     try:
         with cancel_scope_listener() as cancel_scope:
-            proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=text,
-                env=env,
-                cwd=cwd,
-                **new_session_kwargs(),
-            )
+            # A server launch claims its cards host-wide and hands the claim to
+            # the child. A client-only launch claims nothing: it talks to an
+            # already-serving process, and claiming would deadlock the session
+            # against its own server.
+            try:
+                claim = (
+                    claim_devices(
+                        env,
+                        session_dir=(env or os.environ).get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", ""),
+                    )
+                    if server_log_path
+                    else DeviceClaim((), ())
+                )
+            except DevicesBusy as exc:
+                log.error("_subprocess_kill: %s; not launching.", exc)
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=DEVICES_BUSY_RETURNCODE,
+                    stdout=empty,
+                    stderr=str(exc) if text else str(exc).encode("utf-8"),
+                )
+            try:
+                proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=text,
+                    env=env,
+                    cwd=cwd,
+                    pass_fds=claim.fds,
+                    **new_session_kwargs(),
+                )
+            finally:
+                # The child holds its own copy of the description, which is
+                # what the lock lives on, so the claim outlives this process.
+                claim.release()
             capture = _StreamCapture(proc, text=text, on_output=on_output)
             capture.start()
             try:
@@ -1059,7 +1081,6 @@ def run_with_session_kill(
                     stdout=stdout,
                     stderr=stderr,
                 )
-            empty: str | bytes = "" if text else b""
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=proc.returncode,
@@ -1338,7 +1359,7 @@ def _communicate_with_soft_deadline(
                 # re-attaches to this server pays none of the boot. Taken as
                 # ``now - start`` so the boot is measured end to end on this
                 # process's own clock, whatever host the caller reads it on.
-                _stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
+                stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
             if scan.saw_eval_start and not soft_deadline_suspended:
                 soft_deadline_suspended = True
                 log.info(
@@ -1430,6 +1451,8 @@ __all__ = [
     "AGENTX_PREFLIGHT_RETURNCODE",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",
+    "DEVICES_BUSY_ERROR_CLASS",
+    "DEVICES_BUSY_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "OVERTIME_KILL_RETURNCODE",
@@ -1446,4 +1469,5 @@ __all__ = [
     "server_ready_unix",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
+    "stamp_server_ready",
 ]
