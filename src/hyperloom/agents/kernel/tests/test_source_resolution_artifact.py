@@ -182,24 +182,6 @@ def test_written_artifact_satisfies_its_own_contract(tmp_path):
 # than raise AttributeError and kill the run.
 
 
-def test_active_finder_method_falls_back_without_the_constant(monkeypatch):
-    """A contract module missing METHOD_ACTIVE_FINDER must not crash the reader."""
-
-    class _OldContract:
-        """Stands in for a too-old kernel_source_contract (no new constants)."""
-
-    monkeypatch.setattr(tl, "_KSC", _OldContract())
-    # The module-level literal is the source of truth for the fallback string.
-    assert tl._ACTIVE_FINDER_METHOD == "active_finder"
-    authoritative_item = {
-        "source_resolution_method": "active_finder",
-        "op_to_source_status": tl._ROUTABLE_STATUS,
-    }
-    # _is_curated_resolution reads METHOD_ACTIVE_FINDER/SYMBOL_INDEX/CURATED; it
-    # must resolve them via fallback rather than AttributeError.
-    assert tl._is_curated_resolution(authoritative_item) is True
-
-
 def test_candidate_method_falls_back_without_the_constants(monkeypatch):
     """_candidate_resolution_method degrades to grep/unresolved with no contract."""
     monkeypatch.setattr(tl, "_KSC", None)

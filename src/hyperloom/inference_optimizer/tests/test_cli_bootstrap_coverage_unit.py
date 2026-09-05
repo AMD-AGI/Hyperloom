@@ -128,7 +128,7 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
-def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
+def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -139,7 +139,7 @@ def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
 
-    assert state.kernel_optimizer == "native"
+    assert state.kernel_optimizer == "forge"
 
 
 def _stub_seed_deps(monkeypatch, tmp_path):

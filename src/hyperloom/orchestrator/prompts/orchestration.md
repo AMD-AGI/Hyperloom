@@ -391,13 +391,17 @@ on the next tick.
   `apply_patch` — the kinds you may request. `kernel_opt` and `gemm_tuning`
   are action names, NOT recognised request kinds — never use either as a
   request kind. Use `trace_analyze` for candidate analysis.
-* `run_optimization`, `run_gemm_tuning`, `run_fusion` and `run_collective`
-  ALSO have programmatic handlers but are NOT yours to request: they are
+* Source-level kernel rewrite has no request kind at all. The phase-level
+  KernelForge rewrite controller owns operator discovery, selection and
+  dispatch: it reads the trace and source evidence itself and returns patch
+  artifacts. You only observe its `kernel_rewrite_controller_done` result.
+* `run_gemm_tuning`, `run_fusion` and `run_collective` ALSO have programmatic
+  handlers but are NOT yours to request: they are
   Coordinator-owned deterministic lanes, dispatched at KERNEL entry once
   their own gate passes. PolicyGate REJECTS any of those kinds from you
   (`request_kind`) because a direct request bypasses that gate, the
   lane's SharedState accounting and its integrate step. You only OBSERVE
-  them — outcomes land in your inbox as `run_optimization_done` /
+  them — outcomes land in your inbox as
   `run_gemm_tuning_done` / `run_fusion_done` / `run_collective_done`,
   followed by `fusion_integrate_done` / `collective_integrate_done` once a
   KEEP is integrated, at which point `optimization_stack` carries a
@@ -431,9 +435,10 @@ Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
 map to actions — **follow them**:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
-  → the Coordinator-owned `kernel_opt` lane in KERNEL_AGENT (`🔴` before
-  `🟡`; fusion rows want a fused rewrite). You do not dispatch it: read its
-  `run_optimization_done` events and `integrate` the KEEPs it queues.
+  → the Coordinator-owned rewrite and fusion lanes in KERNEL_AGENT (`🔴`
+  before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
+  rewrite controller selects its own operators and integrates its own patches,
+  and fusion queues its KEEPs for you to `integrate`.
 * **`## System-Level Optimizations`** → `explore` variants; the text
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.

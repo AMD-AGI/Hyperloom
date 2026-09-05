@@ -747,17 +747,19 @@ you want to wind down sooner.
   Skip if `last_trace_analyze.trace_input` already equals
   `last_profile_trace` (cached). Explore/sweep/report are NEVER gated on it.
 
-### `kernel_opt` and `gemm_tuning` — not yours to propose
+### `gemm_tuning` — not yours to propose
 
-Both lanes are dispatched by the Coordinator once at KERNEL entry, from a
-nomination and a lane budget. Proposing either is refused: a per-tick re-issue
-would spend time the allocation never granted and target kernels the nomination
-did not choose. Read `kernel_opt_task_attempts` and `pending_keep_kernels` to
-see what the lanes did; do not try to drive them.
+The lane is dispatched by the Coordinator once at KERNEL entry, from a lane
+budget. Proposing it is refused: a per-tick re-issue would spend time the
+allocation never granted. Source-level kernel rewrite is not on this list at all
+-- it has no action and no request kind, because the KernelForge rewrite
+controller selects and dispatches its own operators. Read
+`kernel_rewrite_controller_result` and `pending_keep_kernels` to see what the
+lanes did; do not try to drive them.
 
 ### `integrate` — forced immediately after a KEEP
 
-On `run_optimization_done` with `decision='KEEP'`, integrate is the only
+On a lane response carrying `decision='KEEP'`, integrate is the only
 allowed action until the patch lands on `optimization_stack`:
 
   request{target_agent: 'kernel_agent', kind: 'integrate',
@@ -1045,7 +1047,7 @@ def build_orchestration_prompt(
     ]
     if (
         kernel_enabled
-        and any(a.name == "kernel_opt" for a in actions)
+        and any(a.name == "integrate" for a in actions)
         and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
     ):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())

@@ -909,15 +909,6 @@ class IntentRouter:
                 return
             params = intent.payload.get("params") or {}
             merged_payload = {**intent.payload, **params}
-            # Inject candidates_path from last_trace_analyze when omitted; orchestration value wins.
-            if (
-                kind == "run_optimization"
-                and self.shared_state.last_trace_analyze
-                and not merged_payload.get("candidates_path")
-            ):
-                cached_candidates_path = self.shared_state.last_trace_analyze.get("candidates_path")
-                if cached_candidates_path:
-                    merged_payload["candidates_path"] = cached_candidates_path
             # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
             cache_hit_source = None
             cached_result = self._cached_kernel_request(kind, merged_payload)
@@ -964,12 +955,9 @@ class IntentRouter:
                         if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                             merged_payload["base_tput"] = float(cb_tput)
 
-                    # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately.
                     handler_kwargs: dict[str, Any] = {
                         "session_dir": self.session_dir,
                     }
-                    if kind == "run_optimization":
-                        handler_kwargs["record_partial"] = self._record_kernel_opt_partial
                     # Bracket the programmatic kernel step with START / END
                     # lifecycle events. ``kind`` is the machine step name;
                     # the human label is resolved from LIFECYCLE_STEP_LABELS.
@@ -1041,14 +1029,6 @@ class IntentRouter:
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
                 self.shared_state.save(self.session_dir)
-            # Mirror kernel-opt outcomes into SharedState.
-            if kind == "run_optimization":
-                # Batch mode already streamed each sub-result; re-recording would double-count.
-                if not bool(isinstance(result, dict) and result.get("batch_mode")):
-                    self.shared_state.record_kernel_opt(result)
-                self.shared_state.save(self.session_dir)
-                # Auto-enqueue integrate for KEEP'd kernels not yet integrated.
-                await self._auto_enqueue_pending_integrations()
             if kind == "run_gemm_tuning":
                 await self._handle_gemm_tuning_result(result)
             if kind == "integrate":

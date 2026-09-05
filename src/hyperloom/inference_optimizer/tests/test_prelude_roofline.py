@@ -75,12 +75,21 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.session_dir = tmp_path
     c.shared_state = SharedState(
         baseline_tput=100.0,
-        kernel_optimizer="native",
+        kernel_optimizer="forge",
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c._run_deadline = None
     c._run_started_monotonic = None
+    c._phase_budget_pct = {}
+
+    # KERNEL entry ends by handing rewrite control to a controller subprocess.
+    # Entry tests are about what leads up to that, so the handoff is the last
+    # step they exercise; the test that covers the handoff stubs this itself.
+    async def _skip_controller(_handoff_dir: Path, _output_dir: Path) -> None:
+        return None
+
+    monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
     return c
 
 
@@ -371,218 +380,39 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
 
 
 @pytest.mark.asyncio
-async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(coord: Coordinator, monkeypatch):
-    """The phase dispatches its own kernel_opt on both entry routes.
-
-    The dispatch sat on the GEMM route alone, so skipping GEMM tuning removed
-    the phase's source-level kernel work too -- two unrelated settings, with
-    nothing in the log connecting them. A run then held eight routable
-    candidates, cleared the dispatch floor, and reached SWEEP having optimized
-    nothing, because the only remaining path was an orchestration request that
-    was never made.
-    """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-    assert coord._gemm_tuning_required_before_kernel_opt() is False
-
-    dispatched = 0
-
-    async def _skip_reprofile() -> None:
-        return None
-
-    async def _dispatch() -> None:
-        nonlocal dispatched
-        dispatched += 1
-
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_nomination", _dispatch)
-
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-    assert dispatched == 1
-
-
-@pytest.mark.asyncio
-async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: Coordinator, monkeypatch):
-    """Nothing routable left is the one reason to hand the phase back."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-
-    dispatched = 0
-
-    async def _skip_reprofile() -> None:
-        return None
-
-    async def _dispatch() -> None:
-        nonlocal dispatched
-        dispatched += 1
-
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_nomination", _dispatch)
-
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-    assert dispatched == 0
-
-
-@pytest.mark.asyncio
-async def test_kernel_entry_records_why_it_dispatched_nothing(coord: Coordinator, monkeypatch):
-    """A wholesale dispatch skip has to name itself.
-
-    ``untried_hot_reusable_kernels`` reads the candidate table, so a session
-    whose trace_analyze never landed one takes this path -- and left no trace of
-    having done so. The summary's unattempted buckets only count kernels the
-    table listed, so all six stayed at zero and a 28-hour run with no candidate
-    table read exactly like a workload with no headroom.
-    """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-
-    async def _skip_reprofile() -> None:
-        return None
-
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    coord.shared_state.last_trace_analyze = {}
-    coord.shared_state.roofline_failure_streak = 3
-
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-    skip = coord.shared_state.last_kernel_opt_dispatch_skip
-    assert skip.get("reason") == "no_candidate_table", (
-        "an absent candidate table must be named; without it the summary "
-        "reports six zero buckets and reads as 'nothing worth optimising'"
-    )
-    assert skip.get("trace_analyze_empty") is True
-    assert skip.get("roofline_failure_streak") == 3
-    assert skip.get("ts")
-
-
-@pytest.mark.asyncio
-async def test_kernel_entry_separates_an_empty_table_from_a_spent_one(coord: Coordinator, monkeypatch):
-    """A table whose kernels were all tried is not the same as no table.
-
-    The fixture has to satisfy the gate's own admission test, so the hot kernel
-    is reusable and above the floor, and the ledger records an attempt against
-    it. Anything less leaves the queue empty for want of a table, which is the
-    other reason entirely.
-    """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-
-    async def _skip_reprofile() -> None:
-        return None
-
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    coord.shared_state.last_trace_analyze = {
-        "candidates_path": "/tmp/kernel_candidates.json",
-        "hot_kernels_top15": [
-            {
-                "kernel_id": "k001",
-                "name": "hot_gemm",
-                "source_file": "/p/a.py",
-                "gpu_pct": 40.0,
-                "reusable_native_kernel": True,
-            }
-        ],
-    }
-    coord.shared_state.kernel_opt_task_attempts = {
-        "task-1": {
-            "kernel_id": "k001",
-            "current_kernel_id": "k001",
-            "last_source_file": "/p/a.py",
-            "attempts": 1,
-        }
-    }
-    assert coord.shared_state.untried_hot_reusable_kernels() == [], "fixture must exercise the spent-table state"
-
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-    assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_untried_hot_kernels"
-
-
-@pytest.mark.asyncio
-async def test_a_failed_trace_analyze_is_not_a_spent_table(coord: Coordinator, monkeypatch):
-    """A non-empty snapshot is not evidence of a table.
-
-    trace_analyze that ran and crashed leaves a status/error dict behind. Judged
-    on the dict being non-empty, that reads as "the table listed kernels and
-    they were all tried" -- the same false conclusion this breadcrumb exists to
-    prevent, relocated from the buckets into the reason.
-    """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-
-    async def _skip_reprofile() -> None:
-        return None
-
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    coord.shared_state.last_trace_analyze = {"status": "failed", "error": "roofline crashed"}
-
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-    assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_candidate_table"
-
-
-@pytest.mark.asyncio
-async def test_a_dispatch_retires_an_earlier_skip_breadcrumb(coord: Coordinator, monkeypatch):
-    """A batch dispatch names no kernel_id, so nothing else clears the field.
-
-    Left standing, a breadcrumb from an earlier entry outlives the dispatch and
-    the report asserts "never dispatched" for a round that dispatched and had
-    its candidates filtered by the handler's own floor.
-    """
-    coord.shared_state.last_kernel_opt_dispatch_skip = {"reason": "no_candidate_table"}
-    coord.shared_state.last_trace_analyze = {"candidates_path": "/tmp/kernel_candidates.json"}
-
-    async def _handler(_payload, **_kwargs):
-        return {"status": "ok", "batch_mode": True, "dispatched": 2}
-
-    import hyperloom.orchestrator.kernel.request_handlers as krh
-
-    monkeypatch.setattr(krh, "run_optimization_handler", _handler)
-
-    sent: list[Any] = []
-
-    class _Bus:
-        async def append_and_seq(self, message: Any) -> None:
-            sent.append(message)
-
-    coord.phase_kernel.bus = _Bus()
-
-    await coord.phase_kernel._run_kernel_opt_nomination()
-
-    assert coord.shared_state.last_kernel_opt_dispatch_skip == {}
-    assert sent, "the batch result is still reported on the bus"
-
-
-@pytest.mark.asyncio
-async def test_kernel_entry_records_a_snapshot_without_a_candidates_artifact(
+async def test_kernel_entry_always_hands_rewrite_control_to_controller(
     coord: Coordinator,
     monkeypatch,
-):
-    """The batch's own guard is a third distinct state worth naming."""
-    monkeypatch.setattr(
-        coord.phase_kernel.shared_state,
-        "last_trace_analyze",
-        {"kernel_roofline_top15": [{"kernel_id": "k001"}]},
-        raising=False,
-    )
+) -> None:
+    """Entry writes a handoff and delegates, with no candidate gate in between."""
 
-    await coord.phase_kernel._run_kernel_opt_nomination()
+    async def _skip() -> None:
+        return None
 
-    assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_candidates_path"
+    handed_off: list[tuple[Path, Path]] = []
+
+    async def _controller(handoff_dir: Path, output_dir: Path) -> None:
+        handed_off.append((handoff_dir, output_dir))
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_collective_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
+
+    await coord.phase_kernel._finish_kernel_entry()
+    await coord.phase_kernel._finish_kernel_entry()
+
+    attempt_root = coord.session_dir / "kernel-agent" / "forge" / "cycle-0"
+    # Each entry gets its own attempt directory: the controller refuses an output
+    # root it has already initialized, so re-entry cannot reuse the first one.
+    assert handed_off == [
+        (attempt_root / "attempt-0" / "handoff", attempt_root / "attempt-0"),
+        (attempt_root / "attempt-1" / "handoff", attempt_root / "attempt-1"),
+    ]
+    for handoff_dir, _output_dir in handed_off:
+        assert (handoff_dir / "workload.md").is_file()
+        assert (handoff_dir / "serving-context.md").is_file()
+        assert (handoff_dir / "trace-evidence.md").is_file()
 
 
 def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
@@ -857,57 +687,3 @@ async def _latch_after(coord: Coordinator, monkeypatch, handler) -> Any:
     await coord.phase_kernel._run_kernel_opt_nomination()
 
     return coord.shared_state.kernel_auto_pass_cycle
-
-
-@pytest.mark.asyncio
-async def test_a_completed_auto_pass_latches_the_cycle(coord: Coordinator, monkeypatch):
-    """An empty nomination still counts: that is the case the phase hung on."""
-
-    async def _handler(_payload, **_kwargs):
-        return {"status": "complete", "auto": True, "queued": 0}
-
-    assert await _latch_after(coord, monkeypatch, _handler) is not None
-
-
-@pytest.mark.asyncio
-async def test_a_failed_auto_pass_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
-    """A failure answered for no kernel, so retryable ones must stay pending.
-
-    A failure without a kernel_id writes no attempt ledger either, so latching
-    here would declare the cycle done with nothing to contradict it.
-    """
-
-    async def _handler(_payload, **_kwargs):
-        return {"status": "failed", "auto": True, "queued": 0, "error": "rc=2"}
-
-    assert await _latch_after(coord, monkeypatch, _handler) is None
-
-
-@pytest.mark.asyncio
-async def test_a_timed_out_auto_pass_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
-    """A deadline kill is not a pass that had its say."""
-
-    async def _handler(_payload, **_kwargs):
-        return {"status": "timeout", "auto": True, "queued": 0}
-
-    assert await _latch_after(coord, monkeypatch, _handler) is None
-
-
-@pytest.mark.asyncio
-async def test_the_legacy_selector_path_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
-    """auto=false is the baseline route and never ran a nomination at all."""
-
-    async def _handler(_payload, **_kwargs):
-        return {"status": "ok", "kernel_id": "k001"}
-
-    assert await _latch_after(coord, monkeypatch, _handler) is None
-
-
-@pytest.mark.asyncio
-async def test_a_raising_handler_does_not_latch_the_cycle(coord: Coordinator, monkeypatch):
-    """The entry still reports a failed result, but it answered for nothing."""
-
-    async def _handler(_payload, **_kwargs):
-        raise RuntimeError("boom")
-
-    assert await _latch_after(coord, monkeypatch, _handler) is None

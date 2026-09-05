@@ -105,65 +105,6 @@ def test_dry_run_writes_the_source_resolution_artifact(
     assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
 
 
-def test_agent_dry_run_does_not_spend_a_candidate_review_session(monkeypatch, tmp_path, capsys):
-    """A dry run plans the analysis; it must not run the review agent.
-
-    The stage costs an agent session, waits out a 900-second bound when the
-    stream stalls, and reads the framework tree -- all to audit a table a dry
-    run publishes for inspection and never dispatches from.
-    """
-    import json as _json
-
-    trace = tmp_path / "trace.json"
-    trace.write_text('{"traceEvents": []}', encoding="utf-8")
-    source = tmp_path / "kernel.py"
-    source.write_text("def kernel():\n    pass\n", encoding="utf-8")
-    monkeypatch.setattr(
-        tla,
-        "analyze_trace_files",
-        lambda *_args, **_kwargs: [
-            {
-                "kernel_id": "k001",
-                "name": "kernel",
-                "gpu_pct": 100.0,
-                "duration_us": 1.0,
-                "source_file": str(source),
-                "source_type": "python",
-                "source_resolution_method": "name_grep",
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        tla,
-        "write_reports",
-        lambda *_a, **_kw: {"trace_report_path": str(tmp_path / "trace_report.json")},
-    )
-
-    ran: list[str] = []
-    monkeypatch.setattr(
-        tla,
-        "run_candidate_review_stage",
-        lambda *_a, **_kw: ran.append("called") or {},
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tracelens_analysis.py",
-            "--trace-input",
-            str(trace),
-            "--workspace-path",
-            str(tmp_path / "workspace"),
-            "--dry-run",
-        ],
-    )
-
-    assert tla.main() == 0
-    assert ran == []
-    result = _json.loads(capsys.readouterr().out)
-    assert "kernel_candidates_raw" not in result["artifact_paths"]
-
-
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked first in the buggy resume trace."""
@@ -3995,38 +3936,6 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert "(640,2880) bf16" in g["rows"][1]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
-
-    # Now render the benchmark cases block from the primary candidate
-    # carrying the task_group — this is what the kernel_optimization
-    # subprocess sees in build_prompt.
-    import importlib
-
-    ko = importlib.import_module("kernel_optimization")
-    primary = dict(g["rows"][0])
-    primary["task_group"] = g
-    block = ko._build_benchmark_cases_block(primary)
-    assert "## Benchmark cases" in block
-    # Every row produces a distinct ``Case N:`` line, in
-    # aggregate-time-descending order.
-    assert "Case 1: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 2: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 3: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 4: operation=vllm::rocm_unquantized_gemm" in block
-    # Each row's distinct Args appear in its own Case line. The
-    # ``(640,2880) bf16`` shape only exists in k002's row, so it must
-    # appear in exactly one Case (the second, since k002 is the
-    # second-heaviest at 10992 us).
-    assert block.count("(640,2880) bf16") == 1
-    case2_segment = block.split("Case 2:")[1].split("Case 3:")[0]
-    assert "(640,2880) bf16" in case2_segment, (
-        "k002's unique shape must land in Case 2 — confirms shape preservation per-row, not cross-row merging"
-    )
-    # Same for k003's unique ``(2880,512)`` shape → Case 3.
-    case3_segment = block.split("Case 3:")[1].split("Case 4:")[0]
-    assert "(2880,512) bf16" in case3_segment
-    # And k004's unique ``(2048,2880)`` shape → Case 4.
-    case4_segment = block.split("Case 4:")[1]
-    assert "(2048,2880) bf16" in case4_segment
 
 
 def test_aggregate_drops_empty_prose_entries(tmp_path):

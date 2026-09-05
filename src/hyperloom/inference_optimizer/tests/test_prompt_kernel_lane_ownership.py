@@ -3,7 +3,7 @@
 
 """The assembled KERNEL_AGENT prompt agrees with the request-kind ownership tables.
 
-``run_optimization`` / ``run_gemm_tuning`` are Coordinator-owned lanes that
+``run_gemm_tuning`` / ``run_fusion`` / ``run_collective`` are Coordinator-owned lanes that
 PolicyGate denies from an LLM, so no part of the prompt -- generated sections or
 the ``orchestration.md`` rules fragment -- may advertise them as requestable.
 """
@@ -85,21 +85,22 @@ def test_no_request_template_exists_for_a_coordinator_owned_kind(kernel_prompt):
     assert "### Kernel request kinds" in kernel_prompt
 
 
-def test_trace_analyze_is_not_presented_as_a_run_optimization_prerequisite(kernel_prompt):
-    """``run_optimization`` is dispatched at phase entry; nothing the model does gates it."""
+def test_trace_analyze_is_not_presented_as_a_dispatch_prerequisite(kernel_prompt):
+    """Source rewrite is the controller's; nothing the model does gates a lane."""
     assert "must precede every `run_optimization`" not in kernel_prompt
     assert "### `trace_analyze` — read-only candidate analysis" in kernel_prompt
 
 
 def test_the_owned_lanes_are_named_as_coordinator_owned(kernel_prompt):
     """Ownership must be stated, not left to be inferred from the catalogue."""
-    assert "### `kernel_opt` and `gemm_tuning` — not yours to propose" in kernel_prompt
+    assert "### `gemm_tuning` — not yours to propose" in kernel_prompt
 
     owned_bullet = next(
         (
             block
             for block in kernel_prompt.split("\n* ")
-            if block.startswith("`run_optimization`") and "NOT yours to request" in block
+            if "NOT yours to request" in block
+            and all(f"`{kind}`" in block for kind in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
         ),
         None,
     )

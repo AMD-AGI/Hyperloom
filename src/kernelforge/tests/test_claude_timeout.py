@@ -200,3 +200,66 @@ def test_timeout_before_any_session_id_is_raised(monkeypatch):
     # Nothing was established, so there is no handle to resume; the failure
     # precedes the session and must unwind like the pre-init stream error does.
     assert "timed out" in str(excinfo.value).lower()
+
+
+# The 3.10 stand-in for ``asyncio.timeout``. ``_session_deadline`` only hands it
+# out below 3.11, so on a newer interpreter nothing would reach it -- yet it is
+# what bounds every session on the older one, and a backport that is only
+# exercised by the interpreter that needs it is a backport nobody checks.
+# These construct it directly so its contract holds on both.
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_backport_stops_a_body_that_outlives_its_delay() -> None:
+    """The whole point: a session past its budget is cancelled, not awaited."""
+    deadline = claude_mod._DeadlineBackport(0.01)
+
+    with pytest.raises(asyncio.TimeoutError):
+        async with deadline:
+            await asyncio.sleep(30)
+
+    assert deadline.expired()
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_backport_leaves_a_body_that_finishes_in_time_alone() -> None:
+    """Finishing early is not a timeout, and the timer must not outlive the block."""
+    deadline = claude_mod._DeadlineBackport(30)
+
+    async with deadline:
+        await asyncio.sleep(0)
+
+    assert not deadline.expired()
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_backport_without_a_delay_bounds_nothing() -> None:
+    """``asyncio.timeout(None)`` applies no bound, and the stand-in matches it."""
+    deadline = claude_mod._DeadlineBackport(None)
+
+    async with deadline:
+        await asyncio.sleep(0.02)
+
+    assert not deadline.expired()
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_backport_does_not_disguise_someone_elses_cancellation() -> None:
+    """Only our own deadline becomes a TimeoutError; an outside cancel stays one."""
+    deadline = claude_mod._DeadlineBackport(30)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with deadline:
+            raise asyncio.CancelledError
+
+    assert not deadline.expired()
+
+
+def test_the_session_deadline_is_the_backport_below_311(monkeypatch) -> None:
+    """Which bound a session gets is decided by the interpreter, not the caller.
+
+    Only the sub-3.11 half is asserted here: the 3.11+ half returns the stdlib
+    ``asyncio.timeout``, which a 3.10 interpreter does not have to hand out.
+    """
+    monkeypatch.setattr(claude_mod.sys, "version_info", (3, 10, 12))
+    assert isinstance(claude_mod._session_deadline(30), claude_mod._DeadlineBackport)
