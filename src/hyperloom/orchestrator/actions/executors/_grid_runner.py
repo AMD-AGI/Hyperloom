@@ -46,8 +46,6 @@ from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
-    DEVICES_BUSY_ERROR_CLASS,
-    DEVICES_BUSY_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     OVERTIME_KILL_RETURNCODE,
@@ -2874,9 +2872,7 @@ async def run_grid(
                 # the failure only in the report.
                 if not error.strip():
                     error = redact_secret_values(_report_errors_summary(report))
-                invalid_class = (
-                    DEVICES_BUSY_ERROR_CLASS if rc == DEVICES_BUSY_RETURNCODE else "magpie_nonzero_invalid_measurement"
-                )
+                invalid_class = "magpie_nonzero_invalid_measurement"
             elif not report:
                 error = death_excerpt or "benchmark_report missing"
                 invalid_class = "benchmark_report_missing"

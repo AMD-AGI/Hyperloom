@@ -87,8 +87,6 @@ from ._grid_runner import (
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
-    DEVICES_BUSY_ERROR_CLASS,
-    DEVICES_BUSY_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
@@ -849,8 +847,6 @@ def _classify_subprocess_error(
         for a fast exit caused by argument validation, else
         ``"subprocess_nonzero"``.
     """
-    if returncode == DEVICES_BUSY_RETURNCODE:
-        return DEVICES_BUSY_ERROR_CLASS
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the
     # fast-exit elapsed gate below.
