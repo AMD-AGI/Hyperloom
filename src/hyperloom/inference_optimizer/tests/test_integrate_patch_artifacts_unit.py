@@ -167,8 +167,7 @@ def test_apply_then_revert_restores_clobbered_target(tmp_path):
     target.write_text("ORIGINAL", encoding="utf-8")
     backup_root = tmp_path / "backups"
 
-    applied, errors = IntegratePatchExecutor._apply_artifacts(
-        IntegratePatchExecutor,
+    applied, errors = IntegratePatchExecutor(session_dir=tmp_path)._apply_artifacts(
         [_spec(src, target, "fw/cfg.json")],
         backup_root=backup_root,
     )
@@ -189,8 +188,7 @@ def test_apply_then_revert_deletes_created_target(tmp_path):
     target = tmp_path / "fw" / "new_cfg.json"
     backup_root = tmp_path / "backups"
 
-    applied, errors = IntegratePatchExecutor._apply_artifacts(
-        IntegratePatchExecutor,
+    applied, errors = IntegratePatchExecutor(session_dir=tmp_path)._apply_artifacts(
         [_spec(src, target, "fw/new_cfg.json")],
         backup_root=backup_root,
     )
@@ -210,8 +208,7 @@ def test_apply_keeps_artifact_when_not_reverted(tmp_path):
     target = tmp_path / "fw" / "cfg.json"
     backup_root = tmp_path / "backups"
 
-    applied, errors = IntegratePatchExecutor._apply_artifacts(
-        IntegratePatchExecutor,
+    applied, errors = IntegratePatchExecutor(session_dir=tmp_path)._apply_artifacts(
         [_spec(src, target, "fw/cfg.json")],
         backup_root=backup_root,
     )
