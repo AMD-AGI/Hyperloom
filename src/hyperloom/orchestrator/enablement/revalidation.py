@@ -250,7 +250,6 @@ class EnablementRevalidation(CoordinatorCollaborator):
                     lease_sec=float(lease_ttl_sec),
                     now_unix=time.time(),
                     request_id=key,
-                    probe_origin="enablement_revalidation",
                     evidence={"idempotency_key": key},
                     join=_join,
                 )

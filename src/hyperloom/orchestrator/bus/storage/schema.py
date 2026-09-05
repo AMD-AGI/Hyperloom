@@ -136,10 +136,6 @@ _DDL = [
         renewed_unix         REAL    NOT NULL,
         expires_unix         REAL    NOT NULL,
         settled_unix         REAL,
-        reap_backend         TEXT    NOT NULL DEFAULT '',
-        probe_origin         TEXT    NOT NULL DEFAULT '',
-        provisional          INTEGER NOT NULL DEFAULT 0,
-        correctness_verified INTEGER NOT NULL DEFAULT 0,
         stage_high_water     INTEGER NOT NULL DEFAULT 0
     )
     """,

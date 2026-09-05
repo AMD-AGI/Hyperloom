@@ -2371,10 +2371,6 @@ class EnablementRoundSummary(TypedDict, total=False):
         fence: The holder's token; only a handoff advances it.
         opened_unix: When the round was acquired.
         settled_unix: When it ended, or ``None`` while it is open.
-        provisional: Whether the round's result is not yet trustworthy.
-        correctness_verified: Whether the round's server passed correctness.
-        probe_origin: What caused the round to be opened.
-        reap_backend: What performed, or would have performed, the reap.
         stage_high_water: Furthest ladder stage this round's boots reached.
     """
 
@@ -2385,10 +2381,6 @@ class EnablementRoundSummary(TypedDict, total=False):
     fence: int
     opened_unix: float
     settled_unix: float | None
-    provisional: bool
-    correctness_verified: bool
-    probe_origin: str
-    reap_backend: str
     stage_high_water: int
 
 

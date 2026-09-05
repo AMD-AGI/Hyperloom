@@ -222,7 +222,6 @@ async def test_the_reaper_kills_the_holders_recorded_process_and_confirms_it(db)
 
         settled = await rounds.get("round-spec-1")
         assert settled.outcome == EXPIRED_REAPED
-        assert settled.reap_backend == BACKEND_PROCESS_GROUP
     finally:
         child.kill()
         child.wait()

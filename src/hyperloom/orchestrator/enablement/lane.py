@@ -333,7 +333,6 @@ class EnablementLane(CoordinatorCollaborator):
                 lease_sec=float(lease_ttl_sec),
                 now_unix=time.time(),
                 request_id=idempotency_key,
-                probe_origin=params["enablement_failure_kind"],
                 join=_join,
                 evidence={"idempotency_key": idempotency_key},
             )
@@ -492,7 +491,6 @@ class EnablementLane(CoordinatorCollaborator):
             outcome=outcome,
             now_unix=time.time(),
             request_id=f"settle:{round_row.round_id}:{round_row.fence}",
-            correctness_verified=outcome == BOOTED,
             evidence={"reason": reason} if reason else {},
         )
 

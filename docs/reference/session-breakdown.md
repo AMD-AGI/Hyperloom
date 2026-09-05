@@ -683,10 +683,6 @@ a round: a round has to outlive the process that took it, so no field in
 | `fence`                | int           | The holder's token; only a handoff advances it.                                                     |
 | `opened_unix`          | float         | When the round was acquired.                                                                        |
 | `settled_unix`         | float \| null | When it ended, `null` while open.                                                                   |
-| `provisional`          | bool          | The round's result is not yet trustworthy.                                                          |
-| `correctness_verified` | bool          | The round's server passed correctness.                                                              |
-| `probe_origin`         | string        | What caused the round to be opened.                                                                 |
-| `reap_backend`         | string        | What performed, or would have performed, the reap.                                                  |
 | `stage_high_water`     | int           | Furthest ladder stage this round's boots reached.                                                   |
 
 ### Fields the round ledger replaced
