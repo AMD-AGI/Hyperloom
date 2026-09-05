@@ -11,7 +11,7 @@ change land cleanly.**
 Hyperloom is an autonomous agentic system that optimizes end-to-end LLM inference on AMD
 GPUs (host code and GPU kernels). A Python Coordinator drives an iterative
 Think → Decide → Implement → Benchmark loop, delegating to LLM roles and programmatic
-handlers and integrating external components (Magpie, TraceLens, GEAK, AMD Quark).
+handlers and integrating external components.
 
 ## Where things are documented
 
@@ -52,9 +52,9 @@ doc is the authority on where that boundary lives.
 - **Size budget.** Prefer reviewable diffs. A large diff is a signal to split, not to push
   harder. Cleanup in an unrelated file is a separate PR.
 - **Fix upstream, not around it.** When the root cause is inside a component (GEAK, Magpie,
-  TraceLens, IntelliKit) or a framework, direct the user to fix it there — don't paper over it with a
-  local workaround.
-- **New framework or platform?** Work bring-up through the owning-components before
+  TraceLens, IntelliKit) or a framework, fix it there and pin the fix — don't paper over it
+  with a local workaround.
+- **New framework or platform?** Work bring-up through the owning components before
   integration code lands — see [`CONTRIBUTING.md`](CONTRIBUTING.md) § *Proposing a new
   framework or platform*.
 - **Don't grow the debt.** No new broad `except Exception` / bare `except` — catch the
