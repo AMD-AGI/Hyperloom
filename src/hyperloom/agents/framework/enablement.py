@@ -512,8 +512,6 @@ class EnablementRequest:
         launch_log: Raw failure text fed to :func:`classify_failure`.
         work_dir: Scratch root for candidate worktrees.
         gpu_type: Target GPU (``mi300x`` ...); feeds keyword ranking.
-        launch_probe: Command that must exit 0 for the combo to count as
-            "runs" (the runnable gate). Empty disables the probe.
         max_search_candidates: Cap on bridging PRs to consider.
     """
 
@@ -523,7 +521,6 @@ class EnablementRequest:
     launch_log: str = ""
     work_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "framework-agent-enablement")
     gpu_type: str = ""
-    launch_probe: str = ""
     max_search_candidates: int = 5
 
     @classmethod
@@ -558,7 +555,6 @@ class EnablementRequest:
                 str(raw.get("work_dir") or (Path(tempfile.gettempdir()) / "framework-agent-enablement"))
             ).expanduser(),
             gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
-            launch_probe=str(raw.get("launch_probe") or "").strip(),
             max_search_candidates=int(raw.get("max_search_candidates", 5)),
         )
 
@@ -578,114 +574,35 @@ class EnablementRequest:
 
 def runnable_decision(
     *,
-    probe_returncode: int | None,
+    booted: bool | None,
     correctness_ok: bool | None,
-    probe_timed_out: bool = False,
-    before_signature: FailureSignature | None = None,
-    after_signature: FailureSignature | None = None,
+    boot_timed_out: bool = False,
 ) -> tuple[bool, str]:
     """Decide whether an enablement patch made the combo *run*.
 
-    Returns KEEP only when the launch probe now exits 0 (and did not time out)
-    and, when a correctness check was run, it passed. When both
-    ``before_signature`` and ``after_signature`` are supplied, the same
-    actionable failure re-appearing after the patch returns REVERT.
+    ``booted`` is the boot verdict off the attempt's ladder observation, never a
+    throughput number: a server that comes up and serves slowly has been
+    enabled. Whether the boot got *further* than the last one is a separate
+    question, answered by ladder arithmetic over two boot observations.
 
     Args:
-        probe_returncode: Launch-probe exit code; ``None`` if the probe did not
-            run.
+        booted: Whether the attempt reached a serving server; ``None`` when no
+            observation was recorded and the question was never answered.
         correctness_ok: Minimal-correctness result; ``None`` if not evaluated.
-        probe_timed_out: Whether the probe hit its wall-clock budget.
-        before_signature: Failure signature before applying the patch.
-        after_signature: Failure signature captured from the post-patch probe
-            output (``UNKNOWN`` / non-actionable when it booted cleanly).
+        boot_timed_out: Whether the attempt was reaped on its wall-clock budget.
 
     Returns:
         tuple[bool, str]: ``(runs, reason)``.
     """
-    if probe_timed_out:
-        return False, "launch probe timed out"
-    if probe_returncode is None:
-        return False, "launch probe did not run"
-    if probe_returncode != 0:
-        return False, f"launch probe exited {probe_returncode} (still not runnable)"
-    if (
-        before_signature is not None
-        and after_signature is not None
-        and after_signature.is_actionable
-        and after_signature.kind == before_signature.kind
-    ):
-        return False, f"same failure {after_signature.kind} persists after patch"
+    if boot_timed_out:
+        return False, "the bring-up was reaped on its budget"
+    if booted is None:
+        return False, "no boot observation was recorded for this attempt"
+    if not booted:
+        return False, "the server did not come up (still not runnable)"
     if correctness_ok is False:
-        return False, "launch succeeded but minimal correctness check failed"
-    return True, "combo now launches" + ("" if correctness_ok is None else " and passes minimal correctness")
-
-
-def _failure_identity(sig: FailureSignature | None) -> tuple[str, str, str]:
-    """A coarse, taxonomy-independent identity for a failure signature.
-
-    The identity is ``(kind, offending_file, normalized_excerpt)`` where the
-    excerpt is whitespace-collapsed, lower-cased, truncated, and has numeric
-    operands masked to ``#`` so differing operands compare equal but a genuinely
-    different error does not. This lets two ``UNKNOWN`` crashes still be told
-    apart when the error text / offending site changed.
-
-    Args:
-        sig: The failure signature (may be ``None``).
-
-    Returns:
-        tuple[str, str, str]: ``(kind, offending_file, normalized_excerpt)``.
-    """
-    if sig is None:
-        return ("", "", "")
-    excerpt = re.sub(r"\s+", " ", (sig.raw_excerpt or "")).strip().lower()
-    excerpt = re.sub(r"\d+", "#", excerpt)[:160]
-    return (sig.kind or "", (sig.offending_file or "").strip(), excerpt)
-
-
-def _has_failure(sig: FailureSignature | None) -> bool:
-    """True when a signature represents a real (post-)boot failure, not a clean boot.
-
-    A real failure is either actionable OR carries error text / an offending
-    file; a clean boot is a non-actionable signature with no content.
-    """
-    if sig is None:
-        return False
-    if sig.is_actionable:
-        return True
-    return bool((sig.raw_excerpt or "").strip() or (sig.offending_file or "").strip())
-
-
-def enablement_made_progress(
-    before_signature: FailureSignature | None,
-    after_signature: FailureSignature | None,
-) -> bool:
-    """Whether a patch advanced the boot to a *new, deeper* failure.
-
-    Enablement gaps are frequently serial: clearing one crash reveals a deeper
-    one. A patch that clears the original crash but stops at a different failure
-    has made forward progress and must be kept/stacked, not reverted.
-
-    Progress is judged by whether the failure *identity* changed
-    (:func:`_failure_identity`), not by whether the enumerated ``kind`` changed,
-    so a novel ``UNKNOWN`` gap still registers as progress. A clean boot
-    (``after`` carries no error text) is the terminal runnable case handled by
-    :func:`runnable_decision`, not progress here.
-
-    Args:
-        before_signature: Failure signature before applying the patch.
-        after_signature: Failure signature captured from the post-patch probe.
-
-    Returns:
-        bool: ``True`` when the patch moved the boot to a new failure identity.
-    """
-    # No post-patch failure at all -> clean boot, handled by runnable_decision.
-    if not _has_failure(after_signature):
-        return False
-    if not _has_failure(before_signature):
-        # No prior failure to compare: any post-patch failure is a first step.
-        return True
-    return _failure_identity(after_signature) != _failure_identity(before_signature)
+        return False, "the server came up but the minimal correctness check failed"
+    return True, "the server now comes up" + ("" if correctness_ok is None else " and passes minimal correctness")
 
 
 # Evidence that a dtype/capability miss is backed by a *compiled* op rather
@@ -744,7 +661,6 @@ __all__ = [
     "EnablementRequest",
     "FailureSignature",
     "classify_failure",
-    "enablement_made_progress",
     "is_targeted_build_candidate",
     "runnable_decision",
 ]
