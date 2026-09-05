@@ -435,7 +435,6 @@ class Reconciler:
             outcome=outcome,
             now_unix=now_unix,
             request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-            reap_backend=reap.backend,
             evidence={"reason": why, "reap": reap.outcome, "claim": reap.claim},
         )
         if not result.ok:

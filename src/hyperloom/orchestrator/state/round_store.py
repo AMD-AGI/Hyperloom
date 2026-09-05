@@ -112,11 +112,6 @@ class Round:
         expires_unix: When its lease runs out; the same instant the round's
             lane row carries.
         settled_unix: When it was settled, or ``None``.
-            or ``None`` when nothing ever confirmed it.
-        reap_backend: What performed (or would have performed) the reap.
-        probe_origin: What caused the round to be opened.
-        provisional: Whether the round's result is not yet trustworthy.
-        correctness_verified: Whether the round's server passed correctness.
         stage_high_water: Highest ladder stage the round ever reached.
     """
 
@@ -129,10 +124,6 @@ class Round:
     renewed_unix: float
     expires_unix: float
     settled_unix: float | None
-    reap_backend: str
-    probe_origin: str
-    provisional: bool
-    correctness_verified: bool
     stage_high_water: int
 
     @classmethod
@@ -156,10 +147,6 @@ class Round:
             renewed_unix=float(row["renewed_unix"]),
             expires_unix=float(row["expires_unix"]),
             settled_unix=None if settled is None else float(settled),
-            reap_backend=str(row["reap_backend"]),
-            probe_origin=str(row["probe_origin"]),
-            provisional=bool(row["provisional"]),
-            correctness_verified=bool(row["correctness_verified"]),
             stage_high_water=int(row["stage_high_water"]),
         )
 
@@ -282,9 +269,6 @@ class RoundStore:
         lease_sec: float,
         now_unix: float,
         request_id: str,
-        probe_origin: str = "",
-        reap_backend: str = "",
-        provisional: bool = False,
         join: Callable[[sqlite3.Cursor], None] | None = None,
         evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
@@ -299,9 +283,6 @@ class RoundStore:
             lease_sec: How long the acquire is good for without a renewal.
             now_unix: Current wall time.
             request_id: The caller's id for this attempt.
-            probe_origin: What caused this round to be opened.
-            reap_backend: What would reap this round's processes.
-            provisional: Whether the round's result starts untrustworthy.
             join: Ran with the acquiring cursor once the insert succeeds; its
                 writes commit with the acquire or not at all.
             evidence: Recorded on the outbox row.
@@ -317,9 +298,8 @@ class RoundStore:
                 "INSERT INTO bringup_rounds ("
                 "  round_id, state, outcome, holder_task_id, fence,"
                 "  opened_unix, renewed_unix, expires_unix, settled_unix,"
-                "  reap_backend, probe_origin, provisional,"
-                "  correctness_verified, stage_high_water"
-                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL, ?, ?, ?, 0, 0"
+                "  stage_high_water"
+                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL, 0"
                 f" WHERE NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE {_LIVE_EXCLUSION})"  # nosec B608 - a fixed predicate constant, no caller input.
                 "   AND NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE round_id = ?)",
                 (
@@ -329,9 +309,6 @@ class RoundStore:
                     now,
                     now,
                     expires,
-                    reap_backend,
-                    probe_origin,
-                    1 if provisional else 0,
                     now,
                     round_id,
                 ),
@@ -582,9 +559,6 @@ class RoundStore:
         outcome: str,
         now_unix: float,
         request_id: str,
-        reap_backend: str = "",
-        correctness_verified: bool = False,
-        provisional: bool = False,
         evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """End the round, releasing the machine.
@@ -600,9 +574,6 @@ class RoundStore:
             outcome: One of :data:`OUTCOMES`.
             now_unix: Current wall time.
             request_id: The caller's id for this attempt.
-            reap_backend: What performed the reap.
-            correctness_verified: Whether the round's server passed correctness.
-            provisional: Whether the round's result is untrustworthy.
             evidence: Recorded on the outbox row; a rejected settle is
                 re-driven from it.
 
@@ -675,19 +646,12 @@ class RoundStore:
                     now,
                 )
             cur.execute(
-                "UPDATE bringup_rounds SET"
-                "  state = ?, outcome = ?, settled_unix = ?,"
-                "  reap_backend = CASE WHEN ? <> '' THEN ? ELSE reap_backend END,"
-                "  correctness_verified = ?, provisional = ?"
+                "UPDATE bringup_rounds SET state = ?, outcome = ?, settled_unix = ?"
                 " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
                 (
                     SETTLED,
                     outcome,
                     now,
-                    reap_backend,
-                    reap_backend,
-                    1 if correctness_verified else 0,
-                    1 if provisional else 0,
                     round_id,
                     holder_task_id,
                     int(fence),
