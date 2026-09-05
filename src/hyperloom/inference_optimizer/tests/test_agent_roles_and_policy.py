@@ -19,6 +19,9 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
+)
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
     DELEGATE_ACTION_REQUIRED_PAYLOAD,
@@ -108,7 +111,6 @@ def test_robustness_scheduling_police():
 def test_kernel_owned_actions_include_gemm_tuning():
     assert KERNEL_AGENT_OWNED_ACTIONS == frozenset(
         {
-            "kernel_opt",
             "integrate",
             "gemm_tuning",
         }
@@ -197,20 +199,19 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
     assert exc.value.rule == "request_kind"
 
 
-def test_gate_refuses_a_model_requested_kernel_optimization(monkeypatch):
-    """Same reason as gemm tuning: the Coordinator owns the dispatch."""
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "kernel_agent", "kind": "run_optimization", "params": {}},
-            ),
-        )
-    assert exc.value.rule == "request_kind"
+def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
+    """Source rewrite is the controller's, so the kind is unregistered.
+
+    PolicyGate refuses a kind it knows is Coordinator-owned. ``run_optimization``
+    is not one of those any more -- it is nothing at all -- so the refusal comes
+    from the handler lookup instead, with the valid-kind vocabulary attached.
+    Asserting it here keeps the kind from quietly becoming requestable again.
+    """
+    from hyperloom.orchestrator.kernel.request_handlers import get_handler, has_handler
+
+    assert has_handler("run_optimization") is False
+    assert get_handler("run_optimization") is None
+    assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 
 
 def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
