@@ -18,7 +18,6 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -26,17 +25,18 @@ import time
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+# ``TERM_GRACE_SECONDS`` is this module's name for the shared SIGTERM-to-SIGKILL
+# grace: a driver-side teardown of a server a round left behind waits for the
+# same thing on the same signal, so it waits exactly as long.
+from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
+from hyperloom.common.proctree import collect_tree, group_alive, kill_tree, signal_group
+
 from .bypass_analysis import parse_server_log_throughput
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
 
 log = logging.getLogger(__name__)
 
-
-# Grace window between SIGTERM and SIGKILL, here and for a driver-side teardown
-# of a server a round left behind: the same signal, the same thing being waited
-# for.
-TERM_GRACE_SECONDS: float = 5.0
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
@@ -80,9 +80,6 @@ def new_session_kwargs() -> dict:
 def _process_group_alive(pgid: int) -> bool:
     """Return True iff at least one process is still in ``pgid``.
 
-    ``killpg(pgid, 0)`` raises ``ProcessLookupError`` once the group is empty;
-    any other ``OSError`` (e.g. sandbox ``EPERM``) is treated as "still alive".
-
     Args:
         pgid: The POSIX process-group id to probe.
 
@@ -90,15 +87,7 @@ def _process_group_alive(pgid: int) -> bool:
         True if the group still has at least one member (or liveness is
         indeterminate), False once the group is empty or on non-POSIX.
     """
-    if os.name != "posix":
-        return False
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
+    return group_alive(pgid)
 
 
 def _signal_group(pgid: int, sig: int) -> None:
@@ -108,19 +97,7 @@ def _signal_group(pgid: int, sig: int) -> None:
         pgid (int): The POSIX process-group id to signal.
         sig (int): The signal number to send.
     """
-    if os.name != "posix":
-        return
-    try:
-        os.killpg(pgid, sig)
-    except ProcessLookupError:
-        pass
-    except OSError as exc:
-        log.warning(
-            "_subprocess_kill: killpg(%d, %d) failed: %s",
-            pgid,
-            sig,
-            exc,
-        )
+    signal_group(pgid, sig, what="_subprocess_kill")
 
 
 def kill_my_spawned_server(
@@ -130,11 +107,11 @@ def kill_my_spawned_server(
 ) -> None:
     """Tear down the entire process tree rooted at ``proc``.
 
-    No-op when ``proc`` is ``None`` or already exited. SIGTERM the group, wait
-    up to ``grace_seconds``, then SIGKILL survivors. Never raises (logs a
-    warning on unexpected signalling failure). Requires the child to have been
-    launched with :func:`new_session_kwargs` so its pgid is distinct from
-    Hyperloom's own; asserted defensively below.
+    No-op when ``proc`` is ``None`` or already exited. SIGTERM the tree, wait up
+    to ``grace_seconds``, then SIGKILL survivors. Never raises (logs a warning on
+    unexpected signalling failure). Requires the child to have been launched with
+    :func:`new_session_kwargs` so its pgid is distinct from Hyperloom's own;
+    asserted defensively below.
 
     Args:
         proc: The spawned process whose tree should be reaped; ``None`` is a
@@ -186,16 +163,14 @@ def kill_my_spawned_server(
         )
         return
 
-    _signal_group(pgid, signal.SIGTERM)
-
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
-        if not _process_group_alive(pgid):
-            break
-        time.sleep(0.05)
-
-    if _process_group_alive(pgid):
-        _signal_group(pgid, signal.SIGKILL)
+    try:
+        tree = collect_tree([proc.pid])
+    except OSError as exc:
+        # Every caller reaps from a ``finally:``, so an unreadable procfs has to
+        # be reported rather than raised on top of whatever sent us here.
+        log.error("_subprocess_kill: cannot enumerate the tree under pid=%d: %s", proc.pid, exc)
+        return
+    kill_tree(tree, grace_sec=grace_seconds, confirm_sec=grace_seconds)
 
     try:
         proc.wait(timeout=_REAP_COLLECT_SECONDS)
@@ -611,7 +586,7 @@ def _ready_stamp_path(server_log_path: str) -> Path:
     return Path(server_log_path).parent / _READY_STAMP_NAME
 
 
-def _stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
+def stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
     """Record, beside ``server_log_path``, that the server just reported ready.
 
     Two numbers, because they answer two questions and one clock cannot answer
@@ -990,6 +965,9 @@ def run_with_session_kill(
         session_deadline_sec: Absolute ``time.monotonic()`` instant at which the
             session budget expires. Reaps the tree and returns
             ``SESSION_TIME_EXHAUSTED_RETURNCODE``.
+
+    Returns:
+        subprocess.CompletedProcess: The finished child.
     """
     if server_dead_grace_sec is None:
         try:
@@ -1013,6 +991,7 @@ def run_with_session_kill(
             detok_stall_grace_sec = _DETOK_STALL_GRACE_SEC_DEFAULT
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
+    empty: str | bytes = "" if text else b""
     try:
         with cancel_scope_listener() as cancel_scope:
             proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
@@ -1059,7 +1038,6 @@ def run_with_session_kill(
                     stdout=stdout,
                     stderr=stderr,
                 )
-            empty: str | bytes = "" if text else b""
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=proc.returncode,
@@ -1338,7 +1316,7 @@ def _communicate_with_soft_deadline(
                 # re-attaches to this server pays none of the boot. Taken as
                 # ``now - start`` so the boot is measured end to end on this
                 # process's own clock, whatever host the caller reads it on.
-                _stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
+                stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
             if scan.saw_eval_start and not soft_deadline_suspended:
                 soft_deadline_suspended = True
                 log.info(
@@ -1446,4 +1424,5 @@ __all__ = [
     "server_ready_unix",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
+    "stamp_server_ready",
 ]

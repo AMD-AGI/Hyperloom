@@ -79,7 +79,102 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 }
 
 
+#: The lane an open bring-up round holds for as long as it is open.
+#:
+#: Deliberately absent from :data:`KNOWN_LANES`, because no task may request it.
+#: A round is held by a task that still has to be dispatchable while the round
+#: stands, and every serving lane mutexes against ``gpu_research_lane``, so a
+#: round holding a serving lane under a holder id of its own would deny its own
+#: holder the dispatch the round exists to cover. ``RoundStore`` writes and
+#: drops this row inside the transaction that opens, renews and settles the
+#: round; the rest of the lease machinery -- ``lane_holders``, ``reap_expired``,
+#: the breakdown lane timeline -- reads it like any other lease.
+BRINGUP_ROUND_LANE = "bringup_round"
+
+#: Recorded on a round's lane row in place of a pid. The round's holder is a
+#: task, not this process, and only the task registry can prove a task's process
+#: dead and date the kill an expiry outcome has to carry -- so
+#: :meth:`SqliteLeaseBackend.reap_dead_holders`, which skips non-positive pids,
+#: leaves these rows to the TTL sweep.
+ROUND_LEASE_PID = 0
+
+#: Recorded in the lane row's ``action`` column.
+_ROUND_LEASE_ACTION = "bringup_round"
+
+
 _now_iso = now_iso
+
+
+def _lease_iso(unix_ts: float) -> str:
+    """Render unix seconds the way the lease table's timestamps compare.
+
+    ``expires_at`` is swept by string comparison against :func:`now_iso`, so the
+    two have to agree on offset and precision.
+
+    Args:
+        unix_ts: The instant to render.
+
+    Returns:
+        str: A fixed-width UTC ISO-8601 timestamp.
+    """
+    return datetime.fromtimestamp(float(unix_ts), tz=timezone.utc).isoformat(timespec="microseconds")
+
+
+def hold_round_lane(
+    cur: sqlite3.Cursor,
+    *,
+    round_id: str,
+    holder_task_id: str,
+    expires_unix: float,
+    now_unix: float,
+) -> None:
+    """Write the lane row an open round holds, inside the caller's transaction.
+
+    Keyed on ``(BRINGUP_ROUND_LANE, round_id)`` and idempotent, so the one call
+    serves the acquire, every renewal, and a handoff that moves the round to a
+    new holder. ``acquired_at`` survives a renewal; only the holder and the two
+    clock columns move.
+
+    Args:
+        cur: Cursor of the transaction writing the round row, so the round and
+            its lane land together or not at all.
+        round_id: The round holding the lane; also the lease's holder id.
+        holder_task_id: The task the round is held by right now.
+        expires_unix: When the round's lease runs out.
+        now_unix: Current wall time.
+    """
+    stamp = _lease_iso(now_unix)
+    cur.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid,"
+        "  acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(lane, holder_id) DO UPDATE SET"
+        "  task_id = excluded.task_id,"
+        "  expires_at = excluded.expires_at,"
+        "  heartbeat_at = excluded.heartbeat_at",
+        (
+            BRINGUP_ROUND_LANE,
+            round_id,
+            holder_task_id,
+            _ROUND_LEASE_ACTION,
+            ROUND_LEASE_PID,
+            stamp,
+            _lease_iso(expires_unix),
+            stamp,
+        ),
+    )
+
+
+def drop_round_lane(cur: sqlite3.Cursor, *, round_id: str) -> None:
+    """Release the lane row a round held, inside the caller's transaction.
+
+    Args:
+        cur: Cursor of the transaction settling the round.
+        round_id: The round whose lane is released.
+    """
+    cur.execute(
+        "DELETE FROM leases WHERE lane = ? AND holder_id = ?",
+        (BRINGUP_ROUND_LANE, round_id),
+    )
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:
@@ -475,6 +570,25 @@ class SqliteLeaseBackend:
             )
         return reaped
 
+    async def bringup_round_holders(self, now_unix: float) -> set[str]:
+        """Return the ids of rounds whose lane row is still live at ``now_unix``.
+
+        The lease a round takes when it opens is the round's clock: a round
+        missing from this set has run out, whether or not a sweep has deleted
+        its row yet.
+
+        Args:
+            now_unix: The instant to test, so the caller's pass reads one clock.
+
+        Returns:
+            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
+        """
+        rows = await self.db.fetchall(
+            "SELECT holder_id FROM leases WHERE lane = ? AND expires_at > ?",
+            (BRINGUP_ROUND_LANE, _lease_iso(now_unix)),
+        )
+        return {str(r["holder_id"]) for r in rows}
+
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` for lanes with live rows.
 
@@ -636,6 +750,17 @@ class ResourceLockManager:
             return []
         return await fn()
 
+    async def bringup_round_holders(self, now_unix: float) -> set[str]:
+        """Return the ids of rounds still holding their lane, via the backend.
+
+        Args:
+            now_unix: The instant to test.
+
+        Returns:
+            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
+        """
+        return await self.backend.bringup_round_holders(now_unix)
+
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` via the backend.
 
@@ -664,12 +789,16 @@ class ResourceLockManager:
 
 
 __all__ = [
+    "BRINGUP_ROUND_LANE",
     "KNOWN_LANES",
     "LANE_CONFLICTS",
+    "ROUND_LEASE_PID",
     "LaneBusy",
     "LaneFull",
     "Lease",
     "ResourceLockManager",
     "SqliteLeaseBackend",
     "StaleLeaseError",
+    "drop_round_lane",
+    "hold_round_lane",
 ]

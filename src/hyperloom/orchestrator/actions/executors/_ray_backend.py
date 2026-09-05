@@ -189,10 +189,8 @@ def _run_subprocess_worker(
     """Ray worker body: run the subprocess under session-kill semantics.
 
     Executes on a Ray worker where ``*_VISIBLE_DEVICES`` are already set by Ray.
-    Reuses :func:`run_with_session_kill` so kill/soft-deadline behaviour matches
-    the local path exactly -- including the session reaper, which is the only
-    defence that attributes running out of time to the run rather than to the
-    variant that happened to be in flight.
+    Goes through the same launch boundary as the local path, so kill,
+    soft-deadline and session-reaper behaviour match it exactly.
 
     Args:
         cmd: The command to execute.
@@ -212,12 +210,12 @@ def _run_subprocess_worker(
         ``(returncode, stdout, stderr)``.
     """
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        run_with_session_kill,
         session_remaining_to_deadline_sec,
     )
+    from hyperloom.orchestrator.actions.executors.launch_backend import launch
 
     worker_env = _merge_worker_env(env)
-    proc = run_with_session_kill(
+    proc = launch(
         cmd,
         env=worker_env,
         cwd=cwd,

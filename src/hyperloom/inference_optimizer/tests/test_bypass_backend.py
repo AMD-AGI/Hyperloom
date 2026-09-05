@@ -320,6 +320,7 @@ def test_wait_for_server_ready_polls_until_200():
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=100.0,
+        server_exited=lambda: False,
         poll_s=0.0,
         probe=probe,
         sleep=lambda _s: None,
@@ -328,12 +329,34 @@ def test_wait_for_server_ready_polls_until_200():
     assert calls["n"] == 3
 
 
+def test_wait_for_server_ready_stops_when_the_server_has_exited():
+    """A server that is gone will never answer, so the wait ends with it."""
+    probes = {"n": 0}
+
+    def probe(_url):
+        probes["n"] += 1
+        return 503
+
+    ok = bypass_engine.wait_for_server_ready(
+        "http://127.0.0.1:8888",
+        timeout_s=3600.0,
+        server_exited=lambda: True,
+        poll_s=0.0,
+        probe=probe,
+        sleep=lambda _s: None,
+    )
+    assert ok is False
+    # Once, not for the hour the timeout would otherwise have run.
+    assert probes["n"] == 1
+
+
 def test_wait_for_server_ready_times_out():
     ticks = iter([0.0, 1.0, 2.0, 3.0, 100.0])
 
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=5.0,
+        server_exited=lambda: False,
         poll_s=0.0,
         probe=lambda _u: 503,
         sleep=lambda _s: None,

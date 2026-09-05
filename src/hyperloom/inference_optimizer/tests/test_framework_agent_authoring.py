@@ -641,7 +641,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
     stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
         str(result.result.get("status") or "")
     )
-    stub._maybe_rearm_authored_lane = lambda *_args, **_kwargs: None
+    stub._maybe_rearm_authored_lane = _noop_async
     stub._drain_apply_fail_retry_pending = _noop_async
     stub._is_promotable_result = lambda *_args, **_kwargs: False
     stub._handle_unpromotable_result = _noop_async

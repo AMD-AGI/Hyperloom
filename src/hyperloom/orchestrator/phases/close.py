@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from hyperloom.common.deadline import Deadline
 import logging as _logging
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
@@ -836,7 +837,7 @@ class ClosePhase(PhaseHandler):
                 status,
             )
 
-    async def _enter_closing_phase(self, *, grace_sec: float) -> float:
+    async def _enter_closing_phase(self, *, grace_sec: float) -> Deadline:
         """Enter report-flush phase after the wall-clock deadline (enqueue deterministic report task).
 
         Args:
@@ -844,10 +845,10 @@ class ClosePhase(PhaseHandler):
                 is abandoned.
 
         Returns:
-            The monotonic deadline by which the closing phase must complete.
+            Deadline: The instant by which the closing phase must complete.
         """
         closing_started = time.time()
-        closing_deadline = time.monotonic() + float(grace_sec)
+        closing_deadline = Deadline.after(grace_sec)
         self.shared_state.closing_phase = True
         self.shared_state.closing_started_unix = closing_started
         self.shared_state.save(self.session_dir)
@@ -878,18 +879,25 @@ class ClosePhase(PhaseHandler):
         await self._drain_geak_rebench_for_close(reason="closing_phase")
 
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
-        task, _existing = await self.tasks.create_or_return_existing(
-            kind="report",
-            params={
-                "session_dir": str(self.session_dir),
-                "max_highlights": 50,
-            },
-            idempotency_key=idempotency_key,
-            requires_lanes=[],
-            side_effects=["writes_results"],
-            lease_ttl_sec=120,
-        )
-        self.shared_state.closing_report_task_id = task.task_id
+        task_id = ""
+        try:
+            task, _existing = await self.tasks.create_or_return_existing(
+                kind="report",
+                params={
+                    "session_dir": str(self.session_dir),
+                    "max_highlights": 50,
+                },
+                idempotency_key=idempotency_key,
+                requires_lanes=[],
+                side_effects=["writes_results"],
+                lease_ttl_sec=120,
+            )
+            task_id = task.task_id
+        except Exception:  # noqa: BLE001 — the closing phase is already armed in persisted state
+            # A blank id is the honest record of a failed enqueue, and the
+            # closing check reads it as "nothing to wait for".
+            log.exception("closing_phase: enqueueing the report task failed; the close sequence will write it")
+        self.shared_state.closing_report_task_id = task_id
         self.shared_state.save(self.session_dir)
 
         await self.bus.append_and_seq(
@@ -899,7 +907,7 @@ class ClosePhase(PhaseHandler):
                 "event",
                 {
                     "kind": "closing_phase_entered",
-                    "task_id": task.task_id,
+                    "task_id": task_id,
                     "grace_sec": float(grace_sec),
                     "closing_started_unix": closing_started,
                 },
@@ -907,16 +915,42 @@ class ClosePhase(PhaseHandler):
         )
         return closing_deadline
 
-    async def _closing_report_terminal(self) -> bool:
-        """Report whether the closing-phase report task has finished.
+    async def ensure_close_sequence(self, *, reason: str) -> bool:
+        """Run the close sequencer if nothing else has, whatever stopped the run.
+
+        The sequencer is otherwise reached only when the phase machine
+        transitions into CLOSE, so a run that ends without advancing a phase --
+        a signal, an exception, an objective met at the deadline -- would write
+        no report at all. Idempotent via ``close_sequence_done``.
+
+        Args:
+            reason: What terminated the run, recorded as the entry's from-phase.
 
         Returns:
-            bool: ``True`` when the report task reached a terminal state (or is
-                missing); ``False`` while it is still queued or running.
+            bool: ``True`` when this call ran the sequence.
+        """
+        if self.shared_state.close_sequence_done:
+            return False
+        log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
+        await self._on_enter_close(from_phase=reason)
+        return True
+
+    async def _closing_report_terminal(self) -> bool:
+        """Report whether the closing phase has a finished report to wait on.
+
+        An absent report task counts as finished, so the loop drops out of the
+        closing branch and onto the terminal close sequence that writes the
+        report itself rather than waiting out its grace on nothing.
+
+        Returns:
+            bool: ``True`` when the report task reached a terminal state, is
+                missing, or was never enqueued; ``False`` while it is still
+                queued or running.
         """
         task_id = self.shared_state.closing_report_task_id
         if not task_id:
-            return False
+            log.warning("closing_phase: no report task was enqueued; closing without waiting on one")
+            return True
         from ..state.task_registry import TaskNotFound
 
         try:

@@ -34,7 +34,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from hyperloom.common.codex_session import (
@@ -43,6 +43,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_provider_config,
     resolve_codex_sandbox_mode,
 )
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
@@ -52,6 +53,8 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 
+from ..bringup.trees import head_commit
+from ..delivery.manifest import post_images_from_diff, write_post_images
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -451,12 +454,15 @@ def _build_specialist_env() -> dict[str, str]:
     return env
 
 
-# Live wall-budget extensions granted by ``extend_lease`` while a specialist is
-# already spawned. The reap loop re-reads this every poll, so an extension moves
-# the hard kill deadline of a run that is in flight — without it, extend_lease
-# would push the task / lane / GPU leases out while the subprocess still died at
-# its original ``wall_budget_sec``. Keyed by task_id; the dispatcher clears the
-# entry when the run finishes.
+#: How long the reaper waits on a specialist nobody bounded, matching the
+#: largest deadline the dispatcher hands down.
+UNBOUNDED_REAP_CAP_SEC: float = 4 * 60 * 60.0
+
+
+# Live deadline extensions granted by ``extend_lease`` while a specialist is
+# already spawned, keyed by task_id. The reap loop re-reads this every poll so
+# an extension moves the kill instant of a run that is in flight; the dispatcher
+# clears the entry when the run finishes.
 _WALL_BUDGET_EXTENSIONS: dict[str, float] = {}
 
 
@@ -562,13 +568,6 @@ class SpecialistSubprocessConfig:
     leaf_agents_json: str | None = None
     """``--agents`` JSON declaring leaf sub-agent types. None = built-in leaf."""
 
-    per_turn_max_seconds: float = 600.0
-    """Per-turn wall-clock fallback.
-
-    Only callers that omit ``wall_budget_sec`` fall back to
-    ``max_turns * per_turn_max_seconds`` as a per-task hard timeout.
-    """
-
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
 
@@ -601,11 +600,7 @@ class SpecialistSubprocessResult:
     elapsed_seconds: float = 0.0
 
     timed_out: bool = False
-    """True when the dispatcher killed the subprocess past the wall-clock cap.
-
-    The cap is normally ``wall_budget_sec``, falling back to
-    ``max_turns * per_turn_max_seconds`` when no budget is supplied.
-    """
+    """True when the dispatcher killed the subprocess at its deadline."""
 
     stale_heartbeat: bool = False
     """True when the heartbeat went stale and the dispatcher killed
@@ -649,6 +644,20 @@ class SpecialistSubprocessResult:
     per-turn usage was present (parent falls back to ``usage``)."""
 
     error: str = ""
+
+
+#: Directories a specialist writes for its own use inside the worktree, never
+#: part of a deliverable.
+_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", "scratch", ".hyperloom")
+
+
+def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return the worktree-relative paths the round declared it would touch."""
+    from ..delivery.deliverable import parse_deliverable
+
+    if not done_payload:
+        return ()
+    return parse_deliverable(done_payload, default_tree_id="").targets
 
 
 # Worktree management
@@ -751,7 +760,7 @@ def _setup_worktree(
     return worktree_path, ""
 
 
-# §3.3: how often to poll a PENDING GPU-specialist Ray actor for its pid.
+# How often to poll a PENDING GPU-specialist Ray actor for its pid.
 _RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
 
 
@@ -760,8 +769,8 @@ def _ray_specialist_pending_deadline_sec() -> float:
 
     Reads ``INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC``. A pending
     request that exceeds this becomes a structured task failure rather than an
-    unbounded stall (§3.3 / invariant §6.4: pending time is bounded and tracked
-    separately from the running wall budget).
+    unbounded stall; pending time is bounded and tracked separately from the
+    running wall budget.
     """
     try:
         return float(os.environ.get("INFERENCE_OPTIMIZER_RAY_SPECIALIST_SCHED_TIMEOUT_SEC", "300"))
@@ -832,7 +841,7 @@ class SpecialistSubprocessDispatcher:
         disallowed_tools: frozenset[str] | set[str] | tuple[str, ...] = frozenset(),
         max_turns: int,
         gpu_ids: tuple[int, ...] = (),
-        wall_budget_sec: float | None = None,
+        deadline: Deadline | None = None,
         gpu_lease: Any = None,
         progress_cb: Any = None,
     ) -> SpecialistSubprocessResult:
@@ -860,18 +869,15 @@ class SpecialistSubprocessDispatcher:
             disallowed_tools: Tool names to deny in the agent CLI subprocess.
                 Passed as ``--disallowedTools`` to the Claude CLI; has no
                 Codex equivalent (Codex containment uses ``--sandbox``).
-            max_turns (int): Turn budget. This dispatcher never enforces it
-                mechanically — neither agent CLI is passed a turn-cap flag (the
-                cap reaches the specialist only as advisory prompt text baked
-                into ``system_prompt``). Its sole effect here is the
-                ``max_turns × per_turn_max_seconds`` fallback wall-clock
-                ceiling, used when ``wall_budget_sec`` is not supplied.
+            max_turns (int): Turn budget, never enforced mechanically here; it
+                reaches the specialist only as advisory prompt text baked into
+                ``system_prompt``.
             gpu_ids (tuple[int, ...]): GPU ids to expose to the subprocess.
-            wall_budget_sec (float | None): WS1 explicit wall-clock budget
-                (seconds). When provided it overrides the
-                ``max_turns × per_turn_max_seconds`` ceiling as the reaper's
-                hard kill deadline — turns are no longer the stop signal.
-            gpu_lease (Any): When set (Ray-managed GPU execution, §12 T4), a
+            deadline (Deadline | None): Absolute instant the reaper kills at.
+                ``None`` means the caller set no bound and the reaper falls back
+                to :data:`UNBOUNDED_REAP_CAP_SEC`. A deadline already in the past
+                kills on the first poll.
+            gpu_lease (Any): When set (Ray-managed GPU execution), a
                 started-on-demand ``GpuSpecialistLease``; the whole subprocess
                 runs inside its actor holding ``num_gpus`` (Ray sets the visible
                 devices, so any GPU command the specialist issues stays within
@@ -888,6 +894,9 @@ class SpecialistSubprocessDispatcher:
         """
         # Drop any extension left over from a prior run of this task id.
         clear_wall_budget_extension(task_id)
+        # The pre-image the harvest diffs against, so it must be read before
+        # the specialist can commit anything.
+        worktree_base_commit = head_commit(worktree) if worktree is not None and (worktree / ".git").exists() else ""
         workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = workspace / "prompt.md"
         process_log = workspace / "process.log"
@@ -965,7 +974,7 @@ class SpecialistSubprocessDispatcher:
             codex_home = workspace / ".codex"
             env["CODEX_HOME"] = str(codex_home)
         if gpu_lease is not None:
-            # Ray-managed GPU execution (§12 T4): Ray sets *_VISIBLE_DEVICES in
+            # Ray-managed GPU execution: Ray sets *_VISIBLE_DEVICES in
             # the actor's worker; never let the caller env pin them (that would
             # override Ray's card assignment). ``gpu_ids`` here is the logical
             # 0..N-1 view the specialist sees under Ray's mask — kept only as the
@@ -988,7 +997,7 @@ class SpecialistSubprocessDispatcher:
         log_fh: Any = None
         proc_started: float
         if gpu_lease is not None:
-            # §3.3 non-blocking start: submit the actor launch, then poll for
+            # Non-blocking start: submit the actor launch, then poll for
             # the pid with ``asyncio.sleep`` between polls. This keeps the
             # Coordinator event loop responsive while Ray schedules the actor
             # (no blocking ``ray.get``), and — combined with the timing split
@@ -1047,7 +1056,7 @@ class SpecialistSubprocessDispatcher:
                     )
                 await asyncio.sleep(_RAY_PENDING_POLL_INTERVAL_SEC)
             proc: Any = _RayLeaseProcess(gpu_lease, pid)
-            # §3.3 timing split (invariant §6.4): the wall-budget clock starts
+            # Timing split: the wall-budget clock starts
             # only now that a real pid exists — the Ray pending time above is
             # excluded so a slow-to-schedule actor is never mis-reaped.
             proc_started = time.monotonic()
@@ -1090,12 +1099,7 @@ class SpecialistSubprocessDispatcher:
                     except OSError:
                         log.warning("failed to close specialist prompt stdin", exc_info=True)
 
-        # Reap loop — poll done-file / exit / heartbeat staleness / timeout.
-        # Prefer the explicit wall budget; fall back to ``max_turns × per_turn``.
-        if wall_budget_sec and wall_budget_sec > 0:
-            max_seconds = float(wall_budget_sec)
-        else:
-            max_seconds = float(max_turns) * float(self.config.per_turn_max_seconds)
+        # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
         try:
             outcome = await self._reap_loop(
                 proc=proc,
@@ -1103,7 +1107,7 @@ class SpecialistSubprocessDispatcher:
                 done_files=tuple(done_candidates),
                 partial_files=tuple(partial_candidates),
                 heartbeat_file=heartbeat_file,
-                max_seconds=max_seconds,
+                deadline=deadline,
                 started=proc_started,
                 progress_cb=progress_cb,
                 task_id=task_id,
@@ -1115,9 +1119,6 @@ class SpecialistSubprocessDispatcher:
                 await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
             finally:
                 clear_wall_budget_extension(task_id)
-
-        # Patches: harvest from the worktree via git diff first; fall back to disk scan.
-        patches, collected_patch_roots = self._collect_patches(worktree, workspace, worktree_base)
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
@@ -1139,6 +1140,16 @@ class SpecialistSubprocessDispatcher:
                         if not outcome.get("error"):
                             outcome["error"] = "recovered_from_partial"
                         break
+
+        # Patches: harvest from the worktree via git diff first, else scan
+        # disk. Runs after the done payload, whose targets scope the harvest.
+        patches, collected_patch_roots = self._collect_patches(
+            worktree,
+            workspace,
+            worktree_base,
+            worktree_base_commit=worktree_base_commit,
+            targets=_declared_targets(done_payload),
+        )
 
         # Harvest the trace from process.log with the parsers for the CLI that
         # wrote it: cumulative session token usage, the reply text that lands in
@@ -1433,7 +1444,7 @@ class SpecialistSubprocessDispatcher:
         workspace: Path,
         done_files: tuple[Path, ...],
         heartbeat_file: Path,
-        max_seconds: float,
+        deadline: Deadline | None,
         started: float,
         partial_files: tuple[Path, ...] = (),
         progress_cb: Any = None,
@@ -1457,7 +1468,8 @@ class SpecialistSubprocessDispatcher:
             done_files (tuple[Path, ...]): Candidate done-file paths to poll.
             heartbeat_file (Path): Heartbeat file whose mtime is one of the two
                 activity signals ORed together for the liveness check.
-            max_seconds (float): Hard wall-clock ceiling for the run.
+            deadline (Deadline | None): Absolute instant to kill at; ``None``
+                falls back to :data:`UNBOUNDED_REAP_CAP_SEC` from spawn.
             started (float): ``time.monotonic()`` value at spawn time.
             partial_files (tuple[Path, ...]): Candidate partial-checkpoint
                 paths polled for live progress; never an exit signal.
@@ -1477,6 +1489,8 @@ class SpecialistSubprocessDispatcher:
             "stale_heartbeat": False,
             "error": "",
         }
+        # An unbounded caller still gets a finite instant.
+        hard_stop = deadline if deadline is not None else Deadline.after(UNBOUNDED_REAP_CAP_SEC, now=started)
         last_heartbeat_seen: float = started
         # process.log mtime is a reliable "still working" signal even when the
         # agent never self-writes heartbeat.json.
@@ -1541,12 +1555,12 @@ class SpecialistSubprocessDispatcher:
                 outcome["elapsed"] = time.monotonic() - started
                 break
 
-            # Hard wall-clock cap — re-read each poll so an ``extend_lease``
-            # granted mid-run actually moves this deadline.
-            deadline = max_seconds + wall_budget_extension(task_id)
-            if elapsed > deadline:
+            # Hard stop — the extension is re-read every poll so an
+            # ``extend_lease`` granted mid-run actually moves the kill instant.
+            kill_at = hard_stop.at + wall_budget_extension(task_id)
+            if now >= kill_at:
                 outcome["timed_out"] = True
-                outcome["error"] = f"specialist subprocess exceeded {deadline:.0f}s wall-clock cap"
+                outcome["error"] = f"specialist subprocess killed {elapsed:.0f}s in, at its deadline"
                 self._kill(proc)
                 outcome["exit_code"] = proc.poll()
                 outcome["elapsed"] = time.monotonic() - started
@@ -1596,17 +1610,30 @@ class SpecialistSubprocessDispatcher:
                 pass
 
     @staticmethod
-    def _harvest_worktree_diff(worktree: Path) -> str:
+    def _harvest_pathspec(targets: Sequence[str] = ()) -> list[str]:
+        """Return the ``git diff`` / ``git add`` pathspec that scopes a harvest.
+
+        With no target declared the whole worktree is in scope, minus
+        :data:`_SPECIALIST_SCRATCH_DIRS`, whose whole-file copies would
+        otherwise be harvested as file creations.
+        """
+        declared = [str(t).strip().lstrip("/") for t in targets if str(t).strip()]
+        if declared:
+            return declared
+        return [".", *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS)]
+
+    @staticmethod
+    def _harvest_worktree_diff(worktree: Path, *, base: str = "HEAD", targets: Sequence[str] = ()) -> str:
         """Return the worktree's edits as one ``-p1`` diff, or ``""``.
 
-        A new file is untracked, and ``git diff`` does not see untracked paths.
-        Intent-to-add stages their existence so they render as creations without
-        committing anything, which is what keeps "edited a file and added one"
-        from harvesting a patch that silently omits the addition. ``patches/`` is
-        excluded because the harvest itself lands there.
+        The comparison is ``base``-against-working-tree, since a specialist is
+        not required to commit. Intent-to-add stages untracked paths so they
+        render as creations, ``git diff`` being blind to them otherwise.
 
         Args:
             worktree: Per-task worktree holding a ``.git`` marker.
+            base: The recorded pre-round commit to diff against.
+            targets: Worktree-relative paths the round declared.
 
         Returns:
             str: The diff text, or ``""`` when there is nothing to harvest or
@@ -1626,8 +1653,9 @@ class SpecialistSubprocessDispatcher:
                 log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
                 return None
 
-        _git("add", "-A", "-N", "--", ".", ":(exclude)patches")
-        diff = _git("diff", "HEAD", "--", ".", ":(exclude)patches")
+        pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
+        _git("add", "-A", "-N", "--", *pathspec)
+        diff = _git("diff", base, "--", *pathspec)
         if diff is None or diff.returncode != 0:
             return ""
         return diff.stdout if diff.stdout.strip() else ""
@@ -1637,6 +1665,9 @@ class SpecialistSubprocessDispatcher:
         worktree: Path | None,
         workspace: Path,
         worktree_base: Path | None = None,
+        *,
+        worktree_base_commit: str = "",
+        targets: Sequence[str] = (),
     ) -> tuple[list[str], dict[str, str]]:
         """Harvest the specialist's edits, else collect the patch files it wrote.
 
@@ -1652,16 +1683,28 @@ class SpecialistSubprocessDispatcher:
             workspace: Task workspace.
             worktree_base: Checkout the worktree was branched off, which is the
                 apply root of anything harvested from it.
+            worktree_base_commit: The commit recorded when the worktree was
+                created, so the harvest stays anchored to the pre-round state
+                even if the specialist committed.
+            targets: Worktree-relative paths the round declared, which scope the
+                harvest pathspec.
 
         Returns:
             ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
         if worktree is not None and (worktree / ".git").exists():
-            harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree)
+            harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
+                worktree,
+                base=worktree_base_commit or "HEAD",
+                targets=targets,
+            )
             if harvested_diff:
                 harvested = worktree / "patches" / "_worktree_diff.patch"
                 harvested.parent.mkdir(exist_ok=True)
                 harvested.write_text(harvested_diff, encoding="utf-8")
+                # Last moment the worktree still holds the validated state, so
+                # the post-image the apply site checks against is hashed here.
+                write_post_images(harvested, post_images_from_diff(harvested_diff, worktree))
                 return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
         out: list[str] = []
@@ -1732,6 +1775,7 @@ class SpecialistSubprocessDispatcher:
 __all__ = [
     "AGENT_BACKEND_CLAUDE",
     "AGENT_BACKEND_CODEX",
+    "UNBOUNDED_REAP_CAP_SEC",
     "SpecialistAgentUnavailableError",
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",

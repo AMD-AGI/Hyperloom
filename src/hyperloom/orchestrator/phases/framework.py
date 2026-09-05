@@ -390,21 +390,21 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         return spec_tid
 
-    def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None) -> None:
+    async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None) -> None:
         """Unified rearm dispatcher for all authored lanes.
 
         Routes to the lane-specific handler:
 
-        * ``enablement`` lane → :meth:`_maybe_rearm_enablement` (unchanged
-          semantics; ``advanced`` / ``kept`` / stall logic preserved).
+        * ``enablement`` lane → :meth:`_maybe_rearm_enablement`, which settles
+          the round and charges its observation.
         * ``perf_framework`` / ``perf_explore`` lanes with ``apply_failed``
           status → increment per-candidate apply-fail retry counter; below cap
           clear the in-flight guard so :meth:`_enqueue_author_specialist` can
           be called from the dispatcher; at/above cap stamp a terminal
           progress row.
 
-        All other statuses for perf lanes are not handled here (they go through
-        the existing writeback / progress-stamp paths).
+        All other statuses for perf lanes are handled by the writeback /
+        progress-stamp paths instead.
 
         Args:
             res: The ``integrate_patch`` or ``framework_agent`` result dict.
@@ -415,7 +415,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         status = str(res.get("status") or "")
 
         if lane == "enablement" or res.get("enablement"):
-            self._maybe_rearm_enablement(res)
+            await self._maybe_rearm_enablement(res)
             return
 
         if status != "apply_failed":

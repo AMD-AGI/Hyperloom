@@ -13,6 +13,9 @@ paths render identical YAML:
 
 Used by ``baseline.py`` (materializes once, surfaces the path) and the
 ``explore`` / ``sweep`` grid runs (fall back to materializing on their own).
+
+:func:`~._server_argv.seal_server_argv` settles the server argument string at
+the end of :func:`materialize_config_with_envs`; nothing may write it after.
 """
 
 from __future__ import annotations
@@ -52,8 +55,10 @@ from ._grid_runner import (
     inject_sglang_watchdog_timeout,
     server_args_env_name,
 )
+from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
+from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
     ensure_sglang_patched_for_tracelens,
@@ -983,12 +988,7 @@ def materialize_config_with_envs(
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
     replace_args = str(args_mode or "append").strip().lower() == "replace"
     if operator_server_args and not replace_args:
-        if server_args:
-            from ._grid_runner import merge_server_args
-
-            server_args = merge_server_args(operator_server_args, server_args)
-        else:
-            server_args = operator_server_args
+        server_args = merge_server_args(operator_server_args, server_args)
     with config_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     bench = cfg.setdefault("benchmark", {})
@@ -1481,31 +1481,24 @@ def materialize_config_with_envs(
     # so last-wins lets later merges override them).
     ref_args, reference_envs = resolve_reference_base()
     if ref_args:
-        from ._grid_runner import merge_server_args
-
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        _ref_existing = str(envs.get(_ref_fw_env, "")).strip()
-        envs[_ref_fw_env] = merge_server_args(ref_args, _ref_existing) if _ref_existing else ref_args
+        envs[_ref_fw_env] = merge_server_args(ref_args, str(envs.get(_ref_fw_env, "")))
     for _rk, _rv in reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
-        from ._grid_runner import merge_server_args
-
         framework_env = server_args_env_name(bench.get("framework"))
         existing = str(envs.get(framework_env, "")).strip()
         if replace_args:
             envs[framework_env] = server_args
-        elif framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
-            # For MoE backend exploration/tuning, the candidate value must
-            # replace the baseline's injected default (usually triton) rather
-            # than relying on duplicate last-wins flags.
-            existing = _remove_moe_runner_backend_arg(existing)
-        if not replace_args and existing:
+        else:
+            if framework_env == "EXTRA_SGLANG_ARGS" and "--moe-runner-backend" in str(server_args):
+                # For MoE backend exploration/tuning, the candidate value must
+                # replace the baseline's injected default (usually triton) rather
+                # than relying on duplicate last-wins flags.
+                existing = _remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
-        elif not replace_args:
-            envs[framework_env] = server_args
     # Magpie forwards only ``benchmark.envs``. ``--extra-env`` used to land
     # there only for ``custom``, so vLLM Ray workers never saw MTP pins.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
@@ -1630,37 +1623,27 @@ def materialize_config_with_envs(
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
     if "mimo-v2" in _model_basename:
         # MiMo-V2.x's DEFAULT aiter attention backend SIGABRTs during CUDA-graph
-        # capture on gfx942. Pin the triton attention backend. Merge (never
-        # overwrite) and skip when the caller already pinned an
-        # --attention-backend.
-        from ._grid_runner import merge_server_args
-
-        _mimo_fw_env = server_args_env_name(bench.get("framework"))
-        _mimo_existing = str(envs.get(_mimo_fw_env, "")).strip()
+        # capture on gfx942. Pin the triton attention backend. sglang accepts
+        # lowercase `triton`; vLLM only knows TRITON_ATTN.
         _mimo_is_vllm = "vllm" in str(bench.get("framework") or "").lower()
-        # sglang accepts lowercase `triton`; vLLM only knows TRITON_ATTN. Pick
-        # the framework-correct spelling.
         _mimo_attn_backend = "TRITON_ATTN" if _mimo_is_vllm else "triton"
-        if "attention-backend" not in _mimo_existing:
-            envs[_mimo_fw_env] = (
-                merge_server_args(_mimo_existing, f"--attention-backend {_mimo_attn_backend}")
-                if _mimo_existing
-                else f"--attention-backend {_mimo_attn_backend}"
-            )
+        add_server_arg_unless_pinned(
+            envs,
+            bench.get("framework"),
+            f"--attention-backend {_mimo_attn_backend}",
+            pinned_by=("attention-backend",),
+        )
         # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
         # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
         # rejects at boot. Remap the arch via --hf-overrides. vLLM-only; JSON
-        # kept space-free so it survives Magpie's unquoted splice. Merge (never
-        # overwrite) and skip when --hf-overrides is already pinned.
-        if "vllm" in str(bench.get("framework") or "").lower():
-            _mimo_hf_existing = str(envs.get(_mimo_fw_env, "")).strip()
-            if "hf-overrides" not in _mimo_hf_existing and "hf_overrides" not in _mimo_hf_existing:
-                _mimo_arch_override = '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}'
-                envs[_mimo_fw_env] = (
-                    merge_server_args(_mimo_hf_existing, _mimo_arch_override)
-                    if _mimo_hf_existing
-                    else _mimo_arch_override
-                )
+        # kept space-free so it survives Magpie's unquoted splice.
+        if _mimo_is_vllm:
+            add_server_arg_unless_pinned(
+                envs,
+                bench.get("framework"),
+                '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}',
+                pinned_by=("hf-overrides", "hf_overrides"),
+            )
     # Sparse-attention KV-cache block size (config-derived, model-agnostic).
     # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
     # in one KV-cache group whose sparse backends only accept the model's
@@ -1681,16 +1664,12 @@ def materialize_config_with_envs(
     if "vllm" in str(bench.get("framework") or "").lower():
         _sparse_bs = _sparse_kv_block_size(str(model_path or bench.get("model") or ""))
         if _sparse_bs:
-            from ._grid_runner import merge_server_args
-
-            _sp_fw_env = server_args_env_name(bench.get("framework"))
-            _sp_existing = str(envs.get(_sp_fw_env, "")).strip()
-            if "block-size" not in _sp_existing and "block_size" not in _sp_existing:
-                envs[_sp_fw_env] = (
-                    merge_server_args(_sp_existing, f"--block-size {_sparse_bs}")
-                    if _sp_existing
-                    else f"--block-size {_sparse_bs}"
-                )
+            add_server_arg_unless_pinned(
+                envs,
+                bench.get("framework"),
+                f"--block-size {_sparse_bs}",
+                pinned_by=("block-size", "block_size"),
+            )
     # Single choke point every benchmark path funnels through: the final
     # server-arg guards, applied at the FINAL framework env so any
     # operator-pinned flag is honored and never doubled.
@@ -1714,27 +1693,22 @@ def materialize_config_with_envs(
     ):
         envs.setdefault(_trust_key, "1")
     if _model_requires_remote_code(model_path or bench.get("model")):
-        _remote_code_existing = str(envs.get(framework_env, "")).strip()
-        if "trust-remote-code" not in _remote_code_existing:
-            from ._grid_runner import merge_server_args
-
-            envs[framework_env] = (
-                merge_server_args(_remote_code_existing, "--trust-remote-code")
-                if _remote_code_existing
-                else "--trust-remote-code"
-            )
+        add_server_arg_unless_pinned(
+            envs,
+            bench.get("framework"),
+            "--trust-remote-code",
+            pinned_by=("trust-remote-code",),
+        )
     # Server-side trust-remote-code for custom-code models (Qwen3.6 MoE): the
     # SERVER must also load remote code or it refuses the arch at boot. Scoped
-    # to this family. Merge (never overwrite) and skip when --trust-remote-code
-    # is already set.
+    # to this family.
     if "qwen3.6-35b-a3b" in _model_basename or "qwen3-6-35b-a3b" in _model_basename:
-        _trust_existing = str(envs.get(framework_env, "")).strip()
-        if "trust-remote-code" not in _trust_existing:
-            from ._grid_runner import merge_server_args
-
-            envs[framework_env] = (
-                merge_server_args(_trust_existing, "--trust-remote-code") if _trust_existing else "--trust-remote-code"
-            )
+        add_server_arg_unless_pinned(
+            envs,
+            bench.get("framework"),
+            "--trust-remote-code",
+            pinned_by=("trust-remote-code",),
+        )
     # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
     # Disabling it removes the per-variant accuracy gate — warn loudly, never
     # block.
@@ -1846,8 +1820,6 @@ def materialize_config_with_envs(
         # and the worker then accumulates every profiler event in host RAM at
         # ~60 MiB/s until the cgroup OOM-killer takes it out mid-roofline. No
         # exploration result is worth that, so the bounds win over all three.
-        from ._grid_runner import merge_server_args
-
         profile_args = str(envs.get(framework_env, "")).strip()
         restored = [
             flag
@@ -1865,12 +1837,8 @@ def materialize_config_with_envs(
                 restored,
                 bool(replace_args),
             )
-            merged = " ".join(restored)
-            if profile_args:
-                merged = merge_server_args(profile_args, merged)
-            # _finalize_framework_server_args already ran, so re-apply the sink-side
-            # guard it ends with rather than shipping an unvalidated string.
-            envs[framework_env] = validate_server_args_shell_safe(merged)
+            # The seal applies the sink-side guard to whatever is left here.
+            envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,
@@ -1883,6 +1851,7 @@ def materialize_config_with_envs(
         )
         envs.clear()
         envs.update(filtered_envs)
+    seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

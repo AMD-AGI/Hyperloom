@@ -212,11 +212,11 @@ def test_prelude_refuses_an_arm_that_would_eat_the_optimization_reserve():
 def test_a_resumed_prelude_is_not_charged_for_what_the_earlier_leg_spent():
     """Banked phase spend and the session clock answer to different origins.
 
-    A resume that reanchors the budget restarts the session clock while the
-    phase ledger keeps every second the earlier leg banked. A bound read off
-    the ledger therefore declared preparation overspent on a session that had
-    its whole budget ahead of it, and the measured half of the baseline was
-    refused on every resumed run. Only the clock decides.
+    The phase ledger keeps every second an earlier leg banked, including the
+    legs whose spend the session clock no longer counts against this phase. A
+    bound read off the ledger therefore declared preparation overspent on a
+    session that still had budget ahead of it, and the measured half of the
+    baseline was refused on every resumed run. Only the clock decides.
     """
     state = _prelude_state(spent_sec=10_000.0, usable_sec=10_000.0)
     affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=2706.0)

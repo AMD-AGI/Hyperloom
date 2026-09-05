@@ -869,6 +869,10 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
     # integrate_patch inspects each spec (see _is_aiter_gemm_model_config, which
     # reads .source/.target/.kind), so a bare placeholder object raises
     # AttributeError before the branch under test is reached.
+    # The freeze that runs before the apply hashes the source where it was
+    # validated, so the file has to be there for the apply to be reached at all.
+    (tmp_path / "tuned.json").write_text("{}\n", encoding="utf-8")
+
     def _fake_resolve(*args, **kwargs):
         spec = ip._ArtifactSpec(
             source=tmp_path / "tuned.json",
@@ -971,6 +975,10 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
     scratch = repo / "user_scratch.txt"
     scratch.write_text("user work in progress\n", encoding="utf-8")
+
+    # The freeze that runs before the apply hashes the source where it was
+    # validated, so the file has to be there for the apply to be reached at all.
+    (tmp_path / "tuned.json").write_text("{}\n", encoding="utf-8")
 
     def _fake_resolve(*args, **kwargs):
         spec = ip._ArtifactSpec(

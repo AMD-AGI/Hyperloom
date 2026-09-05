@@ -9,33 +9,22 @@ start-up). Deliberately standalone: no ``hyperloom`` imports, no third-party
 imports beyond an optional ``torch``, because the benchmark process usually
 lives in a different virtualenv than the orchestrator.
 
-Why this exists
----------------
-The orchestrator's existing profile evidence is a GPU kernel-time breakdown. A
-whole class of framework-level inefficiency is invisible there because it never
-shows up as a kernel:
-
-* a collective that does a host round-trip to agree on a shape
-  (``all_gather_object`` on a Python int) burns wall time in RCCL rendezvous and
-  host stalls, not in a nameable kernel;
-* a pure function recomputed once per transformer block per denoising step costs
-  host time plus a pile of small launches;
-* a CPU-resident table re-uploaded on every use costs blocking H2D copies.
-
-This probe measures those three shapes directly.
+It measures three shapes of framework-level inefficiency that never appear in a
+GPU kernel-time breakdown: host round-trips inside collectives, pure functions
+recomputed per block per step, and CPU-resident tensors re-uploaded per use.
 
 Two tiers
 ---------
 **Tier 1** (``HYPERLOOM_HOST_PROBE=1``) wraps a fixed, small set of host-stall
-and transfer entry points. Cost is proportional to how often those specific
-APIs are called, which is negligible against a full benchmark, so tier 1 is
-safe to run inside the ordinary profile leg alongside the torch profiler.
+and transfer entry points. Its cost is negligible against a full benchmark, so
+tier 1 is safe to run inside the ordinary profile leg alongside the torch
+profiler.
 
 **Tier 2** (``HYPERLOOM_HOST_PROBE_DEEP=1``) installs a :func:`sys.setprofile`
 hook that counts every call into the framework source roots and fingerprints
-its arguments. This is what surfaces memoization and loop-hoisting candidates,
-but it inflates host time enough to distort a co-collected torch trace, so it
-defaults off and is meant for a dedicated evidence leg.
+its arguments. It surfaces memoization and loop-hoisting candidates, and it
+inflates host time enough to distort a co-collected torch trace, so it defaults
+off and is meant for a dedicated evidence leg.
 
 Argument fingerprints: strict and loose
 ---------------------------------------
@@ -47,50 +36,29 @@ Every sampled call records two fingerprints of its arguments:
 * **loose** keeps only shape, dtype and device, so a repeat means the argument
   looks like the same value in a possibly *freshly allocated* tensor.
 
-A site with a high loose-repeat rate and a low strict-repeat rate is the
-signature of a loop-invariant computation whose inputs are rebuilt every
-iteration. Memoizing it alone gains nothing (the cache would never hit); the
-allocation has to be hoisted out of the loop first, and only then does the
-memoization pay. That pairing is otherwise a human insight, and getting it wrong
-costs the whole bundle: a greedy accept/reject loop measures the hoist on its
-own, sees no gain, and discards the enabler.
+A site with a high loose-repeat rate and a low strict-repeat rate is a
+loop-invariant computation whose inputs are rebuilt every iteration: the
+allocation has to be hoisted out of the loop before memoizing it can pay.
 
-Why strict identity is not just ``data_ptr``
---------------------------------------------
-Under a caching allocator, a tensor allocated and freed inside a loop gets the
-same address back on the next iteration. Keying strict identity on ``data_ptr``
-would therefore report a freshly built tensor as "the same argument as last
-time" — inverting exactly the distinction above and reclassifying every hoist
-candidate as a memoization candidate that would then never hit at runtime. This
-is the same address-reuse hazard a hand-written cache has to guard against by
-pinning its source tensors.
+Strict identity carries a *generation* token rather than ``data_ptr``, because
+a caching allocator hands the same address back to a freshly built tensor. The
+probe holds a weak reference per observed tensor object and issues a fresh
+generation whenever an address turns out to belong to a new object; weak
+references keep this from pinning device memory.
 
-So strict identity carries a *generation* token instead: the probe holds a weak
-reference per observed tensor object and issues a fresh generation whenever an
-object address turns out to belong to a new object. Weak references keep this
-from pinning device memory, which a probe must never do.
-
-What the probe deliberately does not know
------------------------------------------
-It never reads tensor *contents*. Doing so would require a device-to-host copy
-per sampled call, injecting the very host stalls the probe exists to measure. So
-"loose repeat" means the arguments were shape-, dtype- and device-compatible, not
-that they held equal values. Treat a hoist candidate as a lead to confirm against
-the source, not as proof.
+The probe never reads tensor *contents*, which would require a device-to-host
+copy per sampled call. "Loose repeat" therefore means the arguments were
+shape-, dtype- and device-compatible, not that they held equal values.
 
 Output
 ------
 One JSON file per process at
 ``$HYPERLOOM_HOST_PROBE_DIR/hl_host_probe_rank<N>_pid<PID>.json``, written at
 interpreter exit. Reports are merged by the orchestrator-side aggregator, which
-is the only consumer of this schema.
-
-The pid is in the name because a rank is not one process. A launcher, a re-exec,
-or any short-lived child inherits ``RANK`` from the environment and installs its
-own probe; on a real 8-rank run a 0.8-second helper process with zero recorded
-calls wrote last and destroyed rank 0's entire report. Since the aggregator globs
-and merges, an extra near-empty file costs nothing, while an overwrite silently
-loses a rank.
+is the only consumer of this schema. The pid is in the name because a rank is
+not one process: a launcher, a re-exec, or a short-lived child inherits
+``RANK`` and installs its own probe, and a name without the pid lets the last
+writer overwrite a real rank's report.
 
 Environment
 -----------
@@ -102,15 +70,14 @@ Environment
     Output directory. The probe is inert when unset (nowhere to report).
 ``HYPERLOOM_HOST_PROBE_ROOTS``
     ``os.pathsep``-separated framework source roots. Call sites are attributed
-    to the innermost frame under one of these roots, which is what makes the
-    report point at framework code instead of at torch internals.
+    to the innermost frame under one of these roots.
 ``HYPERLOOM_HOST_PROBE_MAX_SITES``
     Cap on distinct tracked sites per category (default 512).
 ``HYPERLOOM_HOST_PROBE_ARG_SAMPLES``
     Per-site cap on argument-fingerprint samples (default 256). Reading
     ``frame.f_locals`` materializes a dict, so sampling is what keeps tier 2
-    bounded; a couple hundred calls is already far more than enough to
-    establish a repeat rate.
+    bounded.
+
 """
 
 from __future__ import annotations
@@ -187,6 +154,51 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+#: Launcher variables naming this process's rank, most specific first.
+_RANK_ENVS = ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK")
+
+#: Launcher variables naming the size of the job.
+_WORLD_SIZE_ENVS = ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE")
+
+
+def _env_first_int(names: "tuple[str, ...]", default: int) -> int:
+    """Return the first of ``names`` holding an int, else ``default``."""
+    for name in names:
+        try:
+            return int(str(os.environ.get(name, "")).strip())
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _rank() -> int:
+    """Return this process's distributed rank, 0 when the launcher named none."""
+    return _env_first_int(_RANK_ENVS, 0)
+
+
+def _world_size() -> int:
+    """Return the size of the distributed job, 1 when the launcher named none."""
+    return _env_first_int(_WORLD_SIZE_ENVS, 1)
+
+
+def _under_roots(filename: str, roots: "tuple[str, ...]") -> bool:
+    """Return whether ``filename`` sits under one of ``roots``."""
+    return any(filename.startswith(root) for root in roots)
+
+
+def _write_json_report(out_dir: str, name: str, payload: dict) -> str:
+    """Write ``payload`` as JSON to ``out_dir/name`` and return that path.
+
+    Raises:
+        OSError: If the directory or the file cannot be written.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    return path
 
 
 class _SiteStats:
@@ -366,9 +378,7 @@ class HostProbe:
             configured every path qualifies, so the probe still reports
             something rather than silently producing an empty file.
         """
-        if not self.roots:
-            return True
-        return any(filename.startswith(root) for root in self.roots)
+        return not self.roots or _under_roots(filename, self.roots)
 
     def _label_code(self, code: object) -> str:
         """Return the cached ``file:line:name`` label for ``code``, or ``""``.
@@ -865,33 +875,6 @@ class HostProbe:
                 pass
         self._installed = False
 
-    def _rank(self) -> int:
-        """Return this process's distributed rank from the launcher env.
-
-        Returns:
-            The rank from ``RANK`` / ``LOCAL_RANK`` / ``OMPI_COMM_WORLD_RANK``,
-            else 0.
-        """
-        for name in ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK"):
-            try:
-                return int(str(os.environ.get(name, "")).strip())
-            except (TypeError, ValueError):
-                continue
-        return 0
-
-    def _world_size(self) -> int:
-        """Return the distributed world size from the launcher env.
-
-        Returns:
-            The world size from ``WORLD_SIZE`` / ``OMPI_COMM_WORLD_SIZE``, else 1.
-        """
-        for name in ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE"):
-            try:
-                return int(str(os.environ.get(name, "")).strip())
-            except (TypeError, ValueError):
-                continue
-        return 1
-
     def report(self) -> dict:
         """Build this process's evidence report.
 
@@ -938,8 +921,8 @@ class HostProbe:
 
         return {
             "schema": SCHEMA,
-            "rank": self._rank(),
-            "world_size": self._world_size(),
+            "rank": _rank(),
+            "world_size": _world_size(),
             "pid": os.getpid(),
             "wall_seconds": round(time.time() - self._started, 3),
             "roots": list(self.roots),
@@ -974,14 +957,11 @@ class HostProbe:
             sys.setprofile(None)
             self._deep_installed = False
         try:
-            os.makedirs(self.out_dir, exist_ok=True)
-            path = os.path.join(
+            return _write_json_report(
                 self.out_dir,
-                f"hl_host_probe_rank{self._rank()}_pid{os.getpid()}.json",
+                f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
+                self.report(),
             )
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(self.report(), handle, indent=2, sort_keys=True)
-            return path
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             sys.stderr.write(f"[hl_host_probe] could not write report: {exc!r}\n")
             return ""
@@ -1056,4 +1036,9 @@ def install_from_env() -> "HostProbe | None":
     return probe
 
 
-__all__ = ["SCHEMA", "HostProbe", "active", "install_from_env"]
+__all__ = [
+    "SCHEMA",
+    "HostProbe",
+    "active",
+    "install_from_env",
+]

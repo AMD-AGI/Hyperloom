@@ -570,6 +570,8 @@ class ProposalsCollaborator:
                 },
             )
             return
+        # The round the authoring specialist opened runs on under this task id.
+        await self._handoff_enablement_round(task)
         # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
         await self.bus.append_and_seq(
             Message.new(

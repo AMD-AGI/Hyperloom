@@ -26,17 +26,18 @@ async def run_lease_and_db_reclaim(
     expired is failed so a dead worker never wedges a lane indefinitely. Every
     step is individually best-effort — maintenance never aborts the run loop.
 
+    The serving-lease sweep is not one of the steps: it runs in the reconciler,
+    at the top of every tick, because an open bring-up round holds one of those
+    leases and can only be settled there. This pass reports what that sweep did
+    rather than running a second one behind its back.
+
     Args:
-        host: Anything exposing the Coordinator's ``locks``,
+        host: Anything exposing the Coordinator's ``reconciler``,
             ``gpu_specialist_pool``, ``tasks`` and ``db``.
         summary: Mutated in place with the per-step counts.
         reason: Reclaim reason recorded on the tasks and used as the log prefix.
     """
-    try:
-        reaped = await host.locks.reap_expired()
-        summary["leases_reaped"] = len(reaped or [])
-    except Exception:  # noqa: BLE001
-        log.exception("%s: serving-lease reap failed", reason)
+    summary["leases_reaped"] = host.reconciler.last_report.leases_reaped
     try:
         summary["gpu_leases_reaped"] = await host.gpu_specialist_pool.reap_expired()
     except Exception:  # noqa: BLE001
@@ -72,11 +73,12 @@ class MaintenanceCollaborator:
     ) -> dict[str, Any] | None:
         """Periodic in-process maintenance (R5 reaper + R4 DB retention).
 
-        On a fixed tick cadence: actively reap TTL-expired serving + GPU leases
-        and prune the events/tasks DB so a multi-day single-session run never
-        leaks capacity or grows the DB unbounded. Best-effort — every step is
-        independently guarded so one failure never aborts the run loop. Returns
-        a summary dict when it ran, else ``None``.
+        On a fixed tick cadence: actively reap TTL-expired GPU leases and prune
+        the events/tasks DB so a multi-day single-session run never leaks
+        capacity or grows the DB unbounded. The serving-lease count is carried
+        over from the reconciler, which sweeps that table every tick.
+        Best-effort — every step is independently guarded so one failure never
+        aborts the run loop. Returns a summary dict when it ran, else ``None``.
 
         Args:
             tick: The current coordinator tick; maintenance only runs when it

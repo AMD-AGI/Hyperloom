@@ -19,9 +19,9 @@ from hyperloom.orchestrator.policy.gate import (
     _delegate_field_present,
     _value_is_present,
     detect_gpu_count,
-    gpu_specialist_ceiling,
     research_lane_ceiling,
 )
+from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 

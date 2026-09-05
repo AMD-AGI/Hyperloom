@@ -51,10 +51,10 @@ from ._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
+from .launch_backend import launch
 from .benchmark_result import (
     estimate_killed_variant_throughput,
     extract_benchmark_measurement,
@@ -69,6 +69,7 @@ from ._inferencex_patcher import (
     eval_probe_targets_exist,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
+from ._server_argv import seal_server_argv
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -173,12 +174,11 @@ def _resolve_magpie_python() -> str:
             # Probe with ``importlib.util.find_spec`` rather than a bare
             # ``import`` so a missing module returns a non-zero exit code
             # WITHOUT the child emitting a ``ModuleNotFoundError`` traceback.
-            # ``run_with_session_kill`` mirrors child stderr to the parent
-            # stream, so a bare ``import Magpie`` on a candidate that lacks it
-            # would leak an alarming traceback into the run log even though the
-            # probe failing is an expected, benign step of interpreter
-            # resolution.
-            proc = run_with_session_kill(
+            # The launch mirrors child stderr to the parent stream, so a bare
+            # ``import Magpie`` on a candidate that lacks it would leak an
+            # alarming traceback into the run log even though the probe failing
+            # is an expected, benign step of interpreter resolution.
+            proc = launch(
                 [
                     py,
                     "-c",
@@ -726,6 +726,8 @@ def _build_variant_yaml(
             port=int(server_lifecycle["port"]),
         )
 
+    # The final write to the argument env; nothing below may touch it.
+    seal_server_argv(envs, bench.get("framework"))
     output_subdir.mkdir(parents=True, exist_ok=True)
     out_path = output_subdir / "config.yaml"
     with out_path.open("w", encoding="utf-8") as f:
@@ -1064,7 +1066,7 @@ def _run_magpie(
     land in the per-task workspace, not ``/workspace/``. ``soft_deadline_sec``
     is the Fix-E overtime cap: the tree is reaped and a sentinel
     ``OVERTIME_KILL_RETURNCODE`` returned instead of raising ``TimeoutExpired``.
-    ``server_already_ready`` is forwarded to :func:`run_with_session_kill` so
+    ``server_already_ready`` is forwarded to the launch backend so
     warm reuse rounds (client-only, no server boot) use the from-spawn soft clock
     instead of the from-ready clock (which would never arm on an empty log).
 
@@ -1084,7 +1086,7 @@ def _run_magpie(
         serving_lease: When set (Ray-managed GPU execution, §12 T1), the round
             runs inside the lease's actor — which holds ``num_gpus`` across every
             round sharing this server — instead of a local subprocess. ``None``
-            keeps the existing local ``run_with_session_kill`` path unchanged.
+            keeps the existing local subprocess path unchanged.
         on_output: Liveness callback invoked from the reader thread on each
             line the benchmark emits, so the caller's heartbeat can keep
             reporting across a run that blocks for hours. Ignored on the
@@ -1213,9 +1215,9 @@ def _run_magpie(
         config_path=config_path,
         output_dir=output_dir,
     )
-    # run_with_session_kill launches Magpie in its own POSIX session and tears
-    # down the whole descendant tree on every exit path.
-    proc = run_with_session_kill(
+    # The launch puts Magpie in its own POSIX session and tears down the whole
+    # descendant tree on every exit path.
+    proc = launch(
         cmd,
         env=env,
         cwd=cwd,
@@ -3191,8 +3193,8 @@ def _report_errors_summary(report: dict[str, Any] | None, limit: int = 2000) -> 
 def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
     """Return the tail of the first non-empty on-disk benchmark log.
 
-    The piped ``stderr``/``stdout`` from :func:`run_with_session_kill` is empty
-    for the bypass/scriptable path — the customer body (torchrun/bench_fps.py)
+    The piped ``stderr``/``stdout`` from the launch is empty for the
+    bypass/scriptable path — the customer body (torchrun/bench_fps.py)
     writes its own stderr (e.g. an argparse ``unrecognized arguments`` error)
     to ``benchmark_stderr.log`` in the workspace, NOT the parent's pipe. Without
     this, ``magpie_nonzero_invalid_measurement`` aborts land in

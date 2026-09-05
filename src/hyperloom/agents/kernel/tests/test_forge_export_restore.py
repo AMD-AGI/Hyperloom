@@ -13,6 +13,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from hyperloom.common import proctree
+
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
@@ -577,18 +579,16 @@ def test_terminate_forge_process_reports_unreaped_group(
         "_process_group_members",
         lambda _pgid: [(456, 99, "D")],
     )
-    monkeypatch.setattr(
-        forge_submit,
-        "_proc_identity",
-        lambda _pid: (1, 99),
-    )
+    # The residual-member kill runs through the shared procfs helper, so the
+    # identity check and the signal it guards are patched there.
+    monkeypatch.setattr(proctree, "proc_identity", lambda _pid: (1, 99))
     monkeypatch.setattr(
         forge_submit.os,
         "killpg",
         lambda pgid, sig: group_signals.append((pgid, sig)),
     )
     monkeypatch.setattr(
-        forge_submit.os,
+        proctree.os,
         "kill",
         lambda pid, sig: process_signals.append((pid, sig)),
     )

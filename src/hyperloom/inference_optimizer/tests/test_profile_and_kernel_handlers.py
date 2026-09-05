@@ -1916,7 +1916,7 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
         idempotency_key="baseline-valid-warning",
     )
     sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=fake_run):
         res = await sub.run_task(task)
 
     assert res.result["status"] == "failed"
@@ -2271,7 +2271,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
         idempotency_key="prof-inferencex-path",
     )
     sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run_ix):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run_ix):
         res = await sub.run_task(task)
 
     assert res.state == "succeeded"
@@ -2328,7 +2328,7 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
         idempotency_key="prof-capture",
     )
     sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
         res = await sub.run_task(task)
 
     capture_dir = output_dir / "capture_traces"

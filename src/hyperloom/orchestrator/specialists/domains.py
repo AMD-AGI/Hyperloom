@@ -228,11 +228,11 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
-        anchor = (d.kb_anchor or "").strip()
+        anchor = d.kb_anchor.strip()
         if anchor:
             seen.setdefault(anchor, None)
     for extra in EXTRA_KNOWLEDGE_DOMAIN_TAGS:
-        tag = (extra or "").strip()
+        tag = extra.strip()
         if tag:
             seen.setdefault(tag, None)
     return tuple(seen.keys())
@@ -253,7 +253,7 @@ def _anchor_to_domain_map() -> dict[str, "SpecialistDomain"]:
     """
     out: dict[str, SpecialistDomain] = {}
     for d in SPECIALIST_DOMAINS:
-        anchor = (d.kb_anchor or "").strip()
+        anchor = d.kb_anchor.strip()
         if anchor and anchor not in out:
             out[anchor] = d
     return out
@@ -273,7 +273,7 @@ def domain_for_tag(tag: str) -> "SpecialistDomain | None":
         The matching catalogue entry, or ``None`` when the tag is empty or
         unknown.
     """
-    t = (tag or "").strip()
+    t = tag.strip()
     if not t:
         return None
     hit = _ANCHOR_TO_DOMAIN.get(t)
@@ -352,13 +352,9 @@ def get_domain(key: str) -> SpecialistDomain | None:
 def authoring_domain_for_framework(framework: str | None) -> str:
     """Return the authoring domain that matches a framework's kind.
 
-    A request-serving framework and an iterative model pipeline have almost no
-    optimization surface in common: one is scheduling, batching and KV-cache
-    admission, the other is redundant work created by running the same stack
-    once per block per denoising step. Steering a scriptable pipeline at
-    ``serving_specialist`` points it at a hot path that does not exist there, so
-    every place that names an authoring domain resolves it through here rather
-    than hard-coding one.
+    A scriptable pipeline steered at ``serving_specialist`` would be pointed at
+    a scheduling hot path that does not exist there, so every place that names
+    an authoring domain resolves it here rather than hard-coding one.
 
     Args:
         framework (str | None): The session's framework name.
@@ -390,9 +386,8 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 )
 
 
-# Default number of LLM turns a specialist may run. Practically unbounded so the
-# ``max_seconds = max_turns × per_turn`` ceiling is decoupled from turns; the
-# real stop is the wall-clock budget.
+# Default number of LLM turns a specialist may run. Practically unbounded: what
+# stops a specialist is the deadline the dispatcher hands down.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
 # Hard cap; PolicyGate denies a dispatch above it because the in-process

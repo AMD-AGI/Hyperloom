@@ -384,10 +384,18 @@ def test_single_domain_scope_with_multiple_tags_allowed(gate, orchestration_role
 def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    from hyperloom.orchestrator.policy.projection import ResourceFacts
+
     state = SharedState()
     state.gpu_specialist_capacity = capacity
     state.tp = tp
-    return PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    facts = ResourceFacts()
+    facts.update(state)
+    return PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=state,
+        resources=facts,
+    )
 
 
 def test_freeform_gpu_request_clears_ceiling(orchestration_role, monkeypatch):

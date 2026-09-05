@@ -318,26 +318,26 @@ class _RenderMixin:
     def to_resource_pools_summary(self) -> str:
         """Render the GPU pool / lane capacity block.
 
-        These are the same numbers PolicyGate admits a ``needs_gpu`` dispatch
-        against, so a request can be judged schedulable before it is emitted.
+        The numbers the advisory projection judges a ``needs_gpu`` dispatch
+        against; the GPU pool's own acquire is what grants the cards.
 
         Returns:
             str: One line per pool / lane dimension.
         """
         from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES
-        from ...policy.gate import (
-            _effective_gpu_specialist_pool_size,
-            _serving_tp_for_policy,
-            _whole_machine_pool_size,
+        from ...policy.projection import (
+            effective_gpu_specialist_pool_size,
             gpu_specialist_ceiling,
+            serving_tp_for_policy,
+            whole_machine_pool_size,
         )
 
         lines = [
-            f"serving_tp={_serving_tp_for_policy(self)}",
+            f"serving_tp={serving_tp_for_policy(self)}",
             f"gpu_specialist_capacity={gpu_specialist_ceiling(self)}",
-            f"serving_disjoint_gpu_pool={_effective_gpu_specialist_pool_size(self)}"
+            f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(self)}"
             "  (non-bench needs_gpu specialists admit against this)",
-            f"whole_machine_gpu_pool={_whole_machine_pool_size()}"
+            f"whole_machine_gpu_pool={whole_machine_pool_size()}"
             "  (bench / framework-authoring specialists admit against this)",
             f"research_lane_capacity={max(0, int(self.research_lane_capacity or 0))}  (concurrent specialists)",
             f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"

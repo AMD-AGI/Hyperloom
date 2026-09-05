@@ -650,7 +650,7 @@ class TestCustomAdapterMeasurement:
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
             side_effect=_ok,
         ):
             results = asyncio.run(

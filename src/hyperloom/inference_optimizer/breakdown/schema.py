@@ -24,6 +24,8 @@ SCHEMA_VERSION_V5 = "hyperloom.session_breakdown.v5.0"
 #: Current breakdown schema version. V6 stamps the document once the timeline
 #: is recorded by the actions themselves rather than projected out of their
 #: artefacts afterwards, which is what makes an event's start time its real one.
+#: ``enablement`` gained its ledger-sourced round fields inside this version:
+#: they add a section to the block rather than reshape the document.
 SCHEMA_VERSION = SCHEMA_VERSION_V6
 
 
@@ -2353,6 +2355,31 @@ class LangfusePush(TypedDict, total=False):
     receipt_source: str
 
 
+class EnablementRoundSummary(TypedDict, total=False):
+    """One bring-up round, as the durable round ledger recorded it.
+
+    Attributes:
+        round_id: Identity of the round.
+        state: ``open`` while a holder has it, ``settled`` once it ended.
+        outcome: How it ended -- booted / failed / abandoned, or one of the two
+            expiries. Empty while it is open.
+        holder_task_id: The task holding it.
+        fence: The holder's token; only a handoff advances it.
+        opened_unix: When the round was acquired.
+        settled_unix: When it ended, or ``None`` while it is open.
+        stage_high_water: Furthest ladder stage this round's boots reached.
+    """
+
+    round_id: str
+    state: str
+    outcome: str
+    holder_task_id: str
+    fence: int
+    opened_unix: float
+    settled_unix: float | None
+    stage_high_water: int
+
+
 class EnablementStackActionSummary(TypedDict, total=False):
     """One attempt-runtime stack action considered/applied.
 
@@ -2446,8 +2473,13 @@ class EnablementBreakdown(TypedDict, total=False):
         pending: True while a trigger is captured but unconsumed.
         validation_pending: True while an eval-origin KEEP awaits baseline
             revalidation.
-        stall_streak: Consecutive no-progress rounds toward ``enablement_stalled``.
-        inflight_task_id: Specialist task id of the in-flight round.
+        round_id: Bring-up round still open in the round store, when one is.
+        round_holder_task_id: Task holding that round.
+        rounds: Every round in the ledger, newest first (bounded tail).
+        round_count: How many rounds the ledger holds, before that bound.
+        round_outcomes: Settled rounds counted by outcome.
+        round_observations: Boot observations charged to the ledger.
+        stage_high_water: Furthest ladder stage any boot in the session reached.
         last_specialist_task_id: Specialist task id of the most recent round.
         revalidation_task_id: TaskRegistry id of the tracked revalidation task.
         revalidation_generation: Revalidation window counter (idempotency).
@@ -2495,8 +2527,13 @@ class EnablementBreakdown(TypedDict, total=False):
     succeeded: bool
     pending: bool
     validation_pending: bool
-    stall_streak: int
-    inflight_task_id: str
+    round_id: str
+    round_holder_task_id: str
+    rounds: list[EnablementRoundSummary]
+    round_count: int
+    round_outcomes: dict[str, int]
+    round_observations: int
+    stage_high_water: int
     last_specialist_task_id: str
     revalidation_task_id: str
     revalidation_generation: int
@@ -4234,6 +4271,7 @@ __all__ = [
     "DiscoveredHotKernel",
     "EnablementAttemptRuntime",
     "EnablementBreakdown",
+    "EnablementRoundSummary",
     "EnablementStackActionSummary",
     "ExecutorClass",
     "KernelBackendAttempt",

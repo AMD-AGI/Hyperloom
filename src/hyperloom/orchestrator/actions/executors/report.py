@@ -373,6 +373,17 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "user_stop_requested": "Stopped on an explicit operator request.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
+    "server_argv_invalid": (
+        "The installed framework's own argument parser refused the composed server argv before any "
+        "server was launched. Nothing in the framework source is at fault: correct the offending flag "
+        "in --server-args / the recipe for the installed version, then re-run."
+    ),
+    "environment_fault": (
+        "This host cannot run the combination as installed - the framework is missing from the serving "
+        "interpreter, a compiled extension has no build for this platform, the checkpoint path resolves "
+        "to nothing, or the port is already held. No patch to the model or the framework source repairs "
+        "any of those, so the run stopped instead of spending rounds authoring against the machine."
+    ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
     "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
@@ -424,7 +435,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "which would crash engine init."
     ),
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
-    "enablement_stalled": "The enablement loop made no forward progress for several consecutive rounds and stopped instead of re-deriving the same fix.",
+    "enablement_stalled": "The enablement loop spent its progress budget — the bring-up ledger recorded no further ladder progress and no more new failures worth funding — and stopped instead of re-deriving the same fix.",
+    "enablement_attempts_exhausted": "The enablement loop used its whole attempt allowance without producing a baseline that boots, so it stopped instead of retrying indefinitely.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
         "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "
@@ -434,6 +446,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
         "the real cause), or point AIPERF_BIN at an existing pinned build."
     ),
+    # Host-level terminals: something outside the model ended the run.
+    "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
+    "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
 }
 
 

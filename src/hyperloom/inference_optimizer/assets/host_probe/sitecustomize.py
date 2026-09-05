@@ -9,21 +9,11 @@ arbitrary framework's own entrypoint (``torchrun``, a shell wrapper, whatever)
 without editing that entrypoint. The orchestrator prepends this directory to
 ``PYTHONPATH``; nothing else is required of the target framework.
 
-Two properties matter here:
-
-* **Chaining.** Prepending this directory shadows any ``sitecustomize`` the
-  image already ships, which could silently drop that environment's own
-  start-up configuration. So this module finds the next ``sitecustomize`` on the
-  path *after* our directory and executes it first, before installing the probe.
-  It is loaded under a private name (``_hl_prior_sitecustomize``) rather than as
-  ``sitecustomize``, since that entry in ``sys.modules`` is already this module.
-  Executing it is what preserves its side effects, which is the whole point; a
-  prior hook that expects to be importable again *by name* would not find
-  itself, but a start-up hook that does that is not a shape we support.
-* **Inertness.** The probe installs only when ``HYPERLOOM_HOST_PROBE`` is
-  truthy. A benchmark that merely has this directory on ``PYTHONPATH`` behaves
-  exactly as if it did not, which is what makes it safe to leave the prefix in
-  place across an entire session.
+Prepending this directory shadows any ``sitecustomize`` the image already
+ships, so this module executes the next one on ``sys.path`` under a private
+name before installing the probe. The probe itself installs only when
+``HYPERLOOM_HOST_PROBE`` is truthy, so leaving the prefix in place across a
+session is inert.
 
 Every failure path is swallowed: a start-up shim must never be the reason a
 benchmark process fails to boot.

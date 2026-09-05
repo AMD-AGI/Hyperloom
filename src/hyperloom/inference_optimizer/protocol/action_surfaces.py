@@ -101,6 +101,7 @@ assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQU
 # Coordinator-managed actions that agents should not directly propose.
 INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
+        "boot_probe",
         "conc_sweep",
         "roofline",
         "profile",
@@ -187,6 +188,24 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             requires_lanes=("server_lifecycle", "benchmark_lane"),
             side_effects=("launches_server", "reads_server", "writes_results"),
             description="Launch a fresh server with NO accepted modifications, run Magpie benchmark, and set baseline_tput.",
+        ),
+        "boot_probe": ActionMetadata(
+            name="boot_probe",
+            family="prep",
+            pipeline_phase="measure",
+            verdict_class="exploration",
+            expected_gain_pct=(0.0, 0.0),
+            accuracy_risk=0.0,
+            crash_risk=0.05,
+            typical_runtime_min=8.0,
+            lease_ttl_sec=3900,
+            requires_lanes=("server_lifecycle",),
+            side_effects=("launches_server", "reads_server"),
+            description=(
+                "Answer whether the combo boots at all: launch a server, wait for health, ask for one short "
+                "completion, tear it down. Records the same boot observation a baseline does and measures no "
+                "throughput. Coordinator-internal."
+            ),
         ),
         "conc_sweep": ActionMetadata(
             name="conc_sweep",

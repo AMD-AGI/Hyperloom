@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
 from hyperloom.orchestrator.roles import (
     Backend,
@@ -63,7 +64,9 @@ async def test_promote_baseline_sets_anchor_and_current_best(coord: Coordinator)
     )
     assert coord.shared_state.baseline_tput == 1000.0
     assert coord.shared_state.baseline_failure_streak == 0
-    assert coord.shared_state.baseline_arg_error_streak == 0
+    # The arg-error streak is not a boot-failure streak and a promotion does not
+    # clear it; nothing counts into it again once an anchor exists.
+    assert coord.shared_state.baseline_arg_error_streak == 1
     assert coord.shared_state.current_best["action"] == "baseline"
     assert coord.shared_state.current_best["tput"] == 1000.0
     assert coord.shared_state.current_best["cold_tput"] == 900.0
@@ -429,10 +432,9 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 600.0
+    coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
     out = await coord._compose_prompt("orchestration")
     assert "SESSION_DIR=" in out
@@ -443,7 +445,7 @@ async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator)
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 60.0
+    coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
     out = await coord._compose_prompt("orchestration")
@@ -453,7 +455,7 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
 @pytest.mark.asyncio
 async def test_compose_prompt_robustness_and_kernel(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
-    coord._run_deadline = time.monotonic() + 600.0
+    coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
     out_rob = await coord._compose_prompt("robustness")
     out_k = await coord._compose_prompt("kernel_agent")

@@ -10,6 +10,8 @@ row.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from hyperloom.orchestrator.roles import (
@@ -200,12 +202,18 @@ async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reject_enablement_integrate_patch_advances_stall(coord: Coordinator) -> None:
+async def test_reject_enablement_integrate_patch_charges_the_round(coord: Coordinator) -> None:
     """A Critic-rejected ENABLEMENT integrate_patch never reaches the executor,
-    so it must still advance the enablement stall accounting (bump streak, clear
-    inflight_task_id) to avoid stalling before enablement_stalled fires."""
-    coord.shared_state.enablement.inflight_task_id = "spec-e"
-    coord.shared_state.enablement.stall_streak = 0
+    so it must still charge its round to the ledger and settle it -- a round
+    that costs nothing is a round the progress budget cannot count."""
+    opened = await coord.rounds.open(
+        "enablement-spec-e",
+        holder_task_id="spec-e",
+        lease_sec=3600.0,
+        now_unix=time.time(),
+        request_id="seed",
+    )
+    assert opened.ok
     pending = PendingProposal(
         proposal_msg_id="m-enable",
         from_agent="coordinator",
@@ -217,8 +225,10 @@ async def test_reject_enablement_integrate_patch_advances_stall(coord: Coordinat
     await coord._handle_single_verdict(
         source="critic", pending=pending, verdict="reject", reasoning="empty deliverable; nothing to enable"
     )
-    assert coord.shared_state.enablement.stall_streak == 1
-    assert not coord.shared_state.enablement.inflight_task_id
+    from hyperloom.orchestrator.bringup.budget import session_budget
+
+    assert (await session_budget(coord.rounds)).observations == 1
+    assert await coord.rounds.held() is None
 
 
 def _append(bucket: list, candidate) -> "object":

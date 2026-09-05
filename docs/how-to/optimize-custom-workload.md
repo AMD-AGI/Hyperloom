@@ -236,6 +236,12 @@ creates a new timestamped subdirectory under it. Use
 pushes past the terminal-state guard. Without `--resume-from` you always get a
 fresh session, so an interrupted run is never picked up by accident.
 
+A resumed session keeps the budget it started with. Elapsed time is summed
+forward over every leg, so resuming never hands the run another `--max-hours`,
+however the previous leg ended. To let a run that has spent its budget carry
+on, grant more explicitly with `--extend-hours <n>`; the grant is recorded in
+the session state with its reason.
+
 ## Monitor the run and read the output
 
 The benchmark output does not go to the launcher log; it lands in the session

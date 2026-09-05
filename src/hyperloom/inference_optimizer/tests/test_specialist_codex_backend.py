@@ -28,6 +28,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.deadline import Deadline
+
 import hyperloom.orchestrator.roles.codex_agent as codex_agent
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.orchestrator.trace import parse_usage as pu
@@ -187,7 +189,7 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
         user_prompt="find the gap",
         disallowed_tools=frozenset(),
         max_turns=2,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
 
     assert result.exit_code == 0, (
@@ -246,7 +248,7 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
 
     assert result.done_payload is not None
@@ -568,7 +570,7 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
 
     assert result.done_payload is None
@@ -600,7 +602,7 @@ async def test_unconfigured_codex_gateway_fails_the_task(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
     )
     assert result.done_payload is None
     assert "not configured" in result.error
@@ -911,7 +913,7 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
         gpu_lease=lease,
     )
 
@@ -975,7 +977,7 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
         user_prompt="FULL_USER_PROMPT_SENTINEL",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert result.exit_code == 0
@@ -1030,7 +1032,7 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert "bubblewrap" in result.error
@@ -1095,7 +1097,7 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
         disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0,),
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
         gpu_lease=lease,
     )
 
@@ -1168,7 +1170,7 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
         user_prompt="mcp user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert result.exit_code == 0
@@ -1258,7 +1260,7 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
         gpu_lease=lease,
     )
 
@@ -1360,7 +1362,7 @@ async def test_codex_structured_failure_is_propagated_and_redacted(
         user_prompt="user",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=10.0,
+        deadline=Deadline.after(10.0),
     )
 
     assert result.exit_code == 7

@@ -84,7 +84,7 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -107,7 +107,7 @@ def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkey
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -139,7 +139,7 @@ def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, mo
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
         side_effect=fake_run,
     ):
         _run_magpie(
@@ -250,7 +250,7 @@ def test_baseline_exports_eval_result_dir_env(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))
@@ -286,7 +286,7 @@ def test_baseline_parses_accuracy_from_eval_result_dir(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))
@@ -342,7 +342,7 @@ def test_baseline_anchors_relative_result_dir_before_accuracy_parse(tmp_path):
     with (
         patch("hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", return_value=None),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            "hyperloom.orchestrator.actions.executors.baseline.launch",
             side_effect=fake_run,
         ),
     ):
@@ -382,7 +382,7 @@ def test_baseline_parses_accuracy_after_eval_result_dir_cleanup(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))
@@ -426,7 +426,7 @@ def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))
@@ -476,7 +476,7 @@ def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))
@@ -611,7 +611,7 @@ def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))
@@ -714,7 +714,7 @@ def test_baseline_reads_scriptable_quality_gate_when_run_eval_disabled(tmp_path)
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "disable_run_eval": True})
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = asyncio.run(executor(ctx))

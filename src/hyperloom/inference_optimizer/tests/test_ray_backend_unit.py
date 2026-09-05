@@ -1151,7 +1151,7 @@ def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.Mon
         return _Proc()
 
     monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
-    monkeypatch.setattr(gr, "run_with_session_kill", _fake_run)
+    monkeypatch.setattr(gr, "launch", _fake_run)
 
     rc, out, err = gr._run_magpie(
         magpie_python="python3",

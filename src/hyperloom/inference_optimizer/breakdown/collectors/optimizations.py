@@ -18,8 +18,9 @@ from typing import Any
 from ..agent_ownership import UNATTRIBUTED, patch_author
 
 
-#: ``5`` means the recorder-first shape: ``attempts``, ``summary_by_agent``,
-#: and the reconciliation fields under ``validation``. This tracked the
+#: This section's own wire shape, independent of the envelope's version:
+#: ``5`` means the recorder-first shape -- ``attempts``, ``summary_by_agent``,
+#: and the reconciliation fields under ``validation``. It tracked the
 #: envelope's major version until the envelope went to v6.0 for the recorded
 #: timeline, which reshaped nothing here -- so the two numbers now differ, and
 #: a consumer has to read this one for this section rather than infer it.

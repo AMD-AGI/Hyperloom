@@ -274,9 +274,14 @@ def _extract_server_args(
     return " ".join(kept), model
 
 
+#: ``vcs`` value of a framework root with no version control of its own.
+#: Duplicates ``orchestrator.bringup.trees.VCS_NONE``, which this layer cannot
+#: import without inverting the package layering.
+VCS_NONE = "none"
+
 # git -C resolves a relative patch path against the target tree, not the caller,
 # so the script dir is baked in.
-_APPLY_PATCH_FUNC = """\
+_APPLY_PATCH_GIT = """\
 apply_patch() {
   local patch_file="$SCRIPT_DIR/$1"
   for lvl in 1 0 2 3 4 5 6 7 8; do
@@ -288,6 +293,34 @@ apply_patch() {
   echo "ERROR: could not apply $patch_file at any strip level" >&2
   return 1
 }"""
+
+# For a root with no git of its own -- an installed wheel -- where ``git
+# apply`` has nothing to run against.
+_APPLY_PATCH_NO_GIT = """\
+apply_patch() {
+  local patch_file="$SCRIPT_DIR/$1"
+  for lvl in 1 0 2 3 4 5 6 7 8; do
+    if patch -p"$lvl" --fuzz=0 --dry-run -d "$FRAMEWORK_ROOT" -i "$patch_file" >/dev/null 2>&1; then
+      patch -p"$lvl" --fuzz=0 -d "$FRAMEWORK_ROOT" -i "$patch_file"
+      return 0
+    fi
+  done
+  echo "ERROR: could not apply $patch_file at any strip level" >&2
+  return 1
+}"""
+
+
+def _apply_patch_func(framework_root_vcs: str) -> str:
+    """Return the ``apply_patch`` helper that matches the target tree's kind.
+
+    Args:
+        framework_root_vcs: The framework root's vcs discriminant. Only
+            :data:`VCS_NONE` selects the POSIX ``patch`` channel.
+
+    Returns:
+        str: The shell function body.
+    """
+    return _APPLY_PATCH_NO_GIT if framework_root_vcs == VCS_NONE else _APPLY_PATCH_GIT
 
 
 def render_reference_script(
@@ -301,6 +334,7 @@ def render_reference_script(
     gpu_type: str | None = None,
     setup_commands: list[str] | None = None,
     framework_root: str | None = None,
+    framework_root_vcs: str = "",
     runtime: str | None = None,
     rounds: list[dict[str, Any]] | None = None,
 ) -> str:
@@ -328,6 +362,8 @@ def render_reference_script(
         framework_root: Framework source tree root where patches are applied.
             Emitted as ``export FRAMEWORK_ROOT=<path>`` and used in the
             ``apply_patch`` helper. Required for a round carrying patches.
+        framework_root_vcs: That root's vcs discriminant. :data:`VCS_NONE`
+            selects POSIX ``patch``; anything else keeps the git ladder.
         runtime: If non-empty, a note is appended warning that this enablement
             round relied on an isolated attempt venv at the given path and the
             script does not reproduce that layer.
@@ -393,7 +429,7 @@ def render_reference_script(
     if rounds:
         if any(rnd.get("patches") for rnd in rounds):
             lines.append("")
-            lines.append(_APPLY_PATCH_FUNC)
+            lines.append(_apply_patch_func(framework_root_vcs))
         for rnd in rounds:
             if rnd.get("patches"):
                 lines.append("")

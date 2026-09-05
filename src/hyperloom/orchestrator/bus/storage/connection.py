@@ -3,9 +3,10 @@
 
 """SQLite connection wrapper.
 
-Stdlib ``sqlite3``, WAL + ``synchronous=FULL``. Async surface wraps sync ops in
-``asyncio.to_thread``. ``transaction()`` uses ``BEGIN IMMEDIATE`` for cross-table
-atomicity (events + cursors + tasks + leases).
+Stdlib ``sqlite3``, ``synchronous=FULL``, journal mode resolved and verified at
+open. Async surface wraps sync ops in ``asyncio.to_thread``. ``transaction()``
+uses ``BEGIN IMMEDIATE`` for cross-table atomicity (events + cursors + tasks +
+leases + bring-up rounds).
 """
 
 from __future__ import annotations
@@ -26,14 +27,18 @@ from .schema import ensure_schema
 log = logging.getLogger(__name__)
 
 
-# Journal mode is env-overridable; WAL default. On networked filesystems
-# (WekaFS / NFS) WAL's ``-shm`` mapping can corrupt the DB, so set
-# ``INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE=DELETE`` on such mounts.
-_JOURNAL_MODE = os.environ.get("INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE", "WAL").strip() or "WAL"
+#: Journal mode used unless the environment names another one.
+DEFAULT_JOURNAL_MODE = "WAL"
+
+#: The journal modes SQLite accepts. An unrecognised mode leaves SQLite in its
+#: current mode rather than failing, so it is checked before opening.
+JOURNAL_MODES = frozenset({"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"})
+
+#: Environment variable naming the journal mode for every session database.
+JOURNAL_MODE_ENV = "INFERENCE_OPTIMIZER_SQLITE_JOURNAL_MODE"
 
 
 _PRAGMAS = (
-    f"PRAGMA journal_mode = {_JOURNAL_MODE}",
     "PRAGMA synchronous = FULL",
     "PRAGMA foreign_keys = ON",
     "PRAGMA busy_timeout = 30000",
@@ -41,38 +46,72 @@ _PRAGMAS = (
 )
 
 
-def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    """Apply the WAL / durability pragmas to a connection.
+class JournalModeError(RuntimeError):
+    """The journal mode asked for is not the one the database ended up in."""
 
-    Runs each statement in :data:`_PRAGMAS` (journal mode, synchronous
-    level, foreign keys, busy timeout, temp store) on a throwaway
-    cursor.
+
+def resolve_journal_mode(requested: str | None = None) -> str:
+    """Return the journal mode a session database must be opened in.
+
+    WAL's ``-shm`` mapping can corrupt a database on a networked filesystem
+    (WekaFS / NFS), so :data:`JOURNAL_MODE_ENV` overrides it per deployment.
 
     Args:
-        conn (sqlite3.Connection): Connection to configure.
+        requested: Explicit mode; the environment is consulted when omitted.
+
+    Returns:
+        str: The upper-cased mode to open with.
+
+    Raises:
+        JournalModeError: When the mode is not one SQLite defines.
+    """
+    raw = requested if requested is not None else os.environ.get(JOURNAL_MODE_ENV, "")
+    mode = raw.strip().upper() or DEFAULT_JOURNAL_MODE
+    if mode not in JOURNAL_MODES:
+        raise JournalModeError(f"unknown SQLite journal mode {mode!r}; expected one of {sorted(JOURNAL_MODES)}")
+    return mode
+
+
+def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
+    """Apply the journal mode and durability pragmas, and verify the mode took.
+
+    SQLite refuses a journal mode by leaving the old one in force rather than
+    by raising, so ``PRAGMA journal_mode`` is read back and
+    :class:`JournalModeError` raised when it differs.
     """
     cur = conn.cursor()
     try:
+        cur.execute(f"PRAGMA journal_mode = {journal_mode}")  # nosec B608 - validated against JOURNAL_MODES.
         for pragma in _PRAGMAS:
             cur.execute(pragma)
+        cur.execute("PRAGMA journal_mode")
+        actual = str(cur.fetchone()[0]).strip().upper()
+        if actual != journal_mode:
+            raise JournalModeError(f"database opened in journal mode {actual!r}, not the requested {journal_mode!r}")
     finally:
         cur.close()
 
 
-def open_connection(db_path: str | Path) -> sqlite3.Connection:
-    """Open one synchronous connection with WAL pragmas + schema applied.
+def open_connection(db_path: str | Path, *, journal_mode: str | None = None) -> sqlite3.Connection:
+    """Open one synchronous connection with the durability pragmas + schema applied.
 
-    Creates the parent directory if needed, opens the connection with
-    autocommit (``isolation_level=None``) and cross-thread access,
-    sets a ``Row`` row factory, applies the pragmas, and ensures the
-    schema exists.
+    Creates the parent directory if needed, opens with autocommit
+    (``isolation_level=None``) and cross-thread access, sets a ``Row`` row
+    factory, applies and verifies the pragmas, and ensures the schema exists.
 
     Args:
         db_path (str | Path): Path to the SQLite database file.
+        journal_mode (str | None): Journal mode to enforce; resolved from the
+            environment when omitted.
 
     Returns:
         sqlite3.Connection: A ready-to-use connection.
+
+    Raises:
+        JournalModeError: When the mode is unknown, or the database did not
+            enter it.
     """
+    mode = resolve_journal_mode(journal_mode)
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
@@ -83,7 +122,7 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
     )
     try:
         conn.row_factory = sqlite3.Row
-        _apply_pragmas(conn)
+        _apply_pragmas(conn, mode)
         ensure_schema(conn)
     except Exception:
         conn.close()
@@ -98,15 +137,18 @@ class SqliteConnection:
     ``self._async_lock``.
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, journal_mode: str | None = None):
         """Open the wrapped connection and create its locks.
 
         Args:
             db_path (str | Path): Path to the SQLite database file;
                 opened via :func:`open_connection`.
+            journal_mode (str | None): Journal mode to enforce; resolved from
+                the environment when omitted.
         """
         self.db_path = Path(db_path)
-        self._conn = open_connection(self.db_path)
+        self.journal_mode = resolve_journal_mode(journal_mode)
+        self._conn = open_connection(self.db_path, journal_mode=self.journal_mode)
         self._async_lock = asyncio.Lock()
         self._sync_lock = threading.RLock()
 
@@ -228,13 +270,9 @@ class SqliteConnection:
                 await asyncio.to_thread(self._commit)
             except BaseException:
                 # ``BaseException``, not ``Exception``: ``CancelledError`` is
-                # not an ``Exception``, and a cancel landing on any of the
-                # ``to_thread`` hops here — including the one that returns the
-                # cursor, after ``BEGIN IMMEDIATE`` already ran in the worker
-                # thread — would otherwise skip the rollback. The shared
-                # connection then stays inside a transaction for the rest of
-                # the session and every later write fails with "cannot start a
-                # transaction within a transaction".
+                # not an ``Exception``, and a cancel landing on any ``to_thread``
+                # hop here would leave the shared connection inside the
+                # transaction for the rest of the session.
                 await self._rollback_off_loop()
                 raise
             finally:
@@ -268,32 +306,15 @@ class SqliteConnection:
     async def _rollback_off_loop(self) -> None:
         """Roll back a failed transaction on a worker thread, uncancellably.
 
-        Three constraints meet here. The rollback must not run on the event-loop
-        thread, because it takes ``_sync_lock``, and when the failure was a
-        cancellation the worker that cancel abandoned still holds that lock —
-        parked inside its own ``BEGIN IMMEDIATE`` for as long as another writer
-        holds the database, up to ``busy_timeout``. An inline rollback queues
-        behind it and stops the whole loop for that window, which is the
-        shutdown or budget-exhaustion window that issued the cancel. The
-        rollback must not itself be cancellable, because a bare ``await`` in a
-        handler for this task's own cancellation is the way the connection stays
-        wedged inside a transaction for the rest of the session. And the
-        connection must be out of that transaction *before* ``_async_lock`` is
-        released, or a later writer finds it still open and fails with "cannot
-        start a transaction within a transaction".
-
-        :func:`asyncio.shield` keeps the worker running whatever happens to this
-        task, but it protects the rollback, not the wait on it: a cancel landing
-        on the wait raises here. Abandoning the wait at that point releases
-        ``_async_lock`` with the rollback still queued behind the parked worker,
-        which is fire-and-forget with the lock already gone — so every cancel is
-        absorbed and the wait resumed until the rollback is done. The last one
-        absorbed is then re-raised, because a cancelled caller that returns
-        normally keeps running as though it had never been cancelled.
-
-        A rollback that fails outright — a statement error, a connection already
-        closed by teardown, an executor that will accept no more work — is
-        logged and never masks the caller's original exception.
+        Three constraints hold simultaneously: the rollback runs off the event
+        loop, because ``_sync_lock`` may still be held by a worker parked in
+        ``BEGIN IMMEDIATE`` for up to ``busy_timeout``; it must complete before
+        ``_async_lock`` is released, or a later writer finds the transaction
+        still open; and it must not itself be cancellable. :func:`asyncio.shield`
+        protects the rollback but not the wait on it, so cancels landing on the
+        wait are absorbed and the wait resumed, then the last one re-raised. A
+        rollback that fails outright is logged and never masks the caller's
+        original exception.
         """
         rolling_back = asyncio.ensure_future(asyncio.to_thread(self._rollback))
         cancel: asyncio.CancelledError | None = None

@@ -71,12 +71,17 @@ class _ConcurrencyProbe:
         self.entries: list[tuple[str, float]] = []
         self.exits: list[tuple[str, float]] = []
         self.gpu_ids_by_task: dict[str, list[int]] = {}
+        # The deadline the reaper kills this specialist on, as handed down.
+        self.deadlines_by_task: dict[str, object] = {}
+        self.last_task_id: str = ""
         self._lock = asyncio.Lock()
 
     async def __call__(self, ctx) -> dict:
         async with self._lock:
             self.entries.append((ctx.task.task_id, time.monotonic()))
             self.gpu_ids_by_task[ctx.task.task_id] = list((ctx.extra or {}).get("gpu_ids") or [])
+            self.deadlines_by_task[ctx.task.task_id] = (ctx.extra or {}).get("specialist_deadline")
+            self.last_task_id = ctx.task.task_id
         await asyncio.sleep(self.sleep_seconds)
         async with self._lock:
             self.exits.append((ctx.task.task_id, time.monotonic()))
@@ -263,7 +268,11 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
     tmp_path: Path,
     monkeypatch,
 ):
-    # GPU lease TTL is the wall budget × (1 + grace); kill ≤ lease TTL ≤ lane TTL.
+    # The invariant, not an arithmetic identity: the lease the specialist holds
+    # has to outlive the kill the reaper performs at its deadline. Asserting
+    # equality against a budget recomputed here only ever tests that the test
+    # re-anchors the clock the same way dispatch did, which is the bug this
+    # guards against rather than the property.
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 
     coord = await _build_coord_with_capacity(
@@ -300,10 +309,15 @@ async def test_gpu_specialist_lease_ttl_covers_subprocess_timeout(
 
     await coord._pump_dispatcher_once()
 
+    assert len(captured_ttls) == 1
+    ttl = captured_ttls[0]
+    deadline = probe.deadlines_by_task[probe.last_task_id]
+    assert deadline is not None, "the specialist must be handed the deadline it is killed on"
+    # The lease was taken before the deadline was read back here, so the kill is
+    # this many seconds away at most; the lease must still be held then.
+    assert ttl >= deadline.remaining()
     budget = coord._specialist_wall_budget_sec(needs_gpu=True)
-    expected_ttl = max(5, int(budget * (1.0 + GPU_LEASE_TTL_GRACE)))
-    assert captured_ttls == [expected_ttl]
-    assert expected_ttl >= int(budget)
+    assert ttl == pytest.approx(max(5, budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
     assert probe.gpu_ids_by_task
 
 
