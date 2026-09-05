@@ -22,7 +22,7 @@ handlers and integrating external components.
 | External components (Magpie, TraceLens, GEAK, IntelliKit, AgentKernelArena) | [`docs/components/`](docs/components/) |
 | Agent instructions / runtime behavior | [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md) |
 | Workflow & PR process | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Formatting, naming, testing, REUSE conventions | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
+| Style, module layout, tests, shell/YAML, commit hygiene, REUSE, local setup | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
 | PR checklist / AI review prompt | [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md), [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
 
 Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
