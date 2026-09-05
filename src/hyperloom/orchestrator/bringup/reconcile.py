@@ -30,7 +30,6 @@ from typing import Any
 from hyperloom.common.timeutil import now_iso
 
 from ..bus.resource_lock import ResourceLockManager
-from .budget import STALLED_STOP_REASON, session_budget
 from .reap import (
     CLAIM_REACHABLE,
     REAP_HOLDER_ALIVE,
@@ -413,30 +412,6 @@ class Reconciler:
                 round_row.holder_task_id,
                 reap.outcome,
             )
-        await self._charge_the_round(round_row, now_unix, why=why)
-
-    async def _charge_the_round(self, round_row: Round, now_unix: float, *, why: str) -> None:
-        """Charge the ledger for a round that ended without reporting anything.
-
-        Charged at stage zero with no digest, which spends an evidence-stall
-        credit, and stops the session once the budget is spent.
-        """
-        await self._rounds.observe(
-            round_row.round_id,
-            actor_task_id=round_row.holder_task_id,
-            stage=0,
-            failure_digest="",
-            now_unix=now_unix,
-            request_id=f"reconcile:observe:{round_row.round_id}:{round_row.fence}",
-            evidence={"status": "expired", "reason": why},
-        )
-        budget = await session_budget(self._rounds)
-        state = self._shared_state
-        if not budget.exhausted or state is None or state.stop_reason:
-            return
-        log.warning("RECONCILE: progress budget spent -- %s", budget.reason)
-        state.set_stop_reason(STALLED_STOP_REASON)
-        self._save_state()
 
     async def _confirm_gone(self, holder_task_id: str, now_unix: float) -> Reap:
         """Establish whether the holder is gone, and say so only if it is.

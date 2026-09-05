@@ -17,7 +17,6 @@ from hyperloom.common.deadline import Deadline
 
 from ..actions.executors._grid_server_args import merge_server_args
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
-from ..bringup.budget import STALLED_STOP_REASON, ProgressBudget, digest_of, session_budget, stage_of
 from ..collaborator import CoordinatorCollaborator
 from ..delivery.archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS
@@ -382,38 +381,6 @@ class EnablementLane(CoordinatorCollaborator):
                 moved.reason,
             )
 
-    async def _charge_round_observation(self, res: dict[str, Any]) -> ProgressBudget:
-        """Append what this round's boot did to the ledger, and re-read the budget.
-
-        Exactly one observation is charged per round, whatever it claimed to
-        achieve; a round that recorded nothing readable is charged at stage zero
-        with no digest rather than exempted.
-
-        Args:
-            res: The integrate_patch result dict the round came back with.
-
-        Returns:
-            ProgressBudget: What the session has left after this round.
-        """
-        loaded = load_boot_observation(
-            res.get("enablement_observation_path")
-            or res.get("after_observation_path")
-            or (res.get("bench_result") or {}).get("boot_observation_path")
-        )
-        held = await self.rounds.held()
-        round_id = held.round_id if held is not None else ""
-        now = time.time()
-        await self.rounds.observe(
-            round_id,
-            actor_task_id=held.holder_task_id if held is not None else "",
-            stage=stage_of(loaded.observation),
-            failure_digest=digest_of(loaded.observation),
-            now_unix=now,
-            request_id=f"observe:{round_id or 'unheld'}:{now:.3f}",
-            evidence={"status": str(res.get("status") or ""), "degraded": loaded.degraded},
-        )
-        return await session_budget(self.rounds)
-
     async def _settle_enablement_round(self, outcome: str, *, reason: str = "") -> None:
         """End the open round, if one is still open.
 
@@ -632,11 +599,6 @@ class EnablementLane(CoordinatorCollaborator):
                 # The wall this round advanced to: the next round's before half.
                 state.enablement.launch_observation_path = str(res.get("enablement_observation_path") or "")
             _reset_baseline_failure_backstop()
-        budget = await self._charge_round_observation(res)
-        if budget.exhausted and not state.stop_reason:
-            state.set_stop_reason(STALLED_STOP_REASON)
-            stop_set = STALLED_STOP_REASON
-            log.warning("ENABLEMENT: progress budget spent — %s", budget.reason)
         # Set on every round so neither outlives the round it describes.
         state.enablement.last_grounding_drop_reason = [str(d) for d in (res.get("patches_ungrounded") or [])[:8]]
         state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
@@ -671,15 +633,11 @@ class EnablementLane(CoordinatorCollaborator):
         await self._settle_enablement_round(BOOTED if status == "kept" else FAILED, reason=status)
         state.save(self.session_dir)
         log.info(
-            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s "
-            "stacked=%d high_water=%d digests_left=%d stall_left=%d next_attempt=%d%s",
+            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s stacked=%d next_attempt=%d%s",
             status,
             bool(state.enablement.succeeded),
             status == "advanced" or bool(res.get("advanced")),
             len(state.enablement.kept_patches),
-            budget.stage_high_water,
-            budget.digest_credits_left,
-            budget.stall_credits_left,
             state.enablement.attempts,
             f" stop_reason={stop_set}" if stop_set else "",
         )

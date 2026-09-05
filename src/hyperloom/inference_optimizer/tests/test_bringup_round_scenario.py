@@ -214,7 +214,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         (EnablementLane, "_open_authoring_round"),
         (EnablementLane, "_renew_enablement_round"),
         (EnablementLane, "_settle_enablement_round"),
-        (EnablementLane, "_charge_round_observation"),
         (EnablementBuild, "_maybe_enqueue_specialist_requested_build"),
         (EnablementBuild, "_maybe_escalate_to_targeted_build"),
     ):

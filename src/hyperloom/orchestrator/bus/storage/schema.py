@@ -120,14 +120,12 @@ _DDL = [
         opened_unix          REAL    NOT NULL,
         renewed_unix         REAL    NOT NULL,
         expires_unix         REAL    NOT NULL,
-        settled_unix         REAL,
-        stage_high_water     INTEGER NOT NULL DEFAULT 0
+        settled_unix         REAL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_state ON bringup_rounds(state, opened_unix)",
-    # round_events — append-only outbox. Every attempt lands here with its
-    # outcome, evidence and request id, applied or rejected, so a rejected
-    # settle can be re-driven from what the caller asked for.
+    # round_events — append-only audit trail. Every attempt lands here with
+    # its outcome, evidence and request id, applied or rejected.
     """
     CREATE TABLE IF NOT EXISTS round_events (
         event_id      INTEGER PRIMARY KEY AUTOINCREMENT,

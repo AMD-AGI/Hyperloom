@@ -1423,7 +1423,6 @@ class EnablementRoundSummary(TypedDict, total=False):
         fence: The holder's token; only a handoff advances it.
         opened_unix: When the round was acquired.
         settled_unix: When it ended, or ``None`` while it is open.
-        stage_high_water: Furthest ladder stage this round's boots reached.
     """
 
     round_id: str
@@ -1433,7 +1432,6 @@ class EnablementRoundSummary(TypedDict, total=False):
     fence: int
     opened_unix: float
     settled_unix: float | None
-    stage_high_water: int
 
 
 class EnablementStackActionSummary(TypedDict, total=False):
@@ -1491,8 +1489,6 @@ class EnablementBreakdown(TypedDict, total=False):
     rounds: list[EnablementRoundSummary]
     round_count: int
     round_outcomes: dict[str, int]
-    round_observations: int
-    stage_high_water: int
     last_specialist_task_id: str
     revalidation_task_id: str
     revalidation_generation: int

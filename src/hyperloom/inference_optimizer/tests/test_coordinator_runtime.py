@@ -1406,47 +1406,8 @@ async def test_promote_baseline_unrelated_baseline_does_not_consume_pending(sess
         await c.stop()
 
 
-async def _charged(coordinator) -> int:
-    """Return how many observations the session has charged to the round ledger.
-
-    Args:
-        coordinator: The Coordinator whose round store holds the ledger.
-
-    Returns:
-        int: Observations recorded so far.
-    """
-    from hyperloom.orchestrator.bringup.budget import session_budget
-
-    return (await session_budget(coordinator.rounds)).observations
-
-
 @pytest.mark.asyncio
-async def test_promote_baseline_sub_floor_accuracy_charges_an_observation(session_dir):
-    """Tracked revalidation baseline with sub-floor accuracy should rearm, not succeed."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.enablement.origin = "eval"
-        c.shared_state.enablement.validation_pending = True
-        c.shared_state.enablement.accuracy_floor = 0.8
-        c.shared_state.enablement.revalidation_task_id = "t-reval-subflo"
-        await c._promote_to_shared_state(
-            "baseline",
-            {"output_throughput": 1000.0, "completed_requests": 10, "accuracy": 0.5},
-            task=_mk_task("baseline", "t-reval-subflo"),
-        )
-        # Baseline tput anchors normally, but enablement is NOT succeeded.
-        assert c.shared_state.baseline_tput == 1000.0
-        assert c.shared_state.enablement.succeeded is False
-        assert c.shared_state.enablement.validation_pending is False
-        assert await _charged(c) == 1
-        assert c.shared_state.enablement.revalidation_task_id == ""
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_persist_eval_failure_clears_pending_and_charges_an_observation(session_dir, monkeypatch):
+async def test_persist_eval_failure_clears_pending(session_dir, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1455,7 +1416,6 @@ async def test_persist_eval_failure_clears_pending_and_charges_an_observation(se
         c.shared_state.enablement.revalidation_task_id = "t-reval-fail"
         await c._handle_unpromotable_result(_mk_task("baseline", "t-reval-fail"), _eval_failed_result())
         assert c.shared_state.enablement.validation_pending is False
-        assert await _charged(c) == 1
     finally:
         await c.stop()
 
@@ -1550,37 +1510,10 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
             {"status": "failed", "error_class": "oom"},
         )
         assert c.shared_state.enablement.validation_pending is False
-        assert await _charged(c) == 1
         assert c.shared_state.enablement.revalidation_task_id == ""
         # Frozen trigger identity must be preserved.
         assert c.shared_state.enablement.eval_contract_fingerprint == "frozen-fp"
         assert c.shared_state.enablement.accuracy_floor == 0.5
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
-async def test_a_revalidation_the_run_stopped_charges_no_observation(
-    session_dir,
-    monkeypatch,
-    error_class,
-):
-    """The same round cannot be exempt from one ledger and charged to the other."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        st = c.shared_state
-        st.enablement.validation_pending = True
-        st.enablement.revalidation_task_id = "t-reval-stopped"
-        await c._handle_unpromotable_result(
-            _mk_task("baseline", "t-reval-stopped"),
-            {"status": "failed", "error_class": error_class, "error": "reaped"},
-        )
-        assert await _charged(c) == 0
-        assert st.stop_reason in ("", None)
-        assert st.baseline_failure_streak == 0
     finally:
         await c.stop()
 
@@ -1665,35 +1598,6 @@ async def test_a_revalidation_key_spent_on_a_cancelled_row_opens_the_next_one(se
 
 
 @pytest.mark.asyncio
-async def test_resume_does_not_charge_a_revalidation_the_run_cancelled(
-    session_dir,
-    monkeypatch,
-):
-    """The exemption the reap grants must not be charged back by the resume."""
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        st = c.shared_state
-        cancelled = await _cancelled_revalidation_row(c, gen=3)
-        st.enablement.validation_pending = True
-        st.enablement.revalidation_task_id = cancelled.task_id
-        st.enablement.revalidation_generation = 3
-
-        report: dict[str, Any] = {"fixes": []}
-        await c.writeback._resume_recover_pending_revalidation(report)
-
-        assert await _charged(c) == 0
-        assert st.stop_reason in ("", None)
-        # And the window is left usable rather than merely uncharged.
-        assert st.enablement.validation_pending is True
-        assert st.enablement.revalidation_task_id == ""
-        assert st.enablement.revalidation_generation == 4
-        assert [f["kind"] for f in report["fixes"]] == ["reopened_revalidation_the_run_cancelled"]
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(session_dir, monkeypatch):
     """A row that is terminal for any other reason is evidence, and still charged."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
@@ -1715,7 +1619,6 @@ async def test_resume_still_closes_a_revalidation_window_that_had_its_chance(ses
 
         assert st.enablement.validation_pending is False
         assert st.enablement.revalidation_task_id == ""
-        assert await _charged(c) == 1
         assert [f["kind"] for f in report["fixes"]] == ["cleared_orphaned_revalidation_pending"]
     finally:
         await c.stop()

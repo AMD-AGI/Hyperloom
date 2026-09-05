@@ -428,19 +428,6 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
 
 
 @pytest.mark.asyncio
-async def test_every_expired_round_is_charged_to_the_ledger(db):
-    """A round that died without reporting still cost the session a round."""
-    rec, rounds, tasks, _ = _build(db, reaper=_Reaper(Reap(_NOW, REAP_KILLED)))
-    await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
-
-    await rec.run(_NOW + 10.0)
-
-    observations = await rounds.observations()
-    assert [o.round_id for o in observations] == ["round-spec-1"]
-    assert observations[0].evidence["stage"] == 0
-
-
-@pytest.mark.asyncio
 async def test_the_tick_is_stamped_before_any_rule_can_block(db):
     """The stamp is what tells a watcher outside the process that a tick began."""
     rec, _, _, _ = _build(db)

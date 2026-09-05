@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import time
 
 import pytest
 
@@ -194,36 +193,6 @@ async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
     assert len(denied) == 1
     assert denied[0]["candidate_id"] == _CANDIDATE["candidate_id"]
     assert "out of scope" in denied[0]["rationale"]
-
-
-@pytest.mark.asyncio
-async def test_reject_enablement_integrate_patch_charges_the_round(coord: Coordinator) -> None:
-    """A Critic-rejected ENABLEMENT integrate_patch never reaches the executor,
-    so it must still charge its round to the ledger and settle it -- a round
-    that costs nothing is a round the progress budget cannot count."""
-    opened = await coord.rounds.open(
-        "enablement-spec-e",
-        holder_task_id="spec-e",
-        lease_sec=3600.0,
-        now_unix=time.time(),
-        request_id="seed",
-    )
-    assert opened.ok
-    pending = PendingProposal(
-        proposal_msg_id="m-enable",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"params": {"enablement": True, "specialist_task_id": "spec-e"}},
-    )
-    coord.state.pending_proposals[pending.proposal_msg_id] = pending
-    await coord._handle_single_verdict(
-        source="critic", pending=pending, verdict="reject", reasoning="empty deliverable; nothing to enable"
-    )
-    from hyperloom.orchestrator.bringup.budget import session_budget
-
-    assert (await session_budget(coord.rounds)).observations == 1
-    assert await coord.rounds.held() is None
 
 
 def _append(bucket: list, candidate) -> "object":

@@ -59,13 +59,6 @@ EXCLUDED = "excluded"
 ALREADY_EXISTS = "already_exists"
 ALREADY_SETTLED = "already_settled"
 
-#: The op an observation is recorded under.
-OBSERVE = "observe"
-
-#: Evidence keys an observation event carries.
-EVIDENCE_STAGE = "stage"
-EVIDENCE_DIGEST = "failure_digest"
-
 #: Default for an attempt that records nothing beyond the operation itself.
 _NO_EVIDENCE: Mapping[str, Any] = MappingProxyType({})
 
@@ -79,8 +72,6 @@ __all__ = [
     "ABANDONED",
     "ALREADY_SETTLED",
     "BOOTED",
-    "EVIDENCE_DIGEST",
-    "EVIDENCE_STAGE",
     "EXCLUDED",
     "EXPIRED_REAPED",
     "EXPIRED_UNREAPED",
@@ -111,7 +102,6 @@ class Round:
         expires_unix: When its lease runs out; the same instant the round's
             lane row carries.
         settled_unix: When it was settled, or ``None``.
-        stage_high_water: Highest ladder stage the round ever reached.
     """
 
     round_id: str
@@ -123,7 +113,6 @@ class Round:
     renewed_unix: float
     expires_unix: float
     settled_unix: float | None
-    stage_high_water: int
 
     @classmethod
     def from_row(cls, row: Any) -> "Round":
@@ -146,7 +135,6 @@ class Round:
             renewed_unix=float(row["renewed_unix"]),
             expires_unix=float(row["expires_unix"]),
             settled_unix=None if settled is None else float(settled),
-            stage_high_water=int(row["stage_high_water"]),
         )
 
     def excludes_at(self, now_unix: float) -> bool:
@@ -296,9 +284,8 @@ class RoundStore:
             cur.execute(
                 "INSERT INTO bringup_rounds ("
                 "  round_id, state, outcome, holder_task_id, fence,"
-                "  opened_unix, renewed_unix, expires_unix, settled_unix,"
-                "  stage_high_water"
-                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL, 0"
+                "  opened_unix, renewed_unix, expires_unix, settled_unix"
+                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL"
                 f" WHERE NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE {_LIVE_EXCLUSION})"  # nosec B608 - a fixed predicate constant, no caller input.
                 "   AND NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE round_id = ?)",
                 (
@@ -496,59 +483,6 @@ class RoundStore:
             )
         return RoundResult(ok=True, round_id=round_id, fence=next_fence, state=OPEN, event_id=event_id)
 
-    async def observe(
-        self,
-        round_id: str,
-        *,
-        actor_task_id: str,
-        stage: int,
-        failure_digest: str,
-        now_unix: float,
-        request_id: str,
-        evidence: Mapping[str, Any] = _NO_EVIDENCE,
-    ) -> RoundResult:
-        """Record what a boot was seen to do, and raise the high-water mark.
-
-        The only writer of ``stage_high_water``, and it only moves it up. The
-        append takes no compare-and-swap, so no observation is ever dropped.
-
-        Args:
-            round_id: The round the boot ran under; ``""`` when none did.
-            actor_task_id: The task that watched the boot.
-            stage: Ladder stage value the boot reached.
-            failure_digest: Stable identity of the wall it stopped at, or ``""``
-                for a boot that did not stop at one.
-            now_unix: Current wall time.
-            request_id: The caller's id for this attempt.
-            evidence: Extra fields recorded alongside the stage and digest.
-
-        Returns:
-            RoundResult: ``ok``, carrying the event id of the ledger row.
-        """
-        now = float(now_unix)
-        recorded = dict(evidence)
-        recorded[EVIDENCE_STAGE] = max(0, int(stage))
-        recorded[EVIDENCE_DIGEST] = failure_digest
-        async with self.db.transaction() as cur:
-            cur.execute(
-                "UPDATE bringup_rounds SET stage_high_water = MAX(stage_high_water, ?) WHERE round_id = ?",
-                (max(0, int(stage)), round_id),
-            )
-            event_id = _record(
-                cur,
-                round_id=round_id,
-                request_id=request_id,
-                op=OBSERVE,
-                result="applied",
-                outcome="",
-                fence=0,
-                actor_task_id=actor_task_id,
-                reason="",
-                evidence=recorded,
-                now_unix=now,
-            )
-        return RoundResult(ok=True, round_id=round_id, event_id=event_id)
-
     async def settle(
         self,
         round_id: str,
@@ -573,8 +507,7 @@ class RoundStore:
             outcome: One of :data:`OUTCOMES`.
             now_unix: Current wall time.
             request_id: The caller's id for this attempt.
-            evidence: Recorded on the outbox row; a rejected settle is
-                re-driven from it.
+            evidence: Recorded on the outbox row.
 
         Returns:
             RoundResult: ``ok`` when the round settled, ``duplicate`` when this
@@ -730,20 +663,6 @@ class RoundStore:
             (float(now_unix),),
         )
         return [Round.from_row(r) for r in rows]
-
-    async def observations(self) -> list[RoundEvent]:
-        """Return every observation this session recorded, oldest first.
-
-        Order is load-bearing: a failure digest is new exactly once.
-
-        Returns:
-            list[RoundEvent]: The applied observation rows.
-        """
-        rows = await self.db.fetchall(
-            "SELECT * FROM round_events WHERE op = ? AND result = 'applied' ORDER BY event_id ASC",
-            (OBSERVE,),
-        )
-        return [RoundEvent.from_row(r) for r in rows]
 
 
 def _load(cur: sqlite3.Cursor, round_id: str) -> Round | None:

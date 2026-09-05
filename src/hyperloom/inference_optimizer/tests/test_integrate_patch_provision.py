@@ -228,14 +228,7 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
     async def _no_round(*_a, **_k):
         """No round is open, so the rearm's settle is a no-op."""
 
-    async def _no_charge(*_a, **_k):
-        """No ledger here; the budget this rearm reads is an empty one."""
-        from hyperloom.orchestrator.bringup.budget import ProgressBudget
-
-        return ProgressBudget()
-
     coord._settle_enablement_round = _no_round
-    coord._charge_round_observation = _no_charge
 
     action_state = _candidate()
     runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()

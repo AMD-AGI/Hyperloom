@@ -291,7 +291,7 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
 # capability gap rarely becomes fully runnable inside a single budget window.
 # The integrate side REWARDS partial progress: a patch that only advances the
 # boot to a *new, deeper* failure is KEPT and stacked as a base for the next
-# round (see ``bringup.budget.round_advanced`` and ``integrate_patch``
+# round (see ``bringup.observe.round_advanced`` and ``integrate_patch``
 # ``status="advanced"``). Advancing the boot ONE step is therefore an explicit,
 # valid deliverable rather than grounds for returning an empty ``proposal_set``.
 ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (

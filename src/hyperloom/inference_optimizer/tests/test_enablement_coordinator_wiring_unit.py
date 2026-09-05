@@ -370,19 +370,11 @@ def _enqueue_self(**state_kw):
         "_open_authoring_round",
         "_renew_enablement_round",
         "_settle_enablement_round",
-        "_charge_round_observation",
     ):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
     # _enablement_in_flight reads the coordinator's ephemeral pending_proposals.
     fake.state = types.SimpleNamespace(pending_proposals={})
     return fake
-
-
-async def _charged(fake):
-    """Return the progress budget the fake's round ledger currently supports."""
-    from hyperloom.orchestrator.bringup.budget import session_budget
-
-    return await session_budget(fake.rounds)
 
 
 def _observation_at(root: Path, name: str, stage: LadderStage, *, detail: str) -> str:
@@ -527,7 +519,6 @@ async def test_the_lane_leaves_a_silently_finished_round_to_the_repair_pass(monk
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
 
     assert (await fake.rounds.get("enablement-spec-stuck")).state == "open"
-    assert (await _charged(fake)).observations == 0
 
 
 @pytest.mark.asyncio
@@ -559,8 +550,6 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"
     assert settled.outcome == "expired_reaped", "the holder's own row records the end of its work"
-    budget = await _charged(fake)
-    assert (budget.observations, budget.stall_spent) == (1, 1)
     # And the machine comes back with the settle: a settled round holds nothing.
     assert settled.excludes_at(time.time() + 3600.0) is False
 
@@ -575,8 +564,6 @@ async def test_watchdog_does_not_fire_when_task_running(monkeypatch):
     fake = _enqueue_self()
     await _hold_round(fake, "spec-running", holder_state="running")
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    # Nothing charged; still blocked on the running task.
-    assert (await _charged(fake)).observations == 0
 
 
 def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
@@ -639,7 +626,6 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
     await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
     assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-    assert (await _charged(fake)).observations == 0
     held = await fake.rounds.held()
     assert held is not None and held.holder_task_id == "spec-done"
     assert await _queued_of_kind(fake, "specialist") == []
@@ -928,50 +914,6 @@ async def test_rearm_advanced_dedups_stacked_patches(monkeypatch):
         "/s/runs/specialist/t1/patches/001_qk_rope.patch",
         "/s/runs/specialist/t2/patches/002_indexer_share.patch",
     ]
-
-
-@pytest.mark.asyncio
-async def test_the_evidence_stall_budget_stops_a_run_that_shows_nothing(monkeypatch):
-    """Rounds that record no observation spend the stall budget and end the run."""
-    from hyperloom.orchestrator.bringup.budget import EVIDENCE_STALL_BUDGET
-
-    fake = _enqueue_self()
-    st = fake.shared_state
-    for _ in range(EVIDENCE_STALL_BUDGET - 1):
-        await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-        assert st.stop_reason == ""
-    await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert (await _charged(fake)).stall_spent == EVIDENCE_STALL_BUDGET
-    assert st.stop_reason == "enablement_stalled"
-
-
-@pytest.mark.asyncio
-async def test_an_advance_does_not_hand_back_a_spent_stall_credit(tmp_path, monkeypatch):
-    """A credit the ledger recorded as spent stays spent however the next round goes.
-
-    The predicate this replaced reset a counter on every round that claimed
-    progress, and a round that peels one blocker per attempt claims it forever,
-    so the cap it guarded was never reached.
-    """
-    fake = _enqueue_self()
-    st = fake.shared_state
-    await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
-    assert (await _charged(fake)).stall_spent == 1
-    await fake._maybe_rearm_enablement(
-        {
-            "enablement": True,
-            "status": "advanced",
-            "advanced": True,
-            "patches_applied": ["/p/a.patch"],
-            "enablement_launch_log": "ValueError: not initialized from checkpoint",
-            "enablement_observation_path": _observation_at(
-                tmp_path, "after", LadderStage.WEIGHTS_LOADING, detail="weights missing"
-            ),
-        }
-    )
-    budget = await _charged(fake)
-    assert (budget.advances, budget.stall_spent) == (1, 1)
-    assert st.stop_reason == ""
 
 
 @pytest.mark.asyncio

@@ -2914,7 +2914,7 @@ class IntegratePatchExecutor:
 
         from hyperloom.agents.framework.enablement import runnable_decision
 
-        from ...bringup.budget import round_advanced
+        from ...bringup import round_advanced
 
         new_tput = bench_result.get("output_throughput")
         boot_timed_out = bool(gate_evidence.get("timed_out"))

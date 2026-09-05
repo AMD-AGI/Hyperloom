@@ -645,8 +645,6 @@ Round detail (present when set):
 | `rounds`                    | `EnablementRoundSummary[]`       | Every round in the ledger, newest first (bounded tail; see below).     |
 | `round_count`               | int                              | Rounds the ledger holds, before that bound.                            |
 | `round_outcomes`            | object (str → int)               | Settled rounds counted by outcome.                                     |
-| `round_observations`        | int                              | Boot observations charged to the ledger — what bounds how many rounds a session runs. |
-| `stage_high_water`          | int                              | Furthest boot-ladder stage any round reached.                          |
 | `last_specialist_task_id`   | string                           | Specialist task id of the most recent round.                           |
 | `revalidation_task_id`      | string                           | TaskRegistry id of the tracked revalidation task.                      |
 | `revalidation_generation`   | int                              | Revalidation window counter (idempotency).                             |
@@ -676,7 +674,6 @@ a round: a round has to outlive the process that took it, so no field in
 | `fence`                | int           | The holder's token; only a handoff advances it.                                                     |
 | `opened_unix`          | float         | When the round was acquired.                                                                        |
 | `settled_unix`         | float \| null | When it ended, `null` while open.                                                                   |
-| `stage_high_water`     | int           | Furthest ladder stage this round's boots reached.                                                   |
 
 ### Fields the round ledger replaced
 
@@ -684,7 +681,7 @@ These three stopped being emitted in the v6 export that added `rounds[]`.
 
 | Field              | Disposition                                                                                                                          |
 |--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `stall_streak`     | **Removed.** A counter on session state could be resurrected by a crash between the round and the write. The equivalent is now derived from the ledger: `round_observations`, against the session's fixed observation ceiling. |
+| `stall_streak`     | **Removed.** A counter on session state could be resurrected by a crash between the round and the write. What bounds a session that cannot boot is now the attempt cap, reported as the `enablement_attempts_exhausted` stop reason. |
 | `inflight_task_id` | **Renamed** to `round_holder_task_id`, and re-sourced. It named the authoring specialist; the round it stood for also covers the integrate that consumes the specialist's deliverable, and the holder is whichever of the two currently has it. |
 | `dispatch_tick`    | **Removed.** It dated a round by a coordinator tick counter that no consumer could convert to a time. `rounds[].opened_unix` dates the same event in wall-clock seconds. |
 

@@ -1710,7 +1710,7 @@ class ExplorePhase(CoordinatorCollaborator):
             return
         # Route only when there are config levers to test, except for an
         # ENABLEMENT round, which always routes: a round that does not reach
-        # integrate_patch charges no observation against the progress budget.
+        # integrate_patch never reports what its boot did.
         if not config_levers and not is_enablement:
             return
         sid = str(task.task_id or "").strip()

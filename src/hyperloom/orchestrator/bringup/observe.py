@@ -14,11 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.bringup import BootObservation, failure_digest
 from hyperloom.orchestrator.bringup.persist import LoadedObservation, load_boot_observation
 
 if TYPE_CHECKING:
     from hyperloom.agents.framework.enablement import FailureSignature
-    from hyperloom.common.bringup import BootObservation
 
 
 def session_root(owner: Any) -> Path | None:
@@ -133,10 +133,56 @@ def recorded_verdict(
     return observe_bringup(wrapper_stderr=wrapper_text, session_dir=session_dir), loaded
 
 
+def stage_of(observation: BootObservation | None) -> int:
+    """Return how far up the ladder ``observation`` got, as a stage value.
+
+    The greater of ``stage_reached`` and ``stage_failed``, which is the furthest
+    point the boot demonstrably got to; ``0`` for ``None``.
+    """
+    if observation is None:
+        return 0
+    failed = observation.stage_failed
+    return int(max(observation.stage_reached, failed if failed is not None else observation.stage_reached))
+
+
+def digest_of(observation: BootObservation | None) -> str:
+    """Return the failure digest of the wall ``observation`` hit.
+
+    ``""`` when the boot did not stop at a wall, or there is no observation.
+    """
+    if observation is None or observation.stage_failed is None:
+        return ""
+    return failure_digest(observation)
+
+
+def round_advanced(before: BootObservation | None, after: BootObservation | None) -> bool:
+    """Whether the boot after a patch is worth keeping the patch for.
+
+    Args:
+        before: The observation the previous round recorded.
+        after: The observation this round recorded.
+
+    Returns:
+        bool: ``True`` when the boot reached a deeper stage, or stopped at the
+        same one for a digest ``before`` did not carry. A boot that got less far
+        is never an advance.
+    """
+    if after is None:
+        return False
+    reached, previous = stage_of(after), stage_of(before)
+    if reached != previous:
+        return reached > previous
+    digest = digest_of(after)
+    return bool(digest) and digest != digest_of(before)
+
+
 __all__ = [
     "BringupVerdict",
+    "digest_of",
     "observe_bringup",
     "recorded_verdict",
+    "round_advanced",
     "session_root",
+    "stage_of",
     "verdict_of",
 ]

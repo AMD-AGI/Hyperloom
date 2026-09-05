@@ -425,7 +425,7 @@ def _ledger(session_dir, *, rounds):
 
     async def _play():
         store = RoundStore(db)
-        for index, (holder, outcome, stage) in enumerate(rounds):
+        for index, (holder, outcome) in enumerate(rounds):
             opened = await store.open(
                 f"enablement-{holder}",
                 holder_task_id=holder,
@@ -434,14 +434,6 @@ def _ledger(session_dir, *, rounds):
                 request_id=f"open:{holder}",
             )
             assert opened.ok
-            await store.observe(
-                f"enablement-{holder}",
-                actor_task_id=holder,
-                stage=stage,
-                failure_digest=f"digest-{index}",
-                now_unix=1001.0 + index,
-                request_id=f"observe:{holder}",
-            )
             if outcome:
                 settled = await store.settle(
                     f"enablement-{holder}",
@@ -467,7 +459,7 @@ def test_collect_enablement_survives_when_the_rounds_live_only_in_the_ledger(tmp
     the section goes empty here -- which a reader cannot tell apart from a
     session where the lane never ran at all.
     """
-    _ledger(tmp_path, rounds=[("spec-1", "failed", 3), ("spec-2", "booted", 5)])
+    _ledger(tmp_path, rounds=[("spec-1", "failed"), ("spec-2", "booted")])
 
     out = collect_enablement(tmp_path, _state(), [])
 
@@ -475,8 +467,6 @@ def test_collect_enablement_survives_when_the_rounds_live_only_in_the_ledger(tmp
     assert out["engaged"] is True
     assert out["round_count"] == 2
     assert out["round_outcomes"] == {"failed": 1, "booted": 1}
-    assert out["round_observations"] == 2
-    assert out["stage_high_water"] == 5
     assert [r["round_id"] for r in out["rounds"]] == ["enablement-spec-2", "enablement-spec-1"]
     assert out["rounds"][0]["outcome"] == "booted"
     assert out["rounds"][0]["holder_task_id"] == "spec-2"
@@ -488,7 +478,7 @@ def test_collect_enablement_survives_when_the_rounds_live_only_in_the_ledger(tmp
 
 def test_collect_enablement_reports_the_round_that_still_holds_the_machine(tmp_path):
     """An unsettled round is the one the section names as in flight."""
-    _ledger(tmp_path, rounds=[("spec-1", "", 2)])
+    _ledger(tmp_path, rounds=[("spec-1", "")])
 
     out = collect_enablement(tmp_path, _state(), [])
 

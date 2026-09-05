@@ -308,7 +308,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "which would crash engine init."
     ),
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
-    "enablement_stalled": "The enablement loop spent its progress budget — the bring-up ledger recorded no further ladder progress and no more new failures worth funding — and stopped instead of re-deriving the same fix.",
+    "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
     "enablement_attempts_exhausted": "The enablement loop used its whole attempt allowance without producing a baseline that boots, so it stopped instead of retrying indefinitely.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (

@@ -248,8 +248,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_config_incompatible",
         # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
         "baseline_arg_error",
-        # Enablement progress budget spent: the round ledger has used up its
-        # distinct-failure-digest credits or its evidence-stall budget.
+        # Enablement gave up without a booting baseline: a revalidation the
+        # round depended on never promoted.
         "enablement_stalled",
         # Enablement attempt cap: as many authoring attempts as the session is
         # allowed have been opened. Bounds dispatches rather than evidence.

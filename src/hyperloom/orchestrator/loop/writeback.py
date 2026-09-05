@@ -983,9 +983,6 @@ class WritebackCollaborator:
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
-            budget = await self._charge_round_observation(result_payload)
-            if budget.exhausted and not state.stop_reason:
-                state.set_stop_reason("enablement_stalled")
             await self._settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
         launch_log = _extract_enablement_launch_log(result_payload)
         if launch_log:
@@ -3219,9 +3216,6 @@ class WritebackCollaborator:
                         )
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
-                        budget = await self._charge_round_observation(result)
-                        if budget.exhausted and not self.shared_state.stop_reason:
-                            self.shared_state.set_stop_reason("enablement_stalled")
                         await self._settle_enablement_round(FAILED, reason="revalidation_below_floor")
                 else:
                     # An unrelated baseline promoted while revalidation is pending.
@@ -5471,15 +5465,13 @@ class WritebackCollaborator:
                 await self._reopen_revalidation_window()
                 report["fixes"].append({"kind": "reopened_revalidation_the_run_cancelled", "task_id": tracked_tid})
                 log.info(
-                    "resume: revalidation task %s was cancelled by the run; window left open "
-                    "at generation %d without charging the progress budget",
+                    "resume: revalidation task %s was cancelled by the run; window left open at generation %d",
                     tracked_tid,
                     int(state.enablement.revalidation_generation or 0),
                 )
                 return
             state.enablement.validation_pending = False
             state.enablement.revalidation_task_id = ""
-            await self._charge_round_observation({})
             report["fixes"].append({"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid})
             log.info(
                 "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",

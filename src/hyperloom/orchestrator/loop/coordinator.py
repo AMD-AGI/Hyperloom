@@ -863,7 +863,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_renew_enablement_round": "enablement_lane",
         "_handoff_enablement_round": "enablement_lane",
         "_settle_enablement_round": "enablement_lane",
-        "_charge_round_observation": "enablement_lane",
         "_maybe_rearm_enablement": "enablement_lane",
         "_maybe_escalate_to_targeted_build": "enablement_build",
         "_maybe_enqueue_specialist_requested_build": "enablement_build",

@@ -11,7 +11,6 @@ tables reports no rounds.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -37,10 +36,9 @@ def collect_round_ledger(session_dir: Path, warnings: list[str]) -> dict[str, An
 
     Returns:
         dict[str, Any]: ``rounds`` (newest first), ``round_count``,
-        ``round_outcomes`` (outcome -> count), ``round_observations``,
-        ``stage_high_water``, and the open round's ``round_id`` /
-        ``round_holder_task_id`` when one still holds the machine. Empty when
-        the session recorded no round.
+        ``round_outcomes`` (outcome -> count), and the open round's
+        ``round_id`` / ``round_holder_task_id`` when one still holds the
+        machine. Empty when the session recorded no round.
     """
     conn = _open(session_dir, warnings)
     if conn is None:
@@ -49,26 +47,18 @@ def collect_round_ledger(session_dir: Path, warnings: list[str]) -> dict[str, An
         rows = _query(
             conn,
             "SELECT round_id, state, outcome, holder_task_id, fence, opened_unix,"
-            "       settled_unix,"
-            "       stage_high_water"
+            "       settled_unix"
             "  FROM bringup_rounds ORDER BY opened_unix DESC",
-        )
-        observations = _query(
-            conn,
-            "SELECT round_id, evidence FROM round_events"
-            " WHERE op = 'observe' AND result = 'applied' ORDER BY event_id ASC",
         )
     finally:
         conn.close()
-    if not rows and not observations:
+    if not rows:
         return {}
 
     out: dict[str, Any] = {
         "rounds": [_round_summary(r) for r in rows[:_MAX_ROUNDS]],
         "round_count": len(rows),
         "round_outcomes": _outcome_counts(rows),
-        "round_observations": len(observations),
-        "stage_high_water": _stage_high_water(rows, observations),
     }
     for row in rows:
         if _str_or_empty(row["state"]) == "open":
@@ -120,7 +110,6 @@ def _round_summary(row: sqlite3.Row) -> dict[str, Any]:
         "fence": _int(row["fence"]),
         "opened_unix": _float(row["opened_unix"]),
         "settled_unix": None if settled is None else _float(settled),
-        "stage_high_water": _int(row["stage_high_water"]),
     }
 
 
@@ -132,28 +121,6 @@ def _outcome_counts(rows: list[sqlite3.Row]) -> dict[str, int]:
         if outcome:
             counts[outcome] = counts.get(outcome, 0) + 1
     return counts
-
-
-def _stage_high_water(rows: list[sqlite3.Row], observations: list[sqlite3.Row]) -> int:
-    """Return the furthest ladder stage anything in this session reached.
-
-    Args:
-        rows: The ``bringup_rounds`` rows.
-        observations: The applied observation events, read because a boot
-            watched outside a round raises no row's high-water mark.
-
-    Returns:
-        int: The highest stage value recorded, ``0`` when nothing observed one.
-    """
-    high = max((_int(r["stage_high_water"]) for r in rows), default=0)
-    for event in observations:
-        try:
-            evidence = json.loads(event["evidence"])
-        except (TypeError, ValueError):
-            continue
-        if isinstance(evidence, dict):
-            high = max(high, _int(evidence.get("stage")))
-    return high
 
 
 def _int(value: Any) -> int:
