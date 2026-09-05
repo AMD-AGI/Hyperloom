@@ -229,7 +229,6 @@ async def test_only_an_observation_raises_the_high_water_mark(store):
 
     await store.settle("r1", holder_task_id="holder", fence=1, outcome=FAILED, now_unix=now, request_id="settle-1")
     assert (await store.get("r1")).stage_high_water == int(LadderStage.ENGINE_INIT)
-    assert await store.stage_high_water() == int(LadderStage.ENGINE_INIT)
 
 
 @pytest.mark.asyncio

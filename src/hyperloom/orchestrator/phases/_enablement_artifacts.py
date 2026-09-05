@@ -179,8 +179,6 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
             "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
             "framework_switch_problems": res.get("framework_switch_problems") or [],
             "after_signature": res.get("after_signature") or {},
-            "env_grants_applied": res.get("env_grants_applied") or [],
-            "env_grants_refused": res.get("env_grants_refused") or [],
             "enablement_accepted_config_path": archive.path_for(ROLE_LAUNCH_CONFIG),
             "enablement_effective_config": res.get("enablement_effective_config") or {},
             "launch_log_excerpt": launch_log[:_LAUNCH_LOG_EXCERPT_CHARS],

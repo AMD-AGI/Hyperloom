@@ -66,7 +66,6 @@ from ...delivery import (
     write_baseline,
 )
 from ..stop_attribution import stopped_by_the_run_class
-from ...policy.env_grants import EnvGrant, parse_requests as parse_grant_requests
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
@@ -1775,15 +1774,11 @@ class IntegratePatchExecutor:
         # Held so the revert can read the apply's backup ledger back.
         self._nogit_backup_root: Path | None = None
         # Blocked env names this round was granted, each bound to one value.
-        self._consumed_env_grants: tuple[EnvGrant, ...] = ()
-        self._refused_env_grants: tuple[str, ...] = ()
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
         # The executor outlives a single task; an early return must not leave
         # the previous round's authorisation standing.
-        self._consumed_env_grants = ()
-        self._refused_env_grants = ()
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
 
@@ -2380,35 +2375,16 @@ class IntegratePatchExecutor:
         raw_extra_envs = params.get("extra_envs")
         if isinstance(raw_extra_envs, dict):
             proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
-        requested_env_overrides = dict(proposal_extra_envs)
         proposal_extra_envs, _dropped = filter_untrusted_env_mapping(
             proposal_extra_envs,
             allow_predicate=is_allowed_variant_env_key,
         )
-        # A grant lifts the block for one name bound to one value, this round
-        # only. A loader-search-path grant is not re-admitted here, because this
-        # layer assigns; it is prepended through the materialized config.
-        grants, grant_refusals = parse_grant_requests(
-            (done_payload or {}).get("env_grant_requests"),
-            round_key=specialist_task_id,
-        )
-        self._consumed_env_grants = tuple(g for g in grants if g.prefix)
-        self._refused_env_grants = grant_refusals
-        for grant in grants:
-            if grant.prefix:
-                continue
-            if grant.covers(grant.name, requested_env_overrides.get(grant.name, "")):
-                proposal_extra_envs[grant.name] = grant.value
-                _dropped.pop(grant.name, None)
         dropped_env_overrides = sorted(_dropped)
         if dropped_env_overrides:
             log.warning(
                 "integrate_patch: dropping unsafe env override keys: %s",
                 ", ".join(dropped_env_overrides),
             )
-        if grant_refusals:
-            log.warning("integrate_patch: refused env grant request(s): %s", "; ".join(grant_refusals))
-
         # Framework-rewrite switches. Every rewrite in such a patch sits behind
         # a switch that defaults OFF, so the applied patch is inert and benching
         # it as-is would measure the baseline. Turn the switches on for the
@@ -3171,10 +3147,6 @@ class IntegratePatchExecutor:
             correctness_ok=correctness_ok,
             boot_timed_out=boot_timed_out,
         )
-        grant_record = {
-            "env_grants_applied": [g.to_dict() for g in self._consumed_env_grants],
-            "env_grants_refused": list(self._refused_env_grants),
-        }
         if not runs:
             advanced = not booted and round_advanced(before_loaded.observation, after_loaded.observation)
             if advanced:
@@ -3218,7 +3190,6 @@ class IntegratePatchExecutor:
                             setup_result,
                         ),
                         "after_signature": after_signature.to_dict() if after_signature is not None else {},
-                        **grant_record,
                         "enablement_launch_log": new_log,
                         # The wall this round advanced to, for the next round's
                         # before half.
@@ -3310,7 +3281,6 @@ class IntegratePatchExecutor:
             # Captured from the variant this leg launched, so a revalidation
             # replays the graded configuration rather than a re-derived one.
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
-            **grant_record,
             **eval_provenance,
         }
         # Record the KEEP'd attempt runtime so it survives rearm and every later

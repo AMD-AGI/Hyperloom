@@ -782,34 +782,6 @@ class RoundStore:
         )
         return [RoundEvent.from_row(r) for r in rows]
 
-    async def stage_high_water(self) -> int:
-        """Return the furthest ladder stage any round in this session reached.
-
-        Returns:
-            int: The highest stage value recorded, ``0`` when nothing observed
-            a boot yet.
-        """
-        row = await self.db.fetchone("SELECT MAX(stage_high_water) AS high FROM bringup_rounds")
-        return 0 if row is None or row["high"] is None else int(row["high"])
-
-    async def events(self, round_id: str | None = None) -> list[RoundEvent]:
-        """Return outbox rows in the order they were written.
-
-        Args:
-            round_id: Restrict to one round; all rounds when omitted.
-
-        Returns:
-            list[RoundEvent]: The recorded attempts.
-        """
-        if round_id is None:
-            rows = await self.db.fetchall("SELECT * FROM round_events ORDER BY event_id ASC")
-        else:
-            rows = await self.db.fetchall(
-                "SELECT * FROM round_events WHERE round_id = ? ORDER BY event_id ASC",
-                (str(round_id),),
-            )
-        return [RoundEvent.from_row(r) for r in rows]
-
     async def redrivable_settles(self) -> list[RoundEvent]:
         """Return rejected settles whose round is still not settled.
 
