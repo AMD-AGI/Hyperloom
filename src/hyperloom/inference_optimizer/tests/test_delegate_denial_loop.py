@@ -256,7 +256,6 @@ def test_phase_explore_allowlist_drops_legacy_actions():
             "explore",
             "specialist",
             "integrate_patch",
-            "boot_probe",
             "roofline",
             "profile",
             "recover",

@@ -77,7 +77,6 @@ def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str
 
 #: Phase that answers only "does this combo boot and serve": boot, hold,
 #: health, one short completion, tear down. No benchmark client.
-BOOT_PROBE = "boot_probe"
 
 # Reuse verdicts for a persistent lifecycle server (see _server_reusable).
 _REUSE = "reuse"  # healthy port + our pid/meta present -> attach a client round
@@ -129,7 +128,7 @@ def run_benchmark(
 
     inferencex_root = bypass_engine.resolve_inferencex_root(bench)
     # The boot probe runs no benchmark client, so it needs no InferenceX checkout.
-    if phase != BOOT_PROBE and (not inferencex_root or not Path(inferencex_root).is_dir()):
+    if not inferencex_root or not Path(inferencex_root).is_dir():
         _emit_failure(
             output_dir,
             framework,
@@ -193,20 +192,6 @@ def run_benchmark(
     # INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the server-boot budget for lifecycle rounds.
     sl = bench.get("server_lifecycle") or {}
     server_ready_timeout = _as_float(sl.get("server_ready_timeout_s"), timeout_s)
-
-    if phase == BOOT_PROBE:
-        return _run_boot_probe(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len_i,
-            bench_envs=bench_envs,
-            # Where the round slot's watchdog and the ladder classifier look.
-            server_log=output_dir / "server.log",
-            base_url=base_url,
-            server_ready_timeout_s=server_ready_timeout,
-        )
 
     if phase == "server":
         if not pid_dir:
@@ -375,60 +360,6 @@ def run_benchmark(
         rc=rc,
         profile=profile,
     )
-
-
-def _run_boot_probe(
-    *,
-    framework,
-    model,
-    tp,
-    port,
-    max_model_len,
-    bench_envs,
-    server_log,
-    base_url,
-    server_ready_timeout_s,
-) -> int:
-    """Boot, hold, check health, ask for one short completion, tear down.
-
-    Produces only the server's own log and an exit code.
-
-    Returns:
-        int: 0 when the server came up and generated; 1 when it did not; 2 when
-        no server command could be built for this combo.
-    """
-    server_env = _server_env(False, None, bench_envs)
-    extra_args = _tokenize_extra_args(bench_envs, framework)
-    try:
-        server_cmd = bypass_engine.build_server_command(
-            framework=framework,
-            model=model,
-            tp=tp,
-            port=port,
-            max_model_len=max_model_len,
-            extra_args=extra_args,
-            profile_dir=None,
-            python_exe=sys.executable,
-            framework_python=str(bench_envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or ""),
-        )
-    except ValueError as exc:
-        print(f"boot probe: {exc}", file=sys.stderr)
-        return 2
-    Path(server_log).parent.mkdir(parents=True, exist_ok=True)
-    proc = _launch_server(server_cmd, server_env, Path(server_log))
-    try:
-        if not bypass_engine.wait_for_server_ready(
-            base_url, timeout_s=server_ready_timeout_s, server_exited=lambda: proc.poll() is not None
-        ):
-            print("boot probe: the server never became health-ready", file=sys.stderr)
-            return 1
-        generated, detail = bypass_engine.one_short_completion(base_url)
-        if not generated:
-            print(f"boot probe: the server is health-ready but does not serve -- {detail}", file=sys.stderr)
-            return 1
-    finally:
-        _terminate_server(proc)
-    return 0
 
 
 def _run_server_phase(
@@ -1016,7 +947,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     bench.add_argument("--benchmark-config", required=True)
     bench.add_argument("--output-dir", required=True)
     bench.add_argument("--run-mode", default="local")
-    bench.add_argument("--phase", default="all", choices=["all", "server", "client", BOOT_PROBE])
+    bench.add_argument("--phase", default="all", choices=["all", "server", "client"])
     bench.add_argument("--server-lifecycle-pid-dir", default=None)
     bench.add_argument("--server-lifecycle-cleanup", default="true")
     return parser

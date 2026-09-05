@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.deadline import Deadline
 
 from ..actions.executors._grid_server_args import merge_server_args
-from ..actions.executors.boot_probe import probe_would_inform
 from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
 from ..bringup.budget import STALLED_STOP_REASON, ProgressBudget, digest_of, session_budget, stage_of
 from ..collaborator import CoordinatorCollaborator
@@ -227,49 +226,6 @@ class EnablementLane(CoordinatorCollaborator):
         except OSError:
             log.debug("enablement: environment preflight could not be made", exc_info=True)
             return None
-
-    async def _maybe_enqueue_boot_probe(self) -> str:
-        """Enqueue a boot-only probe when nothing says where the last boot stopped.
-
-        The boot half of a baseline is the cheap half, and it alone names the
-        wall an authoring round would otherwise guess at. Elided whenever
-        :func:`~hyperloom.orchestrator.actions.executors.boot_probe.probe_would_inform`
-        says the answer is already known.
-
-        Returns:
-            str: The dispatched ``task_id``, empty when nothing was dispatched.
-        """
-        from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
-        from ..actions.executors._multi_node_env import is_multi_node
-
-        state = self.shared_state
-        origin = state.enablement.origin
-        admitted = eval_enablement_allowed(state) if origin == "eval" else launch_enablement_allowed(state)
-        if not admitted or state.stop_reason or is_multi_node():
-            return ""
-        if state.enablement.succeeded or state.baseline_tput > 0:
-            return ""
-        if state.baseline_failure_streak < 1:
-            return ""
-        if await self.rounds.held() is not None:
-            return ""
-        loaded = load_boot_observation(state.enablement.launch_observation_path)
-        if not probe_would_inform(loaded.observation):
-            return ""
-        attempt = state.enablement.attempts
-        try:
-            task = await self.tasks.create(
-                kind="boot_probe",
-                params={"framework": state.framework},
-                idempotency_key=f"boot_probe:{attempt}",
-                requires_lanes=["server_lifecycle"],
-                side_effects=["launches_server", "reads_server"],
-                lease_ttl_sec=int(self.action_registry["boot_probe"].lease_ttl_sec),
-            )
-        except TerminalTaskReuse:
-            return ""
-        log.info("ENABLEMENT: dispatched boot probe attempt=%d task=%s", attempt, task.task_id)
-        return task.task_id
 
     async def _open_authoring_round(
         self,
@@ -744,7 +700,6 @@ class EnablementLane(CoordinatorCollaborator):
         for pump in (
             self._maybe_route_build_outcomes,
             self._maybe_enqueue_enablement_baseline_revalidation,
-            self._maybe_enqueue_boot_probe,
             self._maybe_enqueue_enablement_specialist,
         ):
             try:

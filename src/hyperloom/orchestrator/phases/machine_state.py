@@ -49,9 +49,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         {
             "target_analysis",
             "baseline",
-            # The cheap half of a baseline, for a combo whose open question is
-            # whether it comes up rather than how fast it is.
-            "boot_probe",
             "roofline",
             "profile",
             "recover",
@@ -64,7 +61,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "explore",
             "specialist",
             "integrate_patch",
-            "boot_probe",
             # roofline/profile auto-enqueued on the cumulative-gain watermark.
             "roofline",
             "profile",

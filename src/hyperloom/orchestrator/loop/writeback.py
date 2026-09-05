@@ -49,7 +49,7 @@ from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..bringup import ARGV_INVALID, ENV_FAULT
+from ..bringup import ARGV_INVALID
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -1119,21 +1119,6 @@ class WritebackCollaborator:
                     provenance="executor",
                     extra={"status": str(result_payload.get("status") or "")},
                 )
-        if task.kind == "boot_probe":
-            # Where the observation landed, plus the evidence the enablement
-            # pump classifies from.
-            observation_path = str(result_payload.get("boot_observation_path") or "")
-            if observation_path:
-                self.shared_state.enablement.launch_observation_path = observation_path
-            launch_log = _extract_enablement_launch_log(result_payload)
-            if launch_log:
-                self.shared_state.enablement.launch_log = launch_log
-            if str(result_payload.get("error_class") or "") == ENV_FAULT:
-                # A host fault no patch repairs and a retry re-finds: terminal on
-                # the first occurrence.
-                self.shared_state.set_stop_reason(ENV_FAULT)
-            any_changed = True
-
         # Baseline-specific gates: streak counter + stop_reason + baseline_not_promoted event.
         # Fast arg errors get their own streak so they don't burn the
         # slow-baseline retry budget on deterministic failures.

@@ -26,7 +26,6 @@ from hyperloom.orchestrator.actions.executors import (
     report_executor,
     session_breakdown_executor,
 )
-from hyperloom.orchestrator.actions.executors.boot_probe import BootProbeExecutor
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
@@ -269,13 +268,6 @@ def _register_executors(
 
     if specialist_executor is not None:
         coordinator.sub.register_executor("specialist", specialist_executor)
-
-    # boot_probe: the boot half of a baseline. Writes its observation under
-    # the session, so it takes the session dir.
-    coordinator.sub.register_executor(
-        "boot_probe",
-        BootProbeExecutor(session_dir=session_dir),
-    )
 
     # IntegratePatchExecutor: applies specialist worktree patches, benches,
     # decides KEEP/REVERT.
