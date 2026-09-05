@@ -103,7 +103,7 @@ _SCAN_ROOTS: tuple[str, ...] = (
     "scripts",
     "docs",
     "examples",
-    "OOB",  # optional component; not always present in a clone
+    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
 )
 
 # Directory names that never hold first-party sources: build output, caches,
