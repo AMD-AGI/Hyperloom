@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -35,11 +35,11 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 from .projection import (
-    AdvisoryDenial,
-    AdvisoryLedger,
-    baseline_advisory,
-    extend_lease_advisory,
-    specialist_gpu_advisory,
+    RULE_GPU_EXCEEDS_CAPACITY,
+    RULE_GPU_POOL_DISABLED,
+    RULE_LEASE_NOT_LIVE,
+    RULE_ROUND_IN_FLIGHT,
+    ResourceFacts,
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -629,9 +629,9 @@ class PolicyGate:
     session_dir: Path | None = None
     strict_paths: bool = False
     shared_state: Any | None = None
-    # Absent, the three resource rules refuse nothing and every attempt goes
-    # straight to its acquire.
-    advisory: AdvisoryLedger | None = None
+    # Default-constructed, the three resource rules refuse nothing and every
+    # attempt goes straight to its acquire.
+    resources: ResourceFacts = field(default_factory=ResourceFacts)
 
     def __post_init__(self) -> None:  # noqa: D401 — dataclass hook
         """Apply the ``INFERENCE_OPTIMIZER_STRICT_PATHS`` override."""
@@ -643,19 +643,6 @@ class PolicyGate:
             "yes",
         ):
             self.strict_paths = True
-
-    def _raise_advisory(self, denial: AdvisoryDenial | None) -> None:
-        """Raise a projection-derived refusal, or let the attempt through.
-
-        Args:
-            denial: What the rule answered; ``None`` admits.
-
-        Raises:
-            PolicyDenied: When the rule refused.
-        """
-        if denial is None:
-            return
-        raise PolicyDenied(denial.message, rule=denial.rule, hint=denial.hint)
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
@@ -966,11 +953,26 @@ class PolicyGate:
 
         Raises:
             PolicyDenied: When a round was holding the machine at the last
-                projection and this attempt is not its holder.
+                update and this attempt is not its holder.
         """
-        if action_name != BASELINE_ACTION_NAME or self.advisory is None:
+        if action_name != BASELINE_ACTION_NAME:
             return
-        self._raise_advisory(baseline_advisory(self.advisory, task_id=task_id))
+        facts = self.resources
+        if not facts.round_excludes or (task_id and task_id == facts.excluding_round_holder):
+            return
+        permanence = (
+            "its lease ran out and nothing ever confirmed the holder dead"
+            if facts.excluding_round_permanent
+            else "its lease is still live"
+        )
+        raise PolicyDenied(
+            (
+                f"baseline: bring-up round {facts.excluding_round_id!r} "
+                f"(holder={facts.excluding_round_holder!r}) holds the machine -- {permanence}"
+            ),
+            rule=RULE_ROUND_IN_FLIGHT,
+            hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
+        )
 
     def _validate_state_transition(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate an ``UPDATE_STATE`` intent's ``changes`` against core fields.
@@ -1463,13 +1465,13 @@ class PolicyGate:
             needs_gpu = True
         if not needs_gpu:
             return
-        projection = self.advisory.projection if self.advisory is not None else None
-        serving_tp = projection.serving_tp if projection is not None else 0
+        facts = self.resources
+        serving_tp = facts.serving_tp
         whole_machine = uses_whole_machine_gpu_lane(params)
         # Whole-machine bench specialists lease from ``framework_gpu_pool``, so
         # their default count matches the dispatcher.
         if whole_machine and serving_tp == 0:
-            default_gpu_count = (projection.whole_machine_pool if projection is not None else 0) or 1
+            default_gpu_count = facts.whole_machine_pool or 1
         else:
             default_gpu_count = serving_tp or 1
         gpu_count_raw = params.get("gpu_count", default_gpu_count)
@@ -1486,13 +1488,35 @@ class PolicyGate:
                 "delegate{action='specialist'}: gpu_count must be > 0 when needs_gpu=true",
                 rule="specialist_gpu_request_invalid",
             )
-        if self.advisory is None:
-            return
         # A bench specialist gets at least serving TP whatever it asked for:
         # it takes the serving lane with it, so a smaller lease cannot run.
         if reserves_bench_lane and serving_tp > gpu_count:
             gpu_count = serving_tp
-        self._raise_advisory(specialist_gpu_advisory(self.advisory, gpu_count=gpu_count, whole_machine=whole_machine))
+        if facts.gpu_specialist_capacity <= 0 and not (whole_machine and facts.whole_machine_pool > 0):
+            raise PolicyDenied(
+                "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
+                rule=RULE_GPU_POOL_DISABLED,
+                hint=(
+                    "Start the session with --gpu-specialist-capacity > 0 or set "
+                    "INFERENCE_OPTIMIZER_GPU_SPECIALIST_CAPACITY before dispatching GPU specialists."
+                ),
+            )
+        pool_size = facts.whole_machine_pool if whole_machine else facts.gpu_specialist_pool
+        pool_desc = "whole-machine GPU pool" if whole_machine else "serving-disjoint GPU specialist pool"
+        if gpu_count > pool_size:
+            raise PolicyDenied(
+                (
+                    f"delegate{{action='specialist'}}: effective gpu_count={gpu_count} "
+                    f"exceeds {pool_desc} size={pool_size} (configured "
+                    f"capacity={facts.gpu_specialist_capacity}, serving_tp={facts.serving_tp})"
+                ),
+                rule=RULE_GPU_EXCEEDS_CAPACITY,
+                hint=(
+                    "Lower params.gpu_count for non-bench probes, omit it for bench "
+                    "specialists only when the pool has at least serving TP free "
+                    "cards, or start a session with a larger GPU pool."
+                ),
+            )
 
     def _autofill_gap_from_ledger(
         self,
@@ -1681,9 +1705,14 @@ class PolicyGate:
                     "a lease must not outlive the session budget."
                 ),
             )
-        if self.advisory is None:
+        live = self.resources.live_task_ids
+        if live is None or task_id in live:
             return
-        self._raise_advisory(extend_lease_advisory(self.advisory, task_id=task_id))
+        raise PolicyDenied(
+            f"extend_lease: task {task_id!r} was not running when the resource facts were read",
+            rule=RULE_LEASE_NOT_LIVE,
+            hint="Re-read get_running_tasks; a finished task's lease cannot be extended.",
+        )
 
     def _path_under_session(self, value: str) -> bool:
         """Return whether a path resolves inside the active session_dir.

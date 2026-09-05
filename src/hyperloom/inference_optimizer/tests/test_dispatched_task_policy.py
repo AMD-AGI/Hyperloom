@@ -16,7 +16,7 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -73,22 +73,22 @@ def _gate(tmp_path: Path, monkeypatch) -> tuple[PolicyGate, Path]:
         session_dir=sd,
         shared_state=state,
         strict_paths=True,
-        advisory=AdvisoryLedger(),
+        resources=ResourceFacts(),
     )
     return gate, sd
 
 
 def _project(gate: PolicyGate, **fields) -> None:
-    """Re-take the gate's advisory snapshot, as a coordinator tick would.
+    """Re-read the gate's resource facts, as a coordinator tick would.
 
     Args:
-        gate: The gate whose advisory layer is refreshed.
-        fields: Facts the projection carries that no SharedState holds -- a
-            bring-up round is the round store's, not the session's.
+        gate: The gate whose facts are re-read.
+        fields: Facts no SharedState holds -- a bring-up round is the round
+            store's, not the session's.
     """
-    from dataclasses import replace
-
-    gate.advisory.refresh(replace(ResourceProjection.of(gate.shared_state, now_unix=1000.0), **fields))
+    gate.resources.update(gate.shared_state)
+    for name, value in fields.items():
+        setattr(gate.resources, name, value)
 
 
 def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | None = None) -> SubAgentRunner:
@@ -103,7 +103,7 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
         session_dir=sd,
         shared_state=state,
         strict_paths=True,
-        advisory=AdvisoryLedger(),
+        resources=ResourceFacts(),
     )
     return SubAgentRunner(
         locks,
@@ -763,7 +763,6 @@ def test_a_round_holding_the_machine_denies_baseline(tmp_path, monkeypatch):
         gate.validate_intent("orchestration", intent)
     assert exc_info.value.rule == "enablement_round_in_flight"
     assert "spec-abc" in str(exc_info.value)
-    assert "advisory" in str(exc_info.value)
 
 
 def test_no_round_in_flight_allows_baseline(tmp_path, monkeypatch):

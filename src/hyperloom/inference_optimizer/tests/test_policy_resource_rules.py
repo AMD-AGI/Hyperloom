@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The gate refuses from a snapshot, and the acquire agrees -- without a GPU.
+"""The gate refuses from facts read before it ran, and the acquire agrees.
 
 The property under test is that a resource rule does not release itself. The
-gate reads a snapshot, so its refusal is labelled advisory and dated; what
-lifts it is a newer snapshot showing the resource free, an explicit bypass, or
-the round's own holder asking. Firing twice is not one of them, because a
-second bring-up against a held machine fights the first for the same cards
-whether or not the gate already said so once.
+gate reads facts the repair pass left; what lifts a refusal is a re-read
+showing the resource free, an explicit bypass, or the round's own holder
+asking. Firing twice is not one of them, because a second bring-up against a
+held machine fights the first for the same cards whether or not the gate
+already said so once.
 
 The rounds here are opened against a real database on the virtual clock the
 rehearsal seam supplies, so a lease that runs out an hour after the round
@@ -27,11 +27,7 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.policy.projection import (
-    RULE_ROUND_IN_FLIGHT,
-    AdvisoryLedger,
-    ResourceProjection,
-)
+from hyperloom.orchestrator.policy.projection import RULE_ROUND_IN_FLIGHT, ResourceFacts
 from hyperloom.orchestrator.rehearsal import VirtualClock
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.round_store import (
@@ -60,9 +56,9 @@ def clock():
     return VirtualClock()
 
 
-def _gate(ledger: AdvisoryLedger | None = None) -> PolicyGate:
-    """A gate with no session facts of its own beyond the projection."""
-    return PolicyGate(role_registry=default_role_registry(), advisory=ledger)
+def _gate(facts: ResourceFacts | None = None) -> PolicyGate:
+    """A gate with no session facts of its own beyond the resource facts."""
+    return PolicyGate(role_registry=default_role_registry(), resources=facts or ResourceFacts())
 
 
 def _baseline() -> Intent:
@@ -70,16 +66,16 @@ def _baseline() -> Intent:
     return Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline", "params": {}})
 
 
-async def _snapshot(store: RoundStore, ledger: AdvisoryLedger, now: float) -> None:
-    """Re-take the snapshot, as a coordinator tick does."""
-    ledger.refresh(ResourceProjection.of(None, now_unix=now, rounds=await store.excluding(now)))
+async def _reread(store: RoundStore, facts: ResourceFacts, now: float) -> None:
+    """Re-read the facts, as the repair pass does at the top of a tick."""
+    facts.update(None, rounds=await store.excluding(now))
 
 
 @pytest.mark.asyncio
 async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, clock):
     """A live round denies; the round that booted and settled denies nothing."""
-    ledger = AdvisoryLedger()
-    gate = _gate(ledger)
+    facts = ResourceFacts()
+    gate = _gate(facts)
     opened = await store.open(
         "round-1",
         holder_task_id="baseline-1",
@@ -89,7 +85,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     )
     assert opened.ok
 
-    await _snapshot(store, ledger, clock.wall())
+    await _reread(store, facts, clock.wall())
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
@@ -106,7 +102,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     )
     assert settled.ok
 
-    await _snapshot(store, ledger, clock.wall())
+    await _reread(store, facts, clock.wall())
     gate.validate_intent("orchestration", _baseline())
 
 
@@ -118,8 +114,8 @@ async def test_an_expired_round_never_confirmed_dead_still_denies(store, clock):
     is evidence, and evidence expires. An unreaped one carries none, so no
     amount of elapsed time turns it into a release.
     """
-    ledger = AdvisoryLedger()
-    gate = _gate(ledger)
+    facts = ResourceFacts()
+    gate = _gate(facts)
     opened = await store.open(
         "round-unreaped",
         holder_task_id="baseline-1",
@@ -138,7 +134,7 @@ async def test_an_expired_round_never_confirmed_dead_still_denies(store, clock):
     )
 
     clock.advance(86_400.0)
-    await _snapshot(store, ledger, clock.wall())
+    await _reread(store, facts, clock.wall())
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
@@ -159,8 +155,8 @@ async def test_an_expired_round_never_confirmed_dead_still_denies(store, clock):
 @pytest.mark.asyncio
 async def test_a_reaped_round_releases_once_its_grace_is_spent(store, clock):
     """The counterpart: a confirmed kill excludes only until the cards settle."""
-    ledger = AdvisoryLedger()
-    gate = _gate(ledger)
+    facts = ResourceFacts()
+    gate = _gate(facts)
     opened = await store.open(
         "round-reaped",
         holder_task_id="baseline-1",
@@ -180,25 +176,25 @@ async def test_a_reaped_round_releases_once_its_grace_is_spent(store, clock):
         kill_confirmed_unix=killed,
     )
 
-    await _snapshot(store, ledger, clock.wall())
+    await _reread(store, facts, clock.wall())
     with pytest.raises(PolicyDenied):
         gate.validate_intent("orchestration", _baseline())
 
     clock.advance(_GRACE + 1.0)
-    await _snapshot(store, ledger, clock.wall())
+    await _reread(store, facts, clock.wall())
     gate.validate_intent("orchestration", _baseline())
 
 
 @pytest.mark.asyncio
 async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock):
-    """The snapshot has not changed, so neither has the answer.
+    """The facts have not changed, so neither has the answer.
 
     A rule that let the second consecutive attempt through would hand the
     machine to a bring-up while the first one still holds it -- the case the
     rule exists for.
     """
-    ledger = AdvisoryLedger()
-    gate = _gate(ledger)
+    facts = ResourceFacts()
+    gate = _gate(facts)
     await store.open(
         "round-1",
         holder_task_id="baseline-1",
@@ -206,7 +202,7 @@ async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock)
         now_unix=clock.wall(),
         request_id="req-open",
     )
-    await _snapshot(store, ledger, clock.wall())
+    await _reread(store, facts, clock.wall())
 
     for _attempt in range(2):
         with pytest.raises(PolicyDenied) as denied:
@@ -222,8 +218,8 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
     gate never let one through: the round the loop started with is the round
     still standing at the end.
     """
-    ledger = AdvisoryLedger()
-    gate = _gate(ledger)
+    facts = ResourceFacts()
+    gate = _gate(facts)
     held = await store.open(
         "round-held",
         holder_task_id="baseline-holder",
@@ -235,7 +231,7 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
 
     for tick in range(10):
         clock.advance(30.0)
-        await _snapshot(store, ledger, clock.wall())
+        await _reread(store, facts, clock.wall())
         with pytest.raises(PolicyDenied) as denied:
             gate.validate_intent("orchestration", _baseline())
         assert denied.value.rule == RULE_ROUND_IN_FLIGHT
@@ -264,8 +260,8 @@ async def test_the_round_holders_own_bring_up_is_admitted_tick_after_tick(store,
     holder would cancel the very bring-up the round was opened for, tick after
     tick. The holder arm reads the acquire the row already won.
     """
-    ledger = AdvisoryLedger()
-    gate = _gate(ledger)
+    facts = ResourceFacts()
+    gate = _gate(facts)
     opened = await store.open(
         "revalidation-1",
         holder_task_id="reval-1",
@@ -277,31 +273,13 @@ async def test_the_round_holders_own_bring_up_is_admitted_tick_after_tick(store,
 
     for _tick in range(6):
         clock.advance(30.0)
-        now = clock.wall()
-        ledger.refresh(ResourceProjection.of(None, now_unix=now, rounds=await store.excluding(now)))
+        await _reread(store, facts, clock.wall())
         gate.validate_dispatched_task("baseline", {"reason": "enablement_revalidation"}, task_id="reval-1")
 
     # And every other baseline is still refused while that round holds.
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_dispatched_task("baseline", {}, task_id="someone-else")
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
-
-
-def test_an_advisory_denial_says_so_and_dates_its_evidence():
-    """A reader must be able to tell advice from a verdict, and how old it is."""
-    ledger = AdvisoryLedger(
-        ResourceProjection(
-            taken_unix=1_800_000_123.5,
-            excluding_round_id="round-1",
-            excluding_round_holder="baseline-1",
-        )
-    )
-    with pytest.raises(PolicyDenied) as denied:
-        _gate(ledger).validate_intent("orchestration", _baseline())
-    message = str(denied.value)
-    assert "advisory" in message
-    assert "1800000123.500" in message
-    assert "at the acquire" in message
 
 
 def _reachable_code(*entries: object) -> list:
@@ -346,12 +324,6 @@ def test_no_validator_on_the_intent_path_reaches_a_database_call():
         if name.startswith(("_validate", "validate")) and isinstance(getattr(type(gate), name, None), FunctionType)
     ]
     assert len(validators) > 10, "the validator sweep found almost nothing; the naming changed"
-    advisory_entries = [
-        projection_module.baseline_advisory,
-        projection_module.specialist_gpu_advisory,
-        projection_module.extend_lease_advisory,
-        projection_module.AdvisoryLedger.deny,
-    ]
 
     banned = {
         "execute",
@@ -368,9 +340,14 @@ def test_no_validator_on_the_intent_path_reaches_a_database_call():
         "SqliteConnection",
         "excluding",
     }
-    for code in _reachable_code(*validators, *advisory_entries):
+    for code in _reachable_code(*validators):
         loaded = {instr.argval for instr in dis.get_instructions(code) if isinstance(instr.argval, str)}
         assert not (loaded & banned), f"{code.co_name} reaches {sorted(loaded & banned)}"
 
     # And the gate cannot name a connection even to pass one on.
     assert not {"sqlite3", "SqliteConnection", "RoundStore"} & set(vars(gate_module))
+
+
+def test_the_resource_rules_refuse_nothing_without_facts():
+    """A gate with no repair pass behind it sends every attempt to its acquire."""
+    _gate().validate_intent("orchestration", _baseline())

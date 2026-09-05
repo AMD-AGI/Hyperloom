@@ -1047,12 +1047,12 @@ def _make_policy_gate(*, shared_state):
         default_role_registry,
     )
     from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
+    from hyperloom.orchestrator.policy.projection import ResourceFacts
 
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=shared_state,
-        advisory=AdvisoryLedger(ResourceProjection.of(shared_state)),
+        resources=ResourceFacts.of(shared_state),
     )
 
 

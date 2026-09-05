@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES, allowed_actions_for
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.prompts.prompt_builder import _section_phase_semantics
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -36,11 +36,11 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 _PROPOSE_CHANNELS = (IntentType.DELEGATE, IntentType.PROPOSE_ACTION)
 
 
-def _llm_gate(advisory: AdvisoryLedger | None = None) -> PolicyGate:
+def _llm_gate(resources: ResourceFacts | None = None) -> PolicyGate:
     """A gate an orchestration agent emits into.
 
     Args:
-        advisory: The resource snapshot the round rule judges against; ``None``
+        resources: The resource facts the round rule judges against; ``None``
             leaves that rule refusing nothing.
 
     Returns:
@@ -49,7 +49,7 @@ def _llm_gate(advisory: AdvisoryLedger | None = None) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=SharedState(session_id="t", phase="KERNEL_AGENT"),
-        advisory=advisory,
+        resources=resources or ResourceFacts(),
     )
 
 
@@ -153,15 +153,9 @@ def test_phase_semantics_prompt_names_every_internal_action() -> None:
 
 
 # -- A bring-up round holds the machine -----------------------------------
-def _round_in_flight() -> AdvisoryLedger:
-    """A snapshot in which a bring-up round holds the machine."""
-    return AdvisoryLedger(
-        ResourceProjection(
-            taken_unix=1000.0,
-            excluding_round_id="round-1",
-            excluding_round_holder="task-abc",
-        )
-    )
+def _round_in_flight() -> ResourceFacts:
+    """Facts in which a bring-up round holds the machine."""
+    return ResourceFacts(excluding_round_id="round-1", excluding_round_holder="task-abc")
 
 
 def test_baseline_is_refused_on_both_agent_channels_while_a_round_holds_the_machine() -> None:

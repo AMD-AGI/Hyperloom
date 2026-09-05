@@ -36,7 +36,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     drop_round_lane,
 )
 from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.orchestrator.policy.projection import AdvisoryLedger
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
     EXPIRED_REAPED,
     EXPIRED_UNREAPED,
@@ -128,7 +128,7 @@ def _build(db, *, reaper=None, proposals=None, state=None, **kw) -> tuple[Reconc
         tasks=tasks,
         locks=ResourceLockManager(SqliteLeaseBackend(db)),
         shared_state=shared,
-        advisory=AdvisoryLedger(),
+        resources=ResourceFacts(),
         proposals=(lambda: proposals) if proposals is not None else None,
         # The session dir the database lives in: the pass writes its tick stamp
         # and its directive cursor there.
@@ -403,18 +403,17 @@ async def test_a_settle_the_store_rejected_is_re_driven_from_the_outbox(db):
 
 
 @pytest.mark.asyncio
-async def test_the_projection_is_rebuilt_from_what_the_rules_left(db):
-    """The gate's snapshot reflects the repair, not the state before it."""
+async def test_the_resource_facts_are_reread_from_what_the_rules_left(db):
+    """The facts the gate reads reflect the repair, not the state before it."""
     rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
     await rec.run(_NOW - 100.0)
-    assert rec._advisory.projection.excluding_round_id == "round-spec-1"
+    assert rec._resources.excluding_round_id == "round-spec-1"
 
     await rec.run(_NOW + 10_000.0)
 
-    projection = rec._advisory.projection
-    assert projection.excluding_round_id == "round-spec-1"
-    assert projection.excluding_round_permanent is True, "an unreaped round excludes for good"
+    assert rec._resources.excluding_round_id == "round-spec-1"
+    assert rec._resources.excluding_round_permanent is True, "an unreaped round excludes for good"
 
 
 @pytest.mark.asyncio
@@ -432,7 +431,8 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
 
     assert report.failures == ["_boom"]
     assert report.settled == [("round-spec-1", EXPIRED_UNREAPED)]
-    assert rec._advisory.projection.taken_unix == _NOW + 10.0
+    # The re-read runs last, so it saw what the rule that raised did not stop.
+    assert rec._resources.excluding_round_id == "round-spec-1"
 
 
 @pytest.mark.asyncio

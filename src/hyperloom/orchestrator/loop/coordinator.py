@@ -67,7 +67,6 @@ from ..policy.gate import (
     PolicyGate,
     SPECIALIST_FROM_AGENT_PREFIX,  # noqa: F401 - re-exported for callers/tests
 )
-from ..policy.projection import AdvisoryLedger, ResourceProjection
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
@@ -686,7 +685,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             shared_state=self.shared_state,
             # Seeded at boot: an empty snapshot would advise against a GPU
             # dispatch the pool can in fact satisfy.
-            advisory=AdvisoryLedger(ResourceProjection.of(self.shared_state, now_unix=time.time())),
         )
         self.sub.policy = self.policy
         # Attach read-only context-pull MCP tools to Orchestration backend.
@@ -1350,7 +1348,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 tasks=self.tasks,
                 locks=self.locks,
                 shared_state=self.shared_state,
-                advisory=self.policy.advisory,
+                resources=self.policy.resources,
                 # A callable, not a captured mapping: the resume replay rebuilds
                 # its contents, so a snapshot taken here would be pre-replay.
                 proposals=lambda: self.state.pending_proposals,
