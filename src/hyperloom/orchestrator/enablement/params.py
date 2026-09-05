@@ -9,13 +9,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_ENABLEMENT
 
+from ..bringup import recorded_verdict, session_root
 from ..collaborator import CoordinatorCollaborator
 
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+#: How long a round may spend discovering bridging candidates before the tick
+#: stops waiting; discovery then degrades to repos-only.
+ENABLEMENT_PARAMS_BUDGET_SEC: float = 45.0
 
 
 def _maybe_build_runtime_candidate(
@@ -139,7 +145,7 @@ class EnablementParams(CoordinatorCollaborator):
         text = (launch_log or "").strip()
         if not text:
             return None
-        from hyperloom.agents.framework.enablement import EnablementRequest, classify_failure
+        from hyperloom.agents.framework.enablement import EnablementRequest
         from hyperloom.agents.framework.enablement_ops import build_search_plan
         from hyperloom.agents.framework.repo_map import repo_url_for_framework
 
@@ -151,7 +157,17 @@ class EnablementParams(CoordinatorCollaborator):
         # Dispatch a specialist for ANY non-blank launch log, even one that
         # classifies as ``UNKNOWN``: ``kind`` is advisory (routes bridge-repo
         # hints and labels the mandate), not a gate.
-        signature = classify_failure(text)
+        verdict, loaded = recorded_verdict(
+            state.enablement.launch_observation_path,
+            wrapper_text=text,
+            session_dir=session_root(self),
+        )
+        signature = verdict.signature
+        if loaded.degraded:
+            log.info(
+                "ENABLEMENT: routing on a re-derived signature (%s); no boot observation was recorded",
+                loaded.degraded,
+            )
         req = EnablementRequest(
             framework=framework,
             model=model or "(target model)",
@@ -160,14 +176,19 @@ class EnablementParams(CoordinatorCollaborator):
             gpu_type=(getattr(state, "gpu_type", "") or "").strip().lower(),
         )
         plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
-        candidate_refs = self._discover_enablement_candidate_refs(req, plan)
+        candidate_refs = self._discover_enablement_candidate_refs(
+            req,
+            plan,
+            deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC),
+        )
         # Lead with a different candidate each attempt (deterministic left-rotation).
         if candidate_refs and attempt:
             n = len(candidate_refs)
             k = attempt % n
             candidate_refs = candidate_refs[k:] + candidate_refs[:k]
-        # Persist so _maybe_escalate_to_targeted_build can pick the top candidate.
-        state.enablement.candidate_refs = list(candidate_refs)
+        # Nothing here writes session state: this runs on a worker thread the
+        # tick may already have stopped waiting on. The refs travel back in the
+        # returned params for the lane to record.
         source_context = self._read_enablement_source_context(signature)
         # For a weight-init failure, fold the checkpoint's ground-truth per-layer
         # weight inventory into the mandate so the loop self-corrects each retry.
@@ -277,8 +298,8 @@ class EnablementParams(CoordinatorCollaborator):
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
             "enablement_search_repos": list(plan.repos),
-            # Pre-patch failure signature, replayed by integrate_patch.
-            "enablement_before_signature": signature.to_dict(),
+            # The before half of integrate_patch's gate.
+            "enablement_before_observation_path": state.enablement.launch_observation_path,
             # CapabilityGap projection: marks resource_constraint as not actionable.
             "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
@@ -297,7 +318,6 @@ class EnablementParams(CoordinatorCollaborator):
             # whole stack and its effective_config records the whole stack.
             "base_extra_envs": acc_envs,
             "base_extra_args": acc_args,
-            "launch_probe": req.launch_probe,
             "source": "coordinator_internal",
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
@@ -490,7 +510,13 @@ class EnablementParams(CoordinatorCollaborator):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
-    def _discover_enablement_candidate_refs(self, req: Any, plan: Any) -> tuple[str, ...]:
+    def _discover_enablement_candidate_refs(
+        self,
+        req: Any,
+        plan: Any,
+        *,
+        deadline: Deadline | None = None,
+    ) -> tuple[str, ...]:
         """Best-effort enumerate + rank bridging PRs for an enablement failure.
 
         Enumerates candidate PRs across every repo in ``plan.repos`` (framework
@@ -500,12 +526,17 @@ class EnablementParams(CoordinatorCollaborator):
         preserved) and returns the top ``req.max_search_candidates`` refs
         (``html_url`` preferred).
 
-        Network + git; **fully exception-guarded**: any failure degrades to an
-        empty tuple so the mandate falls back to repos-only.
+        Network + git. Enumeration is guarded per repo, so a repo that fails is
+        skipped and the rest are still ranked; a run that collects nothing
+        returns an empty tuple and the mandate falls back to repos-only.
+
+        ``deadline`` bounds the worker thread, not the caller: enumeration stops
+        between repos and ranks whatever was collected.
 
         Args:
             req: The :class:`framework_agent.enablement.EnablementRequest`.
             plan: The :class:`framework_agent.enablement_ops.EnablementSearchPlan`.
+            deadline: When to stop enumerating further repos.
 
         Returns:
             tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
@@ -529,6 +560,12 @@ class EnablementParams(CoordinatorCollaborator):
 
         collected: list[Candidate] = []
         for repo in plan.repos:
+            if deadline is not None and deadline.expired():
+                log.info(
+                    "enablement: candidate discovery stopped at its deadline with %d collected",
+                    len(collected),
+                )
+                break
             try:
                 explore_req = ExploreRequest.from_dict(
                     {

@@ -12,11 +12,17 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.delivery.archive import (
+    ROLE_LAUNCH_CONFIG,
+    ROLE_PATCH,
+    ROLE_PROMPT,
+    ROLE_SERVER_LOG,
+    ROLE_SPECIALIST_RESULT,
+)
 from hyperloom.orchestrator.phases._enablement_artifacts import (
     _FILE_SIZE_LIMIT,
     _LOG_TRUNCATION_NOTE,
     _SERVER_LOG_TAIL_LIMIT,
-    role_path,
     snapshot_round,
     write_setting_script,
 )
@@ -56,10 +62,10 @@ def test_applied_patch_is_copied(tmp_path):
     src = tmp_path / "runs" / "specialist" / "abc123" / "patches"
     src.mkdir(parents=True)
     (src / "001_fix.patch").write_text("diff --git a/f b/f\n", encoding="utf-8")
-    written = snapshot_round(tmp_path, _res(patches_applied=[str(src / "001_fix.patch")]))
+    archive = snapshot_round(tmp_path, _res(patches_applied=[str(src / "001_fix.patch")]))
     dest = tmp_path / "reports" / "enablement" / "abc123" / "patches" / "001_fix.patch"
     assert dest.read_text() == "diff --git a/f b/f\n"
-    assert written == [{"path": "reports/enablement/abc123/patches/001_fix.patch", "role": "patch"}]
+    assert archive.to_list() == [{"path": "reports/enablement/abc123/patches/001_fix.patch", "role": ROLE_PATCH}]
 
 
 def test_every_patch_of_a_round_is_reported(tmp_path):
@@ -68,9 +74,10 @@ def test_every_patch_of_a_round_is_reported(tmp_path):
     src.mkdir(parents=True)
     for name in ("001_a.patch", "002_b.patch", "003_c.patch"):
         (src / name).write_text("diff\n", encoding="utf-8")
-    written = snapshot_round(tmp_path, _res(patches_applied=[str(p) for p in sorted(src.iterdir())]))
-    patches = [e["path"] for e in written if e["role"] == "patch"]
-    assert patches == [f"reports/enablement/abc123/patches/{n}" for n in ("001_a.patch", "002_b.patch", "003_c.patch")]
+    archive = snapshot_round(tmp_path, _res(patches_applied=[str(p) for p in sorted(src.iterdir())]))
+    assert archive.paths_for(ROLE_PATCH) == tuple(
+        f"reports/enablement/abc123/patches/{n}" for n in ("001_a.patch", "002_b.patch", "003_c.patch")
+    )
 
 
 def test_unapplied_workspace_patch_is_still_copied(tmp_path):
@@ -78,9 +85,9 @@ def test_unapplied_workspace_patch_is_still_copied(tmp_path):
     src = tmp_path / "runs" / "specialist" / "abc123" / "worktree" / "patches"
     src.mkdir(parents=True)
     (src / "002_try.diff").write_text("diff\n", encoding="utf-8")
-    written = snapshot_round(tmp_path, _res())
+    archive = snapshot_round(tmp_path, _res())
     assert (tmp_path / "reports" / "enablement" / "abc123" / "patches" / "002_try.diff").is_file()
-    assert written == [{"path": "reports/enablement/abc123/patches/002_try.diff", "role": "patch"}]
+    assert archive.to_list() == [{"path": "reports/enablement/abc123/patches/002_try.diff", "role": ROLE_PATCH}]
 
 
 def test_specialist_result_and_prompt_are_copied(tmp_path):
@@ -88,12 +95,12 @@ def test_specialist_result_and_prompt_are_copied(tmp_path):
     ws.mkdir(parents=True)
     (ws / "specialist_done.json").write_text('{"summary": "ok"}', encoding="utf-8")
     (ws / "prompt.md").write_text("# prompt", encoding="utf-8")
-    written = snapshot_round(tmp_path, _res())
+    archive = snapshot_round(tmp_path, _res())
     out = tmp_path / "reports" / "enablement" / "abc123"
     assert (out / "specialist_done.json").is_file()
     assert (out / "prompt.md").is_file()
-    assert role_path(written, "specialist_result") == "reports/enablement/abc123/specialist_done.json"
-    assert role_path(written, "prompt") == "reports/enablement/abc123/prompt.md"
+    assert archive.path_for(ROLE_SPECIALIST_RESULT) == "reports/enablement/abc123/specialist_done.json"
+    assert archive.path_for(ROLE_PROMPT) == "reports/enablement/abc123/prompt.md"
 
 
 def _launch_config(tmp_path, body=b"tp: 8\n"):
@@ -113,18 +120,18 @@ def test_launch_config_is_copied(tmp_path):
 def test_recorded_config_path_is_the_archived_copy(tmp_path):
     """The runs/ original is dropped by the collector, so only the copy resolves."""
     cfg = _launch_config(tmp_path)
-    written = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
+    archive = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
     data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
-    assert role_path(written, "launch_config") == "reports/enablement/abc123/launch_config.yaml"
+    assert archive.path_for(ROLE_LAUNCH_CONFIG) == "reports/enablement/abc123/launch_config.yaml"
     assert data["enablement_accepted_config_path"] == "reports/enablement/abc123/launch_config.yaml"
 
 
 def test_config_the_copy_refused_is_not_recorded(tmp_path):
     """Naming a file the archive does not hold is worse than naming none."""
     cfg = _launch_config(tmp_path, body=b"x" * (_FILE_SIZE_LIMIT + 1))
-    written = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
+    archive = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
     data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
-    assert role_path(written, "launch_config") == ""
+    assert archive.path_for(ROLE_LAUNCH_CONFIG) == ""
     assert data["enablement_accepted_config_path"] == ""
 
 
@@ -133,10 +140,10 @@ def test_server_log_is_archived(tmp_path):
     log = tmp_path / "runs" / "integrate_patch" / "t1" / "server.log"
     log.parent.mkdir(parents=True)
     log.write_text("booting\nImportError: no module named aiter\n", encoding="utf-8")
-    written = snapshot_round(tmp_path, _res(bench_result={"server_log_path": str(log)}))
+    archive = snapshot_round(tmp_path, _res(bench_result={"server_log_path": str(log)}))
     dest = tmp_path / "reports" / "enablement" / "abc123" / "server.log"
     assert dest.read_text() == "booting\nImportError: no module named aiter\n"
-    assert role_path(written, "server_log") == "reports/enablement/abc123/server.log"
+    assert archive.path_for(ROLE_SERVER_LOG) == "reports/enablement/abc123/server.log"
 
 
 def test_oversized_server_log_keeps_its_tail(tmp_path):
@@ -203,14 +210,14 @@ def test_binary_noise_cannot_inflate_the_archived_log(tmp_path):
 
 def test_round_before_a_bench_has_no_server_log(tmp_path):
     """A patch rejected or a build broken never started a server to log."""
-    written = snapshot_round(tmp_path, _res())
-    assert role_path(written, "server_log") == ""
+    archive = snapshot_round(tmp_path, _res())
+    assert archive.path_for(ROLE_SERVER_LOG) == ""
     assert not (tmp_path / "reports" / "enablement" / "abc123" / "server.log").exists()
 
 
 def test_missing_server_log_is_skipped(tmp_path):
-    written = snapshot_round(tmp_path, _res(bench_result={"server_log_path": str(tmp_path / "gone.log")}))
-    assert role_path(written, "server_log") == ""
+    archive = snapshot_round(tmp_path, _res(bench_result={"server_log_path": str(tmp_path / "gone.log")}))
+    assert archive.path_for(ROLE_SERVER_LOG) == ""
 
 
 def test_oversized_artifact_is_skipped(tmp_path):
@@ -218,9 +225,9 @@ def test_oversized_artifact_is_skipped(tmp_path):
     src.mkdir(parents=True)
     big = src / "003_big.patch"
     big.write_bytes(b"x" * (_FILE_SIZE_LIMIT + 1))
-    written = snapshot_round(tmp_path, _res(patches_applied=[str(big)]))
+    archive = snapshot_round(tmp_path, _res(patches_applied=[str(big)]))
     assert not (tmp_path / "reports" / "enablement" / "abc123" / "patches" / "003_big.patch").exists()
-    assert written == []
+    assert archive.to_list() == []
 
 
 def test_launch_log_excerpt_is_bounded(tmp_path):
@@ -242,8 +249,8 @@ def test_demoted_switch_gate_is_recorded(tmp_path):
 
 def test_round_without_a_specialist_is_skipped(tmp_path):
     """Phase-synthesised rounds carry no task id and would all collide."""
-    written = snapshot_round(tmp_path, {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
-    assert written == []
+    archive = snapshot_round(tmp_path, {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"})
+    assert archive.to_list() == []
     assert not (tmp_path / "reports" / "enablement").exists()
 
 
