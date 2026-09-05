@@ -1,12 +1,16 @@
 # Contributing to Hyperloom
 
-Thank you for helping improve Hyperloom. This guide covers the expected workflow, local setup, and quality checks.
+Thank you for helping improve Hyperloom. This guide covers the expected workflow, local setup, and quality checks. The authoring rules that a change is reviewed against live in [`AGENTS.md`](AGENTS.md).
 
 ## Pull Request workflow
 - Create a feature branch off `main`.
 - Keep changes focused and include context in the PR description (problem, approach, test coverage).
 - Ensure merge requirements and applicable GitHub checks pass before requesting review (see [CI and documentation-only changes](#ci-and-documentation-only-changes)).
-- Avoid committing generated artifacts; keep diffs minimal.
+- Avoid committing generated artifacts.
+
+## Proposing a new framework or platform
+
+Hyperloom includes external components (GEAK, Magpie, TraceLens, IntelliKit, frameworks). Work bring-up for a new framework or platform through the owning components before integration code lands, and open a tracking issue for it. Owners are named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
 
 ## CI and documentation-only changes
 
@@ -32,7 +36,7 @@ Use this list (or keep it in sync) for any workflow that should skip on document
 - `docs/**`
 - `LICENSE*`
 - `COPYRIGHT`
-- `CODEOWNERS`
+- `**/CODEOWNERS`
 - `.gitattributes`
 
 If **any** changed file falls **outside** these patterns (for example `.py`, `pyproject.toml`, or `.github/workflows/*.yml`), the workflows that declare this list run as usual.
