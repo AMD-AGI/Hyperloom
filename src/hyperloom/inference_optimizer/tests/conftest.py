@@ -269,20 +269,24 @@ class ProgressCadence:
     wall-clock measurement could tell apart from load anyway.
     """
 
-    def __init__(self, scale: float = PROGRESS_TIME_SCALE) -> None:
+    def __init__(self, scale: float = PROGRESS_TIME_SCALE, clock=None) -> None:
         """Start the clock at zero.
 
         Args:
             scale (float): Production seconds per real second.
+            clock: A ``VirtualClock`` to charge the simulated work to instead of
+                a private counter, for a test that also drives a scripted round
+                and needs both to agree about when things happened.
         """
         self.scale = scale
         self.notes: list[dict] = []
         self.reported_at: list[float] = []
+        self._clock = clock
         self._elapsed = 0.0
 
     def now(self) -> float:
         """Production seconds of simulated work done so far."""
-        return self._elapsed
+        return self._clock.elapsed if self._clock is not None else self._elapsed
 
     def sleep(self, simulated_s: float) -> None:
         """Charge ``simulated_s`` production seconds, blocking the real time they map to.
@@ -293,7 +297,10 @@ class ProgressCadence:
         Args:
             simulated_s (float): Production seconds the simulated child spent.
         """
-        self._elapsed += simulated_s
+        if self._clock is not None:
+            self._clock.advance(simulated_s)
+        else:
+            self._elapsed += simulated_s
         time.sleep(simulated_s / self.scale)
 
     def sink(self):
@@ -455,3 +462,58 @@ def serving_lease_on_a_ray_double(monkeypatch):
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
     with rs.ServingLease(num_gpus=1) as lease:
         yield lease
+
+
+@pytest.fixture
+def virtual_clock():
+    """A :class:`VirtualClock` for tests whose subject is a deadline.
+
+    :class:`ProgressCadence` measures one path's reporting gaps and blocks for
+    real (scaled) time so a heartbeat driver gets to run; that is the right
+    instrument for cadence and the wrong one for a multi-tick round, where
+    nothing may block at all and the readings production takes have to be the
+    clock's. This one is that clock, and can be handed to ``ProgressCadence``
+    so a test using both keeps one timeline.
+    """
+    from hyperloom.orchestrator.rehearsal import VirtualClock
+
+    return VirtualClock()
+
+
+class NoLaunchBackendInstalled(BaseException):
+    """A test launched a subprocess before installing a launch backend.
+
+    A ``BaseException`` on purpose. Several production launch sites sit inside
+    a bare ``except Exception`` -- the Magpie interpreter probe answers "this
+    interpreter cannot import Magpie" that way -- so an ordinary exception here
+    would be swallowed and the test would carry on against a wrong answer
+    instead of stopping.
+    """
+
+
+@pytest.fixture
+def launch_backend(monkeypatch):
+    """Install a launch backend for the test, and take it down afterwards.
+
+    Call it with a
+    :class:`~hyperloom.orchestrator.actions.executors.launch_backend.LaunchBackend`.
+    The process-wide backend is what gets swapped, so the substitution also
+    covers launches made on a worker thread the test never sees.
+    """
+    from hyperloom.orchestrator.actions.executors import launch_backend as module
+
+    installed: list = []
+
+    class _Delegating:
+        def run(self, cmd, **kwargs):
+            if not installed:
+                raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
+            return installed[-1].run(cmd, **kwargs)
+
+    monkeypatch.setattr(module, "PRODUCTION_LAUNCH_BACKEND", _Delegating())
+
+    def _install(backend):
+        installed.append(backend)
+        return backend
+
+    return _install
