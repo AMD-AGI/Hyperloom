@@ -9,12 +9,14 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
+from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -71,8 +73,22 @@ def _gate(tmp_path: Path, monkeypatch) -> tuple[PolicyGate, Path]:
         session_dir=sd,
         shared_state=state,
         strict_paths=True,
+        advisory=AdvisoryLedger(),
     )
     return gate, sd
+
+
+def _project(gate: PolicyGate, **fields) -> None:
+    """Re-take the gate's advisory snapshot, as a coordinator tick would.
+
+    Args:
+        gate: The gate whose advisory layer is refreshed.
+        fields: Facts the projection carries that no SharedState holds -- a
+            bring-up round is the round store's, not the session's.
+    """
+    from dataclasses import replace
+
+    gate.advisory.refresh(replace(ResourceProjection.of(gate.shared_state, now_unix=1000.0), **fields))
 
 
 def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | None = None) -> SubAgentRunner:
@@ -87,6 +103,7 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
         session_dir=sd,
         shared_state=state,
         strict_paths=True,
+        advisory=AdvisoryLedger(),
     )
     return SubAgentRunner(
         locks,
@@ -441,7 +458,15 @@ def test_dispatched_warm_replay_rejects_framework_symlink_escape(
 
 
 @pytest.mark.asyncio
-async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_singleton(tmp_path, monkeypatch):
+async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monkeypatch):
+    """The revalidation baseline executes rather than being cancelled at dispatch.
+
+    A revalidation only exists once a KEEP measured throughput, so the anchor
+    arm fires on exactly the session state a revalidation runs in, and a
+    denial there cancels the row instead of deferring it. What admits it is the
+    round it opened: the store names this task the holder, and the holder is not
+    refused by its own acquire.
+    """
     sub = _runner_with_policy(tmp_path, monkeypatch)
     state = sub.shared_state
     assert isinstance(state, SharedState)
@@ -458,7 +483,7 @@ async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_sing
         params={"reason": "enablement_eval_revalidation"},
         idempotency_key="enablement-revalidation",
     )
-    state.enablement.revalidation_task_id = task.task_id
+    _project(sub.policy, excluding_round_id="revalidation-1", excluding_round_holder=task.task_id)
 
     result = await sub.run_task(task)
 
@@ -466,7 +491,6 @@ async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_sing
     assert executed["ran"] is True
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_dispatched_integrate_patch_with_verdict_passes(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
@@ -726,3 +750,48 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     assert res.result == {"produced": "work"}
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
+
+
+def test_a_round_holding_the_machine_denies_baseline(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, monkeypatch)
+    _project(gate, excluding_round_id="round-7", excluding_round_holder="spec-abc")
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    with pytest.raises(PolicyDenied) as exc_info:
+        gate.validate_intent("orchestration", intent)
+    assert exc_info.value.rule == "enablement_round_in_flight"
+    assert "spec-abc" in str(exc_info.value)
+    assert "advisory" in str(exc_info.value)
+
+
+def test_no_round_in_flight_allows_baseline(tmp_path, monkeypatch):
+    """Nothing holds the machine, so the rule has nothing to refuse."""
+    gate, _ = _gate(tmp_path, monkeypatch)
+    _project(gate)
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={"action_name": "baseline", "params": {}},
+    )
+    gate.validate_intent("orchestration", intent)
+
+
+def test_an_established_anchor_alone_does_not_refuse_a_baseline(tmp_path, monkeypatch):
+    """Re-measuring a reference the run already has is a workflow opinion.
+
+    The rule is about the cards and ports a live round is using, not about how
+    many baselines a session may take, so a session that already has its figure
+    can still take another one while nothing holds the machine.
+    """
+    gate, _ = _gate(tmp_path, monkeypatch)
+    gate.shared_state.baseline_tput = 1000.0
+    _project(gate)
+
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={"action_name": "baseline", "params": {}},
+        ),
+    )
