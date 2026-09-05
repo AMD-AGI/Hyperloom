@@ -1,28 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The declared deliverable a specialist round hands back, and its frozen digests.
+"""The declared deliverable a specialist round hands back.
 
 A round names what it changed -- tree, target paths, env and arg layers, setup
 commands, whole-file artifacts -- rather than leaving the harness to infer it.
-Digests are frozen where the work was validated, before transport, and any
-digest the specialist supplies is discarded.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
-
-from hyperloom.inference_optimizer.session.paths import is_path_within
-from hyperloom.orchestrator.delivery.manifest import ABSENT, TreeBaseline, file_digest
-from hyperloom.orchestrator.source_snapshot import _safe_rel
-
-#: Recorded in place of a pre-image hash when the target did not exist before
-#: the round. Distinct from an empty hash, which reads as "not computed".
-NO_PRE_IMAGE = "absent"
 
 
 class DeliverableRefused(ValueError):
@@ -37,10 +26,6 @@ class Artifact:
         target: Path within ``tree_id`` the file installs to.
         tree_id: Tree the target belongs to, not necessarily the round's own.
         source: Absolute path of the authored file, where it was validated.
-        source_sha256: Frozen hash of ``source``, empty until
-            :func:`freeze_digests` runs.
-        pre_image_sha256: Frozen hash of what ``target`` held before the round,
-            or :data:`NO_PRE_IMAGE` when it held nothing.
         kind: Free-form artifact kind label.
         description: Free-form human description.
     """
@@ -48,15 +33,8 @@ class Artifact:
     target: str
     tree_id: str
     source: str
-    source_sha256: str = ABSENT
-    pre_image_sha256: str = ABSENT
     kind: str = ""
     description: str = ""
-
-    @property
-    def frozen(self) -> bool:
-        """Whether both digests have been computed and can be checked against."""
-        return bool(self.source_sha256) and bool(self.pre_image_sha256)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-safe dict."""
@@ -64,8 +42,6 @@ class Artifact:
             "target": self.target,
             "tree_id": self.tree_id,
             "source": self.source,
-            "source_sha256": self.source_sha256,
-            "pre_image_sha256": self.pre_image_sha256,
             "kind": self.kind,
             "description": self.description,
         }
@@ -125,8 +101,7 @@ def parse_deliverable(payload: Mapping[str, Any], *, default_tree_id: str) -> De
     A ``deliverable`` object is read when the round emits one, otherwise the
     flat keys (``patches_written``, ``extra_envs``, ``extra_server_args``,
     ``setup_commands``). Artifacts are not read here: the install resolves each
-    declared entry against the workspace sandbox and the allowlisted roots, and
-    :func:`freeze_digests` hashes what that resolved to.
+    declared entry against the workspace sandbox and the allowlisted roots.
 
     Args:
         payload: The parsed ``specialist_done`` content.
@@ -160,100 +135,9 @@ def parse_deliverable(payload: Mapping[str, Any], *, default_tree_id: str) -> De
     )
 
 
-def freeze_digests(
-    deliverable: Deliverable,
-    *,
-    baselines: Mapping[str, TreeBaseline],
-    validated_roots: Sequence[Path | str] = (),
-) -> Deliverable:
-    """Compute and freeze every artifact digest at the validation site.
-
-    The source hash comes from the file where the work was validated, the
-    pre-image hash from that target's tree baseline rather than the live tree.
-
-    Args:
-        deliverable: The parsed deliverable.
-        baselines: Pre-round baselines by tree id.
-        validated_roots: Directories a source file may legitimately live in,
-            being the round's worktree and workspace.
-
-    Returns:
-        Deliverable: The same deliverable with digests frozen.
-
-    Raises:
-        DeliverableRefused: When an artifact's source is unreadable, or lies
-            outside ``validated_roots`` with no recorded pre-image.
-    """
-    roots = [Path(r) for r in validated_roots]
-    frozen: list[Artifact] = []
-    for artifact in deliverable.artifacts:
-        source = Path(artifact.source)
-        digest = file_digest(source)
-        if not digest:
-            raise DeliverableRefused(f"artifact source is unreadable: {artifact.source}")
-
-        baseline = baselines.get(artifact.tree_id)
-        rel = _safe_rel(artifact.target)
-        entry = baseline.entry(rel) if baseline is not None and rel is not None else None
-        if entry is None:
-            if not any(is_path_within(source, root) for root in roots):
-                raise DeliverableRefused(
-                    f"artifact {artifact.target} was authored in place with no recorded pre-image; "
-                    "its target has no baseline entry to check the install against"
-                )
-            pre_image = NO_PRE_IMAGE
-        else:
-            pre_image = entry.sha256 if entry.existed else NO_PRE_IMAGE
-
-        frozen.append(
-            Artifact(
-                target=artifact.target,
-                tree_id=artifact.tree_id,
-                source=artifact.source,
-                source_sha256=digest,
-                pre_image_sha256=pre_image,
-                kind=artifact.kind,
-                description=artifact.description,
-            )
-        )
-    return Deliverable(
-        tree_id=deliverable.tree_id,
-        targets=deliverable.targets,
-        patches=deliverable.patches,
-        artifacts=tuple(frozen),
-        envs=dict(deliverable.envs),
-        server_args=deliverable.server_args,
-        setup_commands=deliverable.setup_commands,
-    )
-
-
-def mismatched_recorded_artifacts(records: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
-    """Return recorded artifacts whose source no longer matches its frozen digest.
-
-    Args:
-        records: Accepted artifact records, each with ``target``, ``source``
-            and, once frozen, ``source_sha256``. A record carrying no digest
-            predates freezing and is skipped.
-
-    Returns:
-        tuple[str, ...]: The targets that no longer match, sorted.
-    """
-    failed: list[str] = []
-    for record in records:
-        expected = str(record.get("source_sha256", ""))
-        if not expected:
-            continue
-        if file_digest(Path(str(record["source"]))) != expected:
-            failed.append(str(record["target"]))
-    return tuple(sorted(failed))
-
-
 __all__ = [
-    "NO_PRE_IMAGE",
     "Artifact",
     "Deliverable",
     "DeliverableRefused",
-    "freeze_digests",
     "parse_deliverable",
-    "mismatched_recorded_artifacts",
 ]

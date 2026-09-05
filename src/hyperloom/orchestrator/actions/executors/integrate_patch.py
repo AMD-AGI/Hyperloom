@@ -48,21 +48,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTRE
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
-from ...delivery import (
-    Artifact,
-    Deliverable,
-    DeliverableRefused,
-    TreeBaseline,
-    baseline_path,
-    capture_baseline,
-    drifted_paths,
-    file_digest,
-    freeze_digests,
-    load_records,
-    mismatched_recorded_artifacts,
-    parse_deliverable,
-    write_baseline,
-)
+from ...delivery import file_digest, load_records
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ._accuracy_gate import (
@@ -1321,44 +1307,6 @@ class _ArtifactSpec:
     description: str = ""
 
 
-def _installed_digest_mismatch(frozen: Deliverable | None, spec: "_ArtifactSpec") -> str:
-    """Return why the installed file is not what was validated, or ``""``.
-
-    The bytes now at the target must hash to the digest frozen where the work
-    was validated.
-
-    Args:
-        frozen: The round's deliverable with its digests frozen.
-        spec: The artifact just installed.
-
-    Returns:
-        str: The mismatch description, or ``""`` when the install matches.
-    """
-    if frozen is None:
-        return ""
-    for artifact in frozen.artifacts:
-        if artifact.target != spec.rel_target:
-            continue
-        if not artifact.frozen:
-            return f"{spec.rel_target}: no frozen digest to check the install against"
-        actual = file_digest(spec.target)
-        if actual != artifact.source_sha256:
-            return f"{spec.rel_target}: installed content is not what was validated"
-        return ""
-    return ""
-
-
-def _frozen_digests(frozen: Deliverable | None, rel_target: str) -> dict[str, str]:
-    """Return the frozen digests recorded for ``rel_target``, or an empty dict."""
-    for artifact in frozen.artifacts if frozen is not None else ():
-        if artifact.target == rel_target and artifact.frozen:
-            return {
-                "source_sha256": artifact.source_sha256,
-                "pre_image_sha256": artifact.pre_image_sha256,
-            }
-    return {}
-
-
 def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     """Resolve an artifact target (framework-relative, or absolute) to a path.
 
@@ -1711,8 +1659,6 @@ class IntegratePatchExecutor:
         self._apply_attempted: bool = False
         self._ip_base_artifact_replayed = False
         # This round's deliverable, digests frozen where the work was validated.
-        self._frozen_delivery: Deliverable | None = None
-        self._delivery_baselines: dict[str, TreeBaseline] = {}
         # Held so the revert can read the apply's backup ledger back.
         self._nogit_backup_root: Path | None = None
         # Blocked env names this round was granted, each bound to one value.
@@ -2622,32 +2568,6 @@ class IntegratePatchExecutor:
         ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
 
         self._replay_base_artifacts(params)
-
-        # After the base replay restored the accepted stack and before the
-        # candidate touches the tree: this is the pre-image later checks use.
-        delivery_refusal = self._freeze_delivery(
-            done_payload=done_payload,
-            artifact_specs=artifact_specs,
-            framework_root=framework_root,
-            validated_roots=[output_root, specialist_workspace],
-            specialist_task_id=specialist_task_id,
-        )
-        if delivery_refusal:
-            return _with_stash_restore(
-                framework_root,
-                stash_state,
-                stash_note,
-                {
-                    "status": "apply_failed",
-                    "error_class": "delivery_unverifiable",
-                    "error": delivery_refusal,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "config_changes_applied": {},
-                    "workspace": str(output_root),
-                },
-            )
 
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
@@ -4333,18 +4253,13 @@ class IntegratePatchExecutor:
     def _log_residual_drift(self, framework_root: Path) -> None:
         """Report anything the revert failed to put back.
 
-        Both records are read: the pre-round baseline covers the targets
-        declared up front, the apply's backup ledger covers the patch targets,
-        which are known only once a strip level is detected.
+        Read from the apply's backup ledger, which records each target's
+        pre-image at the strip level the apply detected.
 
         Args:
             framework_root: The tree that was just reverted.
         """
         residual: set[str] = set()
-        for baseline in self._delivery_baselines.values():
-            if Path(baseline.root) == Path(framework_root):
-                residual.update(drifted_paths(baseline))
-
         backup_root = self._nogit_backup_root
         for record in load_records(backup_root) if backup_root is not None else ():
             target = Path(str(record["target"]))
@@ -4390,20 +4305,12 @@ class IntegratePatchExecutor:
         base_artifacts = params.get("enablement_base_artifacts")
         if not isinstance(base_artifacts, list):
             return
-        moved = set(mismatched_recorded_artifacts(a for a in base_artifacts if isinstance(a, dict)))
-        if moved:
-            log.error(
-                "integrate_patch: base artifacts no longer match what was validated; skipping them: %s",
-                ", ".join(sorted(moved)),
-            )
         for art in base_artifacts:
             if not isinstance(art, dict):
                 continue
             source_str = str(art.get("source") or "").strip()
             target_str = str(art.get("target") or "").strip()
             if not source_str or not target_str:
-                continue
-            if target_str in moved:
                 continue
             source = Path(source_str)
             if not source.is_file():
@@ -4433,98 +4340,6 @@ class IntegratePatchExecutor:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             log.info("integrate_patch: re-installed base artifact %s", target)
-
-    def _freeze_delivery(
-        self,
-        *,
-        done_payload: dict[str, Any] | None,
-        artifact_specs: list["_ArtifactSpec"],
-        framework_root: Path | None,
-        validated_roots: list[Path],
-        specialist_task_id: str,
-    ) -> str:
-        """Record each target tree's pre-image and freeze the round's digests.
-
-        Both go on record before the tree is mutated: the pre-image — a commit
-        for a git tree, a content manifest for one without — and the artifact
-        digests, frozen against the files as they were validated. Patch targets
-        are not manifested here; the non-git apply channel records each
-        pre-image in its backup ledger at its detected strip level.
-
-        Args:
-            done_payload: The round's ``specialist_done`` content.
-            artifact_specs: Resolved whole-file artifacts, already bound to an
-                allowlisted root. The digests are frozen from these rather than
-                from the raw payload, so what is checked is what will be
-                installed.
-            framework_root: The round's primary tree, when it has one.
-            validated_roots: Directories an authored source may live in -- the
-                round workspace and the specialist's own.
-            specialist_task_id: Keys the baselines written for this round.
-
-        Returns:
-            str: Empty when the delivery is verifiable; otherwise why it is
-            not, which the caller must treat as a refusal to apply.
-        """
-        from hyperloom.common.io import atomic_write_json
-
-        from ...bringup.trees import tree_id_for, tree_kind
-
-        roots: dict[str, list[str]] = {}
-        if framework_root is not None:
-            roots.setdefault(str(framework_root), [])
-        for spec in artifact_specs:
-            roots.setdefault(str(spec.root), []).append(spec.rel_target)
-
-        baselines: dict[str, TreeBaseline] = {}
-        primary_tree_id = ""
-        for root, targets in roots.items():
-            tree_id = tree_id_for(root)
-            baseline = capture_baseline(tree_id=tree_id, root=root, kind=tree_kind(root), targets=targets)
-            baselines[tree_id] = baseline
-            if framework_root is not None and root == str(framework_root):
-                primary_tree_id = tree_id
-            if self.session_dir:
-                write_baseline(baseline, session_dir=Path(self.session_dir), round_key=specialist_task_id or "round")
-
-        declared = parse_deliverable(done_payload or {}, default_tree_id=primary_tree_id)
-        # From the resolved specs, not the declaration: the spec names the
-        # file that will actually be copied over the target.
-        deliverable = Deliverable(
-            tree_id=declared.tree_id or primary_tree_id,
-            targets=declared.targets,
-            patches=declared.patches,
-            artifacts=tuple(
-                Artifact(
-                    target=spec.rel_target,
-                    tree_id=tree_id_for(str(spec.root)),
-                    source=str(spec.source),
-                    kind=spec.kind,
-                    description=spec.description,
-                )
-                for spec in artifact_specs
-            ),
-            envs=declared.envs,
-            server_args=declared.server_args,
-            setup_commands=declared.setup_commands,
-        )
-        try:
-            frozen = freeze_digests(
-                deliverable,
-                baselines=baselines,
-                validated_roots=validated_roots,
-            )
-        except DeliverableRefused as exc:
-            return str(exc)
-        self._frozen_delivery = frozen
-        self._delivery_baselines = baselines
-        if self.session_dir and specialist_task_id:
-            atomic_write_json(
-                baseline_path(Path(self.session_dir), specialist_task_id, "deliverable"),
-                frozen.to_dict(),
-                trailing_newline=True,
-            )
-        return ""
 
     def _apply_artifacts(
         self,
@@ -4572,13 +4387,8 @@ class IntegratePatchExecutor:
                         # Re-install source for the next round's base replay and
                         # for the archived copy in enablement_setting.sh.
                         "source": str(spec.source),
-                        # The only check a later round's base replay has.
-                        **_frozen_digests(self._frozen_delivery, spec.rel_target),
                     }
                 )
-                installed = _installed_digest_mismatch(self._frozen_delivery, spec)
-                if installed:
-                    errors.append({"artifact": spec.rel_target, "error": installed})
             except OSError as exc:
                 errors.append({"artifact": spec.rel_target, "error": repr(exc)})
         return applied, errors

@@ -55,7 +55,6 @@ from hyperloom.common.env_safety import (
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from ..bringup.trees import head_commit
-from ..delivery.manifest import post_images_from_diff, write_post_images
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
     parse_claude_stream_json_tool_calls,
@@ -1700,9 +1699,6 @@ class SpecialistSubprocessDispatcher:
                 harvested = worktree / "patches" / "_worktree_diff.patch"
                 harvested.parent.mkdir(exist_ok=True)
                 harvested.write_text(harvested_diff, encoding="utf-8")
-                # Last moment the worktree still holds the validated state, so
-                # the post-image the apply site checks against is hashed here.
-                write_post_images(harvested, post_images_from_diff(harvested_diff, worktree))
                 return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
         out: list[str] = []

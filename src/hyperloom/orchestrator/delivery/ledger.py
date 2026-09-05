@@ -9,6 +9,7 @@ describes is touched, so a revert can run from disk alone.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -21,6 +22,29 @@ log = logging.getLogger(__name__)
 
 #: Filename of the ledger within a backup root.
 LEDGER_NAME = "backup_ledger.jsonl"
+
+
+#: Recorded in place of a hash when the path cannot be read.
+ABSENT = ""
+
+
+def file_digest(path: Path) -> str:
+    """Return the lowercase sha256 of ``path``'s bytes, :data:`ABSENT` if unreadable.
+
+    Args:
+        path: File to hash.
+
+    Returns:
+        str: Hex digest, or :data:`ABSENT`.
+    """
+    try:
+        with Path(path).open("rb") as fh:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ABSENT
+    return digest.hexdigest()
 
 
 def ledger_path(backup_root: Path | str) -> Path:

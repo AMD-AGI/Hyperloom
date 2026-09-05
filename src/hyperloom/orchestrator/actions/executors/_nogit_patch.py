@@ -11,13 +11,11 @@ import shutil
 import subprocess
 
 from hyperloom.common.git_safety import safe_directory_args
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from ...delivery.ledger import append_record, merge_records
-from ...delivery.manifest import file_digest as _file_digest
-from ...delivery.manifest import read_post_images
+from ...delivery import file_digest as _file_digest
 from ...specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)
@@ -94,20 +92,17 @@ def _is_git_tree(path: Path) -> bool:
         return False
 
 
-def _reverse_applies_cleanly(
-    framework_root: Path,
-    patch_path: Path,
-    *,
-    post_images: Mapping[str, str] | None = None,
-) -> bool:
+def _reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool:
     """True when ``patch_path`` is already fully applied in ``framework_root``.
 
     A reverse dry-run (``patch -R --dry-run``) is the only probe POSIX
     ``patch`` offers: its forward exit code is non-zero for both "does not
-    apply" and "previously applied". It is not proof of exactness on its own —
+    apply" and "previously applied". On its own it is not proof of exactness:
     ``patch`` matches with fuzz and at an offset, so it answers yes for a tree
-    that merely resembles the post-state — so fuzz is disabled and, where the
-    caller knows the frozen post-image digests, those decide.
+    that merely resembles the post-state. Fuzz is disabled, and a hunk that
+    only matched by shifting is rejected -- an offset means the surrounding
+    lines are not the ones the patch was written against, so the tree is not
+    the post-image even though every hunk found a home.
 
     Strictly a probe: ``--dry-run`` is passed at every level, so the tree is
     never mutated.
@@ -115,9 +110,6 @@ def _reverse_applies_cleanly(
     Args:
         framework_root: The source-tree root the patch targets.
         patch_path: The unified-diff patch file to probe.
-        post_images: Tree-relative path to the digest the file must hold for
-            the patch to count as applied, frozen where the patch was
-            validated. When given, every entry must match.
 
     Returns:
         ``True`` when the tree exactly holds the patch's post-state.
@@ -138,28 +130,15 @@ def _reverse_applies_cleanly(
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         if cp.returncode == 0:
-            return _matches_post_images(framework_root, post_images)
+            if "offset" in cp.stdout:
+                log.info(
+                    "nogit patch: %s reverses only at an offset in %s; not treating it as applied",
+                    patch_path.name,
+                    framework_root,
+                )
+                return False
+            return True
     return False
-
-
-def _matches_post_images(framework_root: Path, post_images: Mapping[str, str] | None) -> bool:
-    """Whether the tree holds exactly the bytes frozen where the patch was validated.
-
-    Args:
-        framework_root: The tree the patch targets.
-        post_images: Tree-relative path to frozen content hash, empty when the
-            patch carries none.
-
-    Returns:
-        ``True`` when every frozen digest is reproduced, or none were frozen.
-    """
-    if not post_images:
-        return True
-    for rel, digest in post_images.items():
-        if _file_digest(framework_root / rel) != digest:
-            log.info("nogit patch: %s does not hold the frozen post-image for %s", framework_root, rel)
-            return False
-    return True
 
 
 def _bak_name(patch_stem: str, rel_target: Path, seq: int) -> str:
@@ -252,7 +231,7 @@ def _apply_patch_no_git(
         # case the apply is a satisfied no-op -- report success with no backups
         # (the patch that really made those edits owns the backups needed for a
         # correct revert).
-        if _reverse_applies_cleanly(framework_root, patch_input, post_images=read_post_images(patch_path)):
+        if _reverse_applies_cleanly(framework_root, patch_input):
             log.info(
                 "nogit patch: %s is already fully applied (clean reverse dry-run); treating as a no-op",
                 patch_path.name,
