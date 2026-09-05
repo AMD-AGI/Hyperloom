@@ -19,6 +19,7 @@ the same pass.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -233,10 +234,15 @@ class Reconciler:
         that started and is still going from one that finished. It is the only
         thing the supervisor reads: a coordinator that has stopped ticking is
         past reading anything this pass could have been left.
+
+        The write fsyncs the file and its directory, and the session directory
+        can be a network mount, so it runs off the loop thread: a stamp that
+        blocked the loop would manufacture the stall it exists to report.
         """
         if self._session_dir is None:
             return
-        supervisor_store.stamp_tick(
+        await asyncio.to_thread(
+            supervisor_store.stamp_tick,
             self._session_dir,
             tick=int(getattr(self._shared_state, "tick", 0)),
             now_unix=now_unix,
