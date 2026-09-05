@@ -574,10 +574,8 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     assert settled.outcome == "expired_reaped", "the holder's own row records the end of its work"
     budget = await _charged(fake)
     assert (budget.observations, budget.stall_spent) == (1, 1)
-    # The machine comes back, but only once the reap grace has run: a kill is
-    # confirmed before the kernel and the GPU allocator have finished with it.
-    assert settled.excludes_at(time.time() + 3600.0) is True
-    assert settled.excludes_at(time.time() + 7200.0) is False
+    # And the machine comes back with the settle: a settled round holds nothing.
+    assert settled.excludes_at(time.time() + 3600.0) is False
 
 
 @pytest.mark.asyncio

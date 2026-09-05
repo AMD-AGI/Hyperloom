@@ -123,9 +123,8 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
     # bringup_rounds — the durable mutex deciding whether another round may
-    # start. The admission predicate reads only exclusion_permanent and
-    # exclusion_until, both NOT NULL so no NULL can reach a WHERE clause that
-    # would read it as false.
+    # start. Admission reads state and expires_unix, so exclusion is bounded by
+    # the lease: a round nobody settles stops excluding on its own.
     """
     CREATE TABLE IF NOT EXISTS bringup_rounds (
         round_id             TEXT    PRIMARY KEY,
@@ -137,10 +136,6 @@ _DDL = [
         renewed_unix         REAL    NOT NULL,
         expires_unix         REAL    NOT NULL,
         settled_unix         REAL,
-        kill_confirmed_unix  REAL,
-        reap_grace_sec       REAL    NOT NULL DEFAULT 0,
-        exclusion_permanent  INTEGER NOT NULL DEFAULT 0,
-        exclusion_until      REAL    NOT NULL DEFAULT 0,
         reap_backend         TEXT    NOT NULL DEFAULT '',
         probe_origin         TEXT    NOT NULL DEFAULT '',
         provisional          INTEGER NOT NULL DEFAULT 0,
@@ -148,7 +143,6 @@ _DDL = [
         stage_high_water     INTEGER NOT NULL DEFAULT 0
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_exclusion ON bringup_rounds(exclusion_permanent, exclusion_until)",
     "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_state ON bringup_rounds(state, opened_unix)",
     # round_events — append-only outbox. Every attempt lands here with its
     # outcome, evidence and request id, applied or rejected, so a rejected

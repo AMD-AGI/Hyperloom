@@ -447,7 +447,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "the real cause), or point AIPERF_BIN at an existing pinned build."
     ),
     # Host-level terminals: something outside the model ended the run.
-    "bringup_round_unreaped": "A bring-up round expired with nothing confirming its holder dead, so the machine stays excluded for the rest of the session and no later round could bring a server up.",
     "supervisor_coordinator_died": "The out-of-band supervisor found the coordinator's process gone; this record was written by the supervisor because there was no coordinator left to write one.",
     "supervisor_tick_stalled": "The out-of-band supervisor found the coordinator's tick not advancing inside its stall window and asked the session to end.",
 }

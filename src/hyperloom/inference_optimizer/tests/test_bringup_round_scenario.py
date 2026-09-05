@@ -52,7 +52,6 @@ from hyperloom.orchestrator.rehearsal import (
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import (
-    DEFAULT_REAP_GRACE_SEC,
     FAILED,
     SETTLED,
     RoundStore,
@@ -307,7 +306,7 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         # kernel has not torn the address space down when the signal returns,
         # and the cards outlive the process that held them by longer still. The
         # next tick is therefore on the far side of that grace.
-        monkeypatch.setattr(time, "time", _advanced_by(DEFAULT_REAP_GRACE_SEC + 1.0))
+        monkeypatch.setattr(time, "time", _advanced_by(1.0))
         lane = _lane(session, tasks, rounds, excerpt.text if excerpt is not None else "", attempts=tick)
         task_id = await lane._maybe_enqueue_enablement_specialist()
         assert task_id, "the lane opened no repair task for a boot that failed"

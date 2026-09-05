@@ -960,15 +960,10 @@ class PolicyGate:
         facts = self.resources
         if not facts.round_excludes or (task_id and task_id == facts.excluding_round_holder):
             return
-        permanence = (
-            "its lease ran out and nothing ever confirmed the holder dead"
-            if facts.excluding_round_permanent
-            else "its lease is still live"
-        )
         raise PolicyDenied(
             (
                 f"baseline: bring-up round {facts.excluding_round_id!r} "
-                f"(holder={facts.excluding_round_holder!r}) holds the machine -- {permanence}"
+                f"(holder={facts.excluding_round_holder!r}) holds the machine while its lease is live"
             ),
             rule=RULE_ROUND_IN_FLIGHT,
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
@@ -1492,6 +1487,10 @@ class PolicyGate:
         # it takes the serving lane with it, so a smaller lease cannot run.
         if reserves_bench_lane and serving_tp > gpu_count:
             gpu_count = serving_tp
+        if not facts.read:
+            # Nothing has read the pool sizes, so there is no pool size to
+            # judge against; the acquire refuses if the pool cannot fund it.
+            return
         if facts.gpu_specialist_capacity <= 0 and not (whole_machine and facts.whole_machine_pool > 0):
             raise PolicyDenied(
                 "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",

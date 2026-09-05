@@ -683,7 +683,6 @@ a round: a round has to outlive the process that took it, so no field in
 | `fence`                | int           | The holder's token; only a handoff advances it.                                                     |
 | `opened_unix`          | float         | When the round was acquired.                                                                        |
 | `settled_unix`         | float \| null | When it ended, `null` while open.                                                                   |
-| `excludes_permanently` | bool          | Its lease ran out with nothing confirming the holder dead, so it denies every later round.          |
 | `provisional`          | bool          | The round's result is not yet trustworthy.                                                          |
 | `correctness_verified` | bool          | The round's server passed correctness.                                                              |
 | `probe_origin`         | string        | What caused the round to be opened.                                                                 |

@@ -2371,8 +2371,6 @@ class EnablementRoundSummary(TypedDict, total=False):
         fence: The holder's token; only a handoff advances it.
         opened_unix: When the round was acquired.
         settled_unix: When it ended, or ``None`` while it is open.
-        excludes_permanently: True for a round whose lease ran out with nothing
-            confirming its holder dead, which denies every later round.
         provisional: Whether the round's result is not yet trustworthy.
         correctness_verified: Whether the round's server passed correctness.
         probe_origin: What caused the round to be opened.
@@ -2387,7 +2385,6 @@ class EnablementRoundSummary(TypedDict, total=False):
     fence: int
     opened_unix: float
     settled_unix: float | None
-    excludes_permanently: bool
     provisional: bool
     correctness_verified: bool
     probe_origin: str

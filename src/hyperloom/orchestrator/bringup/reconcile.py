@@ -46,7 +46,6 @@ from ..state.round_store import (
     EXPIRED_UNREAPED,
     EXPIRY_OUTCOMES,
     OPEN,
-    UNREAPED_STOP_REASON,
     Round,
     RoundStore,
 )
@@ -436,16 +435,23 @@ class Reconciler:
             outcome=outcome,
             now_unix=now_unix,
             request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-            kill_confirmed_unix=reap.confirmed_unix,
             reap_backend=reap.backend,
             evidence={"reason": why, "reap": reap.outcome, "claim": reap.claim},
         )
         if not result.ok:
             return
         report.settled.append((round_row.round_id, outcome))
-        await self._charge_the_round(round_row, now_unix, why=why)
         if outcome == EXPIRED_UNREAPED:
-            self._stop_loudly(round_row, reap)
+            # Recorded, not acted on: an unconfirmable reap is the ordinary
+            # answer from a process-group unit, and the lease has already run
+            # out, so the machine is released either way.
+            log.warning(
+                "RECONCILE: round %s expired with nothing confirming holder %s dead (%s)",
+                round_row.round_id,
+                round_row.holder_task_id,
+                reap.outcome,
+            )
+        await self._charge_the_round(round_row, now_unix, why=why)
 
     async def _charge_the_round(self, round_row: Round, now_unix: float, *, why: str) -> None:
         """Charge the ledger for a round that ended without reporting anything.
@@ -491,21 +497,6 @@ class Reconciler:
             # enumeration: no unit looked at a process to produce it.
             return Reap(float(now_unix), REAP_HOLDER_REPORTED, self._reaper.name, CLAIM_REACHABLE)
         return Reap(None, REAP_UNOBSERVABLE, self._reaper.name, reap.claim)
-
-    def _stop_loudly(self, round_row: Round, reap: Reap) -> None:
-        """Stop the session on a round whose holder was never confirmed dead."""
-        log.error(
-            "RECONCILE: round %s expired with nothing confirming holder %s dead (%s); "
-            "the machine stays excluded and the session stops",
-            round_row.round_id,
-            round_row.holder_task_id,
-            reap.outcome,
-        )
-        state = self._shared_state
-        if state is None or state.stop_reason:
-            return
-        state.set_stop_reason(UNREAPED_STOP_REASON)
-        self._save_state()
 
     def _save_state(self) -> None:
         """Persist SharedState after a terminal, if there is somewhere to put it."""

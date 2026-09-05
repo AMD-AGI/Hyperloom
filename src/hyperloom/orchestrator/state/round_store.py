@@ -44,15 +44,9 @@ EXPIRED_REAPED = "expired_reaped"
 #: The lease ran out and nothing ever confirmed the holder dead.
 EXPIRED_UNREAPED = "expired_unreaped"
 
-#: Session terminal an :data:`EXPIRED_UNREAPED` round forces.
-UNREAPED_STOP_REASON = "bringup_round_unreaped"
-
-#: Outcomes that keep excluding after the round is over; every other outcome
-#: releases.
+#: The two ways a lease can run out, kept apart because the reap either
+#: confirmed the holder dead or did not.
 EXPIRY_OUTCOMES = frozenset({EXPIRED_REAPED, EXPIRED_UNREAPED})
-
-_EXPIRY_ORDER = tuple(sorted(EXPIRY_OUTCOMES))
-_EXPIRY_PLACEHOLDERS = ", ".join("?" for _ in _EXPIRY_ORDER)
 
 OUTCOMES = frozenset({BOOTED, FAILED, ABANDONED, *EXPIRY_OUTCOMES})
 
@@ -72,21 +66,19 @@ OBSERVE = "observe"
 EVIDENCE_STAGE = "stage"
 EVIDENCE_DIGEST = "failure_digest"
 
-#: How long after a confirmed kill the machine stays excluded: a GPU allocation
-#: outlives the process that made it.
-DEFAULT_REAP_GRACE_SEC = 90.0
-
 #: Default for an attempt that records nothing beyond the operation itself.
 _NO_EVIDENCE: Mapping[str, Any] = MappingProxyType({})
 
-#: The admission predicate; both columns are NOT NULL so no NULL reaches it.
-_LIVE_EXCLUSION = "exclusion_permanent = 1 OR exclusion_until > ?"
+#: The admission predicate: a round holds the machine while it is open and its
+#: lease is live. Time-bounded on purpose -- an exclusion that outlived every
+#: reader is what trapped a session before, and the repair pass settles an open
+#: round at the top of a tick, before anything asks to acquire.
+_LIVE_EXCLUSION = f"state = '{OPEN}' AND expires_unix > ?"
 
 __all__ = [
     "ABANDONED",
     "ALREADY_SETTLED",
     "BOOTED",
-    "DEFAULT_REAP_GRACE_SEC",
     "EVIDENCE_DIGEST",
     "EVIDENCE_STAGE",
     "EXCLUDED",
@@ -98,7 +90,6 @@ __all__ = [
     "OPEN",
     "SETTLED",
     "STALE_FENCE",
-    "UNREAPED_STOP_REASON",
     "Round",
     "RoundEvent",
     "RoundResult",
@@ -121,11 +112,7 @@ class Round:
         expires_unix: When its lease runs out; the same instant the round's
             lane row carries.
         settled_unix: When it was settled, or ``None``.
-        kill_confirmed_unix: When the holder's processes were confirmed dead,
             or ``None`` when nothing ever confirmed it.
-        reap_grace_sec: Grace applied on top of a confirmed kill.
-        exclusion_permanent: Whether this round denies every future acquire.
-        exclusion_until: Instant until which this round denies acquires.
         reap_backend: What performed (or would have performed) the reap.
         probe_origin: What caused the round to be opened.
         provisional: Whether the round's result is not yet trustworthy.
@@ -142,10 +129,6 @@ class Round:
     renewed_unix: float
     expires_unix: float
     settled_unix: float | None
-    kill_confirmed_unix: float | None
-    reap_grace_sec: float
-    exclusion_permanent: bool
-    exclusion_until: float
     reap_backend: str
     probe_origin: str
     provisional: bool
@@ -163,7 +146,6 @@ class Round:
             Round: The decoded row.
         """
         settled = row["settled_unix"]
-        killed = row["kill_confirmed_unix"]
         return cls(
             round_id=str(row["round_id"]),
             state=str(row["state"]),
@@ -174,10 +156,6 @@ class Round:
             renewed_unix=float(row["renewed_unix"]),
             expires_unix=float(row["expires_unix"]),
             settled_unix=None if settled is None else float(settled),
-            kill_confirmed_unix=None if killed is None else float(killed),
-            reap_grace_sec=float(row["reap_grace_sec"]),
-            exclusion_permanent=bool(row["exclusion_permanent"]),
-            exclusion_until=float(row["exclusion_until"]),
             reap_backend=str(row["reap_backend"]),
             probe_origin=str(row["probe_origin"]),
             provisional=bool(row["provisional"]),
@@ -196,7 +174,7 @@ class Round:
         Returns:
             bool: ``True`` when an acquire must be denied.
         """
-        return self.exclusion_permanent or self.exclusion_until > float(now_unix)
+        return self.state == OPEN and self.expires_unix > float(now_unix)
 
 
 @dataclass(frozen=True)
@@ -286,19 +264,15 @@ class RoundStore:
 
     Attributes:
         db (SqliteConnection): The session database.
-        reap_grace_sec (float): Grace applied on top of a confirmed kill.
     """
 
-    def __init__(self, db: SqliteConnection, *, reap_grace_sec: float = DEFAULT_REAP_GRACE_SEC):
+    def __init__(self, db: SqliteConnection):
         """Initialise the store.
 
         Args:
             db: The session database.
-            reap_grace_sec: Seconds a confirmed kill keeps excluding after it
-                is confirmed.
         """
         self.db = db
-        self.reap_grace_sec = max(0.0, float(reap_grace_sec))
 
     async def open(
         self,
@@ -343,10 +317,9 @@ class RoundStore:
                 "INSERT INTO bringup_rounds ("
                 "  round_id, state, outcome, holder_task_id, fence,"
                 "  opened_unix, renewed_unix, expires_unix, settled_unix,"
-                "  kill_confirmed_unix, reap_grace_sec, exclusion_permanent,"
-                "  exclusion_until, reap_backend, probe_origin, provisional,"
+                "  reap_backend, probe_origin, provisional,"
                 "  correctness_verified, stage_high_water"
-                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL, NULL, ?, 0, ?, ?, ?, ?, 0, 0"
+                ") SELECT ?, ?, '', ?, 1, ?, ?, ?, NULL, ?, ?, ?, 0, 0"
                 f" WHERE NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE {_LIVE_EXCLUSION})"  # nosec B608 - a fixed predicate constant, no caller input.
                 "   AND NOT EXISTS (SELECT 1 FROM bringup_rounds WHERE round_id = ?)",
                 (
@@ -355,8 +328,6 @@ class RoundStore:
                     holder_task_id,
                     now,
                     now,
-                    expires,
-                    self.reap_grace_sec,
                     expires,
                     reap_backend,
                     probe_origin,
@@ -444,9 +415,9 @@ class RoundStore:
                     cur, round_row, round_id, request_id, "renew", "", fence, holder_task_id, reason, evidence, now
                 )
             cur.execute(
-                "UPDATE bringup_rounds SET renewed_unix = ?, expires_unix = ?, exclusion_until = ?"
+                "UPDATE bringup_rounds SET renewed_unix = ?, expires_unix = ?"
                 " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
-                (now, expires, expires, round_id, holder_task_id, int(fence), OPEN),
+                (now, expires, round_id, holder_task_id, int(fence), OPEN),
             )
             hold_round_lane(
                 cur,
@@ -514,13 +485,12 @@ class RoundStore:
                 )
             cur.execute(
                 "UPDATE bringup_rounds SET holder_task_id = ?, fence = ?, renewed_unix = ?,"
-                "  expires_unix = ?, exclusion_until = ?"
+                "  expires_unix = ?"
                 " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
                 (
                     new_holder_task_id,
                     next_fence,
                     now,
-                    expires,
                     expires,
                     round_id,
                     holder_task_id,
@@ -612,20 +582,16 @@ class RoundStore:
         outcome: str,
         now_unix: float,
         request_id: str,
-        kill_confirmed_unix: float | None = None,
         reap_backend: str = "",
         correctness_verified: bool = False,
         provisional: bool = False,
         evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
-        """End the round and decide what it leaves excluded.
+        """End the round, releasing the machine.
 
-        Both exclusion columns are written with an explicit ``CASE`` so that a
-        NULL ``kill_confirmed_unix`` never reaches the admission predicate. A
-        confirmed kill dates the exclusion from the confirmation, not from the
-        lease the holder never used up. The round's lane row is released here:
-        what a settled round still denies is carried by the exclusion columns,
-        which no lease can express.
+        A settled round denies nothing. The lane row goes with it, so what the
+        next acquire sees is the absence of an open round rather than a record
+        of this one.
 
         Args:
             round_id: The round to settle.
@@ -634,8 +600,6 @@ class RoundStore:
             outcome: One of :data:`OUTCOMES`.
             now_unix: Current wall time.
             request_id: The caller's id for this attempt.
-            kill_confirmed_unix: When the holder's processes were confirmed
-                dead; ``None`` when nothing confirmed it.
             reap_backend: What performed the reap.
             correctness_verified: Whether the round's server passed correctness.
             provisional: Whether the round's result is untrustworthy.
@@ -647,14 +611,10 @@ class RoundStore:
             settle had already been applied, otherwise ``reason``.
 
         Raises:
-            ValueError: When ``outcome`` is not one of :data:`OUTCOMES`, or
-                when :data:`EXPIRED_REAPED` is claimed with nothing to date the
-                reap from.
+            ValueError: When ``outcome`` is not one of :data:`OUTCOMES`.
         """
         if outcome not in OUTCOMES:
             raise ValueError(f"unknown round outcome {outcome!r}; expected one of {sorted(OUTCOMES)}")
-        if outcome == EXPIRED_REAPED and kill_confirmed_unix is None:
-            raise ValueError(f"{EXPIRED_REAPED} needs a kill_confirmed_unix; settle {EXPIRED_UNREAPED} instead")
         now = float(now_unix)
         async with self.db.transaction() as cur:
             round_row = _load(cur, round_id)
@@ -714,35 +674,20 @@ class RoundStore:
                     evidence,
                     now,
                 )
-            killed = None if kill_confirmed_unix is None else float(kill_confirmed_unix)
             cur.execute(
                 "UPDATE bringup_rounds SET"
-                "  state = ?, outcome = ?, settled_unix = ?, kill_confirmed_unix = ?,"
+                "  state = ?, outcome = ?, settled_unix = ?,"
                 "  reap_backend = CASE WHEN ? <> '' THEN ? ELSE reap_backend END,"
-                "  correctness_verified = ?, provisional = ?,"
-                "  exclusion_permanent = CASE WHEN ? = ? THEN 1 ELSE 0 END,"
-                "  exclusion_until = CASE"
-                f"    WHEN ? NOT IN ({_EXPIRY_PLACEHOLDERS}) THEN 0"  # nosec B608 - placeholders for a fixed constant, no caller input.
-                "    WHEN ? IS NOT NULL THEN ? + reap_grace_sec"
-                "    ELSE expires_unix END"
+                "  correctness_verified = ?, provisional = ?"
                 " WHERE round_id = ? AND holder_task_id = ? AND fence = ? AND state = ?",
                 (
                     SETTLED,
                     outcome,
                     now,
-                    killed,
                     reap_backend,
                     reap_backend,
                     1 if correctness_verified else 0,
                     1 if provisional else 0,
-                    outcome,
-                    EXPIRED_UNREAPED,
-                    outcome,
-                    *_EXPIRY_ORDER,
-                    # The bound confirmation, not the column: inside a single
-                    # UPDATE the column still reads its pre-update value.
-                    killed,
-                    killed,
                     round_id,
                     holder_task_id,
                     int(fence),

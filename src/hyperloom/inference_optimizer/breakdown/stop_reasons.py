@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from hyperloom.orchestrator.bringup.argv_preflight import ARGV_INVALID
 from hyperloom.orchestrator.bringup.env_preflight import ENV_FAULT
-from hyperloom.orchestrator.state.round_store import UNREAPED_STOP_REASON
 from hyperloom.orchestrator.supervisor.watch import DIED_STOP_REASON, WEDGED_STOP_REASON
 
 #: Terminals that mean the run optimized and closed normally.
@@ -33,9 +32,7 @@ ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal", "user_stop_requested
 #: that cannot run the combo, an argv the installed parser refuses, a bring-up
 #: round that expired unreaped, or a supervisor that found the coordinator dead
 #: or its tick wedged.
-INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
-    {ENV_FAULT, ARGV_INVALID, UNREAPED_STOP_REASON, DIED_STOP_REASON, WEDGED_STOP_REASON}
-)
+INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset({ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON})
 
 #: Terminals the model gate reached before the loop started. Verdicts about the
 #: model, so absent from :data:`INFRASTRUCTURE_STOP_REASONS`.

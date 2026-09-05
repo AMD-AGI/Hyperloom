@@ -314,7 +314,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "server_argv_invalid",
         # A bring-up round expired with nothing confirming its holder dead, so
         # it keeps excluding the machine.
-        "bringup_round_unreaped",
         # The out-of-band supervisor found the coordinator's process gone; it
         # reaches a report through the terminal artifact the supervisor writes.
         "supervisor_coordinator_died",

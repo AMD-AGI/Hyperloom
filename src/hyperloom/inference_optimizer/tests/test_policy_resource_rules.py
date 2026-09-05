@@ -27,7 +27,11 @@ from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.policy import gate as gate_module
 from hyperloom.orchestrator.policy import projection as projection_module
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.policy.projection import RULE_ROUND_IN_FLIGHT, ResourceFacts
+from hyperloom.orchestrator.policy.projection import (
+    RULE_GPU_POOL_DISABLED,
+    RULE_ROUND_IN_FLIGHT,
+    ResourceFacts,
+)
 from hyperloom.orchestrator.rehearsal import VirtualClock
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.round_store import (
@@ -39,14 +43,13 @@ from hyperloom.orchestrator.state.round_store import (
 )
 
 _LEASE = 600.0
-_GRACE = 90.0
 
 
 @pytest.fixture
 def store(tmp_path):
     """A :class:`RoundStore` over a real temp session database."""
     db = SqliteConnection(tmp_path / "coordinator.db")
-    yield RoundStore(db, reap_grace_sec=_GRACE)
+    yield RoundStore(db)
     db.close()
 
 
@@ -107,17 +110,18 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
 
 
 @pytest.mark.asyncio
-async def test_an_expired_round_never_confirmed_dead_still_denies(store, clock):
-    """Nothing said the holder died, so nothing says the cards are free.
+@pytest.mark.parametrize("outcome", [EXPIRED_UNREAPED, EXPIRED_REAPED])
+async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, outcome):
+    """Settling releases, whether or not anything confirmed the holder dead.
 
-    The contrast is the reaped round beside it: a confirmed kill plus its grace
-    is evidence, and evidence expires. An unreaped one carries none, so no
-    amount of elapsed time turns it into a release.
+    A process-group reap cannot prove a tree gone, so "unconfirmed" is the
+    ordinary answer. Holding the machine on the strength of what nobody could
+    observe is the shape that trapped a session before.
     """
     facts = ResourceFacts()
     gate = _gate(facts)
     opened = await store.open(
-        "round-unreaped",
+        "round-1",
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
         now_unix=clock.wall(),
@@ -125,62 +129,50 @@ async def test_an_expired_round_never_confirmed_dead_still_denies(store, clock):
     )
     clock.advance(_LEASE + 1.0)
     await store.settle(
-        "round-unreaped",
+        "round-1",
         holder_task_id="baseline-1",
         fence=opened.fence,
-        outcome=EXPIRED_UNREAPED,
+        outcome=outcome,
         now_unix=clock.wall(),
         request_id="req-settle",
     )
 
-    clock.advance(86_400.0)
+    await _reread(store, facts, clock.wall())
+    gate.validate_intent("orchestration", _baseline())
+
+    # And the acquire agrees, which is the answer that counts.
+    assert (
+        await store.open(
+            "round-next",
+            holder_task_id="baseline-2",
+            lease_sec=_LEASE,
+            now_unix=clock.wall(),
+            request_id="req-open-2",
+        )
+    ).ok
+
+
+@pytest.mark.asyncio
+async def test_an_open_round_nobody_settled_stops_denying_when_its_lease_runs_out(store, clock):
+    """The exclusion is time-bounded, so no round can hold the machine for good."""
+    facts = ResourceFacts()
+    gate = _gate(facts)
+    assert (
+        await store.open(
+            "round-1",
+            holder_task_id="baseline-1",
+            lease_sec=_LEASE,
+            now_unix=clock.wall(),
+            request_id="req-open",
+        )
+    ).ok
+
     await _reread(store, facts, clock.wall())
     with pytest.raises(PolicyDenied) as denied:
         gate.validate_intent("orchestration", _baseline())
     assert denied.value.rule == RULE_ROUND_IN_FLIGHT
-    assert "nothing ever confirmed the holder dead" in str(denied.value)
 
-    # And the acquire agrees, which is the answer that counts.
-    blocked = await store.open(
-        "round-next",
-        holder_task_id="baseline-2",
-        lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open-2",
-    )
-    assert not blocked.ok
-    assert blocked.reason == EXCLUDED
-
-
-@pytest.mark.asyncio
-async def test_a_reaped_round_releases_once_its_grace_is_spent(store, clock):
-    """The counterpart: a confirmed kill excludes only until the cards settle."""
-    facts = ResourceFacts()
-    gate = _gate(facts)
-    opened = await store.open(
-        "round-reaped",
-        holder_task_id="baseline-1",
-        lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open",
-    )
     clock.advance(_LEASE + 1.0)
-    killed = clock.wall()
-    await store.settle(
-        "round-reaped",
-        holder_task_id="baseline-1",
-        fence=opened.fence,
-        outcome=EXPIRED_REAPED,
-        now_unix=killed,
-        request_id="req-settle",
-        kill_confirmed_unix=killed,
-    )
-
-    await _reread(store, facts, clock.wall())
-    with pytest.raises(PolicyDenied):
-        gate.validate_intent("orchestration", _baseline())
-
-    clock.advance(_GRACE + 1.0)
     await _reread(store, facts, clock.wall())
     gate.validate_intent("orchestration", _baseline())
 
@@ -348,6 +340,19 @@ def test_no_validator_on_the_intent_path_reaches_a_database_call():
     assert not {"sqlite3", "SqliteConnection", "RoundStore"} & set(vars(gate_module))
 
 
-def test_the_resource_rules_refuse_nothing_without_facts():
-    """A gate with no repair pass behind it sends every attempt to its acquire."""
+def test_the_resource_rules_refuse_nothing_until_the_facts_are_read():
+    """A gate with no repair pass behind it sends every attempt to its acquire.
+
+    Unread facts are zeros, and a zero pool read as a configured zero refuses
+    every GPU dispatch on a session that never installed a pass.
+    """
+    request = {"needs_gpu": True, "gpu_count": 8}
     _gate().validate_intent("orchestration", _baseline())
+    _gate()._validate_specialist_gpu_request(request)
+
+    # Once read, the same request is judged against what was found.
+    facts = ResourceFacts()
+    facts.update(None)
+    with pytest.raises(PolicyDenied) as denied:
+        _gate(facts)._validate_specialist_gpu_request(request)
+    assert denied.value.rule == RULE_GPU_POOL_DISABLED

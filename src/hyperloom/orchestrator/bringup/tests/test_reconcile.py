@@ -43,7 +43,6 @@ from hyperloom.orchestrator.state.round_store import (
     FAILED,
     OPEN,
     SETTLED,
-    UNREAPED_STOP_REASON,
     RoundStore,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -172,24 +171,28 @@ async def test_an_expired_round_is_settled_though_every_other_path_is_shut(db):
 
 
 @pytest.mark.asyncio
-async def test_a_round_whose_holder_cannot_be_confirmed_dead_keeps_the_machine(db):
-    """No proof means the machine stays excluded and the run is stopped."""
+async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
+    """Recorded, not acted on.
+
+    A process-group reap can never prove a tree gone, so "unconfirmed" is the
+    ordinary answer rather than an emergency. The lease has run out either way,
+    and a round that held the machine on the strength of what nobody could
+    observe is the shape that trapped a session before.
+    """
     rec, rounds, tasks, state = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 
     await rec.run(_NOW + 10.0)
 
     settled = await rounds.get("round-spec-1")
-    assert settled.outcome == EXPIRED_UNREAPED
-    assert settled.exclusion_permanent is True
-    assert settled.excludes_at(_NOW + 10_000_000.0) is True
-    assert state.stop_reason == UNREAPED_STOP_REASON
-    assert state.saved == 1
+    assert settled.outcome == EXPIRED_UNREAPED, "the outcome still records that nothing confirmed it"
+    assert settled.excludes_at(_NOW + 10.0) is False
+    assert state.stop_reason == "", "an unobservable reap does not end the session"
 
 
 @pytest.mark.asyncio
-async def test_a_confirmed_reap_gives_the_machine_back_after_the_grace(db):
-    """With proof the round expires reaped, and stops excluding once the grace passes."""
+async def test_a_confirmed_reap_gives_the_machine_back_at_once(db):
+    """With proof the round expires reaped, and a settled round holds nothing."""
     rec, rounds, tasks, state = _build(db, reaper=_Reaper(Reap(_NOW, REAP_KILLED)))
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 
@@ -197,9 +200,7 @@ async def test_a_confirmed_reap_gives_the_machine_back_after_the_grace(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.outcome == EXPIRED_REAPED
-    assert settled.exclusion_permanent is False
-    assert settled.excludes_at(_NOW + 10.0) is True, "the reap grace has not passed yet"
-    assert settled.excludes_at(_NOW + 10_000.0) is False
+    assert settled.excludes_at(_NOW + 10.0) is False
     assert state.stop_reason == ""
 
 
@@ -304,7 +305,6 @@ async def test_a_holder_that_reported_its_own_end_is_proof_but_a_lease_watchdog_
     await rec.run(_NOW + 10.0)
 
     assert (await rounds.get("round-spec-1")).outcome == EXPIRED_UNREAPED
-    assert state.stop_reason == UNREAPED_STOP_REASON
 
 
 @pytest.mark.asyncio
@@ -412,8 +412,9 @@ async def test_the_resource_facts_are_reread_from_what_the_rules_left(db):
 
     await rec.run(_NOW + 10_000.0)
 
-    assert rec._resources.excluding_round_id == "round-spec-1"
-    assert rec._resources.excluding_round_permanent is True, "an unreaped round excludes for good"
+    # The pass settled the round, so the facts now say the machine is free:
+    # the repair, not the state before it.
+    assert rec._resources.excluding_round_id == ""
 
 
 @pytest.mark.asyncio
@@ -431,8 +432,8 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
 
     assert report.failures == ["_boom"]
     assert report.settled == [("round-spec-1", EXPIRED_UNREAPED)]
-    # The re-read runs last, so it saw what the rule that raised did not stop.
-    assert rec._resources.excluding_round_id == "round-spec-1"
+    # The re-read runs last, so it saw the settle the raising rule did not stop.
+    assert rec._resources.excluding_round_id == ""
 
 
 @pytest.mark.asyncio
