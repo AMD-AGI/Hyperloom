@@ -16,6 +16,7 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
+from .rounds import collect_round_ledger
 from ._common import (
     _benchmark_report_candidates,
     _benchmark_report_metrics,
@@ -1134,7 +1135,10 @@ def collect_enablement(
     # them.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
     attempts = _as_int(_eg(state, "attempts"))
-    dispatched = bool(_eg(state, "inflight_task_id"))
+    # Rounds come from the ledger, not from state: a round outlives the process
+    # that took it.
+    ledger = collect_round_ledger(session_dir, warnings)
+    dispatched = bool(ledger.get("round_id"))
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
     have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
@@ -1142,7 +1146,7 @@ def collect_enablement(
     have_kept_patches = isinstance(kept_patches_raw, list) and bool(kept_patches_raw)
     # Detect eval-origin by active origin OR persisted kind from a completed run.
     have_eval = origin == "eval" or bool(eval_kind)
-    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_eval)
+    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_eval or ledger.get("round_count"))
     if not (engaged or mode == "off" or have_active or have_attempts or have_build_manifest or have_last_failure):
         return {}
 
@@ -1155,11 +1159,8 @@ def collect_enablement(
         "succeeded": bool(_eg(state, "succeeded")),
         "pending": bool(_eg(state, "pending")),
         "validation_pending": bool(_eg(state, "validation_pending")),
-        "stall_streak": _as_int(_eg(state, "stall_streak")),
     }
-    inflight_tid = str(_eg(state, "inflight_task_id", "") or "")
-    if inflight_tid:
-        out["inflight_task_id"] = inflight_tid
+    out.update(ledger)
     last_spec_tid = str(_eg(state, "last_specialist_task_id", "") or "")
     if last_spec_tid:
         out["last_specialist_task_id"] = last_spec_tid

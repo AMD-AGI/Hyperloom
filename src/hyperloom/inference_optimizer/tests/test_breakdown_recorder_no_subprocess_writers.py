@@ -10,6 +10,7 @@ from pathlib import Path
 
 import hyperloom.agents
 import hyperloom.inference_optimizer.multi_node
+import hyperloom.orchestrator.supervisor
 
 # Matches the recorder package and its ``instrument`` facade, which is how a caller would normally reach it.
 _FORBIDDEN_FRAGMENT = "breakdown.recorder"
@@ -20,6 +21,7 @@ def _subprocess_package_roots() -> list[Path]:
     return [
         Path(hyperloom.agents.__file__).resolve().parent,
         Path(hyperloom.inference_optimizer.multi_node.__file__).resolve().parent,
+        Path(hyperloom.orchestrator.supervisor.__file__).resolve().parent,
     ]
 
 
@@ -46,7 +48,7 @@ def _imports_recorder(path: Path) -> bool:
 
 
 def test_subprocess_packages_do_not_write_breakdown_fragments() -> None:
-    """No agent or multi-node module may import the breakdown recorder."""
+    """No agent, multi-node or supervisor module may import the recorder."""
     offenders: list[str] = []
     for root in _subprocess_package_roots():
         for path in sorted(root.rglob("*.py")):
