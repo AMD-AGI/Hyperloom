@@ -441,24 +441,23 @@ class NoLaunchBackendInstalled(BaseException):
 
 @pytest.fixture
 def launch_backend(monkeypatch):
-    """Install a launch backend for the test, and take it down afterwards.
+    """Install a scripted stand-in for ``run_with_session_kill``.
 
-    Call it with a
-    :class:`~hyperloom.orchestrator.actions.executors.launch_backend.LaunchBackend`.
-    The process-wide backend is what gets swapped, so the substitution also
-    covers launches made on a worker thread the test never sees.
+    Call it with any object exposing that function's signature as ``run``. Both
+    the definition and the names the eager importers bound are patched, so a
+    launch made on a worker thread the test never sees is covered too.
     """
-    from hyperloom.orchestrator.actions.executors import launch_backend as module
+    from hyperloom.orchestrator.actions.executors import _grid_runner, _subprocess_kill, baseline
 
     installed: list = []
 
-    class _Delegating:
-        def run(self, cmd, **kwargs):
-            if not installed:
-                raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
-            return installed[-1].run(cmd, **kwargs)
+    def _run(cmd, **kwargs):
+        if not installed:
+            raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
+        return installed[-1].run(cmd, **kwargs)
 
-    monkeypatch.setattr(module, "PRODUCTION_LAUNCH_BACKEND", _Delegating())
+    for module in (_subprocess_kill, _grid_runner, baseline):
+        monkeypatch.setattr(module, "run_with_session_kill", _run)
 
     def _install(backend):
         installed.append(backend)

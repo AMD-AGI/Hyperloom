@@ -123,7 +123,7 @@ def _run_capturing_variant_notes(
         st.enter_context(patch.object(mne, "is_multi_node", lambda: multi_node))
         st.enter_context(
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
                 side_effect=run_side_effect,
             )
         )
@@ -209,7 +209,7 @@ class TestKeepGoingAsymmetry:
 
     def _run(self, run_side_effect, base, out):
         with patch(
-            "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
             side_effect=run_side_effect,
         ):
             return asyncio.run(
@@ -321,7 +321,7 @@ class TestAutoWarmupTeardown:
         with (
             patch.object(sl, "teardown_lifecycle_server", side_effect=fake_teardown),
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
                 side_effect=run_side_effect,
             ),
         ):
@@ -534,7 +534,7 @@ class TestVariantHeartbeat:
         with (
             progress_scope(sink or _collect),
             patch(
-                "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+                "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
                 side_effect=run_side_effect,
             ),
         ):

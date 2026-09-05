@@ -85,7 +85,7 @@ async def test_nonzero_exit_result_names_a_real_observation(slot, monkeypatch) -
         _write_log(out)
         return types.SimpleNamespace(returncode=1, stdout="", stderr="magpie: benchmark failed")
 
-    monkeypatch.setattr(bl, "launch", _run)
+    monkeypatch.setattr(bl, "run_with_session_kill", _run)
     result = await _round(session, out)
 
     assert result["status"] == "failed"
@@ -108,7 +108,7 @@ async def test_timeout_result_names_a_real_observation(slot, monkeypatch) -> Non
         _write_log(out)
         raise subprocess.TimeoutExpired(cmd, 30)
 
-    monkeypatch.setattr(bl, "launch", _run)
+    monkeypatch.setattr(bl, "run_with_session_kill", _run)
     result = await _round(session, out)
 
     assert result["error_class"] == "timeout"
@@ -132,7 +132,7 @@ async def test_attempts_without_a_server_log_still_get_distinct_artifacts(slot, 
     def _run(cmd, **kwargs):
         return types.SimpleNamespace(returncode=1, stdout="", stderr="magpie: no benchmark workspace")
 
-    monkeypatch.setattr(bl, "launch", _run)
+    monkeypatch.setattr(bl, "run_with_session_kill", _run)
 
     paths = [(await _round(session, out))["boot_observation_path"] for _ in range(3)]
 

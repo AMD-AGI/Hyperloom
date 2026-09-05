@@ -273,7 +273,7 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -331,7 +331,7 @@ async def test_integrate_handler_keeps_positive_stack_increment(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -387,7 +387,7 @@ async def test_integrate_handler_rejects_stack_increment_under_noise_floor(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -441,7 +441,7 @@ async def test_integrate_handler_keeps_exact_stack_increment_noise_floor(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -479,7 +479,7 @@ async def test_integrate_handler_accepts_valid_rebaseline_with_wrapper_warning(s
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -507,7 +507,7 @@ async def test_integrate_handler_rejects_rebaseline_that_exited_nonzero(session_
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] != "KEEP"
@@ -539,7 +539,7 @@ async def test_integrate_handler_revert_decision(session_dir, tmp_path):
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "REVERT"
     assert res["gain_pct"] < -1
@@ -581,7 +581,7 @@ async def test_integrate_handler_keeps_when_accuracy_holds(session_dir, tmp_path
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=0.79),
     ):
         res = await krh.integrate_handler(
@@ -605,7 +605,7 @@ async def test_integrate_handler_reverts_on_accuracy_regression(session_dir, tmp
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=0.60),
     ):
         res = await krh.integrate_handler(
@@ -631,7 +631,7 @@ async def test_integrate_handler_missing_accuracy_blocks_keep_when_baseline_know
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=None),
     ):
         res = await krh.integrate_handler(
@@ -652,7 +652,7 @@ async def test_integrate_handler_without_baseline_accuracy_keeps_on_throughput(s
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=None),
     ):
         res = await krh.integrate_handler(
@@ -673,7 +673,7 @@ async def test_integrate_handler_skips_accuracy_gate_on_throughput_loss(session_
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=700.0, accuracy=0.10),
     ):
         res = await krh.integrate_handler(
@@ -696,7 +696,7 @@ async def test_integrate_handler_accuracy_gate_opt_out(session_dir, tmp_path, mo
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=None),
     ):
         res = await krh.integrate_handler(
@@ -723,7 +723,7 @@ async def test_applyback_keep_stamps_the_serving_validation_tier(session_dir, tm
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=0.79),
     ):
         res = await krh.integrate_handler(
@@ -748,7 +748,7 @@ async def test_applyback_cannot_opt_out_of_the_accuracy_gate(session_dir, tmp_pa
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=None),
     ):
         res = await krh.integrate_handler(
@@ -771,7 +771,7 @@ async def test_applyback_without_baseline_accuracy_cannot_degrade_to_throughput(
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=None),
     ):
         res = await krh.integrate_handler(
@@ -794,7 +794,7 @@ async def test_applyback_accuracy_regression_reuses_the_shared_verdict(session_d
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=0.60),
     ):
         res = await krh.integrate_handler(
@@ -817,7 +817,7 @@ async def test_applyback_losing_throughput_leaves_the_verdict_unsettled(session_
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=700.0, accuracy=0.79),
     ):
         res = await krh.integrate_handler(
@@ -851,7 +851,7 @@ async def test_multi_file_patch_records_per_file_import_evidence(session_dir, tm
     payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner_with_server_log(
             tput=900.0,
             accuracy=0.79,
@@ -878,7 +878,7 @@ async def test_multi_file_patch_that_never_loaded_loses_its_keep(session_dir, tm
     payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner_with_server_log(
             tput=900.0,
             accuracy=0.79,
@@ -905,7 +905,7 @@ async def test_partly_traced_multi_file_patch_keeps_and_only_annotates(session_d
     payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner_with_server_log(
             tput=900.0,
             accuracy=0.79,
@@ -931,7 +931,7 @@ async def test_import_evidence_never_substitutes_for_accuracy(session_dir, tmp_p
     payload["patch_write_paths"] = [str(target), "vllm/flydsl_gemm.py"]
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner_with_server_log(
             tput=900.0,
             accuracy=0.60,
@@ -954,7 +954,7 @@ async def test_single_file_patch_import_behaviour_is_unchanged(session_dir, tmp_
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner_with_server_log(
             tput=900.0,
             accuracy=0.79,
@@ -980,7 +980,7 @@ async def test_integrate_accuracy_verdict_lands_in_attempt_ledger(session_dir, t
     target, patch_file = _write_patch_pair(tmp_path)
 
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.launch",
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
         side_effect=_runner(tput=900.0, accuracy=0.60),
     ):
         res = await krh.integrate_handler(
@@ -1026,7 +1026,7 @@ async def test_integrate_handler_invalid_rebaseline_is_retryable_fault(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     # error_class here is deliberately NOT in the fault whitelist, proving the status-based check saves the patch.
@@ -1079,7 +1079,7 @@ async def test_integrate_handler_reverts_applied_source_on_non_keep(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "REVERT"
@@ -1131,7 +1131,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
         "kernel_id": "k006",
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["status"] == "ok"
@@ -1188,7 +1188,7 @@ async def test_integrate_handler_accepts_runtime_jit_deferred_apply(
             return_value=apply_result,
         ),
         patch(
-            "hyperloom.orchestrator.actions.executors.baseline.launch",
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
             side_effect=_fake_run,
         ),
     ):
@@ -1319,7 +1319,7 @@ async def test_integrate_handler_injects_extra_server_args(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
 
     assert res["decision"] == "KEEP"
@@ -1358,7 +1358,7 @@ async def test_integrate_handler_needs_review_when_within_threshold(
         "target_file": str(target),
         "skip_rebuild": True,
     }
-    with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await krh.integrate_handler(payload, session_dir=session_dir)
     assert res["decision"] == "NEEDS_REVIEW"
 
@@ -1404,7 +1404,7 @@ async def test_coordinator_integrate_request_emits_keep_response(session_dir, tm
             "reusable_native_kernel_ids": ["k1"],
         }
         c.shared_state.save(session_dir)
-        with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+        with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
             await c._handle_intent(
                 "orchestration",
                 Intent(
@@ -1492,7 +1492,7 @@ async def test_coordinator_stops_repeating_same_kernel_integrate_after_cap(
                 "skip_rebuild": True,
             },
         }
-        with patch("hyperloom.orchestrator.actions.executors.baseline.launch", side_effect=_fake_run):
+        with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
             for _ in range(4):
                 await c._handle_intent(
                     "orchestration",

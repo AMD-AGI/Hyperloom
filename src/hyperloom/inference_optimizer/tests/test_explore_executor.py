@@ -497,7 +497,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -563,7 +563,7 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -619,7 +619,7 @@ async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_a
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -668,7 +668,7 @@ async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -721,7 +721,7 @@ async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -781,7 +781,7 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -842,7 +842,7 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -917,7 +917,7 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -978,7 +978,7 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1052,7 +1052,7 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1111,7 +1111,7 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1175,7 +1175,7 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         await sub.run_task(task)
@@ -1287,7 +1287,7 @@ async def test_explore_cold_decision_keeps_eval(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         await sub.run_task(task)
@@ -1333,7 +1333,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         await sub.run_task(task)
@@ -1382,7 +1382,7 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1452,7 +1452,7 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_kill,
     ):
         res = await sub.run_task(task)
@@ -1540,7 +1540,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_kill,
     ):
         res = await sub.run_task(task)
@@ -1603,7 +1603,7 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1665,7 +1665,7 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1743,7 +1743,7 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1821,7 +1821,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -1882,7 +1882,7 @@ async def test_explore_attributes_a_round_the_run_reaped_before_anything_measure
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)
@@ -2254,7 +2254,7 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.launch",
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
     ):
         res = await sub.run_task(task)

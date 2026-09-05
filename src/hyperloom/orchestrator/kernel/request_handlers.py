@@ -1460,7 +1460,7 @@ async def _run_subprocess(
             ray_gcs_address_from_state,
             infera_ssh_env_from_state,
         )
-        from ..actions.executors.launch_backend import launch
+        from ..actions.executors._subprocess_kill import run_with_session_kill
 
         if is_multi_node():
             # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
@@ -1477,8 +1477,8 @@ async def _run_subprocess(
         # flushing: block-buffered on a pipe, it looks dead between flushes.
         # ``setdefault`` so an operator who set this deliberately still wins.
         env.setdefault("PYTHONUNBUFFERED", "1")
-        # ``launch`` reaps the whole descendant tree on every exit path.
-        cp = launch(
+        # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
+        cp = run_with_session_kill(
             cmd,
             env=env,
             timeout=timeout_sec,

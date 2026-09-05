@@ -77,10 +77,10 @@ from ._subprocess_kill import (
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
+    run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
-from .launch_backend import launch
 from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
     materialized_run_eval_disabled,
@@ -3556,7 +3556,7 @@ class BaselineExecutor:
                 label="mn_warmup",
             ) as warm_activity:
                 warm_proc = await asyncio.to_thread(
-                    launch,
+                    run_with_session_kill,
                     warm_cmd,
                     env=warm_env,
                     cwd=str(warm_dir),
@@ -3899,7 +3899,7 @@ class BaselineExecutor:
                     label="benchmark",
                 ) as activity:
                     proc = await asyncio.to_thread(
-                        launch,
+                        run_with_session_kill,
                         cmd,
                         env=env,
                         cwd=str(output_dir),

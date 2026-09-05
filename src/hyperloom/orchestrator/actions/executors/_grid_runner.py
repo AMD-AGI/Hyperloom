@@ -46,10 +46,10 @@ from ._subprocess_kill import (
     OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
-from .launch_backend import launch
 from .benchmark_result import (
     estimate_killed_variant_throughput,
     extract_benchmark_measurement,
@@ -153,7 +153,7 @@ def _resolve_magpie_python() -> str:
             # ``import Magpie`` on a candidate that lacks it would leak an
             # alarming traceback into the run log even though the probe failing
             # is an expected, benign step of interpreter resolution.
-            proc = launch(
+            proc = run_with_session_kill(
                 [
                     py,
                     "-c",
@@ -876,7 +876,7 @@ def _run_magpie(
     )
     # The launch puts Magpie in its own POSIX session and tears down the whole
     # descendant tree on every exit path.
-    proc = launch(
+    proc = run_with_session_kill(
         cmd,
         env=env,
         cwd=cwd,
