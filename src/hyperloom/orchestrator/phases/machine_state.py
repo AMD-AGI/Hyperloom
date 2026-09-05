@@ -49,6 +49,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         {
             "target_analysis",
             "baseline",
+            # The cheap half of a baseline, for a combo whose open question is
+            # whether it comes up rather than how fast it is.
+            "boot_probe",
             "roofline",
             "profile",
             "recover",
@@ -61,6 +64,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "explore",
             "specialist",
             "integrate_patch",
+            "boot_probe",
             # roofline/profile auto-enqueued on the cumulative-gain watermark.
             "roofline",
             "profile",
@@ -248,13 +252,38 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_config_incompatible",
         # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
         "baseline_arg_error",
-        # Enablement loop stall: >= _ENABLEMENT_MAX_STALL consecutive rounds made no forward progress.
+        # Enablement progress budget spent: the round ledger has used up its
+        # distinct-failure-digest credits or its evidence-stall budget.
         "enablement_stalled",
-        # The baseline could not produce an accuracy result even though the accuracy test was expected to run (broken
-        # eval / missing quality gate).
+        # Enablement attempt cap: as many authoring attempts as the session is
+        # allowed have been opened. Bounds dispatches rather than evidence.
+        "enablement_attempts_exhausted",
+        # The baseline could not produce an accuracy result even though the
+        # accuracy test was expected to run (broken eval / missing quality
+        # gate). Optimizing against an unvalidated baseline is unsafe, so the
+        # run halts. Post-baseline accuracy failures REVERT the offending
+        # change instead of stopping.
         "baseline_accuracy_failed",
-        # AgentX is on but its benchmark client (aiperf) is missing or is not the pinned build, and the runtime
-        # install could not supply it.
+        # Bring-up terminals: the host cannot run the combo, or the harness
+        # composed an argument the installed parser does not have. Classified as
+        # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
+        "environment_fault",
+        "server_argv_invalid",
+        # A bring-up round expired with nothing confirming its holder dead, so
+        # it keeps excluding the machine.
+        "bringup_round_unreaped",
+        # The out-of-band supervisor found the coordinator's process gone; it
+        # reaches a report through the terminal artifact the supervisor writes.
+        "supervisor_coordinator_died",
+        # The out-of-band supervisor found the tick not advancing and the
+        # coordinator did not answer the stop it was sent; it reaches a report
+        # through the terminal artifact the supervisor writes.
+        "supervisor_tick_stalled",
+        # AgentX is on but its benchmark client (aiperf) is missing or is not
+        # the pinned build, and the runtime install could not supply it. An
+        # environment/supply gap, not a code gap: nothing downstream can author
+        # its way out of it, so the run halts on the FIRST occurrence instead of
+        # spending the budget in the enablement lane.
         AGENTX_PREFLIGHT_STOP_REASON,
     }
 )
@@ -933,36 +962,42 @@ def session_remaining_seconds(
     *,
     now_unix: float | None = None,
 ) -> float | None:
-    """Total wall-clock seconds remaining for the session (``None`` when unbounded)."""
-    try:
-        deadline = float(getattr(state, "deadline_unix", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        deadline = 0.0
-    if deadline > 0.0:
-        now = float(now_unix) if now_unix is not None else time.time()
-        return max(0.0, deadline - now)
+    """Total wall-clock seconds remaining for the session (``None`` when unbounded).
+
+    Derived from the same forward-summed elapsed total the Coordinator loop and
+    admission read, so the three cannot disagree about what a multi-leg session
+    has already spent. An unarmed leg anchor means no leg is charging through
+    this view; the charged total answers for a state reloaded between legs, and
+    wall time since ``start_ts`` for one that never charged.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes``,
+            ``elapsed_charged_sec``, ``leg_anchor_unix`` and ``start_ts``.
+        now_unix (float | None): Override for the current time, kept in the same
+            time source as ``phase_elapsed_seconds(now_unix=...)``.
+
+    Returns:
+        float | None: Non-negative seconds left in the session, ``None`` when
+        unbounded (``max_minutes`` is 0), and ``None`` when nothing on the state
+        dates the session -- no charge, no anchor, no parseable ``start_ts``.
+    """
     mm = _max_minutes(state)
     if mm <= 0:
         return None
-    start_ts = str(getattr(state, "start_ts", "") or "").strip()
-    if not start_ts:
-        return None
     try:
-        from datetime import datetime, timezone
-
-        start = datetime.fromisoformat(start_ts)
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        # Honor an injected now_unix so this stays in the same time source as phase_elapsed_seconds(now_unix=...) for
-        # pure/testable budget math.
-        if now_unix is not None:
-            now_dt = datetime.fromtimestamp(float(now_unix), tz=timezone.utc)
-        else:
-            now_dt = datetime.now(timezone.utc)
-        elapsed_sec = max(0.0, (now_dt - start).total_seconds())
-    except (ValueError, TypeError):
+        charged = max(0.0, float(getattr(state, "elapsed_charged_sec", 0.0) or 0.0))
+        anchor = float(getattr(state, "leg_anchor_unix", 0.0) or 0.0)
+    except (TypeError, ValueError):
         return None
-    return max(0.0, mm * 60.0 - elapsed_sec)
+    now = float(now_unix) if now_unix is not None else time.time()
+    if anchor > 0.0:
+        return max(0.0, mm * 60.0 - (charged + max(0.0, now - anchor)))
+    if charged > 0.0:
+        return max(0.0, mm * 60.0 - charged)
+    started = to_unix(str(getattr(state, "start_ts", "") or "").strip())
+    if started is None:
+        return None
+    return max(0.0, mm * 60.0 - max(0.0, now - started))
 
 
 # plateau pure functions
@@ -1470,19 +1505,6 @@ def kernel_work_pending(state: Any) -> bool:
     return False
 
 
-def enablement_engaged(state: Any) -> bool:
-    """Whether an enablement round has started and is still making progress."""
-    from ..actions.executors._accuracy_gate import ENABLEMENT_MODE_OFF, resolve_enablement_mode
-
-    if resolve_enablement_mode(state) == ENABLEMENT_MODE_OFF:
-        return False
-    return bool(
-        (getattr(state.enablement, "kept_patches", None) or [])
-        or getattr(state.enablement, "inflight_task_id", "")
-        or int(getattr(state.enablement, "attempts", 0) or 0) > 0
-    )
-
-
 def exit_normal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """``baseline_tput > 0`` and warm-replay settled → ``prelude_done`` (else ``None``)."""
     if warm_replay_in_flight(state):
@@ -1672,7 +1694,7 @@ def exit_cold_anchor_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
 def exit_terminal_prelude(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Decide the PRELUDE terminal exit on repeated baseline failures."""
     streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
-    if streak >= 3 and not enablement_engaged(state):
+    if streak >= 3:
         return "prelude_baseline_failed", {"baseline_failure_streak": streak}
     return None
 
