@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.breakdown.session_package import (
     MANIFEST_JSON_NAME,
     MANIFEST_TXT_NAME,
     PACKAGE_SUBDIR,
+    RESERVED_PATHS,
     package_session_artifacts,
 )
 
@@ -483,3 +484,189 @@ def test_manifest_text_names_missing_files_for_a_human_reader(tmp_path: Path) ->
     assert "complete     : False" in text
     assert "REFUSED" in text
     assert "reports/final.json" in text
+
+
+# ---- must-ship partition under cap pressure --------------------------------
+_BLOB = "Z" * 20_000
+
+
+def _build_pressure_session(sd: Path) -> None:
+    """A session whose bulk exceeds both caps several times over."""
+    for rel in RESERVED_PATHS:
+        _write(sd / rel, "{}")
+    # Curated but not must-ship, and above the bulk in the priority order.
+    _write(sd / "current_setting.sh", "#!/usr/bin/env bash\nvllm serve $MODEL\n")
+    _write(sd / "reports" / "session_terminal.pre.json", "{}")
+    _write(sd / "reports" / "bringup" / "measure_round-abc123def456-000.json", "{}")
+    # Low-priority bulk: the last entries in the glob order.
+    for i in range(4):
+        _write(sd / "runs" / f"b{i}" / "summary.txt", _BLOB)
+        _write(sd / "runs" / f"b{i}" / "attempts" / "000" / "server.log.gz", _BLOB)
+
+
+def test_must_ship_artifacts_survive_both_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session past both caps still ships every post-mortem artifact."""
+    from hyperloom.inference_optimizer.breakdown import session_package as sp
+
+    monkeypatch.setattr(sp, "_MAX_FILES", 3)
+    monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 4096)
+    sd = tmp_path / "session"
+    _build_pressure_session(sd)
+
+    out = sp.package_session_artifacts(sd, session_id="sid-cap", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    manifest = _manifest(out)
+
+    # Every must-ship artifact is in the bundle, by literal path.
+    assert "reports/bringup/trees.json" in names
+    assert "storage/coordinator.db" in names
+    assert "state.json" in names
+    assert "manifest.json" in names
+    assert "reports/final.json" in names
+    assert "session_breakdown.json" in names
+    assert "reports/session_terminal.json" in names
+    for rel in RESERVED_PATHS:
+        assert rel in names, f"must-ship artifact dropped: {rel}"
+
+    # The cap did bite, and it bit only the low-priority bulk.
+    assert manifest["truncated"] is True
+    assert manifest["reserved_overflow"] is False
+    assert manifest["complete"] is False
+    assert manifest["dropped_files"]
+    assert all(d.startswith("runs/") for d in manifest["dropped_files"]), manifest["dropped_files"]
+
+    # The curated non-bulk files ahead of the blobs kept their slots.
+    assert "current_setting.sh" in names
+    assert "reports/session_terminal.pre.json" in names
+    assert "reports/bringup/measure_round-abc123def456-000.json" in names
+
+    included = {e["path"] for e in manifest["included_files"]}
+    assert not (included & set(manifest["dropped_files"]))
+
+
+def test_must_ship_partition_is_packed_first(tmp_path: Path) -> None:
+    """Packing order is the reserved set, in its declared order, then the rest."""
+    sd = tmp_path / "session"
+    _build_pressure_session(sd)
+
+    out = package_session_artifacts(sd, session_id="sid-order", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    order = [e["path"] for e in _manifest(out)["included_files"]]
+    assert order[: len(RESERVED_PATHS)] == list(RESERVED_PATHS)
+
+
+def test_oversize_file_is_skipped_not_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One blob over the cap must not take the small files behind it."""
+    from hyperloom.inference_optimizer.breakdown import session_package as sp
+
+    monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 4096)
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    # Selected before runs/**, and far too big to fit.
+    _write(sd / "reports" / "enablement" / "tid-abc" / "bundle.bin", _BLOB)
+    # Selected after it, and tiny.
+    _write(sd / "runs" / "recover" / "r1" / "result.json", '{"ok":true}')
+
+    out = sp.package_session_artifacts(sd, session_id="sid-skip", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    assert "reports/enablement/tid-abc/bundle.bin" not in names
+    assert "runs/recover/r1/result.json" in names
+    manifest = _manifest(out)
+    assert manifest["truncated"] is True
+    assert manifest["dropped_files"] == ["reports/enablement/tid-abc/bundle.bin"]
+
+
+def test_reserved_overflow_fails_loudly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A must-ship artifact past the reserved ceiling is reported, not hidden."""
+    from hyperloom.inference_optimizer.breakdown import session_package as sp
+
+    monkeypatch.setattr(sp, "_MAX_RESERVED_BYTES", 64)
+    sd = tmp_path / "session"
+    for rel in RESERVED_PATHS:
+        _write(sd / rel, "{}")
+    _write(sd / "storage" / "coordinator.db", "D" * 4096)
+
+    out = sp.package_session_artifacts(sd, session_id="sid-reserved", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    manifest = _manifest(out)
+    assert manifest["reserved_overflow"] is True
+    assert manifest["complete"] is False
+    assert "storage/coordinator.db" in manifest["dropped_files"]
+    # The rest of the must-ship set still fits and still ships.
+    names = _zip_names(out)
+    for rel in RESERVED_PATHS:
+        if rel != "storage/coordinator.db":
+            assert rel in names
+    with zipfile.ZipFile(out) as zf:
+        text = zf.read(MANIFEST_TXT_NAME).decode("utf-8")
+    assert "RESERVED PARTITION OVERFLOWED" in text
+
+
+# ---- glob semantics --------------------------------------------------------
+def test_double_star_matches_zero_directories(tmp_path: Path) -> None:
+    """``a/**/b`` must select ``a/b``, not only ``a/<dir>/b``."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "runs" / "benchmark_report.json", "{}")
+    _write(sd / "runs" / "x" / "y" / "benchmark_report.json", "{}")
+
+    out = package_session_artifacts(sd, session_id="sid-glob", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    assert "runs/benchmark_report.json" in names
+    assert "runs/x/y/benchmark_report.json" in names
+
+
+def test_single_star_stays_within_one_segment(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "reports" / "trace" / "decision_trace.jsonl", "{}\n")
+    _write(sd / "reports" / "trace" / "nested" / "deep.jsonl", "{}\n")
+
+    out = package_session_artifacts(sd, session_id="sid-seg", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    assert "reports/trace/decision_trace.jsonl" in names
+    assert "reports/trace/nested/deep.jsonl" not in names
+
+
+def test_bringup_and_terminal_artifacts_are_collected(tmp_path: Path) -> None:
+    """The bring-up tree and both terminal verdicts are in the curated set."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "reports" / "bringup" / "trees.json", '{"trees":[]}')
+    _write(sd / "reports" / "bringup" / "measure_round-abc123def456-001.json", "{}")
+    _write(sd / "reports" / "session_terminal.json", '{"verdict":"ok"}')
+    _write(sd / "reports" / "session_terminal.pre.json", '{"verdict":"pending"}')
+
+    out = package_session_artifacts(sd, session_id="sid-bringup", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    assert "reports/bringup/trees.json" in names
+    assert "reports/bringup/measure_round-abc123def456-001.json" in names
+    assert "reports/session_terminal.json" in names
+    assert "reports/session_terminal.pre.json" in names
+
+
+def test_per_attempt_server_logs_are_gzip(tmp_path: Path) -> None:
+    """Per-attempt logs ship gzipped, so a consumer needs only the stdlib."""
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    _write(sd / "runs" / "measure" / "t1" / "attempts" / "000" / "server.log.gz", "GZ")
+    _write(sd / "runs" / "measure" / "t1" / "server.log", "PLAINTEXT")
+
+    out = package_session_artifacts(sd, session_id="sid-logs", dest_root=tmp_path / "ws")
+
+    assert out is not None
+    names = _zip_names(out)
+    assert "runs/measure/t1/attempts/000/server.log.gz" in names
+    assert "runs/measure/t1/server.log" not in names

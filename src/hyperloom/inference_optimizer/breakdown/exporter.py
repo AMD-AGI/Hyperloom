@@ -1177,10 +1177,24 @@ def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
     return platform_fingerprint(gpu_type)
 
 
+#: Who wrote a crash-safe ``final.json``. A producer may replace a fallback
+#: written by itself or by a lower-ranked producer, never the full
+#: ``ReportExecutor`` output. The supervisor outranks the coordinator: it
+#: writes only after observing the coordinator's process end.
+FINAL_PRODUCER_COORDINATOR = "coordinator"
+FINAL_PRODUCER_SUPERVISOR = "supervisor"
+_FINAL_PRODUCER_RANK: dict[str, int] = {
+    FINAL_PRODUCER_COORDINATOR: 1,
+    FINAL_PRODUCER_SUPERVISOR: 2,
+}
+
+
 def write_minimal_final_json(
     session_dir: Path | str,
     *,
     output_path: Path | str | None = None,
+    producer: str = FINAL_PRODUCER_COORDINATOR,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit.
 
@@ -1190,23 +1204,24 @@ def write_minimal_final_json(
     compact JSON summary from ``state.json`` so a consumable result always
     exists.
 
-    Stays minimal (one SharedState read) so it does not block shutdown.
-    Idempotent: never overwrites an existing non-empty
-    ``reports/final.json`` (so it can never clobber a full ReportExecutor
-    summary).
+    Stays minimal (one SharedState read) so it does not block shutdown. A full
+    ``ReportExecutor`` summary is never clobbered; an existing crash-safe
+    fallback is refreshed only by an equal or higher-ranked producer.
 
     Args:
         session_dir: The hyperloom session directory.
         output_path: Destination file; defaults to
             ``<session_dir>/reports/final.json``.
+        producer: Which writer this is; see :data:`_FINAL_PRODUCER_RANK` for
+            what a given producer is allowed to replace.
+        extra: Extra keys merged into the summary — what the producer knows
+            that ``state.json`` does not.
 
     Returns:
         The path of the (existing or newly written) ``final.json`` file.
 
     Raises:
-        OSError: If the destination cannot be read or written; returning a
-            path to a file that was never written would be worse. The
-            teardown caller logs it rather than masking the stop_reason.
+        OSError: If the destination cannot be read or written.
     """
     from datetime import datetime, timezone
 
@@ -1216,15 +1231,17 @@ def write_minimal_final_json(
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Decide whether to keep the existing final.json or (re)write the fallback:
-    #   * full report (``safety_net`` absent/false) -> keep, never clobber it.
-    #   * prior crash-safe fallback (``safety_net: true``) -> refresh.
-    #   * corrupt / unreadable -> preserve as ``final.json.corrupt``, then
-    #     overwrite so downstream still gets consumable JSON.
+    # Keep a full report (``safety_net`` absent/false) and a fallback from a
+    # higher-ranked producer; refresh a fallback from an equal or lower-ranked
+    # one; preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
+    rank = _FINAL_PRODUCER_RANK.get(producer, 1)
     if target.exists() and target.stat().st_size > 0:
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
             overwrite = isinstance(existing, dict) and existing.get("safety_net") is True
+            if overwrite:
+                held = _FINAL_PRODUCER_RANK.get(existing.get("producer"), 1)
+                overwrite = rank >= held
         except (OSError, json.JSONDecodeError):
             try:
                 target.replace(target.with_name(target.name + ".corrupt"))
@@ -1240,6 +1257,7 @@ def write_minimal_final_json(
         # ReportExecutor output and know the run did not finish gracefully.
         "safety_net": True,
         "report_complete": False,
+        "producer": producer,
         "session_id": state.session_id,
         "model_name": state.model_name,
         "model_path": state.model_path,
@@ -1261,6 +1279,8 @@ def write_minimal_final_json(
         # every path it probes.
         "platform": _crash_safe_platform(state.gpu_type),
     }
+    if extra:
+        summary.update(extra)
 
     fd, tmp = tempfile.mkstemp(
         prefix=".final.json.",
@@ -1286,6 +1306,8 @@ def write_minimal_final_json(
 __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
+    "FINAL_PRODUCER_COORDINATOR",
+    "FINAL_PRODUCER_SUPERVISOR",
     "build",
     "write_breakdown_json",
     "write_minimal_final_json",

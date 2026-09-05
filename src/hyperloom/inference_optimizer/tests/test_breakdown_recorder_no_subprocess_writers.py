@@ -22,6 +22,7 @@ from pathlib import Path
 
 import hyperloom.agents
 import hyperloom.inference_optimizer.multi_node
+import hyperloom.orchestrator.supervisor
 
 # Matches the recorder package and its ``instrument`` facade, which is how a
 # caller would normally reach it.
@@ -31,12 +32,21 @@ _FORBIDDEN_FRAGMENT = "breakdown.recorder"
 def _subprocess_package_roots() -> list[Path]:
     """Return the package directories that must not write breakdown fragments.
 
+    The supervisor is here for the same reason the other two are: it runs as its
+    own process against a live session, so an upsert from it races the
+    coordinator's. It reaches ``breakdown`` deliberately -- to write the terminal
+    ``final.json`` a dead coordinator never wrote -- and that path is a
+    single-writer atomic replace under a producer rank, not a read-merge-rewrite
+    upsert. The line between the two is what this guard holds.
+
     Returns:
-        list[Path]: Absolute roots of the agent and multi-node packages.
+        list[Path]: Absolute roots of the agent, multi-node and supervisor
+            packages.
     """
     return [
         Path(hyperloom.agents.__file__).resolve().parent,
         Path(hyperloom.inference_optimizer.multi_node.__file__).resolve().parent,
+        Path(hyperloom.orchestrator.supervisor.__file__).resolve().parent,
     ]
 
 
@@ -73,7 +83,7 @@ def _imports_recorder(path: Path) -> bool:
 
 
 def test_subprocess_packages_do_not_write_breakdown_fragments() -> None:
-    """No agent or multi-node module may import the breakdown recorder."""
+    """No agent, multi-node or supervisor module may import the recorder."""
     offenders: list[str] = []
     for root in _subprocess_package_roots():
         for path in sorted(root.rglob("*.py")):

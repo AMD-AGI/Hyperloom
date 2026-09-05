@@ -43,6 +43,11 @@ def _dict_rows(value: Any) -> list[dict[str, Any]]:
     return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
 
 
+def _str_or_empty(value: Any) -> str:
+    """Coerce a nullable column or state field to a string, ``""`` when NULL."""
+    return "" if value is None else str(value)
+
+
 def _first(*values: Any) -> Any:
     """Return the first value that is neither ``None`` nor an empty string."""
     return next((value for value in values if value is not None and value != ""), None)

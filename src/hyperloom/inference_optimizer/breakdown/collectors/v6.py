@@ -26,26 +26,9 @@ from ._common import (
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
+from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from .v6_stages import project_conc_sweep_event
 
-
-_SUCCESS_STOP_REASONS = frozenset(
-    {
-        "target_reached",
-        "global_converged",
-        "time_exhausted",
-        "max_ticks",
-        "sweep_done",
-    }
-)
-_ABORTED_STOP_REASONS = frozenset({"signal", "user_stop_requested"})
-_MODEL_GATE_STOP_REASONS = frozenset(
-    {
-        "model_context_window_too_small",
-        "model_config_incompatible",
-        "unsupported_model_arch",
-    }
-)
 _FRAMEWORK_EXIT_REASON_MAP = {
     "explore_no_more_leverage": "optimize_no_more_leverage",
     "plateau_explore": "optimize_no_more_leverage",
@@ -2023,20 +2006,12 @@ def collect_v6_timeline(
     return [event for _, event in indexed]
 
 
-def _outcome_status(stop_reason: str) -> str:
-    if stop_reason in _SUCCESS_STOP_REASONS:
-        return "completed"
-    if stop_reason in _ABORTED_STOP_REASONS or not stop_reason:
-        return "aborted"
-    return "failed"
-
-
 def _stage_reached(
     state: dict[str, Any],
     stop_reason: str,
     timeline: list[dict[str, Any]],
 ) -> str:
-    if stop_reason in _MODEL_GATE_STOP_REASONS:
+    if stop_reason in MODEL_GATE_STOP_REASONS:
         return "model_gate"
     phase = str(state.get("phase") or "").strip().upper()
     history = state.get("phase_history")
@@ -2060,7 +2035,6 @@ def _stage_reached(
                 bool(enablement.get("validation_pending")),
                 bool(enablement.get("succeeded")),
                 bool(enablement.get("launch_log")),
-                bool(enablement.get("inflight_task_id")),
             )
         ):
             return "enablement"

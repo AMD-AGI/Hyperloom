@@ -57,7 +57,7 @@ from ..model_config_utils import (
 )
 from .bootstrap import (
     _begin_resume_leg,
-    _clean_stop_resume_budget_lines,
+    _resume_budget_lines,
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
@@ -106,6 +106,8 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
+from hyperloom.orchestrator.supervisor import spawn_supervisor, stop_supervisor
+
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
     ENV_USER_DATA_PATH,
@@ -1828,26 +1830,16 @@ def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
         args.streams_per_partition = int(streams) if streams else None
 
 
-# Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
-# Anything else (baseline / preflight failures, crashes, enablement stalls) exits
-# non-zero so CI surfaces genuine problems.
-_SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
-    {
-        "target_reached",
-        "global_converged",
-        "time_exhausted",
-        "max_ticks",
-        # SWEEP finished cleanly: exit_normal_sweep returns sweep_done once the
-        # concurrency ladder settles, which means the run optimized and
-        # closed normally (e.g. the no-kernel path), so neither is a CI failure.
-        "sweep_done",
-    }
-)
-
-
 def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
-    """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure)."""
-    return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
+    """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
+
+    Reads the same set the breakdown grades outcomes against. A second copy here
+    would decide CI's verdict on a vocabulary that had drifted from the one the
+    report was written from.
+    """
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+
+    return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
 
 
 def _new_preflight_failure_session_dir(
@@ -2352,8 +2344,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             )
             sys.exit(2)
 
-        reanchor_budget = bool(prior_stop or prior_crash >= 3)
-        _begin_resume_leg(state, reanchor_budget=reanchor_budget)
+        _begin_resume_leg(state)
+        extend_hours = float(args.extend_hours)
+        if extend_hours > 0.0:
+            state.extend_budget_minutes(extend_hours * 60.0, reason="--extend-hours")
         state.save(session_dir)
         _record_resumed_model_gate(
             args,
@@ -2365,16 +2359,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 "gpu_type": str(state.gpu_type or manifest.get("gpu_type") or ""),
             },
         )
-        if reanchor_budget:
-            override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
-            print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
-            print(f"  → reset start_ts to {state.start_ts} (resume budget)")
-        else:
-            for line in _clean_stop_resume_budget_lines(
-                state,
-                max_hours=float(getattr(args, "max_hours", 0) or 0),
-            ):
-                print(line)
+        override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
+        print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
+        for line in _resume_budget_lines(state, extend_hours=extend_hours):
+            print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
@@ -2899,6 +2887,18 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # The out-of-band supervisor watches for the two failures this process
+    # cannot report on itself: dying, and ceasing to tick. It is given the
+    # session's budget so its stall window fits inside the run it watches.
+    try:
+        supervisor_proc = spawn_supervisor(session_dir, session_sec=args.max_hours * 3600.0)
+    except OSError as exc:
+        # Auxiliary: a run without a watchdog still runs, and the operator is
+        # told on both channels that it is unwatched.
+        supervisor_proc = None
+        log.warning("supervisor: could not start (%s); the run proceeds unwatched", exc)
+        print(f"[supervisor] could not start ({exc}); the run proceeds unwatched", file=sys.stderr)
+
     try:
         stop_reason = await coordinator.run(
             objective=objective,
@@ -2910,8 +2910,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         state = coordinator.shared_state
+        # Stopping the leases and the agent subprocesses is itself a step that
+        # can hang, so it happens while the supervisor is still watching; the
+        # supervisor is stood down only once it has returned.
         with timed_teardown_step(state, "coordinator_stop"):
             await coordinator.stop()
+        with timed_teardown_step(state, "supervisor_stop"):
+            stop_supervisor(supervisor_proc)
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.

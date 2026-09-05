@@ -49,6 +49,7 @@ from ..agent_ownership import (
     patch_lever_kind,
 )
 from ..critic_reviews import normalize_framework_reviews
+from ..stop_reasons import outcome_status as derive_outcome_status
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -1001,13 +1002,8 @@ def _snapshot_v4_run(rec, st: Any) -> None:
         },
     }
     stop_reason = str(getattr(st, "stop_reason", "") or "")
-    outcome_status = "running"
-    if stop_reason:
-        outcome_status = (
-            "failed"
-            if any(marker in stop_reason.lower() for marker in ("failed", "error", "crash", "abort"))
-            else "completed"
-        )
+    # Shared with the session projection so both report the same outcome.
+    outcome_status = derive_outcome_status(stop_reason) if stop_reason else "running"
     rec.record_upsert_singleton(
         "run_snapshot",
         {
