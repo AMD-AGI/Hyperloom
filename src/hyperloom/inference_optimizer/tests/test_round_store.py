@@ -47,20 +47,23 @@ async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store
     the row said the machine was held and nothing could say otherwise.
     """
     clock = virtual_clock
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
 
     clock.advance(30.0)
     settled_at = clock.wall()
-    assert (
-        await store.settle("r", holder_task_id="t-1", fence=1, outcome=outcome, now_unix=settled_at, request_id="q2")
-    ).ok
+    settled = await store.settle(
+        "r", holder_task_id="t-1", fence=1, outcome=outcome, now_unix=settled_at, request_id="q2"
+    )
+    assert settled.ok
 
     row = await store.get("r")
     assert row is not None and row.outcome == outcome
     assert row.excludes_at(settled_at) is False
     assert await store.excluding(settled_at) == []
     # And the next round is admitted at once, on the same instant.
-    assert (await store.open("next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=settled_at, request_id="q3")).ok
+    opened = await store.open("next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=settled_at, request_id="q3")
+    assert opened.ok
 
 
 @pytest.mark.asyncio
@@ -68,7 +71,8 @@ async def test_an_open_round_holds_the_machine_only_while_its_lease_is_live(stor
     """The exclusion is time-bounded, so a round nobody settles frees itself."""
     clock = virtual_clock
     opened_at = clock.wall()
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")
+    assert opened.ok
 
     row = await store.get("r")
     assert row is not None
@@ -78,11 +82,10 @@ async def test_an_open_round_holds_the_machine_only_while_its_lease_is_live(stor
     assert await store.excluding(opened_at + _LEASE + 1.0) == []
 
     # A holder that never settled cannot keep the next round out for good.
-    assert (
-        await store.open(
-            "next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=opened_at + _LEASE + 1.0, request_id="q2"
-        )
-    ).ok
+    opened = await store.open(
+        "next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=opened_at + _LEASE + 1.0, request_id="q2"
+    )
+    assert opened.ok
 
 
 @pytest.mark.asyncio
@@ -90,16 +93,16 @@ async def test_the_open_round_is_read_back_from_the_table_not_from_a_field(store
     """``held`` is how a later lifecycle call finds the round it must address."""
     clock = virtual_clock
     assert await store.held() is None
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
     held = await store.held()
     assert held is not None and held.round_id == "r" and held.holder_task_id == "t-1"
 
     clock.advance(30.0)
-    assert (
-        await store.settle(
-            "r", holder_task_id="t-1", fence=held.fence, outcome=BOOTED, now_unix=clock.wall(), request_id="q2"
-        )
-    ).ok
+    settled = await store.settle(
+        "r", holder_task_id="t-1", fence=held.fence, outcome=BOOTED, now_unix=clock.wall(), request_id="q2"
+    )
+    assert settled.ok
     assert await store.held() is None
 
 
@@ -130,16 +133,15 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     def _join(cur):
         create_in_cursor(cur, kind="baseline", params={}, idempotency_key="round-a", task_id="t-1")
 
-    assert (
-        await store.open(
-            "round-a",
-            holder_task_id="t-1",
-            lease_sec=_LEASE,
-            now_unix=clock.wall(),
-            request_id="q1",
-            join=_join,
-        )
-    ).ok
+    opened = await store.open(
+        "round-a",
+        holder_task_id="t-1",
+        lease_sec=_LEASE,
+        now_unix=clock.wall(),
+        request_id="q1",
+        join=_join,
+    )
+    assert opened.ok
     assert (await tasks.get("t-1")).state == "queued"
 
     # A loser rolls back whatever its join wrote, so no task row outlives the
@@ -178,7 +180,8 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
 async def test_renewing_extends_the_lease_without_invalidating_the_holders_settle(store, virtual_clock):
     """A heartbeat is not a change of holder, so it leaves the fence alone."""
     clock = virtual_clock
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
 
     for tick in range(3):
         clock.advance(_LEASE / 2.0)
@@ -199,16 +202,18 @@ async def test_renewing_extends_the_lease_without_invalidating_the_holders_settl
     assert row.expires_unix == pytest.approx(clock.wall() + _LEASE)
 
     # The token the holder acquired under still settles the round it holds.
-    assert (
-        await store.settle("r", holder_task_id="t-1", fence=1, outcome=BOOTED, now_unix=clock.wall(), request_id="q2")
-    ).ok
+    settled = await store.settle(
+        "r", holder_task_id="t-1", fence=1, outcome=BOOTED, now_unix=clock.wall(), request_id="q2"
+    )
+    assert settled.ok
 
 
 @pytest.mark.asyncio
 async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_rejected(store, virtual_clock):
     """The fence names a holder, and only a handoff can change either."""
     clock = virtual_clock
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
 
     clock.advance(120.0)
     handed = await store.handoff(
@@ -248,31 +253,27 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
     assert stale.reason == STALE_FENCE
     assert (await store.get("r")).state == rs.OPEN
 
-    # A rejected settle is a settle still owed, and everything needed to make
-    # it again survived the rejection.
-    pending = await store.redrivable_settles()
-    assert [e.request_id for e in pending] == ["q3", "q4"]
-    assert pending[-1].outcome == BOOTED
-    assert pending[-1].evidence == {"tput": 12.5}
-
-    redriven = await store.settle(
-        "r",
-        holder_task_id="t-2",
-        fence=2,
-        outcome=pending[-1].outcome,
-        now_unix=clock.wall(),
-        request_id=pending[-1].request_id,
-        evidence=pending[-1].evidence,
+    # The refusal is recorded with what was asked for, which is how a fence
+    # firing is ever noticed.
+    rows = await store.db.fetchall(
+        "SELECT request_id, result, reason FROM round_events WHERE round_id = ? AND op = 'settle' ORDER BY event_id",
+        ("r",),
     )
-    assert redriven.ok
-    assert await store.redrivable_settles() == []
+    assert [(r["request_id"], r["result"], r["reason"]) for r in rows][-1] == ("q4", "rejected", STALE_FENCE)
+
+    # The holder the fence names can still settle it.
+    settled = await store.settle(
+        "r", holder_task_id="t-2", fence=2, outcome=BOOTED, now_unix=clock.wall(), request_id="q5"
+    )
+    assert settled.ok
 
 
 @pytest.mark.asyncio
 async def test_settling_twice_records_the_replay_without_changing_the_round(store, virtual_clock):
     """A retried settle is idempotent; a different one is refused."""
     clock = virtual_clock
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
     clock.advance(45.0)
     first_settled_at = clock.wall()
     first = await store.settle(
@@ -304,7 +305,8 @@ async def test_settling_twice_records_the_replay_without_changing_the_round(stor
 async def test_a_non_owner_cannot_settle_a_round_it_does_not_hold(store, virtual_clock):
     """Ownership is checked separately from the fence, and both are recorded."""
     clock = virtual_clock
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
     refused = await store.settle(
         "r", holder_task_id="impostor", fence=1, outcome=BOOTED, now_unix=clock.wall(), request_id="q2"
     )
@@ -336,7 +338,8 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
     """
     clock = virtual_clock
     opened_at = clock.wall()
-    assert (await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")).ok
+    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")
+    assert opened.ok
 
     row = await _lane_row(store, "r")
     assert row is not None
@@ -348,9 +351,10 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
 
     clock.advance(60.0)
     renewed_at = clock.wall()
-    assert (
-        await store.renew("r", holder_task_id="t-1", fence=1, lease_sec=_LEASE, now_unix=renewed_at, request_id="q2")
-    ).ok
+    renewed = await store.renew(
+        "r", holder_task_id="t-1", fence=1, lease_sec=_LEASE, now_unix=renewed_at, request_id="q2"
+    )
+    assert renewed.ok
     row = await _lane_row(store, "r")
     assert row["acquired_at"] == acquired, "a renewal moves the lease, not the acquire"
     assert row["expires_at"] > acquired
@@ -369,9 +373,10 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
     assert (await _lane_row(store, "r"))["task_id"] == "t-2", "the round stays open, so it keeps the lane"
 
     clock.advance(60.0)
-    assert (
-        await store.settle("r", holder_task_id="t-2", fence=2, outcome=BOOTED, now_unix=clock.wall(), request_id="q4")
-    ).ok
+    settled = await store.settle(
+        "r", holder_task_id="t-2", fence=2, outcome=BOOTED, now_unix=clock.wall(), request_id="q4"
+    )
+    assert settled.ok
     assert await _lane_row(store, "r") is None
 
 
@@ -379,7 +384,8 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
 async def test_a_refused_acquire_leaves_no_lane_behind(store, virtual_clock):
     """A round that was never opened holds nothing; the two roll back together."""
     clock = virtual_clock
-    assert (await store.open("r1", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")).ok
+    opened = await store.open("r1", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    assert opened.ok
     refused = await store.open("r2", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q2")
     assert refused.ok is False and refused.reason == rs.EXCLUDED
     assert await _lane_row(store, "r2") is None

@@ -7,7 +7,7 @@ Runs at the top of every tick with no condition on phase, budget, mode or state,
 because the state it repairs is exactly what stops the dispatcher from
 dispatching. Each rule is an independent repair -- an expired round, a terminal
 holder, a task whose process is provably gone, an undecided review past its TTL,
-a settle the store rejected -- and the resource facts the gate reads are
+an unanswered review -- and the resource facts the gate reads are
 re-read from whatever they leave. A round ended here is also charged to the
 round ledger, so a round that died without reporting still costs the session one.
 
@@ -44,8 +44,6 @@ from .reap import (
 from ..state.round_store import (
     EXPIRED_REAPED,
     EXPIRED_UNREAPED,
-    EXPIRY_OUTCOMES,
-    OPEN,
     Round,
     RoundStore,
 )
@@ -114,7 +112,6 @@ class ReconcileReport:
         leases_reaped: Lease rows the pass swept.
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
-        redriven: Rounds whose rejected settle was re-driven.
         failed_tasks: Task ids marked failed on proof their process is gone.
         denied_reviews: Proposal ids denied on the review TTL.
         closed_windows: Revalidation task ids whose window the pass closed.
@@ -124,7 +121,6 @@ class ReconcileReport:
     leases_reaped: int = 0
     settled: list[tuple[str, str]] = field(default_factory=list)
     handed_off: list[str] = field(default_factory=list)
-    redriven: list[str] = field(default_factory=list)
     failed_tasks: list[str] = field(default_factory=list)
     denied_reviews: list[str] = field(default_factory=list)
     closed_windows: list[str] = field(default_factory=list)
@@ -133,14 +129,7 @@ class ReconcileReport:
     @property
     def acted(self) -> bool:
         """bool: Whether the pass changed anything worth logging."""
-        return bool(
-            self.settled
-            or self.handed_off
-            or self.redriven
-            or self.failed_tasks
-            or self.denied_reviews
-            or self.closed_windows
-        )
+        return bool(self.settled or self.handed_off or self.failed_tasks or self.denied_reviews or self.closed_windows)
 
 
 class Reconciler:
@@ -216,7 +205,6 @@ class Reconciler:
             self._stamp_tick,
             self._fail_dead_tasks,
             self._deny_timed_out_reviews,
-            self._redrive_rejected_settles,
             self._resolve_open_rounds,
             self._close_stale_validation_window,
             self._reap_leases,
@@ -230,10 +218,9 @@ class Reconciler:
         self.last_report = report
         if report.acted:
             log.info(
-                "RECONCILE: settled=%s handed_off=%s redriven=%s failed_tasks=%d denied_reviews=%d leases_reaped=%d",
+                "RECONCILE: settled=%s handed_off=%s failed_tasks=%d denied_reviews=%d leases_reaped=%d",
                 report.settled,
                 report.handed_off,
-                report.redriven,
                 len(report.failed_tasks),
                 len(report.denied_reviews),
                 report.leases_reaped,
@@ -316,30 +303,6 @@ class Reconciler:
             return
         pending.decided = True
         pending.verdict = TIMEOUT_VERDICT
-
-    async def _redrive_rejected_settles(self, now_unix: float, report: ReconcileReport) -> None:
-        """Re-drive settles the store refused while the round is still open.
-
-        Expiry outcomes are skipped: replaying one would date a reap that never
-        happened, so :meth:`_expire` re-derives them from a fresh reap instead.
-        """
-        for event in await self._rounds.redrivable_settles():
-            if event.outcome in EXPIRY_OUTCOMES or not event.outcome:
-                continue
-            round_row = await self._rounds.get(event.round_id)
-            if round_row is None or round_row.state != OPEN:
-                continue
-            result = await self._rounds.settle(
-                round_row.round_id,
-                holder_task_id=round_row.holder_task_id,
-                fence=round_row.fence,
-                outcome=event.outcome,
-                now_unix=now_unix,
-                request_id=event.request_id,
-                evidence={**event.evidence, "redriven_from_event": event.event_id},
-            )
-            if result.ok:
-                report.redriven.append(round_row.round_id)
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Expire, advance or leave each open round, oldest first.
