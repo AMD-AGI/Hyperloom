@@ -7,8 +7,8 @@ Runs at the top of every tick with no condition on phase, budget, mode or state,
 because the state it repairs is exactly what stops the dispatcher from
 dispatching. Each rule is an independent repair -- an expired round, a terminal
 holder, a task whose process is provably gone, an undecided review past its TTL,
-a settle the store rejected -- and the advisory projection the gate reads is
-rebuilt from whatever they leave. A round ended here is also charged to the
+a settle the store rejected -- and the resource facts the gate reads are
+re-read from whatever they leave. A round ended here is also charged to the
 round ledger, so a round that died without reporting still costs the session one.
 
 This pass is also the loop's only sweep of the lease table. An open round holds
@@ -30,7 +30,6 @@ from typing import Any
 from hyperloom.common.timeutil import now_iso
 
 from ..bus.resource_lock import ResourceLockManager
-from ..policy.projection import ResourceProjection
 from .budget import STALLED_STOP_REASON, session_budget
 from .reap import (
     CLAIM_REACHABLE,
@@ -163,7 +162,7 @@ class Reconciler:
         tasks: TaskRegistry,
         locks: ResourceLockManager,
         shared_state: Any,
-        advisory: Any = None,
+        resources: Any = None,
         proposals: Callable[[], Mapping[str, Any]] | None = None,
         session_dir: Any = None,
         reaper: Any = None,
@@ -178,7 +177,7 @@ class Reconciler:
             locks: The lease manager; this pass is its only sweeper.
             shared_state: SharedState, read for the projection and written when
                 an unreaped round stops the session.
-            advisory: The gate's advisory ledger; ``None`` skips the refresh.
+            resources: The gate's resource facts; ``None`` skips the update.
             proposals: Returns the in-memory pending proposals, so a durable
                 timeout deny also reaches the copy the loop consults.
             session_dir: Where SharedState is saved after a terminal is set.
@@ -193,7 +192,7 @@ class Reconciler:
         self._tasks = tasks
         self._locks = locks
         self._shared_state = shared_state
-        self._advisory = advisory
+        self._resources = resources
         self._proposals = proposals
         self._session_dir = session_dir
         self._reaper: ReapBackend = reaper if reaper is not None else select_reaper()
@@ -515,16 +514,13 @@ class Reconciler:
         self._shared_state.save(self._session_dir)
 
     async def _rebuild_projection(self, now_unix: float, report: ReconcileReport) -> None:
-        """Refresh the advisory snapshot from what the rules left behind."""
-        if self._advisory is None:
+        """Re-read the facts the gate's resource rules judge against."""
+        if self._resources is None:
             return
-        self._advisory.refresh(
-            ResourceProjection.of(
-                self._shared_state,
-                now_unix=now_unix,
-                rounds=await self._rounds.excluding(now_unix),
-                live_task_ids=[t.task_id for t in await self._tasks.running()],
-            )
+        self._resources.update(
+            self._shared_state,
+            rounds=await self._rounds.excluding(now_unix),
+            live_task_ids=[t.task_id for t in await self._tasks.running()],
         )
 
     async def _task(self, task_id: str) -> Task | None:

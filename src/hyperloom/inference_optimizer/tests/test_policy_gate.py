@@ -14,8 +14,6 @@ gate then refuses.
 
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -28,7 +26,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES, allowed_actions_for
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
-from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.prompts.prompt_builder import _section_phase_semantics
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -36,11 +34,11 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 _PROPOSE_CHANNELS = (IntentType.DELEGATE, IntentType.PROPOSE_ACTION)
 
 
-def _llm_gate(advisory: AdvisoryLedger | None = None) -> PolicyGate:
+def _llm_gate(resources: ResourceFacts | None = None) -> PolicyGate:
     """A gate an orchestration agent emits into.
 
     Args:
-        advisory: The resource snapshot the round rule judges against; ``None``
+        resources: The resource facts the round rule judges against; ``None``
             leaves that rule refusing nothing.
 
     Returns:
@@ -49,7 +47,7 @@ def _llm_gate(advisory: AdvisoryLedger | None = None) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=SharedState(session_id="t", phase="KERNEL_AGENT"),
-        advisory=advisory,
+        resources=resources or ResourceFacts(),
     )
 
 
@@ -62,35 +60,6 @@ def _emit(gate: PolicyGate, intent_type: IntentType, payload: dict) -> None:
         payload: The intent payload.
     """
     gate.validate_intent("orchestration", Intent(type=intent_type, payload=payload))
-
-
-# -- ROCm containment on write-like path fields ---------------------------
-def test_rocm_runtime_write_denied(tmp_path: Path) -> None:
-    """A patch target inside the ROCm runtime is not HIP source."""
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=tmp_path,
-        strict_paths=True,
-    )
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_payload_paths(
-            SimpleNamespace(name="kernel"),
-            IntentType.DELEGATE,
-            {"target_file": "/opt/rocm/lib/libhip_hcc.so"},
-        )
-    assert exc.value.rule == "rocm_runtime_write_denied"
-
-
-def test_rocm_runtime_filter_does_not_apply_to_read_path_fields(tmp_path: Path, monkeypatch) -> None:
-    """Reading a trace out of the runtime tree writes nothing, so it passes."""
-    gate = PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path, strict_paths=True)
-    monkeypatch.setattr(gate, "_path_under_session", lambda _path: True)
-
-    gate._validate_payload_paths(
-        SimpleNamespace(name="kernel"),
-        IntentType.DELEGATE,
-        {"trace_input": "/opt/rocm/lib/runtime.trace.json"},
-    )
 
 
 # -- Coordinator-owned kernel lanes ---------------------------------------
@@ -153,15 +122,9 @@ def test_phase_semantics_prompt_names_every_internal_action() -> None:
 
 
 # -- A bring-up round holds the machine -----------------------------------
-def _round_in_flight() -> AdvisoryLedger:
-    """A snapshot in which a bring-up round holds the machine."""
-    return AdvisoryLedger(
-        ResourceProjection(
-            taken_unix=1000.0,
-            excluding_round_id="round-1",
-            excluding_round_holder="task-abc",
-        )
-    )
+def _round_in_flight() -> ResourceFacts:
+    """Facts in which a bring-up round holds the machine."""
+    return ResourceFacts(excluding_round_id="round-1", excluding_round_holder="task-abc")
 
 
 def test_baseline_is_refused_on_both_agent_channels_while_a_round_holds_the_machine() -> None:

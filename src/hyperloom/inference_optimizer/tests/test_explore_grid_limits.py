@@ -13,7 +13,7 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
 )
-from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -22,7 +22,7 @@ def _policy(state: SharedState) -> PolicyGate:
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=state,
-        advisory=AdvisoryLedger(ResourceProjection.of(state)),
+        resources=ResourceFacts.of(state),
     )
 
 
