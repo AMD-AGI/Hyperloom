@@ -90,37 +90,6 @@ def coordinator_tick_path(session_dir: Path) -> Path:
     return supervisor_dir(session_dir) / "coordinator_tick.json"
 
 
-def supervisor_directives_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/directives.jsonl``.
-
-    Append-only. The supervisor writes a directive here for the coordinator's
-    reconciler to consume at the top of a tick.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to the directive log.
-    """
-    return supervisor_dir(session_dir) / "directives.jsonl"
-
-
-def supervisor_cursor_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/consumed.json``.
-
-    The coordinator's cursor into the directive log — the one file in this
-    directory the coordinator writes — so a directive is acted on once across
-    restarts.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to the cursor.
-    """
-    return supervisor_dir(session_dir) / "consumed.json"
-
-
 def supervisor_status_path(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/supervisor/status.json``.
 

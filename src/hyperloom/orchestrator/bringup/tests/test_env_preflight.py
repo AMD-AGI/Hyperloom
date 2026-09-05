@@ -67,8 +67,8 @@ def test_a_repository_id_is_not_judged_as_a_path(serving_python):
     assert verdict.status == ep.OK
 
 
-def test_a_port_already_bound_is_a_fault(serving_python):
-    """Something answering on the serving port means this round cannot bind it."""
+def test_a_port_already_bound_does_not_end_the_run(serving_python):
+    """A port answering now may be this session's own server, or an orphan."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
         held.bind(("127.0.0.1", 0))
         held.listen(1)
@@ -80,12 +80,13 @@ def test_a_port_already_bound_is_a_fault(serving_python):
             launch_env=serving_python,
             probe=_probe_returning({"found": True, "exc": "", "missing": "", "detail": ""}),
         )
-    assert verdict.status == ep.FAULT
+    assert verdict.status == ep.UNAVAILABLE
     assert verdict.fault == ep.PORT_ALREADY_BOUND
+    assert not verdict.terminal
 
 
-def test_a_framework_the_serving_interpreter_cannot_resolve_is_a_fault(serving_python):
-    """``find_spec`` finding nothing is the whole of the evidence needed."""
+def test_a_framework_the_serving_interpreter_cannot_resolve_does_not_end_the_run(serving_python):
+    """Installing the framework is what a round does, so this is not terminal."""
     verdict = ep.check_environment(
         framework="vllm",
         model="org/Model-8B",
@@ -93,8 +94,9 @@ def test_a_framework_the_serving_interpreter_cannot_resolve_is_a_fault(serving_p
         launch_env=serving_python,
         probe=_probe_returning({"found": False, "exc": "", "missing": "", "detail": ""}),
     )
-    assert verdict.status == ep.FAULT
+    assert verdict.status == ep.UNAVAILABLE
     assert verdict.fault == ep.FRAMEWORK_NOT_INSTALLED
+    assert not verdict.terminal
 
 
 def test_a_missing_dependency_is_named_from_the_exception_not_the_message(serving_python):
@@ -114,13 +116,14 @@ def test_a_missing_dependency_is_named_from_the_exception_not_the_message(servin
             }
         ),
     )
-    assert verdict.status == ep.FAULT
+    assert verdict.status == ep.UNAVAILABLE
     assert verdict.fault == ep.EXTENSION_MISSING
     assert verdict.subject == "flashinfer"
+    assert not verdict.terminal
 
 
 def test_an_extension_with_no_build_for_this_platform_is_told_apart_by_class(serving_python):
-    """An ``ImportError`` that is not a ``ModuleNotFoundError`` is an unloadable build."""
+    """Named apart from a missing module, but not terminal: a build may follow."""
     verdict = ep.check_environment(
         framework="vllm",
         model="org/Model-8B",
@@ -128,8 +131,9 @@ def test_an_extension_with_no_build_for_this_platform_is_told_apart_by_class(ser
         launch_env=serving_python,
         probe=_probe_returning({"found": True, "exc": "ImportError", "missing": "", "detail": "undefined symbol"}),
     )
-    assert verdict.status == ep.FAULT
+    assert verdict.status == ep.UNAVAILABLE
     assert verdict.fault == ep.EXTENSION_UNBUILT
+    assert not verdict.terminal
 
 
 def test_an_import_error_that_is_not_about_the_host_is_left_to_the_launch(serving_python):
@@ -167,10 +171,10 @@ def test_no_serving_interpreter_is_unavailable_not_a_fault(monkeypatch):
 
 def test_the_observation_carries_the_fault_and_the_stage_the_launch_would_die_at():
     """A fault records like any other bring-up observation, and says it is one."""
-    verdict = ep.EnvVerdict(status=ep.FAULT, fault=ep.EXTENSION_UNBUILT, detail="undefined symbol")
+    verdict = ep.EnvVerdict(status=ep.FAULT, fault=ep.CHECKPOINT_UNRESOLVED, detail="no such path")
     observation = ep.env_fault_observation(verdict)
-    assert observation.stage_failed == LadderStage.IMPORT
-    assert observation.env_fault == ep.EXTENSION_UNBUILT
+    assert observation.stage_failed == LadderStage.CONFIG_VALIDATE
+    assert observation.env_fault == ep.CHECKPOINT_UNRESOLVED
     assert ep.is_env_fault(observation)
     assert not observation.booted
 

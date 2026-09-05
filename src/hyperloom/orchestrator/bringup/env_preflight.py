@@ -50,6 +50,12 @@ STREAM = "env_preflight"
 
 #: The one outcome this module names for itself; :data:`OK` and
 #: :data:`UNAVAILABLE` are the argv preflight's, shared so the two read alike.
+#:
+#: Reserved for a condition no round could change. The lane installs frameworks
+#: and builds extensions, so an import that fails now may import after the next
+#: round, and a bound port may be free once the reaper has run: those are
+#: :data:`UNAVAILABLE`, reported and not acted on. Only a checkpoint path that
+#: does not exist on this host is a fault.
 FAULT = "fault"
 
 #: The serving interpreter cannot reach the framework package at all.
@@ -73,11 +79,7 @@ PORT_ALREADY_BOUND = "port_already_bound"
 #: Where each fault sits on the boot ladder, so an environment record and a real
 #: boot observation of the same wall are comparable.
 _FAULT_STAGE: Mapping[str, LadderStage] = {
-    FRAMEWORK_NOT_INSTALLED: LadderStage.IMPORT,
-    EXTENSION_MISSING: LadderStage.IMPORT,
-    EXTENSION_UNBUILT: LadderStage.IMPORT,
     CHECKPOINT_UNRESOLVED: LadderStage.CONFIG_VALIDATE,
-    PORT_ALREADY_BOUND: LadderStage.PROCESS_START,
 }
 
 #: Bounded by how long the framework's top-level package takes to import.
@@ -163,8 +165,9 @@ def _port_verdict(port: int) -> EnvVerdict:
     """Judge whether the serving port is free.
 
     Returns:
-        EnvVerdict: A fault when the port answers a connect, :data:`OK` when it
-        refuses one, and :data:`UNAVAILABLE` for any other socket outcome.
+        EnvVerdict: :data:`OK` when the port refuses a connect, otherwise
+        :data:`UNAVAILABLE` -- a port answering now may be this session's own
+        server still shutting down, or an orphan the reaper has yet to take.
     """
     if port <= 0:
         return EnvVerdict(status=OK)
@@ -177,7 +180,7 @@ def _port_verdict(port: int) -> EnvVerdict:
     if not answered:
         return EnvVerdict(status=OK)
     return EnvVerdict(
-        status=FAULT,
+        status=UNAVAILABLE,
         fault=PORT_ALREADY_BOUND,
         detail=f"127.0.0.1:{port} already accepts connections, so this round's server cannot bind it",
         subject=str(port),
@@ -248,7 +251,7 @@ def _import_verdict(
     exc = str(payload.get("exc", ""))
     if not payload["found"]:
         return EnvVerdict(
-            status=FAULT,
+            status=UNAVAILABLE,
             fault=FRAMEWORK_NOT_INSTALLED,
             detail=detail or f"{interpreter} cannot resolve {framework}",
             subject=framework,
@@ -257,13 +260,13 @@ def _import_verdict(
         return EnvVerdict(status=OK)
     if exc == "ModuleNotFoundError":
         return EnvVerdict(
-            status=FAULT,
+            status=UNAVAILABLE,
             fault=EXTENSION_MISSING,
             detail=detail,
             subject=str(payload.get("missing", "")) or framework,
         )
     if exc == "ImportError":
-        return EnvVerdict(status=FAULT, fault=EXTENSION_UNBUILT, detail=detail, subject=framework)
+        return EnvVerdict(status=UNAVAILABLE, fault=EXTENSION_UNBUILT, detail=detail, subject=framework)
     # The framework raised for a reason that is not about what this host holds;
     # the launch will produce it and the classifier will place it.
     return EnvVerdict(status=OK)
