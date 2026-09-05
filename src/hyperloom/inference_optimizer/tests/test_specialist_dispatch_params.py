@@ -389,10 +389,12 @@ def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
     state = SharedState()
     state.gpu_specialist_capacity = capacity
     state.tp = tp
+    facts = ResourceFacts()
+    facts.update(state)
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=state,
-        resources=ResourceFacts.of(state),
+        resources=facts,
     )
 
 

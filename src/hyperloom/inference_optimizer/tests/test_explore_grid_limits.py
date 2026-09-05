@@ -22,11 +22,13 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _policy(state: SharedState) -> PolicyGate:
-    """A gate whose advisory projection is a snapshot of ``state``."""
+    """A gate whose resource rules read facts read off ``state``."""
+    facts = ResourceFacts()
+    facts.update(state)
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=state,
-        resources=ResourceFacts.of(state),
+        resources=facts,
     )
 
 
