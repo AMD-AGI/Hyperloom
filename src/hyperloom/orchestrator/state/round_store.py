@@ -84,7 +84,6 @@ __all__ = [
     "EXCLUDED",
     "EXPIRED_REAPED",
     "EXPIRED_UNREAPED",
-    "EXPIRY_OUTCOMES",
     "FAILED",
     "NOT_OWNER",
     "OPEN",
@@ -743,23 +742,6 @@ class RoundStore:
         rows = await self.db.fetchall(
             "SELECT * FROM round_events WHERE op = ? AND result = 'applied' ORDER BY event_id ASC",
             (OBSERVE,),
-        )
-        return [RoundEvent.from_row(r) for r in rows]
-
-    async def redrivable_settles(self) -> list[RoundEvent]:
-        """Return rejected settles whose round is still not settled.
-
-        Returns:
-            list[RoundEvent]: The rejected settles still worth re-driving,
-            oldest first.
-        """
-        rows = await self.db.fetchall(
-            "SELECT e.* FROM round_events e"
-            " LEFT JOIN bringup_rounds r ON r.round_id = e.round_id"
-            " WHERE e.op = 'settle' AND e.result = 'rejected'"
-            "   AND (r.round_id IS NULL OR r.state <> ?)"
-            " ORDER BY e.event_id ASC",
-            (SETTLED,),
         )
         return [RoundEvent.from_row(r) for r in rows]
 

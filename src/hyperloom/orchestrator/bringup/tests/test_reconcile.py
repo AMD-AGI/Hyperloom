@@ -40,7 +40,6 @@ from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
     EXPIRED_REAPED,
     EXPIRED_UNREAPED,
-    FAILED,
     OPEN,
     SETTLED,
     RoundStore,
@@ -376,29 +375,6 @@ async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
 
     rows = await db.fetchall("SELECT 1 FROM events WHERE topic = 'review_verdict'")
     assert len(rows) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_settle_the_store_rejected_is_re_driven_from_the_outbox(db):
-    """The round still owes the outcome somebody asked for."""
-    rec, rounds, tasks, _ = _build(db)
-    await _open_round(rounds, tasks, holder="spec-1")
-    refused = await rounds.settle(
-        "round-spec-1",
-        holder_task_id="spec-1",
-        fence=99,
-        outcome=FAILED,
-        now_unix=_NOW,
-        request_id="settle:stale",
-    )
-    assert not refused.ok
-
-    report = await rec.run(_NOW + 1.0)
-
-    settled = await rounds.get("round-spec-1")
-    assert report.redriven == ["round-spec-1"]
-    assert settled.state == SETTLED
-    assert settled.outcome == FAILED
 
 
 @pytest.mark.asyncio

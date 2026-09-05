@@ -248,24 +248,18 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
     assert stale.reason == STALE_FENCE
     assert (await store.get("r")).state == rs.OPEN
 
-    # A rejected settle is a settle still owed, and everything needed to make
-    # it again survived the rejection.
-    pending = await store.redrivable_settles()
-    assert [e.request_id for e in pending] == ["q3", "q4"]
-    assert pending[-1].outcome == BOOTED
-    assert pending[-1].evidence == {"tput": 12.5}
-
-    redriven = await store.settle(
-        "r",
-        holder_task_id="t-2",
-        fence=2,
-        outcome=pending[-1].outcome,
-        now_unix=clock.wall(),
-        request_id=pending[-1].request_id,
-        evidence=pending[-1].evidence,
+    # The refusal is recorded with what was asked for, which is how a fence
+    # firing is ever noticed.
+    rows = await store.db.fetchall(
+        "SELECT request_id, result, reason FROM round_events WHERE round_id = ? AND op = 'settle' ORDER BY event_id",
+        ("r",),
     )
-    assert redriven.ok
-    assert await store.redrivable_settles() == []
+    assert [(r["request_id"], r["result"], r["reason"]) for r in rows][-1] == ("q4", "rejected", STALE_FENCE)
+
+    # The holder the fence names can still settle it.
+    assert (
+        await store.settle("r", holder_task_id="t-2", fence=2, outcome=BOOTED, now_unix=clock.wall(), request_id="q5")
+    ).ok
 
 
 @pytest.mark.asyncio

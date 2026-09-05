@@ -159,7 +159,6 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_round_events_round ON round_events(round_id, event_id)",
-    "CREATE INDEX IF NOT EXISTS idx_round_events_redrive ON round_events(op, result, event_id)",
     # schema_version — tracks future migrations
     """
     CREATE TABLE IF NOT EXISTS schema_version (
