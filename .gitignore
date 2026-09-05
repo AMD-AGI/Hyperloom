@@ -82,6 +82,7 @@ specialist.info.md
 
 # claude files
 *.claude
+CLAUDE.md
 .agents
 skills-lock.json
 
@@ -119,3 +120,4 @@ kimik3-wares
 /*.csv
 /*.pptx
 /*.html
+audit.md

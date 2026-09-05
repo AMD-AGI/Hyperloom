@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 import zipfile
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 try:
@@ -25,25 +26,21 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _excluded_dir_names(cfg: dict) -> set[str]:
-    """Literal directory names in the packages.find exclude patterns.
+def _excluded_package_patterns(cfg: dict) -> list[str]:
+    """The packages.find exclude patterns that keep a tree out of the wheel.
 
-    Derived rather than hardcoded so this cannot narrow while the exclude list
-    widens: ``*.testing.*`` contributes ``testing``, the ``*`` segments nothing.
-
-    Patterns under a shipped package-data *subtree* are skipped.
+    Patterns naming a shipped package-data *subtree* are dropped.
     ``kernelforge.data`` is excluded from *package* discovery -- its resource
     trees contain .py sample kernels that must not be handed out as importable
     modules -- but its files do ship, declared as ``kernelforge =
-    ["data/**/*"]``. Reading its segments literally would put "kernelforge" and
-    "data" in the leak vocabulary and flag the entire package as a test tree.
+    ["data/**/*"]``, so matching wheel entries against it would flag the whole
+    resource tree as a leak.
 
     The skip is keyed on the subtree the globs actually name (``kernelforge`` +
     ``data/**/*`` -> ``kernelforge.data``), not on the package-data key alone.
     A bare ``startswith("kernelforge.")`` would also swallow a future
-    ``kernelforge.tests`` exclusion -- narrowing this function while the exclude
-    list widened, which is the exact failure the paragraph above says it is
-    written to prevent.
+    ``kernelforge.tests`` exclusion, narrowing this check while the exclude
+    list widened.
     """
     patterns = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
     shipped = tuple(
@@ -52,23 +49,30 @@ def _excluded_dir_names(cfg: dict) -> set[str]:
         for glob in globs
         if "/" in glob and "*" not in glob.split("/", 1)[0]
     )
-    return {
-        segment
-        for pattern in patterns
-        if not any(pattern == key or pattern.startswith(f"{key}.") for key in shipped)
-        for segment in pattern.split(".")
-        if segment != "*"
-    }
+    return [
+        pattern for pattern in patterns if not any(pattern == key or pattern.startswith(f"{key}.") for key in shipped)
+    ]
 
 
-def _check_no_test_packages(cfg: dict, names: list[str]) -> list[str]:
-    excluded = _excluded_dir_names(cfg)
-    if not excluded:
+def _check_no_excluded_packages(cfg: dict, names: list[str]) -> list[str]:
+    """No wheel entry may sit in a package packages.find was told to exclude.
+
+    Entries are matched as the dotted package name of their directory, against
+    the exclude patterns verbatim -- the same comparison ``test_packaging_lint``
+    makes against the source tree, so the two cannot disagree about what a
+    pattern covers. Reading literal directory *segments* out of the patterns
+    instead would put "hyperloom" and "orchestrator" in the leak vocabulary the
+    moment a single subpackage was excluded, and condemn the whole wheel.
+    """
+    patterns = _excluded_package_patterns(cfg)
+    if not patterns:
         return ["packages.find declares no exclude, so nothing keeps test trees out of the wheel"]
-    leaked = sorted(n for n in names if excluded & set(Path(n).parts))
+    leaked = sorted(
+        name for name in names if any(fnmatchcase(".".join(Path(name).parent.parts), pattern) for pattern in patterns)
+    )
     if not leaked:
         return []
-    return [f"{len(leaked)} test entries shipped in the wheel, e.g. {leaked[:5]}"]
+    return [f"{len(leaked)} entries from excluded packages shipped in the wheel, e.g. {leaked[:5]}"]
 
 
 def _check_declared_package_data_is_present(cfg: dict, names: list[str]) -> list[str]:
@@ -170,7 +174,7 @@ def main() -> int:
     with zipfile.ZipFile(args.wheel) as zf:
         names = zf.namelist()
         errors = [
-            *_check_no_test_packages(cfg, names),
+            *_check_no_excluded_packages(cfg, names),
             *_check_declared_package_data_is_present(cfg, names),
             *_check_data_files_are_present(cfg, names),
             *_check_resource_trees_are_populated(names),
@@ -183,7 +187,7 @@ def main() -> int:
             print(f"  - {error}", file=sys.stderr)
         return 1
 
-    print(f"OK {args.wheel.name}: {len(names)} entries, no test packages, declared assets all present")
+    print(f"OK {args.wheel.name}: {len(names)} entries, no excluded packages, declared assets all present")
     return 0
 
 

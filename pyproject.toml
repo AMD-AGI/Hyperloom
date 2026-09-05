@@ -91,6 +91,8 @@ test = [
     "hyperloom-inference_optimizer[runtime]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
+    # Property-based tests over the bring-up ladder.
+    "hypothesis>=6.0",
     "respx>=0.21",
     "requests>=2.28",
     # psutil-based live-compiler probe in _aiter_jit.
@@ -187,6 +189,12 @@ exclude = [
     # importable top-level modules. They ship as package-data instead.
     "kernelforge.data",
     "kernelforge.data.*",
+    # Scripted launch/specialist backends and a virtual clock: scaffolding a
+    # test drives, not a runtime component. Nothing in the shipped tree imports
+    # it, and the production launch boundary it substitutes
+    # (``actions/executors/launch_backend.py``) ships as normal.
+    "hyperloom.orchestrator.rehearsal",
+    "hyperloom.orchestrator.rehearsal.*",
 ]
 
 [tool.setuptools.data-files]
@@ -326,7 +334,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
-    "OOB",  # optional component; not always present in a clone
+    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
 # live-serving plumbing that is covered end-to-end rather than by unit tests.

@@ -9,18 +9,19 @@ myst:
 
 This document describes the conventions contributors should follow when changing
 [Hyperloom](https://github.com/AMD-AGI/Hyperloom). It complements
-[AGENTS.md](../../AGENTS.md) (authoring rules), [CONTRIBUTING.md](../../CONTRIBUTING.md)
-(workflow and checks), and the machine-readable settings in `pyproject.toml`.
+[CONTRIBUTING.md](../../CONTRIBUTING.md) (workflow and checks) and the machine-readable
+settings in `pyproject.toml`.
 
 When this guide and tooling disagree, **tooling wins** — update the guide if you change
 `pyproject.toml`, `.pre-commit-config.yaml`, or CI workflows.
 
 ## Principles
 
-1. **Correctness before cleverness** — prefer readable code with tests over micro-optimizations.
-2. **Automate what you can** — run `pre-commit` locally; let CI enforce the rest.
-3. **No secrets in the tree** — credentials belong in environment variables or secret stores.
-4. **License hygiene** — every file must satisfy [REUSE](https://reuse.software/) (see below).
+1. **Minimal, focused diffs** — one logical change per pull request; avoid drive-by refactors.
+2. **Correctness before cleverness** — prefer readable code with tests over micro-optimizations.
+3. **Automate what you can** — run `pre-commit` locally; let CI enforce the rest.
+4. **No secrets in the tree** — credentials belong in environment variables or secret stores.
+5. **License hygiene** — every file must satisfy [REUSE](https://reuse.software/) (see below).
 
 ## Python
 
