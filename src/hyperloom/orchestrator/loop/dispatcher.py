@@ -7,11 +7,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 from collections.abc import Callable, Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -645,12 +647,12 @@ class DispatcherCollaborator:
             if task.kind == "specialist":
                 params = task.params or {}
                 needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
-                # Explicit wall-clock budget (lane-tiered base × macro_cycle,
-                # with a benchmark-profile floor and capped by session time).
-                extra_context["wall_budget_sec"] = self._specialist_wall_budget_sec(
+                # Absolute stop instant, tightened by the session bound.
+                specialist_deadline = self._specialist_deadline(
                     needs_gpu=needs_gpu,
                     params=params,
                 )
+                extra_context["specialist_deadline"] = specialist_deadline
                 extra_context["specialist_progress_cb"] = self._specialist_progress_publisher(task)
                 if needs_gpu:
                     # Probe serving-slot state immediately before admitting
@@ -720,12 +722,11 @@ class DispatcherCollaborator:
                             serving_tp,
                         )
                         gpu_count = serving_tp
-                    # TTL re-sourced to the wall budget. Iron law:
-                    # kill <= gpu_lease TTL <= gpu_research_lane TTL. Both TTLs
-                    # come from ``_gpu_lease_ttl_sec`` so they never drift apart.
+                    # Iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL,
+                    # measured from the same deadline carried down to the reaper.
                     gpu_ttl_sec = self._gpu_lease_ttl_sec(
                         int(task.lease_ttl_sec or 0),
-                        params=params,
+                        deadline=specialist_deadline,
                     )
                     # Under single-node Ray the physical GPU mutex is Ray's
                     # ``num_gpus``, not this SQLite pool. Admit by a count-based
@@ -988,21 +989,20 @@ class DispatcherCollaborator:
         needs_gpu: bool,
         params: dict[str, Any] | None = None,
     ) -> float:
-        """Compute the explicit wall-clock budget for a specialist task.
+        """How long a specialist of this shape is worth running, ignoring the session.
 
-        The budget is a lane-tiered base (cpu 10min / gpu 60min) amplified by the
-        macro-cycle count and hard-capped at 4h. Bench-capable patch specialists
-        are floored at the rebench helper's timeout plus a 10-minute startup
-        allowance. Any finite session budget remains an upper bound::
+        A lane-tiered base (cpu 10min / gpu 60min) amplified by the macro-cycle
+        count and hard-capped at 4h. Bench-capable patch specialists are floored
+        at the rebench helper's timeout plus a 10-minute startup allowance, since
+        a budget under that guarantees the kill lands mid-benchmark::
 
             budget_sec = min(base × (macro_cycle + 1), 240 min)
             if profile.bench:
                 budget_sec = max(budget_sec, rebench_timeout + 10 min)
-            budget_sec = min(budget_sec, session_remaining)
 
-        ``macro_cycle`` grows whenever a new macro-cycle opens, including short
-        bounded runs. As cycles progress, specialists get more room to complete
-        larger attempts, up to the 4h cap.
+        What the session can still afford is applied separately by
+        :meth:`_specialist_deadline`, so session exhaustion cannot be read here
+        as an absent budget.
 
         Args:
             needs_gpu: Whether the specialist holds a GPU lease (selects the
@@ -1011,7 +1011,7 @@ class DispatcherCollaborator:
                 bench-capable patch specialists.
 
         Returns:
-            float: The wall-clock budget in seconds.
+            float: A positive wall-clock budget in seconds.
         """
         base_min = 60.0 if needs_gpu else 10.0
         macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
@@ -1023,10 +1023,29 @@ class DispatcherCollaborator:
         profile = resolve_specialist_profile(params or {})
         if profile.reserves_benchmark_lane:
             budget_sec = max(budget_sec, float(DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60))
-        session_remaining_min = self.shared_state.remaining_minutes()
-        if session_remaining_min is not None:
-            budget_sec = min(budget_sec, session_remaining_min * 60.0)
-        return max(0.0, budget_sec)
+        return budget_sec
+
+    def _specialist_deadline(
+        self,
+        *,
+        needs_gpu: bool,
+        params: dict[str, Any] | None = None,
+    ) -> Deadline:
+        """The absolute instant this specialist must have stopped by.
+
+        An exhausted session yields an already-expired instant, which the reaper
+        kills on immediately -- unlike a zero-second duration, which a lower
+        layer could read as "unbudgeted".
+
+        Args:
+            needs_gpu: Whether the specialist holds a GPU lease.
+            params: Specialist dispatch parameters.
+
+        Returns:
+            Deadline: The earlier of the shape budget and the session bound.
+        """
+        shape = Deadline.after(self._specialist_wall_budget_sec(needs_gpu=needs_gpu, params=params))
+        return shape.tightened_to(self.shared_state.session_deadline())
 
     def _resolve_serving_tp(self) -> int:
         """Resolve the live serving process's TP size (cards it holds).
@@ -1053,33 +1072,30 @@ class DispatcherCollaborator:
         floor_ttl_sec: int = 0,
         *,
         params: dict[str, Any] | None = None,
+        deadline: Deadline | None = None,
     ) -> int:
         """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
 
         The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
         GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
-        the agent's WS1 wall-budget kill, so both are sourced from the same
-        ``wall_budget × (1 + GPU_LEASE_TTL_GRACE)`` here to keep them from
-        drifting apart.
+        the kill the reaper performs at the specialist's deadline. A caller that
+        has already anchored that deadline passes it in, so the kill and the
+        lease are not timed from two different readings of the clock.
 
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
                 ``lease_ttl_sec``) the computed TTL is raised to.
-            params: Specialist dispatch parameters used to derive the same
-                profile-aware wall budget as the subprocess reaper.
+            params: Specialist dispatch parameters, used to derive the deadline
+                when the caller has none to hand over.
+            deadline: The instant the reaper will kill on.
 
         Returns:
-            int: ``max(floor_ttl_sec, wall_budget × (1 + grace))``.
+            int: ``max(floor_ttl_sec, time_to_deadline × (1 + grace))``.
         """
+        stop_at = deadline if deadline is not None else self._specialist_deadline(needs_gpu=True, params=params)
         return max(
             int(floor_ttl_sec or 0),
-            int(
-                self._specialist_wall_budget_sec(
-                    needs_gpu=True,
-                    params=params,
-                )
-                * (1.0 + GPU_LEASE_TTL_GRACE)
-            ),
+            math.ceil(max(0.0, stop_at.remaining()) * (1.0 + GPU_LEASE_TTL_GRACE)),
         )
 
     async def _account_dead_holder_failures(
@@ -1287,7 +1303,7 @@ class DispatcherCollaborator:
                 # results (schedules retry or stamps terminal).
                 res_dict = getattr(result, "result", None)
                 try:
-                    self._maybe_rearm_authored_lane(res_dict)
+                    await self._maybe_rearm_authored_lane(res_dict)
                 except Exception:  # noqa: BLE001 — defensive
                     log.exception(
                         "AUTHORED_LANE rearm failed for task=%s",
