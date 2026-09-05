@@ -93,14 +93,14 @@ def _done_payload(
     domain: str = "serving_specialist",
     gap: str = "gap.attention.fp8_kv",
     proposals: list | None = None,
-    empty: bool = False,
+    no_proposals: bool = False,
     summary: str = "Specialist found candidate variants",
     confidence: float = 0.7,
 ) -> dict[str, Any]:
     if proposals is None:
         proposals = (
             []
-            if empty
+            if no_proposals
             else [
                 {
                     "variant_name": "max_seqs_512",
@@ -113,9 +113,8 @@ def _done_payload(
         "domain": domain,
         "gap_canonical_id": gap,
         "proposal_set": proposals,
-        "empty": empty or len(proposals) == 0,
         "summary": summary,
-        "reason": "kb_evidence" if not empty else "no_findings",
+        "reason": "no_findings" if not proposals else "kb_evidence",
         "confidence": confidence,
         "new_findings": ["fp8 kv cache stable above bs=128"],
         "residual_questions": [],
@@ -142,18 +141,12 @@ async def test_record_specialist_result_non_empty_proposal_set(coord):
     assert row["task_id"] == "task-1"
     assert row["domain"] == "serving_specialist"
     assert row["gap_canonical_id"] == "gap.attention.fp8_kv"
-    assert row["empty"] is False
     assert row["proposals_total"] == 1
     assert row["round_id"] == "task-1"
     assert state.last_specialist["task_id"] == "task-1"
-    assert state.last_specialist["empty"] is False
     assert state.last_specialist["proposals_total"] == 1
     assert state.last_specialist["domain"] == "serving_specialist"
     assert state.saved == 1
-    coord._record_observation.assert_awaited_once()
-    args, kwargs = coord._record_observation.call_args
-    assert args[1] == "observation"
-    assert args[2]["kind"] == "specialist_done_recorded"
 
 
 @pytest.mark.asyncio
@@ -161,7 +154,7 @@ async def test_record_specialist_result_enqueues_build_request(coord):
     task = _StubTask(task_id="build-spec", params={"enablement": True})
     coord.tasks.register(task)
     coord._maybe_enqueue_specialist_requested_build = AsyncMock()
-    payload = _done_payload(empty=True)
+    payload = _done_payload(no_proposals=True)
     payload["needs_targeted_build"] = {
         "component": "aiter",
         "capability": "deepseek_v4_decode",
@@ -182,11 +175,11 @@ async def test_record_specialist_result_enqueues_build_request(coord):
 
 @pytest.mark.asyncio
 async def test_record_specialist_result_empty_proposal_set(coord):
-    """Empty proposal_set: ledger row stays (empty=True)."""
+    """An empty proposal_set still records a round; proposals_total carries it."""
     task = _StubTask(task_id="task-empty-1", params={})
     coord.tasks.register(task)
 
-    payload = _done_payload(empty=True, domain="kernel_switch_specialist")
+    payload = _done_payload(no_proposals=True, domain="kernel_switch_specialist")
     await coord._record_specialist_result(
         task=task,
         done_payload=payload,
@@ -195,8 +188,8 @@ async def test_record_specialist_result_empty_proposal_set(coord):
 
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
-    assert state.specialist_rounds[0]["empty"] is True
-    assert state.last_specialist["empty"] is True
+    assert state.specialist_rounds[0]["proposals_total"] == 0
+    assert state.last_specialist["proposals_total"] == 0
 
 
 @pytest.mark.asyncio
@@ -210,18 +203,18 @@ async def test_record_specialist_result_idempotent_on_round_id(coord):
 
     await coord._record_specialist_result(
         task=task,
-        done_payload=_done_payload(empty=False),
+        done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
     await coord._record_specialist_result(
         task=task,
-        done_payload=_done_payload(empty=True, proposals=[]),
+        done_payload=_done_payload(proposals=[]),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-resume",
     )
 
     state: _StubSharedState = coord.shared_state
     assert len(state.specialist_rounds) == 1
-    assert state.specialist_rounds[0]["empty"] is True
+    assert state.specialist_rounds[0]["proposals_total"] == 0
     assert state.specialist_rounds[0]["round_id"] == "round-7"
 
 
@@ -282,7 +275,6 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
         "completed_at",
         "domain",
         "gap_canonical_id",
-        "empty",
         "proposals_total",
         "proposal_set",
         "summary",
@@ -296,7 +288,6 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
     assert entry["round_id"] == "round-9"
     assert entry["task_id"] == "t-build"
     assert entry["proposals_total"] == 2
-    assert entry["empty"] is False
     assert entry["confidence"] == 0.62
     assert entry["source_phase"] == "KERNEL_AGENT"
 
@@ -424,7 +415,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     row = coord.shared_state.specialist_rounds[0]
     assert row["domain"] == "serving_specialist"
     assert row["proposals_total"] == 1
-    assert row["empty"] is False
     assert coord.shared_state.last_specialist.get("domain") == "serving_specialist"
     workspace = session_dir / "runs" / "specialist"
     assert workspace.exists()

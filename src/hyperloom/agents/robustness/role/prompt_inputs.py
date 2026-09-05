@@ -21,14 +21,11 @@ headers. For the robustness role the expected blocks are:
       PRELUDE: elapsed=123s cap=456s used=27%
       FRAMEWORK_AGENT: elapsed=789s cap=unlimited used=0%
 
-    === Conversation progress ===
-    ticks_without_progress=3 threshold=12 severity=ok last_progress_tick=45
-
     === Inbox for <agent> [(newest last)] ===
     seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload={'k': 'v', ...}
 
 Parse failures surface as an empty :class:`ReactorContext` rather than
-raising, keeping the reactor's heartbeat fallback alive.
+raising, so the reactor still completes its tick.
 """
 
 from __future__ import annotations
@@ -66,20 +63,15 @@ _KB_HEADER_PREFIX = "=== Knowledge base hints"
 _TIME_BUDGET_HEADER = "=== Time budget ==="
 _PHASE_HEADER = "=== Phase ==="
 _PHASE_BUDGET_HEADER = "=== Phase budget telemetry ==="
-_CONVERSATION_PROGRESS_HEADER = "=== Conversation progress ==="
+
+# One ``<agent>=<age>s ago`` pair of the rendered ``agent_last_active`` value.
+_AGENT_AGE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\d+)s ago")
 
 _PHASE_BUDGET_LINE_RE = re.compile(
     r"^\s+(?P<phase>[A-Z_]+):\s+"
     r"elapsed=(?P<elapsed>\d+)s\s+"
     r"(?:cap=(?P<cap>\d+)s|cap=unlimited)\s+"
     r"used=(?P<used>-?\d+(?:\.\d+)?)%\s*$"
-)
-
-_CONVERSATION_PROGRESS_LINE_RE = re.compile(
-    r"^\s*ticks_without_progress=(?P<ticks>\d+)\s+"
-    r"threshold=(?P<threshold>\d+)\s+"
-    r"severity=(?P<severity>\S+)\s+"
-    r"last_progress_tick=(?P<last>\d+)\s*$"
 )
 
 # SharedState lines we care about.
@@ -97,6 +89,9 @@ _SCALAR_KEYS = {
     "has_keep_pending_integrate",
     # Aggregated into ``SharedStateSnapshot.explore_started``; ``(none)`` is the never-yet sentinel.
     "last_explore",
+    "agent_last_active",
+    # Count of explore/integrate_patch rounds with at least one valid measurement.
+    "gain_gated_action_count",
 }
 
 # Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
@@ -128,25 +123,6 @@ class PhaseBudgetRow:
     elapsed_sec: int
     cap_sec: int
     used_pct: float
-
-
-@dataclass
-class ConversationProgress:
-    """Parsed ``=== Conversation progress ===`` block.
-
-    Attributes:
-        ticks_without_progress (int): Ticks since the last measurable
-            advancement (new KEEP / stack growth / validated-gain / phase).
-        threshold (int): Tick count above which severity is ``"high"``.
-        severity (str): ``"ok"`` or ``"high"`` as emitted by the Coordinator.
-        last_progress_tick (int): Session-wide tick index of the most recent
-            progress event.
-    """
-
-    ticks_without_progress: int
-    threshold: int
-    severity: str
-    last_progress_tick: int
 
 
 @dataclass
@@ -223,6 +199,8 @@ class SharedStateSnapshot:
     closing_phase: bool = False
     kernel_opt_attempts_count: int = 0
     has_keep_pending_integrate: bool = False
+    agent_last_active_unix: dict[str, float] = field(default_factory=dict)
+    gain_gated_action_count: int = 0
 
 
 @dataclass
@@ -242,8 +220,6 @@ class ReactorContext:
             when the block is absent.
         phase_budget (list[PhaseBudgetRow]): Per-phase budget rows from
             ``=== Phase budget telemetry ===``; empty when absent.
-        conversation_progress (ConversationProgress | None): Parsed progress
-            signal from ``=== Conversation progress ===``; ``None`` when absent.
     """
 
     tick_index: int = 0
@@ -253,7 +229,6 @@ class ReactorContext:
     parse_warnings: list[str] = field(default_factory=list)
     phase: str = ""
     phase_budget: list[PhaseBudgetRow] = field(default_factory=list)
-    conversation_progress: ConversationProgress | None = None
 
 
 def from_coordinator_prompt(
@@ -296,7 +271,6 @@ def from_coordinator_prompt(
         warnings.append("no recognised sections in prompt")
     phase = _parse_phase(sections.get("phase", ""))
     phase_budget = _parse_phase_budget(sections.get("phase_budget", ""))
-    conversation_progress = _parse_conversation_progress(sections.get("conversation_progress", ""))
     return ReactorContext(
         tick_index=tick_index,
         shared_state=snapshot,
@@ -305,7 +279,6 @@ def from_coordinator_prompt(
         parse_warnings=warnings,
         phase=phase,
         phase_budget=phase_budget,
-        conversation_progress=conversation_progress,
     )
 
 
@@ -319,7 +292,7 @@ def _split_sections(prompt: str) -> dict[str, str]:
 
     Returns a dict keyed by section name. Recognised keys:
     ``shared_state``, ``time_budget``, ``inbox``, ``kb``,
-    ``phase``, ``phase_budget``, ``conversation_progress``.
+    ``phase``, ``phase_budget``.
 
     Args:
         prompt (str): The full rendered Coordinator prompt text.
@@ -354,10 +327,6 @@ def _split_sections(prompt: str) -> dict[str, str]:
             continue
         if stripped == _PHASE_BUDGET_HEADER:
             current = "phase_budget"
-            sections.setdefault(current, [])
-            continue
-        if stripped == _CONVERSATION_PROGRESS_HEADER:
-            current = "conversation_progress"
             sections.setdefault(current, [])
             continue
         if current is None:
@@ -402,6 +371,9 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
         if key not in _SCALAR_KEYS:
             continue
         head = _split_double_space(value)
+        if key == "agent_last_active":
+            snapshot.agent_last_active_unix = _parse_agent_last_active(head, now_unix=time.time())
+            continue
         spec = _SCALAR_FIELD_TABLE.get(key)
         if spec is not None:
             attr, coerce = spec
@@ -411,6 +383,19 @@ def _parse_shared_state(body: str) -> SharedStateSnapshot:
             if head and head != "(none)":
                 snapshot.explore_started = True
     return snapshot
+
+
+def _parse_agent_last_active(text: str, *, now_unix: float) -> dict[str, float]:
+    """Turn the rendered ``agent_last_active`` ages back into Unix timestamps.
+
+    Args:
+        text (str): The rendered value, ``orchestration=2s ago, critic=45s ago``.
+        now_unix (float): Current time the ages are measured back from.
+
+    Returns:
+        dict[str, float]: Agent name to its reconstructed Unix timestamp.
+    """
+    return {agent: now_unix - float(age) for agent, age in _AGENT_AGE_RE.findall(text or "")}
 
 
 def _count_optimization_stack(head: str) -> int:
@@ -473,6 +458,7 @@ _SCALAR_FIELD_TABLE: dict[str, tuple[str, Callable[[str], Any]]] = {
     "optimization_stack": ("optimization_stack_size", _count_optimization_stack),
     "kernel_opt_attempts_count": ("kernel_opt_attempts_count", lambda head: to_int(head, default=0)),
     "has_keep_pending_integrate": ("has_keep_pending_integrate", lambda head: head.lower() == "true"),
+    "gain_gated_action_count": ("gain_gated_action_count", lambda head: to_int(head, default=0)),
 }
 
 
@@ -520,28 +506,6 @@ def _parse_phase_budget(body: str) -> list[PhaseBudgetRow]:
             )
         )
     return rows
-
-
-def _parse_conversation_progress(body: str) -> ConversationProgress | None:
-    """Parse the conversation progress block.
-
-    Args:
-        body (str): The conversation progress block body text.
-
-    Returns:
-        ConversationProgress | None: Parsed progress, or ``None`` when the
-        block is absent or the body line does not match.
-    """
-    for raw in body.splitlines():
-        match = _CONVERSATION_PROGRESS_LINE_RE.match(raw)
-        if match:
-            return ConversationProgress(
-                ticks_without_progress=int(match.group("ticks")),
-                threshold=int(match.group("threshold")),
-                severity=match.group("severity").lower(),
-                last_progress_tick=int(match.group("last")),
-            )
-    return None
 
 
 def _parse_time_budget_into(snapshot: SharedStateSnapshot, body: str) -> None:

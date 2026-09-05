@@ -299,7 +299,7 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
 # boot to a *new, deeper* failure is KEPT and stacked as a base for the next
 # round (see ``enablement.enablement_made_progress`` and ``integrate_patch``
 # ``status="advanced"``). Advancing the boot ONE step is therefore an explicit,
-# valid deliverable rather than grounds for returning ``empty=true``.
+# valid deliverable rather than grounds for returning an empty ``proposal_set``.
 ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
     "serial: clearing one boot failure usually reveals a deeper one. You do NOT "
@@ -312,10 +312,11 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "a serve flag, an env var, or a dependency install — whichever is simplest.",
     "Record the change: a source patch in ``patches_written``, serve-flag or "
     "env-var changes in ``proposal_set`` (each entry as ``extra_server_args`` "
-    "or ``extra_envs``), dependency installs in ``setup_commands``. Set "
-    "``empty=false`` and in ``summary`` state which failure you cleared and "
+    "or ``extra_envs``), dependency installs in ``setup_commands``. Emit a "
+    "non-empty ``proposal_set`` (or ``patches_written`` / ``artifacts_written``) "
+    "and in ``summary`` state which failure you cleared and "
     "what the next (deeper) failure now is.",
-    "Return ``empty=true`` ONLY when you cannot advance past the CURRENT failure "
+    "Return ``proposal_set=[]`` ONLY when you cannot advance past the CURRENT failure "
     "by even one step — NOT merely because full runnability is out of reach this "
     "round.",
 )
@@ -350,8 +351,8 @@ ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "A build request is COMPLEMENTARY to a source patch, not a replacement: you "
     "MAY both author the smallest patch that advances the boot one step AND "
     "request a build for the compiled/from-source piece the patch cannot cover. "
-    "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT set "
-    "``empty=true`` when you emit one.",
+    "Setting ``needs_targeted_build`` counts as a real deliverable — do NOT "
+    "return an empty ``proposal_set`` when you emit one.",
 )
 
 

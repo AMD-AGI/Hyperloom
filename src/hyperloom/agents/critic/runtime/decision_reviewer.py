@@ -37,7 +37,7 @@ from .intent_envelope import (
     Intent,
     build_advice_intent,
     build_envelope,
-    build_heartbeat_intent,
+    build_idle_intent,
     build_review_verdict_intent,
 )
 from .kb_client import KBClient
@@ -888,7 +888,7 @@ class DecisionReviewer:
         malformed entry cannot leave earlier proposals marked reviewed with
         their intents undelivered. Valid batches then record session memory,
         increment metrics, optionally write a KB lesson, append any advice
-        intents, and fall back to a heartbeat intent when nothing was reviewed.
+        intents, and fall back to an idle observation when nothing was reviewed.
 
         Args:
             req (CriticRequest): The parsed request.
@@ -987,9 +987,9 @@ class DecisionReviewer:
                 continue
             intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
 
-        # Heartbeat fallback when nothing to review.
+        # Nothing to review — still report in.
         if not intents:
-            intents.append(build_heartbeat_intent())
+            intents.append(build_idle_intent())
 
         outcome.intent_envelope = build_envelope(intents).to_dict()
 

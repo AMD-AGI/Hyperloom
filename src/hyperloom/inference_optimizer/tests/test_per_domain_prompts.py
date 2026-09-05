@@ -400,7 +400,6 @@ async def test_runner_does_not_log_generic_template_for_any_domain(tmp_path):
         "gap_canonical_id": "gap.x",
         "domain": "kernel_switch_specialist",
         "proposal_set": [],
-        "empty": True,
         "summary": "test",
         "reason": "test",
         "confidence": 0.0,
@@ -511,7 +510,6 @@ def _valid_done_payload(
         "proposal_set": proposals
         if proposals is not None
         else ([] if empty else [{"name": "v1", "extra_args": "--flag"}]),
-        "empty": empty,
         "summary": "stub run summary",
     }
     if empty and "summary" not in (extras or {}):
@@ -859,7 +857,7 @@ async def test_specialist_runner_synthesises_empty_done_on_max_turns(tmp_path):
     result = await runner.run(ctx)
 
     assert result.status == "empty_synthesised"
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert result.specialist_done["proposal_set"] == []
     assert result.specialist_done["domain"] == "serving_specialist"
     assert "max_turns_exhausted" in result.specialist_done.get("reason", "")
@@ -891,7 +889,7 @@ async def test_specialist_runner_backend_error_synthesises_empty_done(tmp_path):
     result = await runner.run(ctx)
 
     assert result.status == "stale"
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert "rate limited" in result.error
 
 
@@ -912,7 +910,7 @@ async def test_specialist_runner_unknown_domain_synthesises_empty(tmp_path):
     ctx = RunnerContext(task=task, lease=None, extra={})
     result = await runner.run(ctx)
     assert result.status == "empty_synthesised"
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert "unknown specialist domain" in result.specialist_done["reason"]
 
 
@@ -934,7 +932,6 @@ def test_build_empty_specialist_done_shape():
     assert done["gap_canonical_id"] == "gap.x"
     assert done["domain"] == "serving_specialist"
     assert done["proposal_set"] == []
-    assert done["empty"] is True
     assert done["summary"]
 
 

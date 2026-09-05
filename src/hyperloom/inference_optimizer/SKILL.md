@@ -37,7 +37,7 @@ The CLI starts a Python Coordinator that coordinates:
     inference server, GPU, FD, disk, shm). On multi-node every
     such resource lives in a separate pod (head / worker / RayJob), so each
     probe surfaces as a HIGH false positive that floods the bus. The CLI
-    auto-downgrades to `--robustness-mock` (heartbeat only) and prints a
+    auto-downgrades to `--robustness-mock` (idle intents only) and prints a
     WARNING; pass `--robustness-mock` explicitly to suppress it. See
     `src/hyperloom/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 

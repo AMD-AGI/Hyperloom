@@ -528,7 +528,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         session_dir,
         monkeypatch,
     ):
-        """GEMM tuning validation has no patch; it must still run E2E with envs."""
+        """GEMM tuning validation has no patch; mode=env_only must still run E2E."""
         _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
         captured: dict[str, object] = {}
 
@@ -549,6 +549,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         result = await krh.integrate_handler(
             {
                 "source": "forge_gemm_tuning",
+                "mode": "env_only",
                 "kernel_id": "gemm_tune_fmoe_ck",
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
@@ -564,6 +565,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         assert captured["params"]["extra_envs"] == {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"}
         assert captured["params"]["defer_accuracy_until_after_measure"] is True
         assert captured["params"]["post_measure_accuracy_min_tput"] == pytest.approx(1010.0)
+        assert "env_only" in result["advisory"]
 
 
 class TestApplybackProvenanceSurvivesTheLedgerFallbacks:

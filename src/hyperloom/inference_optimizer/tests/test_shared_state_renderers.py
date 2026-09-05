@@ -56,17 +56,25 @@ def test_format_variant_line_no_measurement_carries_reason():
     assert "gain_below_threshold" not in measured
 
 
-def test_enrich_with_tested_gain():
-    entry = {"fingerprint": "fp1"}
-    tested = {"fp1": {"gain_pct": 3.0, "result": {"output_throughput": 99.0}}}
-    out = SharedState._enrich_with_tested_gain(entry, tested)
-    assert out["gain_pct"] == 3.0
-    assert out["tput"] == 99.0
-    # already-populated returns unchanged
-    full = {"gain_pct": 1.0, "tput": 1.0}
-    assert SharedState._enrich_with_tested_gain(full, tested) is full
-    # missing fingerprint snapshot -> unchanged
-    assert SharedState._enrich_with_tested_gain({"fingerprint": "none"}, tested) == {"fingerprint": "none"}
+def test_format_search_state_enumerates_every_tested_entry():
+    """No truncation: a variant missing from the render reads as untried."""
+    search = {"cursor": 40, "tested": {f"fp{i:02d}": {"outcome": "REJECT", "name": f"v{i}"} for i in range(40)}}
+    out = SharedState._format_search_state(search)
+    assert "tested=40" in out
+    for i in range(40):
+        assert f"fp{i:02d}" in out
+
+
+def test_format_search_state_puts_keeps_first():
+    search = {
+        "tested": {
+            "fp-reject": {"outcome": "REJECT", "name": "r"},
+            "fp-keep": {"outcome": "KEEP", "name": "k"},
+        }
+    }
+    body = SharedState._format_search_state(search).splitlines()
+    rows = [ln for ln in body if ln.strip().startswith("fp-")]
+    assert rows[0].strip().startswith("fp-keep")
 
 
 def test_format_search_state():
@@ -75,12 +83,11 @@ def test_format_search_state():
         "cursor": 3,
         "accepted": [{"name": "a", "fingerprint": "f1"}],
         "rejected": [{"name": "r", "gain_pct": -1.0}],
-        "tested": {"f1": {"gain_pct": 4.0}},
+        "tested": {"f1": {"outcome": "KEEP", "name": "a", "gain_pct": 4.0}},
     }
     out = SharedState._format_search_state(search)
-    assert "cursor=3" in out
-    assert "accepted:" in out
-    assert "rejected (last 15):" in out
+    assert "cursor=3  accepted=1  rejected=1  tested=1" in out
+    assert "f1" in out and "KEEP" in out
     assert "killed_overtime" not in out
 
 

@@ -66,7 +66,7 @@ ALWAYS_ON = (
     "## 7. RULES & OUTPUT PROTOCOL",
     "### Phase awareness",
     "### Hard rules",
-    "### Pulling context on a delta turn",
+    "### Pulling what the projection does not carry",
     "### SESSION_DIR contract",
     "### Output protocol",
     "RULE F3",

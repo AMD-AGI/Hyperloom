@@ -31,8 +31,8 @@ _SEVERITY_REGRESS: str = "regress"
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
 # Periodic in-process maintenance/reaper cadence (lease reaping + DB retention),
-# in coordinator ticks.
-MAINTENANCE_EVERY_TICKS: int = 50
+# in wall-clock seconds.
+MAINTENANCE_INTERVAL_SEC: int = 1800
 
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
@@ -377,7 +377,21 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
                 error = result.get("error")
             raw_notes = result.get("notes")
             if isinstance(raw_notes, list):
-                notes = [n for n in raw_notes if n][:_OUTCOME_NOTES_MAX]
+                # patch_safety_numeric is the Critic's artifact; it is not a lever here.
+                notes = [n for n in raw_notes if n and not str(n).startswith("patch_safety_numeric:")][
+                    :_OUTCOME_NOTES_MAX
+                ]
+            done = result.get("specialist_done") if kind == "specialist" else None
+            if isinstance(done, dict):
+                summary = str(done.get("summary") or "").strip()
+                if summary:
+                    parts.append(f"summary={summary[:400]!r}")
+                if done.get("confidence") is not None:
+                    parts.append(f"confidence={done['confidence']}")
+                for label, key in (("findings", "new_findings"), ("questions", "residual_questions")):
+                    items = done.get(key)
+                    if isinstance(items, list) and items:
+                        parts.append(f"{label}={len(items)}")
         if error:
             parts.append(f"error={str(error)[:200]!r}")
         if notes:
@@ -695,100 +709,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._tasks_running: list[asyncio.Task] = []
-        # Orchestration prompt mode: first turn full SEED, later turns DELTA.
-        self._orchestration_seeded: bool = False
-        # Orchestration working-memory checkpoint policy + tracker.
-        from ..state import orchestration_memory as _orch_mem
 
-        # Context-token guardrail: derive soft/hard budgets from the
-        # orchestration model's window × fraction (env-overridable). 0 budgets
-        # disable token triggers (char/tick/time cadence still applies).
-        def _ckpt_fraction(env_key: str, default: float) -> float:
-            try:
-                v = float(os.environ.get(env_key, "").strip() or default)
-            except (TypeError, ValueError):
-                v = default
-            return v if 0.0 < v <= 1.0 else default
-
-        _orch_model = str(getattr(self.backends.get("orchestration"), "model", "") or "")
-        _ctx_window = _orch_mem.context_window_for_model(_orch_model)
-        _soft_frac = _ckpt_fraction(
-            "INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION",
-            _orch_mem.DEFAULT_CONTEXT_TOKEN_SOFT_FRACTION,
-        )
-        self._checkpoint_policy = _orch_mem.CheckpointPolicy(
-            context_token_soft=int(_ctx_window * _soft_frac),
-        )
-        # Kept so a provider that reports its own window per turn can replace the
-        # table's guess without re-deriving the operator's fraction.
-        self._checkpoint_soft_fraction = _soft_frac
-        self._checkpoint_tracker = _orch_mem.CheckpointTracker(
-            last_phase=str(getattr(self.shared_state, "phase", "") or ""),
-        )
-        # Consecutive degenerate checkpoint replies; resets on a good one.
-        self._consec_degenerate_ckpt: int = 0
-        # Disable checkpointing entirely via env.
-        self._checkpoint_enabled: bool = os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_ORCH_CHECKPOINT",
-            "",
-        ).strip().lower() not in {"1", "true", "yes", "on"}
-        # Seed memory rendered into the next full SEED push (resume recovery).
-        # INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK=<n> re-seeds from the
-        # n-th-from-newest history snapshot instead of the live memory.
-        _seed_memory = dict(getattr(self.shared_state, "orchestration_memory", {}) or {})
-        _rollback_raw = os.environ.get("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "").strip()
-        if _rollback_raw:
-            try:
-                _n = int(_rollback_raw)
-                _hist = list(getattr(self.shared_state, "orchestration_memory_history", []) or [])
-                if _n >= 1 and len(_hist) >= _n:
-                    _seed_memory = dict(_hist[-_n])
-                    self.shared_state.orchestration_memory = _seed_memory
-                    log.warning(
-                        "Coordinator: orchestration memory rolled back to history[-%d] (of %d snapshots)",
-                        _n,
-                        len(_hist),
-                    )
-                else:
-                    log.warning(
-                        "Coordinator: ORCH_MEMORY_ROLLBACK=%s out of range (history has %d); using live memory",
-                        _rollback_raw,
-                        len(_hist),
-                    )
-            except (TypeError, ValueError):
-                log.warning(
-                    "Coordinator: invalid ORCH_MEMORY_ROLLBACK=%r; using live memory",
-                    _rollback_raw,
-                )
-        self._orchestration_seed_memory: str = _orch_mem.render_memory_for_seed(_seed_memory)
-        # No-progress circuit-breaker telemetry; threshold = high-severity cutoff.
-        self._progress_marker: dict[str, Any] = {}
-        try:
-            self._no_progress_threshold: int = max(
-                1,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_NO_PROGRESS_TICKS",
-                        "15",
-                    )
-                ),
-            )
-        except ValueError:
-            self._no_progress_threshold = 15
-
-        # Periodic maintenance/reaper cadence (lease reaping + DB retention). 0 disables.
-        try:
-            self._maintenance_every_ticks: int = max(
-                0,
-                int(
-                    os.environ.get(
-                        "INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS",
-                        str(MAINTENANCE_EVERY_TICKS),
-                    )
-                ),
-            )
-        except ValueError:
-            self._maintenance_every_ticks = MAINTENANCE_EVERY_TICKS
+        # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
+        self._last_maintenance_ts: float = time.monotonic()
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions
         # apply per cycle. Only takes effect for long/unbounded runs; short
@@ -909,7 +832,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_update_state": "router",
         # recorder (folded into writeback)
         "_aggregate_research_evidence": "writeback",
-        "_harvest_research_scout": "writeback",
+        "_harvest_specialist_findings": "writeback",
         "_record_specialist_result": "writeback",
         "_drain_queued_baselines": "writeback",
         # Phase handlers, grouped in the same call-chain order as
@@ -1001,7 +924,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_negative_ledger_domain_counts": "phase_explore",
         "_plan_cycle_focus": "phase_explore",
         "_record_cycle_strategy_for_current_cycle": "phase_explore",
-        "_cycle_strategy_seed_block": "phase_explore",
+        "_cycle_strategy_block": "phase_explore",
         "_cycle_directive_fallback": "phase_explore",
         "_reseed_orch_prompt_for_cycle": "phase_explore",
         "_apply_macro_cycle_reloop": "phase_explore",
@@ -1081,11 +1004,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_candidate_discovery_inflight": "phase_framework",
         "_ingest_candidate_discovery": "phase_framework",
         "_candidates_from_discovery_proposals": "phase_framework",
-        "_orchestration_conversational": "conversation",
-        "_orchestration_context_tools_mounted": "conversation",
-        "_orchestration_needs_seed": "conversation",
-        "_reset_orchestration_conversation": "conversation",
-        "_conversation_progress_signal": "conversation",
         "_attach_orchestration_context_tools": "conversation",
         "_context_inbox_reader": "conversation",
         "_context_recent_outcomes_reader": "conversation",
@@ -1106,6 +1024,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_current_primary_gap": "conversation",
         "_recent_proposed_variants": "conversation",
         "_priors_match_advisory_block": "conversation",
+        "_discarded_escalate_hint_advisory_block": "conversation",
         "_workload_canonical_id": "proposals",
         "_read_local_recipe_row": "proposals",
         "_extract_kept_best_config": "proposals",
@@ -1174,9 +1093,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_validate_geak_via_geak_harness": "writeback",
         "resumed_from": "writeback",
         "_replay_resume_if_needed": "writeback",
-        "_maybe_run_maintenance_tick": "maintenance",
+        "_run_maintenance": "maintenance",
         "_maybe_prune_runs_for_disk": "maintenance",
-        "_maybe_checkpoint_orchestration": "maintenance",
         "enqueue_targeted_build": "build_lifecycle",
     }
 
@@ -1641,9 +1559,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
     ) -> None:
         """Run one tick step, cancelling it when the session/closing bound elapses.
 
-        The wall-clock stop lives at the end of each tick. A conversational
-        reactor turn or a long phase-enter await that never returns would skip
-        that stop. Cancelling the step lets the tick finish and enter CLOSE.
+        The wall-clock stop lives at the end of each tick. A reactor turn or a
+        long phase-enter await that never returns would skip that stop.
+        Cancelling the step lets the tick finish and enter CLOSE.
 
         Args:
             factory: Builds the awaitable so a skipped step is never started.
@@ -1763,14 +1681,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
                                 lambda n=name: self._reactor_pass(n),
                                 stage=f"reactor:{name}",
                             )
-                        # Orchestration checkpoint/compaction; cadence-based.
-                        if not self._stop.is_set():
-                            try:
-                                await self._maybe_checkpoint_orchestration(
-                                    tick=tick_n,
-                                )
-                            except Exception:  # noqa: BLE001
-                                log.exception("Coordinator.run: orchestration checkpoint raised")
                     if not self._stop.is_set():
                         await self._pump_dispatcher_once()
                     # FRAMEWORK_AGENT phase pump: see ``tick()`` for rationale.
@@ -1791,9 +1701,12 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             exc=exc,
                             tick=tick_n,
                         )
-                    # Periodic reaper + DB retention; cadence-gated.
+                    # Periodic reaper + DB retention; time-gated.
                     try:
-                        await self._maybe_run_maintenance_tick(tick=tick_n)
+                        now = time.monotonic()
+                        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
+                            await self._run_maintenance(tick=tick_n)
+                            self._last_maintenance_ts = now
                     except Exception:  # noqa: BLE001
                         log.exception("maintenance tick raised")
                 except (asyncio.CancelledError, KeyboardInterrupt):
@@ -1934,13 +1847,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
             agent_name (str): The agent role to run this pass for.
         """
         backend = self.backends[agent_name]
-        # The system prompt is loaded first because the SEED/DELTA gate inside
-        # _compose_prompt has to know whether THIS prompt replaces the backend's
-        # conversation. A re-scoped prompt opens a new thread inside the turn, so
-        # a gate that only sees the thread as it stands would compose a delta for
-        # a conversation that is about to be emptied.
         sys_prompt = await self._load_system_prompt(agent_name)
-        prompt = await self._compose_prompt(agent_name, system_prompt=sys_prompt)
+        prompt = await self._compose_prompt(agent_name)
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         # No-op for backends without the hook. Presence of the hook is also what
@@ -2015,34 +1923,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
         self._record_reactor_conversation(agent_name, result)
-        # Context-token water level. Only a per-request figure is comparable to
-        # the window; a backend reporting none leaves the level at 0 and the
-        # char ledger carries the growth signal alone.
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                md = getattr(result, "metadata", None) or {}
-                self._checkpoint_tracker.set_context_tokens(int(md.get("context_tokens_peak") or 0))
-                self._checkpoint_tracker.chars_add(len(prompt) + len(getattr(result, "raw_text", "") or ""))
-            except Exception:  # noqa: BLE001 — accounting must never break routing
-                pass
-        # Kept out of the ledger's try above: that one exists so a missing token
-        # figure still leaves the char ledger updating, and a throw from here
-        # would stop it too.
-        if agent_name == "orchestration" and self._orchestration_conversational():
-            try:
-                md = getattr(result, "metadata", None) or {}
-                self._checkpoint_policy.adopt_context_window(
-                    int(md.get("model_context_window") or 0),
-                    self._checkpoint_soft_fraction,
-                )
-            except Exception:  # noqa: BLE001 — accounting must never break routing
-                pass
-        # Completed orchestration turn means SEED delivered; later turns send DELTA.
-        if agent_name == "orchestration":
-            self._orchestration_seeded = True
         for intent in result.intents:
             await self._handle_intent(agent_name, intent)
         await self._advance_rendered_cursor(agent_name)
+        self.shared_state.agent_last_active[agent_name] = time.time()
 
     def _trace_mcp_setup(self, *, agent_name: str, backend: Backend) -> None:
         """Persist orchestration MCP setup once per session."""

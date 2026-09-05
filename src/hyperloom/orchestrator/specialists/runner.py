@@ -391,7 +391,7 @@ def build_empty_specialist_done(
 ) -> dict[str, Any]:
     """Return the canonical empty ``specialist_done`` payload.
 
-    Shape: ``empty=true``, ``proposal_set=[]``, non-empty summary.
+    Shape: ``proposal_set=[]`` with a non-empty summary and reason.
 
     Args:
         gap_canonical_id: Canonical id of the gap the specialist addressed.
@@ -406,7 +406,6 @@ def build_empty_specialist_done(
         "gap_canonical_id": gap_canonical_id,
         "domain": domain,
         "proposal_set": [],
-        "empty": True,
         "summary": (reason or "specialist exited empty")[:480],
         "reason": reason or "specialist exited empty",
         "confidence": float(max(0.0, min(1.0, confidence))),
@@ -1305,8 +1304,6 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        if "empty" not in done_payload:
-            done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:
             done_payload["summary"] = "specialist emitted done without summary"[:480]
         # Reconcile self-reported ``patches_written`` against the filesystem:
@@ -1423,8 +1420,6 @@ class SpecialistRunner:
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
         if spans_roots:
             done_payload["patches_span_multiple_roots"] = True
-        if not kept:
-            done_payload["empty"] = not bool(done_payload.get("proposal_set"))
         notes.extend(safety.notes())
         recovered = bool(done_payload.get("_recovered_from_partial"))
         # ``partial`` keeps an infra failure visible without making the attempt

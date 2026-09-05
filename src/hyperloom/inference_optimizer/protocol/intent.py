@@ -73,7 +73,7 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
     # specialist exit envelope; the runner re-stamps and defaults the payload.
-    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "empty", "summary"),
+    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "summary"),
 }
 
 

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Batch 2 coverage for Coordinator: synchronous context readers, the
-no-progress circuit-breaker signal, resume replay, orchestration-conversation
-reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
+"""Batch 2 coverage for Coordinator: synchronous context readers, resume
+replay, specialist result recording, and lifecycle teardown (stop / Recipe
+KB T4 safety net)."""
 
 from __future__ import annotations
 
@@ -17,22 +17,20 @@ import pytest
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
-    MockTurn,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+def _idle_intent() -> Intent:
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"})
 
 
 def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
+    return ScriptedPlan(turns=[], default_intent=_idle_intent())
 
 
 def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,7 +208,7 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
-    await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "heartbeat", {"body_md": "hi"}))
+    await coord.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "observation", {"body_md": "hi"}))
     out = coord._context_inbox_reader()
     assert "(no inbox events)" not in out
     assert isinstance(out, str)
@@ -233,33 +231,6 @@ async def test_recent_outcomes_reader_with_rows(coord: Coordinator) -> None:
 def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
     assert isinstance(coord._context_recent_outcomes_reader(top_k=999), str)
     assert isinstance(coord._context_recent_outcomes_reader(top_k=0), str)
-
-
-# -- _reset_orchestration_conversation --------------------------------------
-def test_reset_orchestration_conversation_clears_seed(coord: Coordinator) -> None:
-    coord._orchestration_seeded = True
-    coord._reset_orchestration_conversation()
-    assert coord._orchestration_seeded is False
-
-
-def test_reset_orchestration_conversation_invokes_backend_hook(coord: Coordinator) -> None:
-    calls: list[int] = []
-    backend = coord.backends["orchestration"]
-    backend.reset_conversation = lambda: calls.append(1)  # type: ignore[attr-defined]
-    coord._orchestration_seeded = True
-    coord._reset_orchestration_conversation()
-    assert calls == [1]
-    assert coord._orchestration_seeded is False
-
-
-def test_reset_orchestration_conversation_swallows_hook_error(coord: Coordinator) -> None:
-    def _boom() -> None:
-        raise RuntimeError("nope")
-
-    coord.backends["orchestration"].reset_conversation = _boom  # type: ignore[attr-defined]
-    coord._orchestration_seeded = True
-    coord._reset_orchestration_conversation()
-    assert coord._orchestration_seeded is False
 
 
 @pytest.mark.asyncio
@@ -850,98 +821,6 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
     assert coord.shared_state.cumulative_gain_validated_stack_len == len(coord.shared_state.optimization_stack)
 
 
-@pytest.mark.asyncio
-async def test_reactor_pass_records_context_tokens(coord: Coordinator) -> None:
-    backend = MockBackend(
-        ScriptedPlan(
-            turns=[
-                MockTurn(
-                    intents=[_heartbeat()],
-                    raw_text="ok",
-                    metadata={
-                        "input_tokens": 10,
-                        "cache_read_input_tokens": 20,
-                        "cache_creation_input_tokens": 30,
-                        "context_tokens_peak": 45,
-                    },
-                )
-            ]
-        ),
-        name="orchestration",
-    )
-    backend.conversational = True  # type: ignore[attr-defined]
-    coord.backends["orchestration"] = backend
-    await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 45
-
-
-@pytest.mark.asyncio
-async def test_reactor_pass_ignores_call_cumulative_token_counters(coord: Coordinator) -> None:
-    backend = MockBackend(
-        ScriptedPlan(
-            turns=[
-                MockTurn(
-                    intents=[_heartbeat()],
-                    raw_text="ok",
-                    metadata={
-                        "input_tokens": 6,
-                        "cache_read_input_tokens": 75_448,
-                        "cache_creation_input_tokens": 154_099,
-                    },
-                )
-            ]
-        ),
-        name="orchestration",
-    )
-    backend.conversational = True  # type: ignore[attr-defined]
-    coord.backends["orchestration"] = backend
-    await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 0
-    assert coord._checkpoint_tracker.chars_since_last > 0
-
-
-@pytest.mark.asyncio
-async def test_reactor_pass_chars_fallback_without_token_metadata(coord: Coordinator) -> None:
-    backend = MockBackend(
-        ScriptedPlan(turns=[MockTurn(intents=[_heartbeat()], raw_text="raw-reply", metadata={})]),
-        name="orchestration",
-    )
-    backend.conversational = True  # type: ignore[attr-defined]
-    coord.backends["orchestration"] = backend
-    coord._checkpoint_tracker.chars_since_last = 0
-    await coord._reactor_pass("orchestration")
-    assert coord._checkpoint_tracker.context_tokens_now == 0
-    assert coord._checkpoint_tracker.chars_since_last > len("raw-reply")
-
-
-# -- _conversation_progress_signal ------------------------------------------
-def test_progress_signal_first_call_seeds_marker(coord: Coordinator) -> None:
-    coord._progress_marker = {}
-    sig = coord._conversation_progress_signal()
-    assert sig["ticks_without_progress"] == 0
-    assert sig["severity"] == "ok"
-
-
-def test_progress_signal_detects_progress(coord: Coordinator) -> None:
-    coord._progress_marker = {}
-    coord._conversation_progress_signal()  # seed
-    coord.shared_state.tick = 5
-    coord.shared_state.cumulative_gain_validated = 10.0
-    sig = coord._conversation_progress_signal()
-    assert sig["last_progress_tick"] == 5
-    assert sig["severity"] == "ok"
-
-
-def test_progress_signal_flags_stall(coord: Coordinator) -> None:
-    coord._progress_marker = {}
-    coord._no_progress_threshold = 2
-    coord._conversation_progress_signal()  # seed at tick 0
-    coord.shared_state.tick = 10
-    sig = coord._conversation_progress_signal()
-    assert sig["ticks_without_progress"] >= 2
-    assert sig["severity"] == "high"
-
-
 # -- replay_for_resume ------------------------------------------------------
 @pytest.mark.asyncio
 async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator) -> None:
@@ -1102,525 +981,6 @@ async def test_pump_dispatcher_absorbs_spawn_exception(coord: Coordinator, monke
 
     monkeypatch.setattr(coord.sub, "run_task", fake_run)
     await coord._pump_dispatcher_once()
-
-
-# -- _maybe_checkpoint_orchestration (taken path) ---------------------------
-class _FakeRunResult:
-    def __init__(self, raw_text: str) -> None:
-        self.raw_text = raw_text
-
-
-def _make_conversational(coord: Coordinator, *, raw_text: str | None = None) -> None:
-    backend = coord.backends["orchestration"]
-    backend.conversational = True  # type: ignore[attr-defined]
-    backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
-    # Well-formed checkpoint reply exercises the compaction "taken" path; raw_text= exercises the degenerate path.
-    reply = (
-        raw_text
-        if raw_text is not None
-        else (
-            '```json\n{"current_plan": "tune MoE", "hypotheses": ["h1"], '
-            '"tried_and_why": ["explored attention backends"], "pending": ["p1"], '
-            '"learnings": ["l1"]}\n```'
-        )
-    )
-
-    async def _run(**kw):
-        return _FakeRunResult(reply)
-
-    backend.run = _run  # type: ignore[assignment]
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_disabled_returns_false(coord: Coordinator) -> None:
-    coord._checkpoint_enabled = False
-    assert await coord._maybe_checkpoint_orchestration(tick=1) is False
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_policy_declines(coord: Coordinator) -> None:
-    import time
-
-    _make_conversational(coord)
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-
-    class _Policy:
-        def should_checkpoint(self, **kw):
-            return False
-
-    coord._checkpoint_policy = _Policy()
-    assert await coord._maybe_checkpoint_orchestration(tick=5) is False
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_taken_compacts_memory(coord: Coordinator) -> None:
-    import time
-
-    _make_conversational(coord)
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-
-    class _Policy:
-        def should_checkpoint(self, **kw):
-            return True
-
-    coord._checkpoint_policy = _Policy()
-    took = await coord._maybe_checkpoint_orchestration(tick=12, phase_changed=True)
-    assert took is True
-    assert coord._orchestration_seeded is False
-    assert coord.shared_state.orchestration_memory
-    assert len(coord.shared_state.orchestration_memory_history) == 1
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_history_ring_caps_at_ten(coord: Coordinator) -> None:
-    import time
-
-    coord._checkpoint_enabled = True
-    coord._run_started_monotonic = time.monotonic()
-    _always_checkpoint(coord)
-    backend = coord.backends["orchestration"]
-    backend.conversational = True  # type: ignore[attr-defined]
-    backend.reset_conversation = lambda: None  # type: ignore[attr-defined]
-
-    for i in range(12):
-
-        async def _run(**kw):
-            return _FakeRunResult(
-                f'```json\n{{"current_plan": "plan {i}", "hypotheses": ["h{i}"], '
-                f'"tried_and_why": [], "pending": [], "learnings": []}}\n```'
-            )
-
-        backend.run = _run  # type: ignore[assignment]
-        coord._orchestration_seeded = True
-        assert await coord._maybe_checkpoint_orchestration(tick=i + 1) is True
-
-    hist = coord.shared_state.orchestration_memory_history
-    assert len(hist) == 10
-    assert hist[0]["current_plan"] == "plan 2"
-    assert hist[-1]["current_plan"] == "plan 11"
-
-
-def test_checkpoint_policy_context_fraction_env(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CTX_SOFT_FRACTION", "0.5")
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    backends = _build_backends()
-    backends["orchestration"].model = "claude-opus-4-8"  # type: ignore[attr-defined]
-    c = Coordinator(sd, backends=backends)
-    assert c._checkpoint_policy.context_token_soft == 100_000
-
-
-def test_orchestration_memory_rollback_env(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_ORCH_MEMORY_ROLLBACK", "2")
-    sd = make_session_dir()
-    from .conftest import seed_target_analysis_marker
-
-    seed_target_analysis_marker(sd)
-    state = SharedState.load_or_init(sd)
-    state.orchestration_memory = {"current_plan": "latest"}
-    state.orchestration_memory_history = [
-        {"current_plan": "older"},
-        {"current_plan": "middle"},
-        {"current_plan": "latest"},
-    ]
-    state.save(sd)
-
-    c = Coordinator(sd, backends=_build_backends())
-    assert c.shared_state.orchestration_memory == {"current_plan": "middle"}
-    assert "current_plan: middle" in c._orchestration_seed_memory
-
-
-def _always_checkpoint(coord: Coordinator) -> None:
-    class _Policy:
-        def should_checkpoint(self, **kw):
-            return True
-
-    coord._checkpoint_policy = _Policy()
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_degenerate_non_hard_skips_and_preserves(coord: Coordinator) -> None:
-    import time
-
-    # Non-JSON reply → degenerate; not near the window → skip compaction.
-    _make_conversational(coord, raw_text="just prose, no JSON object here")
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-    coord.shared_state.orchestration_memory = {"current_plan": "keep me"}
-    _always_checkpoint(coord)
-
-    took = await coord._maybe_checkpoint_orchestration(tick=7)
-    assert took is False
-    # conversation NOT reset and prior memory untouched
-    assert coord._orchestration_seeded is True
-    assert coord.shared_state.orchestration_memory == {"current_plan": "keep me"}
-    assert coord._consec_degenerate_ckpt == 1
-    assert coord._checkpoint_tracker.last_tick == 7
-    assert coord._checkpoint_tracker.chars_since_last == 0
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_degenerate_three_times_emits_medium_observation(coord: Coordinator) -> None:
-    import time
-
-    _make_conversational(coord, raw_text="just prose, no JSON object here")
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-    _always_checkpoint(coord)
-
-    for tick in (1, 2, 3):
-        assert await coord._maybe_checkpoint_orchestration(tick=tick) is False
-
-    rows = await coord.bus.tail(topic="observation", n=20)
-    degraded = [m.payload for m in rows if m.payload.get("kind") == "orchestration_checkpoint_degraded"]
-    assert any(p.get("severity") == "medium" and p.get("consecutive") == 3 for p in degraded)
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_failure_resets_tracker(coord: Coordinator) -> None:
-    import time
-
-    _make_conversational(coord)
-    coord._checkpoint_enabled = True
-    coord._orchestration_seeded = True
-    coord._run_started_monotonic = time.monotonic()
-    coord._checkpoint_tracker.chars_since_last = 999
-    _always_checkpoint(coord)
-
-    async def _boom(**kw):
-        raise RuntimeError("backend down")
-
-    coord.backends["orchestration"].run = _boom  # type: ignore[assignment]
-    took = await coord._maybe_checkpoint_orchestration(tick=30)
-    assert took is False
-    # tracker reset even on failure → no checkpoint storm next tick
-    assert coord._checkpoint_tracker.chars_since_last == 0
-
-
-# -- _compose_prompt advisory + telemetry append paths ----------------------
-@pytest.mark.asyncio
-async def test_compose_prompt_orchestration_all_advisory_blocks(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    ss = coord.shared_state
-    monkeypatch.setattr(ss, "to_policy_denial_summary", lambda top_k=6: "DENIAL")
-    monkeypatch.setattr(ss, "to_warm_start_summary", lambda: "WARM-BLOCK")
-    monkeypatch.setattr(ss, "to_gaps_summary", lambda: "GAPS-BLOCK")
-    monkeypatch.setattr(ss, "to_proposal_scores_summary", lambda: "SCORES-BLOCK")
-    monkeypatch.setattr(ss, "to_intervention_mix_summary", lambda: "MIX-BLOCK")
-    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-BLOCK")
-    monkeypatch.setattr(coord.conversation, "_priors_match_advisory_block", lambda: "PRIORS-BLOCK")
-    monkeypatch.setattr(coord.conversation, "_plateau_advisory_block", lambda: "PLATEAU-BLOCK")
-    monkeypatch.setattr(coord.conversation, "_research_scout_seed_block", lambda: "HINTS-BLOCK")
-
-    out = await coord._compose_prompt("orchestration")
-    for token in (
-        "DENIAL",
-        "WARM-BLOCK",
-        "GAPS-BLOCK",
-        "HINTS-BLOCK",
-        "GAP-BLOCK",
-        "SCORES-BLOCK",
-        "PRIORS-BLOCK",
-        "MIX-BLOCK",
-        "PLATEAU-BLOCK",
-    ):
-        assert token in out
-
-
-def test_research_scout_seed_block_keeps_findings_and_questions_only(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints
-
-    research_hints.append_hints(
-        coord.session_dir,
-        [
-            {"what": "hint one", "source": "https://example.test/one"},
-            {"what": "hint two", "source": "https://example.test/two"},
-        ],
-    )
-    coord.shared_state.specialist_rounds = [
-        {
-            "domain": "research_scout_specialist",
-            "proposal_set": [
-                {
-                    "name": "first",
-                    "extra_envs": {"FIRST": "1"},
-                    "source_evidence": ["https://example.test/one"],
-                }
-            ],
-            "residual_questions": ["question one"],
-        },
-        {
-            "domain": "research_scout_specialist",
-            "proposal_set": [
-                {
-                    "name": "second",
-                    "extra_args": "--second",
-                    "source_evidence": ["https://example.test/two"],
-                }
-            ],
-            "residual_questions": ["question two"],
-        },
-        {
-            "domain": "serving_specialist",
-            "proposal_set": [{"name": "ignore-me"}],
-            "residual_questions": ["ignore me"],
-        },
-    ]
-
-    block = coord.conversation._research_scout_seed_block()
-
-    assert "hint one" in block
-    assert "hint two" in block
-    assert "question one" in block
-    assert "question two" in block
-    assert "ignore-me" not in block
-    # Proposals moved to the shared untested-proposal queue, which also drops
-    # the ones already benched; rendering them here as well would double them.
-    assert "Untested executable proposals" not in block
-    assert '"name": "first"' not in block
-    assert '"name": "second"' not in block
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_orchestration_advisory_blocks_raise(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    ss = coord.shared_state
-
-    def _boom(*a, **k):
-        raise RuntimeError("summary failed")
-
-    monkeypatch.setattr(ss, "to_phase_status_summary", _boom)
-    monkeypatch.setattr(ss, "to_warm_start_summary", _boom)
-    monkeypatch.setattr(ss, "to_gaps_summary", _boom)
-    monkeypatch.setattr(ss, "to_proposal_scores_summary", _boom)
-    monkeypatch.setattr(ss, "to_intervention_mix_summary", _boom)
-    monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", _boom)
-    monkeypatch.setattr(coord.conversation, "_priors_match_advisory_block", _boom)
-    monkeypatch.setattr(coord.conversation, "_plateau_advisory_block", _boom)
-    monkeypatch.setattr(coord.conversation, "_research_scout_seed_block", _boom)
-
-    # Every advisory failure is swallowed; the prompt still renders.
-    out = await coord._compose_prompt("orchestration")
-    assert "SESSION_DIR=" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_telemetry_raises(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    def _boom(*a, **k):
-        raise RuntimeError("telemetry failed")
-
-    monkeypatch.setattr(coord.shared_state, "to_phase_budget_telemetry", _boom)
-    monkeypatch.setattr(coord.conversation, "_conversation_progress_signal", _boom)
-    out = await coord._compose_prompt("robustness")
-    # Every advisory failure is swallowed; the prompt still renders.
-    assert "SESSION_DIR=" in out
-
-
-@pytest.mark.asyncio
-async def test_promote_baseline_no_warmup_parses_materialized(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    coord.shared_state.auto_roofline_pending_task_id = "pending-x"  # skip cascade
-    import hyperloom.orchestrator.loop.writeback as mod
-
-    monkeypatch.setattr(mod, "_parse_baseline_workload_extra", lambda path: {"isl": 256})
-    await coord._promote_to_shared_state(
-        "baseline",
-        {
-            "output_throughput": 1000.0,  # no warmup_round_tput -> else branch
-            "materialized_config": "/tmp/run.yaml",
-        },
-    )
-    assert coord.shared_state.baseline_tput == 1000.0
-    assert coord.shared_state.baseline_workload_extra == {"isl": 256}
-
-
-@pytest.mark.asyncio
-async def test_promote_baseline_materialized_parse_raises(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    coord.shared_state.auto_roofline_pending_task_id = "pending-x"
-    import hyperloom.orchestrator.loop.writeback as mod
-
-    def _boom(path):
-        raise RuntimeError("parse failed")
-
-    monkeypatch.setattr(mod, "_parse_baseline_workload_extra", _boom)
-    await coord._promote_to_shared_state(
-        "baseline",
-        {
-            "output_throughput": 1000.0,
-            "materialized_config": "/tmp/run.yaml",
-        },
-    )
-    assert coord.shared_state.baseline_config_path == "/tmp/run.yaml"
-
-
-@pytest.mark.asyncio
-async def test_promote_profile_skipped_clears_pending(coord: Coordinator) -> None:
-    task = _ptask("prof-1", "profile")
-    coord.shared_state.auto_roofline_pending_task_id = "prof-1"
-    await coord._promote_to_shared_state(
-        "profile",
-        {"status": "skipped", "error_class": "x"},
-        task=task,
-    )
-    assert coord.shared_state.auto_roofline_pending_task_id == ""
-
-
-@pytest.mark.asyncio
-async def test_promote_profile_succeeded_reanchors(coord: Coordinator) -> None:
-    task = _ptask("prof-2", "profile")
-    coord.shared_state.auto_roofline_pending_task_id = "prof-2"
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.cumulative_gain_validated = 10.0
-    await coord._promote_to_shared_state(
-        "profile",
-        {"status": "succeeded", "main_trace_path": "/tmp/t.json", "output_throughput": 880.0},
-        task=task,
-    )
-    assert coord.shared_state.auto_roofline_pending_task_id == ""
-
-
-@pytest.mark.asyncio
-async def test_promote_roofline_succeeded_clears_pending(coord: Coordinator) -> None:
-    task = _ptask("roof-1", "roofline")
-    coord.shared_state.auto_roofline_pending_task_id = "roof-1"
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.cumulative_gain_validated = 5.0
-    await coord._promote_to_shared_state(
-        "roofline",
-        {"status": "succeeded"},
-        task=task,
-    )
-    assert coord.shared_state.auto_roofline_pending_task_id == ""
-
-
-@pytest.mark.asyncio
-async def test_promote_roofline_skipped_clears_pending(coord: Coordinator) -> None:
-    task = _ptask("roof-2", "roofline")
-    coord.shared_state.auto_roofline_pending_task_id = "roof-2"
-    await coord._promote_to_shared_state(
-        "roofline",
-        {"status": "skipped"},
-        task=task,
-    )
-    assert coord.shared_state.auto_roofline_pending_task_id == ""
-
-
-@pytest.mark.asyncio
-async def test_promote_explore_discovered_flags_and_bad_winner(
-    coord: Coordinator,
-) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    await coord._promote_to_shared_state(
-        "explore",
-        {
-            "explore_search_update": {"round_id": "r1"},
-            "discovered_flags_update": {
-                "framework": "sglang",
-                "backend_flags": ["--x"],
-                "param_flags": [],
-                "source_path": "/tmp/p",
-                "discovery_error": "parse glitch",
-            },
-            "winners": ["not-a-dict"],
-            "round_id": "r1",
-        },
-    )
-    assert coord.shared_state.discovered_flags_error == "parse glitch"
-
-
-@pytest.mark.asyncio
-async def test_promote_conc_sweep_records(coord: Coordinator) -> None:
-    task = _ptask("cs-1", "conc_sweep")
-    await coord._promote_to_shared_state(
-        "conc_sweep",
-        {
-            "status": "succeeded",
-            "was_skipped": False,
-            "summary": {"best_speedup": 1.2, "best_conc": 64, "successful_pairs": 3},
-            "report_json_path": "/tmp/cs.json",
-        },
-        task=task,
-    )
-
-
-@pytest.mark.asyncio
-async def test_unpromotable_conc_sweep_records_failed_terminal_state(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
-
-    task = _ptask("cs-failed", "conc_sweep")
-    await coord._handle_unpromotable_result(
-        task,
-        {
-            "status": "failed",
-            "budget_exhausted": False,
-            "summary": {"successful_pairs": 0},
-            "report_json_path": "/tmp/cs-failed.json",
-        },
-    )
-
-    assert coord.shared_state.last_conc_sweep["status"] == "failed"
-    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is False
-    result = exit_normal_sweep(coord.shared_state)
-    assert result is not None
-    reason, evidence = result
-    assert reason == "sweep_failed"
-    assert evidence["sweep_status"] == "failed"
-
-
-@pytest.mark.asyncio
-async def test_budget_limited_conc_sweep_skip_records_done(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
-
-    task = _ptask("cs-budget-skip", "conc_sweep")
-    await coord._promote_to_shared_state(
-        "conc_sweep",
-        {
-            "status": "skipped",
-            "was_skipped": True,
-            "skip_reason": "budget_exhausted_no_successful_pairs",
-            "budget_exhausted": True,
-            "summary": {"successful_pairs": 0},
-            "report_json_path": "/tmp/cs-budget-skip.json",
-        },
-        task=task,
-    )
-
-    assert coord.shared_state.last_conc_sweep["status"] == "skipped"
-    assert coord.shared_state.last_conc_sweep["budget_exhausted"] is True
-    result = exit_normal_sweep(coord.shared_state)
-    assert result is not None
-    reason, evidence = result
-    assert reason == "sweep_done"
-    assert evidence["sweep_status"] == "skipped"
-
-
-# -- _promote_to_shared_state additional branches ---------------------------
-def _ptask(tid: str, kind: str):
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
 
 
 # -- specialist visibility contract -----------------------------------------
@@ -1832,8 +1192,11 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
     assert "KERNEL_AGENT plateau detected" in out
 
 
-@pytest.mark.asyncio
 # -- _record_specialist_result ----------------------------------------------
+def _ptask(tid: str, kind: str) -> Task:
+    return Task(task_id=tid, kind=kind, state="running", params={}, idempotency_key=f"{tid}-k")
+
+
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
     task = _ptask("rec-spec-1", "specialist")
@@ -1875,21 +1238,21 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
 
 
 @pytest.mark.asyncio
-async def test_record_specialist_result_research_scout(coord: Coordinator, monkeypatch) -> None:
+async def test_record_specialist_result_harvests_findings(coord: Coordinator, monkeypatch) -> None:
+    """Findings are harvested from any domain that reports them, not just the scout."""
     task = _ptask("rec-spec-2", "specialist")
     harvested: list[dict] = []
 
     async def harvest(done_payload):
         harvested.append(done_payload)
 
-    monkeypatch.setattr(coord, "_harvest_research_scout", harvest)
+    monkeypatch.setattr(coord, "_harvest_specialist_findings", harvest)
     await coord._record_specialist_result(
         task=task,
         done_payload={
-            "domain": "research_scout_specialist",
+            "domain": "kernel_agent",
             "proposal_set": [],
-            "empty": True,
-            "research": {"hints": {}},
+            "new_findings": [{"text": "aiter gemm path is fused upstream"}],
         },
         source="specialist:rec-spec-2",
     )
@@ -1994,7 +1357,7 @@ async def test_handle_intent_policy_denied(coord: Coordinator, monkeypatch) -> N
         recorded.append(denied)
 
     monkeypatch.setattr(coord.writeback, "_record_policy_denied", _rec)
-    await coord._handle_intent("orchestration", _heartbeat())
+    await coord._handle_intent("orchestration", _idle_intent())
     assert recorded
 
 
@@ -2006,7 +1369,7 @@ async def test_handle_intent_handler_exception_is_recorded(coord: Coordinator, m
         raise RuntimeError("handler boom")
 
     monkeypatch.setattr(coord, "_handle_send_message", _boom)
-    await coord._handle_intent("orchestration", _heartbeat())
+    await coord._handle_intent("orchestration", _idle_intent())
 
 
 @pytest.mark.asyncio

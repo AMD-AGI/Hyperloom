@@ -1720,10 +1720,9 @@ class SpecialistSubprocessDispatcher:
             for k, v in inner.items():
                 merged[k] = v
             log.info(
-                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d, empty=%s)",
+                "_read_done: unwrapped specialist_done intent envelope at %s (proposal_set_len=%d)",
                 done_file,
                 len(inner.get("proposal_set") or []) if isinstance(inner.get("proposal_set"), list) else 0,
-                inner.get("empty"),
             )
             return merged
         return data

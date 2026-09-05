@@ -232,8 +232,8 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        # 3 agents × 2 ticks × 1 heartbeat = 6 send_message events
-        msgs = await c.bus.tail(n=20, topic="heartbeat")
+        # 3 agents × 2 ticks × 1 idle message = 6 send_message events
+        msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 6
     finally:
         await c.stop()

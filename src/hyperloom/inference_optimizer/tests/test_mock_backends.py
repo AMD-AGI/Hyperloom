@@ -18,15 +18,15 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+def _idle_intent() -> Intent:
+    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"})
 
 
 def _backends_with_mock_critic_and_robustness(
     plans: dict[str, ScriptedPlan] | None = None,
 ) -> dict[str, object]:
     plans = plans or {}
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
+    silent = ScriptedPlan(turns=[], default_intent=_idle_intent())
     return {
         "orchestration": MockBackend(plans.get("orchestration", silent), name="o"),
         "critic": MockCriticBackend(),
@@ -61,7 +61,7 @@ async def test_mock_critic_dedups_same_proposal():
     assert len(r1.intents) == 1 and r1.intents[0].type == IntentType.REVIEW_VERDICT
     assert len(r2.intents) == 1
     assert r2.intents[0].type == IntentType.SEND_MESSAGE
-    assert r2.intents[0].payload["topic"] == "heartbeat"
+    assert r2.intents[0].payload["topic"] == "observation"
 
 
 @pytest.mark.asyncio
@@ -80,22 +80,22 @@ async def test_mock_critic_emits_one_verdict_per_proposal():
 
 
 @pytest.mark.asyncio
-async def test_mock_critic_heartbeat_when_no_proposal():
+async def test_mock_critic_idles_when_no_proposal():
     backend = MockCriticBackend()
     res = await backend.run("(no new messages for critic)")
     assert len(res.intents) == 1
     assert res.intents[0].type == IntentType.SEND_MESSAGE
-    assert res.intents[0].payload["topic"] == "heartbeat"
+    assert res.intents[0].payload["topic"] == "observation"
 
 
 # MockRobustnessBackend (unit)
 @pytest.mark.asyncio
-async def test_mock_robustness_always_heartbeat():
+async def test_mock_robustness_always_idle_intent():
     backend = MockRobustnessBackend()
     for _ in range(3):
         res = await backend.run("anything")
         assert len(res.intents) == 1
-        assert res.intents[0].payload["topic"] == "heartbeat"
+        assert res.intents[0].payload["topic"] == "observation"
 
 
 @pytest.mark.asyncio
@@ -146,12 +146,12 @@ async def test_e2e_mock_critic_closes_proposal_loop(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_e2e_mock_robustness_keeps_emitting_heartbeats(session_dir):
+async def test_e2e_mock_robustness_keeps_emitting_idle_messages(session_dir):
     backends = _backends_with_mock_critic_and_robustness({})
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(3)
-        beats = await c.bus.tail(topic="heartbeat", to_agent="*")
+        beats = await c.bus.tail(topic="observation", to_agent="*")
         assert len(beats) >= 9
         assert any(m.from_agent == "robustness" for m in beats)
     finally:

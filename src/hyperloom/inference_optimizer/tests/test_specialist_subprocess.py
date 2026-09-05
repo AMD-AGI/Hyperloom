@@ -117,7 +117,6 @@ def _make_fake_claude(
                 }
             ],
             "patches_written": [],
-            "empty": False,
             "summary": "fake claude subprocess output",
             "confidence": 0.5,
         }
@@ -160,7 +159,6 @@ exit 0
                     }
                 ],
                 "patches_written": ["patches/001_test.patch"],
-                "empty": False,
                 "summary": "fake patch-authoring specialist",
                 "confidence": 0.7,
             }
@@ -188,7 +186,6 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
   "domain": "serving_specialist",
   "proposal_set": [],
   "patches_written": [],
-  "empty": true,
   "summary": "env echo",
   "confidence": 0.0,
   "hip_visible": "$HIP_VISIBLE_DEVICES",
@@ -207,7 +204,6 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
   "domain": "serving_specialist",
   "proposal_set": [],
   "patches_written": [],
-  "empty": true,
   "summary": "llm env echo",
   "confidence": 0.0,
   "api_timeout_ms": "$API_TIMEOUT_MS",
@@ -371,7 +367,7 @@ async def test_subprocess_path_harvests_done_file(
     result = await runner.run(ctx)
 
     assert result.status == "succeeded"
-    assert result.specialist_done["empty"] is False
+    assert result.specialist_done["proposal_set"]
     assert result.specialist_done["domain"] == "serving_specialist"
     workspace = session_dir / "runs" / "specialist" / "t-spec-done"
     assert (workspace / "specialist_done.json").exists()
@@ -597,7 +593,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 
     result = await runner.run(ctx)
     assert result.status in ("empty_synthesised", "stale")
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert "subprocess" in (result.error or "")
 
 
@@ -665,7 +661,7 @@ async def test_subprocess_recovers_partial_when_no_final(
     # Salvaged work keeps the findings but must not read as a clean run.
     assert result.status == "partial"
     assert "recovered_from_partial" in result.notes
-    assert result.specialist_done["empty"] is False
+    assert result.specialist_done["proposal_set"]
     assert result.specialist_done.get("_recovered_from_partial") is True
     assert result.specialist_done["proposal_set"]
 

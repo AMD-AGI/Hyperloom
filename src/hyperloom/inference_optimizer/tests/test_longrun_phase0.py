@@ -11,6 +11,7 @@ LLM backend calls. All deterministic + offline.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -101,7 +102,7 @@ def test_tested_ledger_cap_applied_on_merge():
 async def test_prune_events_respects_recent_window(conn):
     bus = MessageBus(conn)
     for i in range(100):
-        await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
+        await bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
     # keep_recent=10: only the last 10 are retained.
     deleted = await dbm.prune_events(conn, keep_recent=10)
     assert deleted == 90
@@ -117,7 +118,7 @@ async def test_prune_events_protects_pending_proposal(conn):
     prop = Message.new("orchestration", "*", "proposal", {"action_name": "x"})
     await bus.append_and_seq(prop)
     for i in range(50):
-        await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
+        await bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
 
     await dbm.prune_events(conn, keep_recent=0)
     rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
@@ -204,7 +205,7 @@ async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
 async def test_run_db_retention_aggregates(conn):
     bus = MessageBus(conn)
     for i in range(40):
-        await bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
+        await bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
     res = await dbm.run_db_retention(conn, events_keep_recent=5)
     assert res.events_deleted > 0
     assert res.total == res.events_deleted + res.tasks_deleted
@@ -296,11 +297,10 @@ def test_retry_policy_from_env(monkeypatch):
 
 # coordinator maintenance tick (cadence + wiring)
 @pytest.mark.asyncio
-async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypatch):
+async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_MAINTENANCE_EVERY_TICKS", "10")
     from hyperloom.inference_optimizer.session.paths import make_session_dir
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import MAINTENANCE_INTERVAL_SEC, Coordinator
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
@@ -327,17 +327,17 @@ async def test_coordinator_maintenance_tick_cadence_and_reaps(tmp_path, monkeypa
         )
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
         for i in range(30):
-            await c.bus.append_and_seq(Message.new("orchestration", "*", "heartbeat", {"i": i}))
+            await c.bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
 
-        # Off-cadence ticks are a no-op.
-        assert await c._maybe_run_maintenance_tick(tick=7) is None
-        # On-cadence tick reaps leases + runs DB retention.
-        summary = await c._maybe_run_maintenance_tick(tick=10)
+        summary = await c._run_maintenance(tick=10)
         assert summary is not None
         assert summary["gpu_leases_reaped"] == 1
         assert "events_pruned" in summary and "tasks_pruned" in summary
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
         assert int(rows[0]["c"]) == 0
+        # The wall-clock gate is seeded at construction, so tick 1 of a fresh
+        # session must not already be past the interval.
+        assert time.monotonic() - c._last_maintenance_ts < MAINTENANCE_INTERVAL_SEC
     finally:
         await c.stop()
 
@@ -381,7 +381,7 @@ async def test_claude_backend_retries_transient_then_succeeds():
                 raise asyncio.TimeoutError("proxy stall")
             block = ToolUseBlock(
                 EMIT_INTENT_TOOL_QUALIFIED,
-                {"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}},
+                {"intent_type": "send_message", "payload": {"topic": "observation", "body_md": "ok"}},
             )
             yield _Msg(content=[block])
 

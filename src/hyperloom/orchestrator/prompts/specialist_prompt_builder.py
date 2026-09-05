@@ -999,7 +999,8 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "are discouraged when a real bottleneck is on the table — but stop once",
         "rounds stop yielding new findings; the wall clock is not the only stop",
         "signal. Quality over quantity: **2 proposals is the norm, 4 the hard",
-        "cap**. One real beats two padded; ``empty=true`` beats one padded.",
+        "cap**. One real beats two padded; an empty ``proposal_set`` with a",
+        "clear ``summary`` beats one padded.",
         "",
         "Division of labour: the Coordinator owns the serving GPU, runs the E2E",
         "benchmark, and decides KEEP/REVERT — you do not have to validate final",
@@ -1485,7 +1486,7 @@ def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
                     + "(Section 3); flag each ``provenance: "
                     + "domain_focus_default`` and call it an unvalidated "
                     + "fallback in the proposal's ``reason``. If none clears "
-                    + "that bar, emit ``empty=true`` and cite in ``summary`` "
+                    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
                     + "which you considered and why each was rejected — a "
                     + "bare empty exit with no rationale reads as a tool "
                     + "failure. Do NOT add a ``confidence`` field: "
@@ -2005,17 +2006,17 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  path is accepted only if it resolves inside an allowlisted framework",
             "  root. ``integrate_patch`` backs up the target, installs the artifact,",
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
-            "  tuned artifact is a FULL result — set ``empty=false`` when",
-            "  ``artifacts_written`` is non-empty.",
+            "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
+            "  list the artifact in ``artifacts_written``.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
         patch_fields = []
         no_output = "  and no findings; in that case"
-    empty_rule = [
-        "- ``empty=true`` is legitimate ONLY when you have no actionable proposals",
+    no_proposal_rule = [
+        "- An empty ``proposal_set`` is legitimate ONLY when you have no actionable proposals",
         no_output,
-        "  ``proposal_set=[]`` and you must put the reason in ``summary``.",
+        "  and you must put the reason in ``summary``.",
     ]
 
     return [
@@ -2072,7 +2073,6 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                         }
                     ],
                     **({"patches_written": []} if authors_patches else {}),
-                    "empty": False,
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
                     "new_findings": [],
@@ -2116,7 +2116,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "of the first two. Padding is a failure, not thoroughness: each "
             "weak entry costs a Critic reject and a slot on the serial "
             "benchmark queue. One real proposal is a better round than two "
-            "padded ones, and ``empty=true`` is better than one."
+            "padded ones, and an empty ``proposal_set`` with a clear ``summary`` "
+            "is better than one."
         ),
         (
             "- The Critic reviews each surviving variant against the KB "
@@ -2125,7 +2126,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             + "off the same dead-end)."
         ),
         *patch_fields,
-        *empty_rule,
+        *no_proposal_rule,
         "- ``new_findings`` is a list of learned items. Research scouts must",
         "  emit source-backed ``{what, source, expected_impact, accuracy_risk,",
         "  domain_tags[]}`` records.",
@@ -2203,7 +2204,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "   this directory + read-only access to ``framework_source_roots``",
         "   and ``SESSION_DIR``.",
         "6. On tool error or no useful action left, emit",
-        "   ``specialist_done{empty=true, summary='<why>'}``.",
+        "   ``specialist_done{proposal_set=[], summary='<why>'}``.",
         f"7. {BASH_KILL_SAFETY_PREAMBLE}",
     ]
 

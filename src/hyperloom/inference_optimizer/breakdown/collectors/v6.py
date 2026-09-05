@@ -622,7 +622,7 @@ def _specialist_status(row: dict[str, Any]) -> str:
     if raw in {"failed", "error", "timed_out", "timeout"} or row.get("error"):
         return "failed"
     proposals = row.get("proposal_set")
-    if bool(row.get("empty")) or isinstance(proposals, list) and not proposals:
+    if not row.get("proposals_total") or (isinstance(proposals, list) and not proposals):
         return "empty"
     if raw in {"empty", "skipped"}:
         return "empty"

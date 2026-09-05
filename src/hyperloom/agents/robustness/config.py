@@ -104,7 +104,7 @@ class Config:
     llm_rca_max_chars: int = 1500
 
     # -- reactor knobs --
-    cooldown_ticks: int = 5
+    cooldown_sec: float = 300.0
     source_fail_threshold: int = 3
     source_recheck_interval_s: float = 30.0
     standalone_tick_interval_s: float = 10.0
@@ -154,10 +154,9 @@ class Config:
     aiter_jit_stale_build_persist_ticks: int = 5
 
     # -- gain_plateau / no_levers_found signals --
-    progress_gain_window_ticks: int = 6
+    progress_gain_window_actions: int = 6
     progress_gain_epsilon_pct: float = 0.5
     progress_no_levers_min_minutes: float = 45.0
-    progress_no_levers_min_ticks: int = 8
 
     # -- disk / shm signals --
     disk_used_warn_pct: float = 85.0
@@ -240,9 +239,8 @@ class Config:
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0
 
-    # -- phase budget / conversation progress signals --
+    # -- phase budget signal --
     phase_budget_warn_used_pct: float = 90.0
-    conversation_progress_enabled: bool = True
 
     # -- cross-tick state persistence --
     # Subprocess-per-tick transport needs disk-backed state for any

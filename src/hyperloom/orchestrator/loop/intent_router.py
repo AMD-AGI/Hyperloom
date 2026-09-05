@@ -40,7 +40,7 @@ from .coordinator_helpers import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..bus.message_bus import Message
+from ..bus.message_bus import Message, TOPIC_ALLOWLIST
 from ..policy.gate import (
     patch_verdict_subject,
     PolicyDenied,
@@ -1319,10 +1319,7 @@ class IntentRouter:
                 ``topic`` / ``to`` plus arbitrary message fields.
         """
         topic = intent.payload.get("topic", "observation")
-        if (
-            topic
-            not in __import__("hyperloom.orchestrator.bus.message_bus", fromlist=["TOPIC_ALLOWLIST"]).TOPIC_ALLOWLIST
-        ):
+        if topic not in TOPIC_ALLOWLIST:
             # Soft-degrade unknown topic.
             topic = "observation"
         to_agent = intent.payload.get("to") or "*"

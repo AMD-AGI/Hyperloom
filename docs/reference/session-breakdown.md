@@ -586,19 +586,12 @@ Terminal Recipe publication is reported alongside the artifact paths:
 
 ### `telemetry.orchestration_context`
 
-Health of the orchestration conversation's compaction loop (`OrchestrationContext`).
-All fields are `total=False`; sessions predating this field report zeroes.
+Orchestration turn accounting (`OrchestrationContext`). All fields are
+`total=False`; sessions predating this field report zeroes.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `seed_prompts` | int | Full-state SEED pushes to the orchestration backend |
-| `delta_prompts` | int | Thin DELTA pushes (verbose state omitted) |
-| `compactions` | int | `orchestration_checkpoint` events recorded |
-| `degenerate_compactions` | int | Compactions skipped on an unusable summary |
-| `tick_count` | int | Ticks executed; denominator for the rates below |
-| `compactions_per_tick` | float | `compactions / tick_count`; near 1.0 means every tick re-seeds the conversation |
-| `delta_ratio` | float | `delta_prompts / (seed + delta)`; near 0 means the DELTA path is not being reached |
-| `context_tokens_at_compaction` | dict[str, int] | `min` / `median` / `max` token water level at each compaction; a `min` above the soft budget means the token trigger cannot be un-tripped by compacting |
+| `tick_count` | int | Coordinator ticks executed; one full state projection each |
 
 ---
 

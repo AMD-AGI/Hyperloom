@@ -667,7 +667,6 @@ async def _run_rewrite_integrate(
                 "domain": "framework_rewrite_specialist",
                 "proposal_set": [],
                 "patches_written": ["patches/001_rewrite.patch"],
-                "empty": False,
                 "summary": "switch-gated rewrites",
                 manifest.MANIFEST_KEY: list(switches or []),
             }

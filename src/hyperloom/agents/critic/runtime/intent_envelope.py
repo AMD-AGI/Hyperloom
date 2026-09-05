@@ -10,7 +10,7 @@ The Coordinator accepts intent envelopes of the form
 ```
 
 The Critic normally produces two intent types: ``review_verdict``
-(per proposal) and ``send_message`` (heartbeat / ``advice``). Raw
+(per proposal) and ``send_message`` (``observation`` / ``advice``). Raw
 envelope validation delegates to the inference-optimizer protocol
 validator so the Coordinator and standalone critic runtime share one
 payload schema.
@@ -67,10 +67,7 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
     }
 )
 
-
-# Default content for the heartbeat fallback.
-DEFAULT_HEARTBEAT_TOPIC = "heartbeat"
-DEFAULT_HEARTBEAT_BODY = "ok (critic)"
+DEFAULT_IDLE_BODY = "ok (critic)"
 DEFAULT_ADVICE_TOPIC = "advice"
 
 
@@ -221,19 +218,16 @@ def build_review_verdict_intent(
     return Intent(intent_type="review_verdict", payload=payload)
 
 
-def build_heartbeat_intent(body_md: str = DEFAULT_HEARTBEAT_BODY) -> Intent:
-    """Build the heartbeat ``send_message`` intent.
+def build_idle_intent(body_md: str = DEFAULT_IDLE_BODY) -> Intent:
+    """Build the ``observation`` ``send_message`` intent for an idle turn.
 
     Args:
-        body_md (str): Message body; defaults to :data:`DEFAULT_HEARTBEAT_BODY`.
+        body_md (str): Message body; defaults to :data:`DEFAULT_IDLE_BODY`.
 
     Returns:
-        Intent: A ``send_message`` intent on the heartbeat topic.
+        Intent: A ``send_message`` intent on the ``observation`` topic.
     """
-    return Intent(
-        intent_type="send_message",
-        payload={"topic": DEFAULT_HEARTBEAT_TOPIC, "body_md": body_md},
-    )
+    return Intent(intent_type="send_message", payload={"topic": "observation", "body_md": body_md})
 
 
 def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = None) -> Intent:
@@ -256,23 +250,21 @@ def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = No
 def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     """Wrap a non-empty iterable of intents into an envelope.
 
-    Empty input falls back to a single heartbeat so the Coordinator never
-    times out on an empty envelope; this matches MockCriticBackend.
+    Empty input falls back to a single idle observation so the Coordinator
+    never times out on an empty envelope; this matches MockCriticBackend.
 
     Args:
         intents (Iterable[Intent]): The intents to wrap.
 
     Returns:
-        IntentEnvelope: The validated envelope (heartbeat-only if ``intents``
+        IntentEnvelope: The validated envelope (idle-only if ``intents``
         was empty).
 
     Raises:
         IntentEnvelopeValidationError: If the resulting envelope fails the
             self-check in :func:`validate_envelope`.
     """
-    materialised = list(intents)
-    if not materialised:
-        materialised = [build_heartbeat_intent()]
+    materialised = list(intents) or [build_idle_intent()]
     env = IntentEnvelope()
     for intent in materialised:
         env.append(intent)
@@ -286,14 +278,13 @@ __all__ = [
     "ALLOWED_VERDICTS",
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
-    "DEFAULT_HEARTBEAT_BODY",
-    "DEFAULT_HEARTBEAT_TOPIC",
+    "DEFAULT_IDLE_BODY",
     "ENVELOPE_SCHEMA_VERSION",
     "Intent",
     "IntentEnvelope",
     "build_advice_intent",
     "build_envelope",
-    "build_heartbeat_intent",
+    "build_idle_intent",
     "build_review_verdict_intent",
     "validate_envelope",
 ]

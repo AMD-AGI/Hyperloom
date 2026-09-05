@@ -264,7 +264,7 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     assert specialist_task.params["reauthor_attempt"] == 1
     round_entry = stub._build_specialist_round_entry(
         task=specialist_task,
-        done_payload={"proposal_set": [], "empty": True},
+        done_payload={"proposal_set": []},
         source=f"specialist:{task_id}",
     )
     assert round_entry["reauthor_attempt"] == 1
@@ -681,7 +681,6 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": False,
         "patches_written": [],
         "proposal_set": [{"name": "serving-gc-off-critical-path"}],
         "summary": "patch target file absent from framework tree",
@@ -842,7 +841,6 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -877,7 +875,6 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -925,7 +922,6 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [

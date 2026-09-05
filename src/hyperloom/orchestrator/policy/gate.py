@@ -1105,6 +1105,13 @@ class PolicyGate:
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
+        if kind == "integrate":
+            mode = str(payload.get("mode") or "patch").strip().lower()
+            if mode not in ("patch", "env_only"):
+                raise PolicyDenied(
+                    f"integrate mode must be 'patch' or 'env_only', got {mode!r}",
+                    rule="invalid_integrate_mode",
+                )
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(
             role.name,

@@ -17,11 +17,10 @@ object, so the payload arrives as a JSON string; decoding it and handing the
 result to :func:`validate_envelope` keeps payload checking identical to the
 Claude path.
 
-One :class:`CodexSession` is held across ticks, which is what makes the
-backend honestly ``conversational``: the Coordinator can then push a thin
-delta instead of the full session state every turn, and compaction has a
-conversation to compact. The session owns a child process and a private state
-directory, so the Coordinator closes it (:meth:`aclose`) when the run ends.
+One :class:`CodexSession` is held across ticks so the SDK client and its child
+process are opened once rather than per turn. The session owns that child
+process and a private state directory, so the Coordinator closes it
+(:meth:`aclose`) when the run ends.
 """
 
 from __future__ import annotations
@@ -90,12 +89,9 @@ def build_output_instructions(allowed_intents: Iterable[IntentType]) -> str:
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
-    heartbeat = json.dumps({"topic": "heartbeat", "body_md": "ok"})
-    has_send_message = _IT.SEND_MESSAGE in set(allowed_intents)
-    heartbeat_line = (
-        f"- ALWAYS emit at least one intent. With nothing to report, emit\n"
-        f'  {{"intent_type": "send_message", "payload": {json.dumps(heartbeat)}}}.'
-        if has_send_message
+    always_emit_line = (
+        "- ALWAYS emit at least one intent."
+        if _IT.SEND_MESSAGE in set(allowed_intents)
         else "- ALWAYS emit exactly one intent; the schema requires it."
     )
     return f"""
@@ -112,7 +108,7 @@ output schema — no prose, no code fences, nothing around it:
 - Put only NEW information in payload bodies; do not restate context already
   in SharedState, your inbox, or analysis.md. Keep length proportional to
   substance.
-{heartbeat_line}
+{always_emit_line}
 ==== END OUTPUT FORMAT ====
 """.strip()
 
@@ -169,14 +165,9 @@ def decode_intent_envelope(text: str) -> dict[str, Any]:
 class CodexBackend:
     """Production Codex reactor backend. Implements :class:`Backend`.
 
-    One behaviour differs from the Claude path and cannot be made to match. A
-    thread's developer instructions are fixed when it starts, so a phase re-scope
-    has to open a new thread, and the model's own reasoning and plan go with the
-    old one. :meth:`needs_seed_for` makes the Coordinator push a full SEED across
-    that seam, and the seam checkpoint that normally runs first carries the
-    distilled memory over -- but that checkpoint is skipped when checkpointing is
-    disabled or the conversation was never seeded, and then only SharedState
-    survives. Claude resumes by ``session_id`` and keeps everything.
+    A thread's developer instructions are fixed when it starts, so a phase
+    re-scope has to open a new thread. Every turn carries the full state
+    projection, so nothing the next turn needs lives in the discarded thread.
 
     Args:
         allowed_intents: The emitting role's intent set; becomes the enforced
@@ -208,8 +199,8 @@ class CodexBackend:
     writable_roots: tuple[Path, ...] = ()
     sandbox_mode: str = ""
     codex_bin: str = ""
-    # An agent turn carries a tool loop, so it needs the conversational budget
-    # the Claude orchestration path also floors at, not a completion's 120s.
+    # An agent turn carries a tool loop, so it needs the orchestration budget,
+    # not a completion's 120s.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC",
@@ -224,10 +215,6 @@ class CodexBackend:
     name: str = "codex"
     calls: list[dict[str, Any]] = field(default_factory=list)
 
-    # Every turn runs on one held SDK thread, so the Coordinator's delta gating
-    # and checkpoint compaction both apply. Not a dataclass field: a
-    # session-scoped backend has no stateless mode to fall back to.
-    conversational = True
     # Which prompt modules describe a surface this backend actually has. Read
     # by the prompt builder, which cannot infer it from the role: the
     # orchestration role is Claude on paper and Codex in an OpenAI-only run.
@@ -238,9 +225,6 @@ class CodexBackend:
     # system prompt is re-scoped on phase entry, and thread instructions are
     # fixed at thread_start, so a change has to open a new thread.
     _thread_instructions: str = field(default="", init=False, repr=False)
-    # Whether the open thread has carried a turn. A fresh thread holds no
-    # history, so the caller owes it a full push rather than a delta.
-    _thread_seeded: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root.
@@ -336,7 +320,6 @@ class CodexBackend:
             raise LLMCallFailed(f"Codex Agent SDK turn failed: {redact_secret_values(str(exc))}") from exc
         if sdk_result.error:
             raise LLMCallFailed("Codex Agent SDK turn failed: " + redact_secret_values(sdk_result.error))
-        self._thread_seeded = True
 
         usage = dict(sdk_result.usage or {})
         input_tokens = safe_int(usage.get("input_tokens"))
@@ -394,56 +377,15 @@ class CodexBackend:
             raise NoIntentEmitted(f"codex envelope invalid: {exc}") from exc
         return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
 
-    # ------------------------------------------------------------------
-    @property
-    def needs_seed(self) -> bool:
-        """True when the open conversation has no history to build a delta on.
-
-        The caller decides between a full push and a delta, but only this
-        backend knows when the thread underneath was replaced — by a reset, by
-        a re-scoped system prompt, or by a turn that never landed.
-
-        This is the question a backend can answer without knowing what the turn
-        will carry. The Coordinator reads it only from backends that cannot
-        answer :meth:`needs_seed_for`, so this backend's own answer is never the
-        one used; it stays because the attribute is the fallback half of that
-        protocol, and a backend implementing only this half must still work.
-        """
-        return not self._thread_seeded
-
-    def needs_seed_for(self, system_prompt: str | None) -> bool:
-        """True when the turn about to run will start on an empty thread.
-
-        :attr:`needs_seed` can only describe the thread as it stands, but the
-        caller has to choose SEED or DELTA *before* the turn, and a re-scoped
-        system prompt replaces the thread inside the turn itself. Answering for
-        the prompt that is about to be sent is what keeps a thin delta out of a
-        thread that holds none of the state the delta omits.
-        """
-        if not self._thread_seeded:
-            return True
-        return self._instructions_for(system_prompt) != self._thread_instructions
-
     def _instructions_for(self, system_prompt: str | None) -> str:
         """Thread-level instructions implied by one system prompt."""
         return "\n\n".join(
             part for part in ((system_prompt or "").strip(), build_output_instructions(self.allowed_intents)) if part
         )
 
-    def reset_conversation(self) -> None:
-        """Start the next turn on a fresh conversation.
-
-        The conversation is the SDK thread; the client and its private state
-        directory stay up, so a compaction cannot leak a child process.
-        """
-        self._thread_seeded = False
-        if self._session is not None:
-            self._session.reset_thread()
-
     async def aclose(self) -> None:
         """Release the held session: SDK client, child process, ``CODEX_HOME``."""
         session, self._session = self._session, None
-        self._thread_seeded = False
         if session is not None:
             await session.aclose()
 
@@ -470,7 +412,6 @@ class CodexBackend:
                 component="orchestration",
                 operation="orchestrate_turn",
             )
-            self._thread_seeded = False
             try:
                 await self._session.start()
             except CodexSessionUnavailableError as exc:
@@ -488,7 +429,6 @@ class CodexBackend:
         elif instructions != self._thread_instructions:
             self._session.developer_instructions = instructions
             self._session.reset_thread()
-            self._thread_seeded = False
         self._thread_instructions = instructions
         return self._session
 

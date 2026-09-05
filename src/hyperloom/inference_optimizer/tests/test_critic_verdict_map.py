@@ -2080,7 +2080,7 @@ def test_specialist_prompt_renders_proposal_target_and_ceiling():
     assert "**2 entries is the norm, 4 the hard cap.**" in text
     assert "**2 proposals is the norm, 4 the hard" in text
     # Both the padding and the keep-going pressures need a stated counterweight.
-    assert "``empty=true`` is better than one" in text
+    assert "an empty ``proposal_set`` with a clear ``summary``" in text
     assert "stop once" in text and "not the only stop" in text
     assert "a coin-flip proposal is worse than none" in text
     assert "reviews each surviving variant" in text

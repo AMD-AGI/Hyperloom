@@ -107,7 +107,6 @@ class _GpuProbe:
                 "gap_canonical_id": ctx.task.params.get("gap_canonical_id", ""),
                 "domain": "serving_specialist",
                 "proposal_set": [],
-                "empty": True,
                 "summary": "gpu-probe noop",
                 "reason": "test",
                 "confidence": 0.0,

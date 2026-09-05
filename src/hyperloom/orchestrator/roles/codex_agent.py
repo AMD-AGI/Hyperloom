@@ -43,7 +43,6 @@ your final response as exactly one JSON object:
         "gap_canonical_id": "...",
         "domain": "...",
         "proposal_set": [],
-        "empty": true,
         "summary": "..."
       }
     }

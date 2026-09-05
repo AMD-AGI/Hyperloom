@@ -2115,7 +2115,6 @@ def test_framework_timeline_treats_empty_discovery_as_executed_work(tmp_path):
                 "task_kind": "candidate_discovery",
                 "domain": "candidate_discovery_specialist",
                 "proposal_set": [],
-                "empty": True,
                 "completed_at": "2026-08-28T01:03:00+00:00",
             }
         ],

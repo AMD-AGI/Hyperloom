@@ -13,7 +13,6 @@ import time
 
 import pytest
 
-from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_NAMES
 from hyperloom.orchestrator.roles import (
     Backend,
     MockBackend,
@@ -476,56 +475,11 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
     assert coord._priors_match_advisory_block() == ""
 
 
-# -- _harvest_research_scout -----------------------------------------------
-@pytest.mark.asyncio
-async def test_harvest_research_scout_empty_and_populated(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints
-
-    events: list[str] = []
-
-    async def checkpoint(**kwargs):
-        assert kwargs["force"] is True
-        events.append("checkpoint")
-        return False
-
-    def reset():
-        events.append("reset")
-        coord._orchestration_seeded = False
-
-    monkeypatch.setattr(coord, "_maybe_checkpoint_orchestration", checkpoint)
-    monkeypatch.setattr(coord, "_reset_orchestration_conversation", reset)
-
-    await coord._harvest_research_scout({})
-    coord._orchestration_seeded = True
-    await coord._harvest_research_scout(
-        {
-            "new_findings": [
-                {
-                    "what": "enable aiter",
-                    "source": "https://example.test/aiter",
-                    "domain_tags": ["serving"],
-                }
-            ],
-            "proposal_set": [
-                {
-                    "name": "aiter",
-                    "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
-                    "source_evidence": ["https://example.test/aiter"],
-                }
-            ],
-        }
-    )
-    assert research_hints.load_hints(coord.session_dir)[0]["what"] == "enable aiter"
-    assert "https://example.test/aiter" in coord.shared_state.research_scout_seen_pr_ids
-    assert coord._orchestration_seeded is False
-    assert events == ["checkpoint", "reset", "checkpoint", "reset"]
+# -- _harvest_specialist_findings -----------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
+async def test_harvest_specialist_findings_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
     """LLM-authored competitor numbers must never be persisted as a consumable
     competitor target.
 
@@ -537,7 +491,7 @@ async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coo
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 
-    await coord._harvest_research_scout(
+    await coord._harvest_specialist_findings(
         {
             "new_findings": [{"what": "try mtp", "source": "https://pr/1"}],
             "competitor_target": {
@@ -552,13 +506,6 @@ async def test_harvest_research_scout_does_not_persist_llm_competitor_target(coo
 
     assert not session_paths.competitor_target_json(coord.session_dir).exists()
     assert research_hints.load_competitor_target(coord.session_dir) is None
-
-
-# -- _maybe_checkpoint_orchestration ---------------------------------------
-@pytest.mark.asyncio
-async def test_maybe_checkpoint_orchestration_non_conversational(coord: Coordinator) -> None:
-    took = await coord._maybe_checkpoint_orchestration(tick=1, phase_changed=False)
-    assert took is False
 
 
 # -- _handle_escalate_strategy_change --------------------------------------
@@ -937,67 +884,6 @@ async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinat
     coord.shared_state.cumulative_gain_validated = 5.0
     await coord._compose_prompt("orchestration")
     assert coord.shared_state.target_gap_pct == 0.0
-
-
-def _pin_conversational_with_context_tools(coord: Coordinator, monkeypatch) -> None:
-    """Pin the delta path AND the mounted pull tools the banner advertises."""
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    monkeypatch.setattr(coord.conversation, "_orchestration_context_tools_mounted", lambda: True)
-    coord._orchestration_seeded = True
-
-
-@pytest.mark.asyncio
-async def test_delta_banner_names_every_registered_context_tool(coord: Coordinator, monkeypatch) -> None:
-    _pin_conversational_with_context_tools(coord, monkeypatch)
-    text = await coord._compose_prompt("orchestration")
-    banner_start = text.find("=== Context (pull on demand) ===")
-    assert banner_start != -1, "DELTA banner missing"
-    banner = text[banner_start:]
-    for tool in CONTEXT_TOOL_NAMES:
-        assert tool in banner, f"{tool!r} not in DELTA banner"
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_conversational_delta(coord: Coordinator, monkeypatch) -> None:
-    _pin_conversational_with_context_tools(coord, monkeypatch)
-    out = await coord._compose_prompt("orchestration")
-    assert "Context (pull on demand)" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_delta_without_context_tools_names_none(coord: Coordinator, monkeypatch) -> None:
-    """A backend with no pull tools must not be told to call them."""
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = True
-    out = await coord._compose_prompt("orchestration")
-    assert "=== Context (delta turn) ===" in out
-    for tool in CONTEXT_TOOL_NAMES:
-        assert tool not in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_conversational_seed_memory(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.conversation, "_orchestration_conversational", lambda: True)
-    coord._orchestration_seeded = False
-    coord._orchestration_seed_memory = "=== recovered memory ==="
-    out = await coord._compose_prompt("orchestration")
-    assert "recovered memory" in out
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_high_no_progress(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(
-        coord.conversation,
-        "_conversation_progress_signal",
-        lambda: {
-            "ticks_without_progress": 9,
-            "threshold": 5,
-            "severity": "high",
-            "last_progress_tick": 1,
-        },
-    )
-    out = await coord._compose_prompt("robustness")
-    assert "no observable progress" in out
 
 
 # -- _context_analysis_reader ----------------------------------------------

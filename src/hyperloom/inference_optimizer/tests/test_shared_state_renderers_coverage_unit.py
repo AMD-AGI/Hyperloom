@@ -38,31 +38,18 @@ def test_format_variant_line():
     assert "(no-flag)" in line2
 
 
-def test_enrich_with_tested_gain():
-    entry = {"fingerprint": "fp1"}
-    tested = {"fp1": {"gain_pct": 3.0, "result": {"output_throughput": 99.0}}}
-    out = SharedState._enrich_with_tested_gain(entry, tested)
-    assert out["gain_pct"] == 3.0
-    assert out["tput"] == 99.0
-    # already-populated returns unchanged
-    full = {"gain_pct": 1.0, "tput": 1.0}
-    assert SharedState._enrich_with_tested_gain(full, tested) is full
-    # missing fingerprint snapshot -> unchanged
-    assert SharedState._enrich_with_tested_gain({"fingerprint": "none"}, tested) == {"fingerprint": "none"}
-
-
 def test_format_search_state():
     assert SharedState._format_search_state(None) == "(none)"
+    assert SharedState._format_search_state({"tested": {}}).strip().startswith("cursor=0")
     search = {
         "cursor": 3,
         "accepted": [{"name": "a", "fingerprint": "f1"}],
         "rejected": [{"name": "r", "gain_pct": -1.0}],
-        "tested": {"f1": {"gain_pct": 4.0}},
+        "tested": {"f1": {"outcome": "REJECT", "name": "r", "gain_pct": -1.0}},
     }
     out = SharedState._format_search_state(search)
-    assert "cursor=3" in out
-    assert "accepted:" in out
-    assert "rejected (last 15):" in out
+    assert "cursor=3  accepted=1  rejected=1  tested=1" in out
+    assert "f1" in out and "REJECT" in out
 
 
 def test_format_optimization_stack():

@@ -76,6 +76,7 @@ class MockBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
         """Record the call and play back the next scripted turn.
 
@@ -84,6 +85,7 @@ class MockBackend:
             system_prompt (str | None): Optional system prompt (recorded).
             tools (list[str] | None): Optional tool names (recorded).
             max_turns (int): Maximum sub-turns (recorded).
+            allow_no_intent (bool): Unused; accepted for protocol parity.
 
         Returns:
             BackendTurnResult: The intents, raw text, and metadata of the next
@@ -115,7 +117,7 @@ class MockBackend:
 
         Advances the cursor while scripted turns remain. Once exhausted, repeats
         the last turn when ``loop_last`` is set, otherwise replays
-        ``default_intent`` when present, and finally falls back to a heartbeat
+        ``default_intent`` when present, and finally falls back to an idle
         turn so the reactor keeps ticking.
 
         Returns:
@@ -129,10 +131,10 @@ class MockBackend:
             return self.plan.turns[-1]
         if self.plan.default_intent is not None:
             return MockTurn(intents=[self.plan.default_intent])
-        # Out of script and no fallback → emit a heartbeat so the reactor keeps ticking.
+        # Out of script and no fallback → emit an observation so the reactor keeps ticking.
         return MockTurn(
             intents=[
-                Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+                Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"}),
             ]
         )
 
@@ -146,14 +148,14 @@ _PROPOSAL_RE = re.compile(
 
 
 class MockRowScanBackend:
-    """Row-scanning reactor mock: one intent per matched inbox row, else heartbeat.
+    """Row-scanning reactor mock: one intent per matched inbox row, else idle.
 
     Generalises the always-approve Critic mock: scan the rendered inbox in
     ``prompt`` for rows matching ``row_regex`` and emit one intent (built by
     ``intent_builder``) per not-yet-seen row — keyed by ``dedup_key`` (msg_id
     by default) so reactor fan-out re-renders don't double-emit. When no row
-    matches, emit a single heartbeat ``send_message`` so the reactor loop
-    always sees signal of life. Implements :class:`Backend`.
+    matches, emit a single idle ``send_message`` so the reactor loop always
+    sees signal of life. Implements :class:`Backend`.
     """
 
     def __init__(
@@ -162,7 +164,7 @@ class MockRowScanBackend:
         name: str,
         row_regex: re.Pattern[str],
         intent_builder: Callable[[re.Match[str]], Intent],
-        heartbeat_body: str,
+        idle_body: str,
         raw_text: str,
         dedup_key: Callable[[re.Match[str]], str] = lambda m: m.group(2),
     ):
@@ -174,8 +176,8 @@ class MockRowScanBackend:
                 rendered inbox; each match yields one intent.
             intent_builder (Callable[[re.Match[str]], Intent]): Builds the intent
                 for a matched (not-yet-seen) row.
-            heartbeat_body (str): ``body_md`` of the fallback heartbeat message
-                emitted when no row matches.
+            idle_body (str): ``body_md`` of the fallback message emitted when
+                no row matches.
             raw_text (str): Raw text stamped on the returned turn result.
             dedup_key (Callable[[re.Match[str]], str]): Extracts the dedup key
                 from a match (defaults to the msg_id capture group).
@@ -183,7 +185,7 @@ class MockRowScanBackend:
         self.name = name
         self._row_regex = row_regex
         self._intent_builder = intent_builder
-        self._heartbeat_body = heartbeat_body
+        self._idle_body = idle_body
         self._raw_text = raw_text
         self._dedup_key = dedup_key
         self.calls: list[dict[str, Any]] = []
@@ -198,8 +200,9 @@ class MockRowScanBackend:
         tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
+        allow_no_intent: bool = False,
     ) -> BackendTurnResult:
-        """Emit one intent per not-yet-seen matched row, else a heartbeat.
+        """Emit one intent per not-yet-seen matched row, else an idle message.
 
         Args:
             prompt (str): The composed turn prompt containing the rendered inbox.
@@ -207,9 +210,10 @@ class MockRowScanBackend:
             tools (list[str] | None): Unused; accepted for protocol parity.
             disallowed_tools (list[str] | None): Unused; accepted for protocol parity.
             max_turns (int): Unused; accepted for protocol parity.
+            allow_no_intent (bool): Unused; accepted for protocol parity.
 
         Returns:
-            BackendTurnResult: The per-row intents and/or heartbeat for this turn.
+            BackendTurnResult: The per-row intents, or one idle message.
         """
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
@@ -223,7 +227,7 @@ class MockRowScanBackend:
             intents.append(
                 Intent(
                     type=IntentType.SEND_MESSAGE,
-                    payload={"topic": "heartbeat", "body_md": self._heartbeat_body},
+                    payload={"topic": "observation", "body_md": self._idle_body},
                 )
             )
         return BackendTurnResult(intents=intents, raw_text=self._raw_text)
@@ -232,8 +236,8 @@ class MockRowScanBackend:
 def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
     """Build the always-approve mock Critic backend.
 
-    Emits ``review_verdict{verdict="approve"}`` per visible proposal row, or a
-    heartbeat when none are present.
+    Emits ``review_verdict{verdict="approve"}`` per visible proposal row, or an
+    idle message when none are present.
 
     Args:
         name (str): Human-readable backend name used in logs and metadata.
@@ -258,7 +262,7 @@ def auto_approve_critic(name: str = "critic-mock") -> MockRowScanBackend:
         name=name,
         row_regex=_PROPOSAL_RE,
         intent_builder=_approve,
-        heartbeat_body="ok (mock critic)",
+        idle_body="ok (mock critic, no proposals)",
         raw_text="(mock critic)",
     )
 

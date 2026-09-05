@@ -95,7 +95,6 @@ def _write_specialist_workspace(
         "domain": "serving_specialist",
         "proposal_set": [],
         "patches_written": patch_paths,
-        "empty": False,
         "summary": "PR-A4 test",
         "confidence": 0.5,
     }
@@ -628,7 +627,6 @@ async def test_executor_no_patches_returns_no_patches(tmp_path: Path):
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": [],
-                "empty": True,
                 "summary": "no proposals or patches",
             }
         )
@@ -777,7 +775,6 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
                 "domain": "serving_specialist",
                 "proposal_set": [],
                 "patches_written": [],
-                "empty": False,
                 "summary": "config-only specialist",
             }
         )

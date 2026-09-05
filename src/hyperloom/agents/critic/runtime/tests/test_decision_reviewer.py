@@ -600,7 +600,7 @@ def test_commit_review_kb_draft_non_list_raises(reviewer):
         rev.commit_review(request, {"kb_drafts": {"not": "a list"}})
 
 
-def test_commit_review_no_proposals_emits_heartbeat(reviewer):
+def test_commit_review_no_proposals_emits_idle_observation(reviewer):
     rev, kb, sm = reviewer
     prompt = (
         "=== Shared session state ===\nmodel=qwen3-14b framework=sglang\n=== Inbox for critic ===\n(no new messages)\n"
@@ -613,7 +613,7 @@ def test_commit_review_no_proposals_emits_heartbeat(reviewer):
     intents = outcome.intent_envelope["intents"]
     assert len(intents) == 1
     assert intents[0]["intent_type"] == "send_message"
-    assert intents[0]["payload"]["topic"] == "heartbeat"
+    assert intents[0]["payload"]["topic"] == "observation"
 
 
 def test_commit_review_persists_to_kb_when_flagged(reviewer):
