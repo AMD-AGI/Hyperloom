@@ -3966,61 +3966,6 @@ def test_default_kernel_batch_parallel_matches_full_node():
     assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 
-@pytest.mark.asyncio
-async def test_coordinator_refuses_a_model_issued_run_optimization(
-    session_dir,
-):
-    """The lane is Coordinator-owned, so the request never reaches its handler.
-
-    It used to arrive from the model and have ``candidates_path`` back-filled
-    from state. Dispatch now happens once at phase entry from a nomination and a
-    lane budget, so a per-tick re-issue is refused rather than topped up: it
-    would spend time the allocation never granted."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
-    # last_profile_trace set; simulate the post-baseline + post-profile state.
-    c.shared_state.baseline_tput = 1234.5
-    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
-    cached_path = "/path/cached/kernel_candidates.json"
-    c.shared_state.last_trace_analyze = {
-        "trace_input": "/path/trace/x.json.gz",
-        "candidates_path": cached_path,
-    }
-    # The gate also consults ``last_select_kernels``; seed it with the same trace.
-    c.shared_state.last_select_kernels = {
-        "trace_input": "/path/trace/x.json.gz",
-        "candidates_path": cached_path,
-    }
-    explicit = "/path/operator/override_candidates.json"
-
-    captured: dict = {}
-
-    async def fake_handler(payload, *, session_dir, **kwargs):
-        captured["payload"] = dict(payload)
-        captured["kwargs"] = kwargs
-        return {"status": "ok"}
-
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"run_optimization": fake_handler}):
-        try:
-            await c._handle_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.REQUEST,
-                    payload={
-                        "target_agent": "kernel_agent",
-                        "kind": "run_optimization",
-                        "params": {
-                            "kernel_id": "k001",
-                            "candidates_path": explicit,
-                        },
-                    },
-                ),
-            )
-            assert "payload" not in captured, "a Coordinator-owned lane must not reach its handler from the model"
-        finally:
-            await c.stop()
-
-
 # Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
 @pytest.mark.asyncio
 async def test_coordinator_streams_batch_results_and_dedups_final_record(

@@ -26,7 +26,6 @@ from types import MappingProxyType
 # Actions owned by the Kernel role; requested via request{target_agent="kernel_agent"}.
 KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
     {
-        "kernel_opt",
         "integrate",
         "gemm_tuning",
     }
@@ -38,7 +37,6 @@ KERNEL_AGENT_OWNED_ACTIONS: frozenset[str] = frozenset(
 # prompt must advertise the kind.
 KERNEL_ACTION_REQUEST_KINDS: Mapping[str, str] = MappingProxyType(
     {
-        "kernel_opt": "run_optimization",
         "gemm_tuning": "run_gemm_tuning",
         "integrate": "integrate",
     }
@@ -76,10 +74,8 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_collective",
         "run_fusion",
-        # Dispatched once at phase entry from a nomination and a lane budget. An
-        # LLM re-issuing either per tick would spend budget the allocation never
-        # granted and pick targets the nomination did not choose.
-        "run_optimization",
+        # Dispatched once at phase entry from a lane budget. An LLM re-issuing it
+        # per tick would spend budget the allocation never granted.
         "run_gemm_tuning",
     }
 )
@@ -140,7 +136,6 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "explore",
     "specialist",
     "integrate_patch",
-    "kernel_opt",
     "integrate",
     "gemm_tuning",
     "report",
@@ -280,23 +275,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "the enablement launch-only build probe and framework-agent authoring lanes."
             ),
         ),
-        "kernel_opt": ActionMetadata(
-            name="kernel_opt",
-            family="deep_kernel",
-            pipeline_phase="deep",
-            verdict_class="exploration",
-            expected_gain_pct=(5.0, 25.0),
-            accuracy_risk=0.1,
-            crash_risk=0.2,
-            typical_runtime_min=60.0,
-            lease_ttl_sec=7200,
-            requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "launches_server"),
-            description=(
-                "REQUEST kernel: parallel-submit kernel optimization candidates for one reusable native kernel id "
-                "picked from the latest profile."
-            ),
-        ),
         "profile": ActionMetadata(
             name="profile",
             family="analysis",
@@ -378,7 +356,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("reads_server", "writes_results"),
             description=(
                 "Composite action: runs profile + trace_analyze atomically to produce a fresh TraceLens analysis.md "
-                "snapshot. Required prerequisite for explore / kernel_opt."
+                "snapshot. Required prerequisite for explore."
             ),
         ),
         "session_breakdown": ActionMetadata(

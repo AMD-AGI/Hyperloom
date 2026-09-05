@@ -2261,12 +2261,14 @@ class TestBf16DenseFallbackIsInternalToForge:
         coord.phase_kernel._geak_enabled = lambda: False
         coord._gemm_tuning_required_before_kernel_opt = lambda: True
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
-        coord.phase_kernel._kernel_opt_work_remains = lambda: False
 
         async def _noop(*_args, **_kwargs):
             return None
 
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
+        # KERNEL entry ends by handing rewrite control to a controller
+        # subprocess. This test counts gemm calls, so it stops at that handoff.
+        coord.phase_kernel._run_kernel_rewrite_controller = _noop
 
         calls: list[dict] = []
 
