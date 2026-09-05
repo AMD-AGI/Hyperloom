@@ -17,14 +17,24 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
 )
+from hyperloom.orchestrator.policy.projection import AdvisoryLedger, ResourceProjection
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+
+def _policy(state: SharedState) -> PolicyGate:
+    """A gate whose advisory projection is a snapshot of ``state``."""
+    return PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=state,
+        advisory=AdvisoryLedger(ResourceProjection.of(state)),
+    )
 
 
 def _gate(research_lane_capacity: int = 1) -> PolicyGate:
     s = SharedState()
     s.phase = "FRAMEWORK_AGENT"
     s.research_lane_capacity = research_lane_capacity
-    return PolicyGate(role_registry=default_role_registry(), shared_state=s)
+    return _policy(s)
 
 
 def _specialist_variants(n: int) -> list[dict]:
@@ -150,7 +160,7 @@ def test_gpu_specialist_allowed_within_capacity(monkeypatch):
     s = SharedState()
     s.phase = "FRAMEWORK_AGENT"
     s.gpu_specialist_capacity = 2
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=s)
+    gate = _policy(s)
     gate.validate_intent(
         "orchestration",
         _specialist_delegate({"needs_gpu": True, "gpu_count": 1}),
@@ -161,7 +171,7 @@ def test_gpu_specialist_denies_above_capacity():
     s = SharedState()
     s.phase = "FRAMEWORK_AGENT"
     s.gpu_specialist_capacity = 1
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=s)
+    gate = _policy(s)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",

@@ -192,7 +192,7 @@ def test_disable_run_eval_param_forces_run_eval_false(tmp_path):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -228,7 +228,7 @@ def test_no_eval_forces_run_eval_false(tmp_path):
     )
     ctx.extra["shared_state"].eval_disabled = True
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -286,7 +286,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -330,7 +330,7 @@ def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
     )
     ctx.task.kind = "baseline"
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -369,7 +369,7 @@ def test_non_eval_failure_does_not_retry(tmp_path):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -415,7 +415,7 @@ def test_baseline_missing_accuracy_stops_run(tmp_path):
         state,
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -460,7 +460,7 @@ def test_baseline_operator_disabled_eval_still_stops(tmp_path):
         state,
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -515,7 +515,7 @@ def test_baseline_eval_failure_stops_run_without_burning_a_retry(tmp_path):
         state,
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -572,7 +572,7 @@ def test_non_baseline_kind_still_gets_the_throughput_salvage_retry(tmp_path):
     )
     ctx = SimpleNamespace(task=task, extra={"shared_state": state})
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))
@@ -840,7 +840,7 @@ def test_eval_already_off_does_not_retry(tmp_path):
         }
     )
     with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        "hyperloom.orchestrator.actions.executors.baseline.launch",
         side_effect=fake_run,
     ):
         result = _run(executor(ctx))

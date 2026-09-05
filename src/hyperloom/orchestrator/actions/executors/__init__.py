@@ -16,6 +16,7 @@ from .explore import (
     ExploreExecutor,
     explore_executor,
 )
+from .boot_probe import BootProbeExecutor
 from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
@@ -24,6 +25,7 @@ from .recover import RecoverExecutor, recover_executor
 
 __all__ = [
     "BaselineExecutor",
+    "BootProbeExecutor",
     "ConcSweepExecutor",
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "ExploreExecutor",

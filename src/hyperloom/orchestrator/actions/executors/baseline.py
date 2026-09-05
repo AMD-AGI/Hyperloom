@@ -16,15 +16,19 @@ Robustness RCA later.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from contextlib import ExitStack, suppress
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -83,13 +87,15 @@ from ._grid_runner import (
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
+    DEVICES_BUSY_ERROR_CLASS,
+    DEVICES_BUSY_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
-    run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
+from .launch_backend import launch
 from ._accuracy_gate import (
     _RUN_EVAL_FALSE_VALUES,
     materialized_run_eval_disabled,
@@ -257,6 +263,168 @@ _NON_RECOVERABLE_MARKERS = (
 # line): only an OOM on/adjacent to the marker line demotes it. The bare weak
 # marker keeps the whole-blob OOM/compile exclusion.
 _STRONG_OOM_CONTEXT_RADIUS = 1
+
+
+#: Bytes read from each end of a ``server.log`` when observing a bring-up. Both
+#: ends are needed: the boot milestones are at the head, the wall at the tail.
+_BRINGUP_LOG_EDGE_BYTES = 65_536
+
+#: Subdirectory of a round slot holding earlier attempts' server logs.
+_ATTEMPTS_DIRNAME = "attempts"
+
+#: File in that subdirectory holding the slot's next attempt index. An attempt
+#: that produced no log retains nothing, so the index cannot be counted off the
+#: retained directories.
+_ATTEMPT_COUNTER_NAME = "next_index"
+
+# Both timestamp shapes a served model writes: SGLang stamps a full date,
+# vLLM's default formatter omits the year.
+_SERVER_LOG_CLOCK = re.compile(r"(?:(\d{4})-)?(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
+
+#: Substituted for a year the log did not print. A leap year, so a Feb-29 line
+#: still parses; only the difference between two stamps is used.
+_CLOCK_ASSUMED_YEAR = 2000
+
+
+@dataclass(frozen=True)
+class BringupLog:
+    """One bring-up log as far as it could be read.
+
+    Attributes:
+        text: The decoded head-and-tail text; empty when no log was written and
+            empty when the log could not be read.
+        degraded: Empty when the read answered for the log's contents;
+            :data:`~hyperloom.orchestrator.bringup.DEGRADED_UNREADABLE` when a
+            log that exists could not be read back.
+    """
+
+    text: str
+    degraded: str = ""
+
+
+def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
+    """Read a server log's head and tail for bring-up classification.
+
+    A log that was never written and a log the mount refuses to serve are
+    different answers, and both are answers: an ESTALE or EIO on the session
+    mount degrades the observation rather than costing the round.
+
+    Args:
+        path: The log file to read.
+        edge_bytes: Bytes taken from each end; a log no larger than twice this
+            is read whole.
+
+    Returns:
+        BringupLog: The decoded text, head first, and the degraded outcome when
+        a log that exists could not be read.
+    """
+    from ...bringup import DEGRADED_UNREADABLE
+
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            if size <= edge_bytes * 2:
+                handle.seek(0)
+                return BringupLog(handle.read().decode("utf-8", "replace"))
+            handle.seek(0)
+            head = handle.read(edge_bytes)
+            handle.seek(size - edge_bytes)
+            tail = handle.read(edge_bytes)
+    except FileNotFoundError:
+        return BringupLog("")
+    except OSError as exc:
+        log.warning("bringup: server log %s could not be read (%s)", path, exc)
+        return BringupLog("", DEGRADED_UNREADABLE)
+    return BringupLog(head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace"))
+
+
+def server_child_elapsed_sec(server_log_text: str) -> float:
+    """Return how long the server child ran, on the server child's own clock.
+
+    Taken from the log's timestamps rather than the wrapper's spawn-to-return
+    wall-clock, which also covers materialisation, the client and teardown.
+
+    Args:
+        server_log_text: Text read from the server child's log.
+
+    Returns:
+        float: Seconds between the first and last timestamped line, or ``0.0``
+        when fewer than two lines carry a parseable timestamp.
+    """
+    stamps: list[datetime] = []
+    for match in _SERVER_LOG_CLOCK.finditer(server_log_text):
+        year, month, day, hour, minute, second = match.groups()
+        try:
+            stamps.append(
+                datetime(
+                    int(year or _CLOCK_ASSUMED_YEAR),
+                    int(month),
+                    int(day),
+                    int(hour),
+                    int(minute),
+                    int(second),
+                )
+            )
+        except ValueError:
+            continue
+    if len(stamps) < 2:
+        return 0.0
+    return max(0.0, (stamps[-1] - stamps[0]).total_seconds())
+
+
+def open_bringup_attempt(output_dir: Path) -> int:
+    """Retain the previous attempt's ``server.log`` and index this attempt.
+
+    A round slot is reused across retries, so the previous attempt's log is
+    moved into its own attempt directory, gzipped, rather than deleted.
+
+    Args:
+        output_dir: The per-round workspace slot.
+
+    Returns:
+        int: This attempt's zero-based index within the slot.
+
+    Raises:
+        OSError: When the previous log cannot be rotated out; a log left in
+            place would be classified as this attempt's.
+    """
+    attempts = output_dir / _ATTEMPTS_DIRNAME
+    index = _claim_attempt_index(attempts)
+    live = output_dir / "server.log"
+    if not live.exists():
+        return index
+    # The live log is the *previous* attempt's, hence the index below.
+    kept = attempts / f"{max(index - 1, 0):03d}"
+    kept.mkdir(parents=True, exist_ok=True)
+    with live.open("rb") as source, gzip.open(kept / "server.log.gz", "wb") as target:
+        shutil.copyfileobj(source, target)
+    live.unlink()
+    return index
+
+
+def _claim_attempt_index(attempts: Path) -> int:
+    """Claim the next attempt index for a round slot and persist the successor.
+
+    Args:
+        attempts: The slot's attempts directory.
+
+    Returns:
+        int: The claimed zero-based index; ``0`` for the slot's first attempt.
+
+    Raises:
+        OSError: When the counter cannot be read or advanced; two attempts
+            would otherwise claim one index and overwrite one observation.
+        ValueError: When the counter file holds something that is not an index.
+    """
+    counter = attempts / _ATTEMPT_COUNTER_NAME
+    try:
+        index = max(0, int(counter.read_text(encoding="utf-8").strip() or "0"))
+    except FileNotFoundError:
+        index = 0
+    attempts.mkdir(parents=True, exist_ok=True)
+    counter.write_text(f"{index + 1}\n", encoding="utf-8")
+    return index
 
 
 def _is_cuda_graph_capture_failure(*texts: str) -> bool:
@@ -665,6 +833,7 @@ def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
 def _classify_subprocess_error(
     elapsed_sec: float,
     stderr_tail: str,
+    returncode: int | None = None,
 ) -> str:
     """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
     validation error, else 'subprocess_nonzero'.
@@ -672,11 +841,16 @@ def _classify_subprocess_error(
     Args:
         elapsed_sec: Subprocess wall-clock runtime in seconds.
         stderr_tail: Tail of the subprocess stderr used for marker matching.
+        returncode: The subprocess returncode, read for the sentinels that
+            name their own cause.
 
     Returns:
-        ``"fast_exit_arg_error"`` for a fast exit caused by argument
-        validation, else ``"subprocess_nonzero"``.
+        The named class for a recognised sentinel, ``"fast_exit_arg_error"``
+        for a fast exit caused by argument validation, else
+        ``"subprocess_nonzero"``.
     """
+    if returncode == DEVICES_BUSY_RETURNCODE:
+        return DEVICES_BUSY_ERROR_CLASS
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the
     # fast-exit elapsed gate below.
@@ -3396,7 +3570,7 @@ class BaselineExecutor:
 
         Materializes the workload config, resolves the timeout (with cold-start
         detection), restarts the multi-node server when required, launches
-        Magpie via ``run_with_session_kill``, harvests leaked artifacts, parses
+        Magpie via the launch backend, harvests leaked artifacts, parses
         ``benchmark_report.json`` and the accuracy eval, and returns a result
         dict the Coordinator promotes into SharedState.
 
@@ -4717,7 +4891,7 @@ class BaselineExecutor:
                 label="mn_warmup",
             ) as warm_activity:
                 warm_proc = await asyncio.to_thread(
-                    run_with_session_kill,
+                    launch,
                     warm_cmd,
                     env=warm_env,
                     cwd=str(warm_dir),
@@ -4745,6 +4919,99 @@ class BaselineExecutor:
                 capture_meta=capture_meta,
             )
         return None
+
+    def _preflight_server_argv(
+        self,
+        *,
+        config_path: Path,
+        framework: str,
+        launch_env: dict[str, str],
+        output_dir: Path,
+        attempt: int,
+        capture_meta: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Ask the installed framework's parser about this round's argv.
+
+        The argv is read out of the rendered YAML and probed in that file's own
+        benchmark envs, which are what the launch reads. A repaired argv is
+        written back through the same seal.
+
+        Args:
+            config_path: The materialised YAML this round launches.
+            framework: Framework the config serves.
+            launch_env: The environment the benchmark subprocess will get.
+            output_dir: The round slot, for the observation artifact.
+            attempt: This attempt's index within the slot.
+            capture_meta: Result fields echoed onto whatever this round returns.
+
+        Returns:
+            dict | None: A terminal failure result when the argv is refused;
+            ``None`` when the round may proceed -- including every unavailable
+            verdict, which must never cost a round.
+        """
+        from ...bringup import (
+            ARGV_INVALID,
+            argv_invalid_observation,
+            check_server_argv,
+            write_boot_observation,
+        )
+        from ...bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE
+        from ._server_argv import config_launch_env, config_server_argv, reseal_config_argv
+
+        sealed = config_server_argv(config_path)
+        if not sealed.tokenized or not sealed.argv:
+            return None
+
+        # ``_resolve_shared_state`` is typed loosely and callers inject partial
+        # doubles, so the round's repair ledger may not be present at all.
+        enablement = getattr(self._resolve_shared_state(), "enablement", None)
+        spent: list[str] = enablement.argv_repairs if enablement is not None else []
+        verdict = check_server_argv(
+            framework=framework,
+            argv=sealed.argv,
+            text=sealed.text,
+            launch_env=config_launch_env(config_path, launch_env),
+            repaired=spent,
+            digest=sealed.digest,
+        )
+
+        if verdict.status == UNAVAILABLE:
+            log.info(
+                "argv preflight unavailable (%s): %s; the launch remains the only verdict",
+                verdict.reason,
+                verdict.detail,
+            )
+            return None
+        if verdict.status == OK:
+            if verdict.reason == PARSED_AFTER_DROP:
+                reseal_config_argv(config_path, verdict.text)
+                if verdict.repaired_digest:
+                    spent.append(verdict.repaired_digest)
+                capture_meta["server_argv_dropped"] = list(verdict.dropped)
+            return None
+
+        observation = argv_invalid_observation(verdict, session_dir=self.session_dir)
+        capture_meta["boot_observation_path"] = write_boot_observation(
+            observation,
+            session_dir=self.session_dir,
+            output_dir=output_dir,
+            attempt=attempt,
+        )
+        excerpt = observation.excerpt
+        log.error(
+            "argv preflight: %s refused the server argv (%s); not launching",
+            framework or "the framework",
+            verdict.reason,
+        )
+        return {
+            "status": "failed",
+            "error_class": ARGV_INVALID,
+            "error": f"{framework or 'framework'} rejected the server argv ({verdict.reason}): {verdict.detail}",
+            "output_dir": str(output_dir),
+            "enablement_launch_log": excerpt.text if excerpt is not None else "",
+            "server_argv": list(verdict.argv),
+            **capture_meta,
+        }
 
     async def _run_single_benchmark(
         self,
@@ -4795,7 +5062,7 @@ class BaselineExecutor:
                 ``num_gpus`` across this run's rounds (double-run warmup +
                 measure share one lease) — instead of a local subprocess. Ray
                 owns ``*_VISIBLE_DEVICES``, so the YAML device list is stripped
-                first (T2). ``None`` keeps the local ``run_with_session_kill``
+                first (T2). ``None`` keeps the local subprocess
                 path unchanged.
 
         Returns:
@@ -4919,9 +5186,9 @@ class BaselineExecutor:
         log_mn_banner("baseline_executor", log, output_dir=str(output_dir))
         log.info("baseline_executor: launching Magpie cmd=%s output_dir=%s", cmd, output_dir)
 
-        # Magpie launched via ``run_with_session_kill`` so the whole descendant
-        # tree is torn down on every exit path (plain subprocess.run leaks
-        # daemonized server processes).
+        # Magpie launched through the session-kill backend so the whole
+        # descendant tree is torn down on every exit path (plain
+        # subprocess.run leaks daemonized server processes).
         # Multi-node client warmup: one discarded pass against the persistent
         # remote server (restarted just above) to warm JIT / steady-state
         # before the measured pass. Best-effort; MN-only; skipped when another
@@ -4955,25 +5222,54 @@ class BaselineExecutor:
         # Magpie re-roots the actual server via ``cd <inferencex>``;
         # ``_ensure_local_inferencex`` above keeps that checkout on local disk.
         output_dir.mkdir(parents=True, exist_ok=True)
-        # A reused output_dir may still hold a prior attempt's server.log, whose
-        # terminal init markers would misclassify THIS attempt as
-        # ``server_init_dead``. Clear it so classification only sees this
-        # attempt's log.
-        stale_server_log = output_dir / "server.log"
-        try:
-            stale_server_log.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            log.warning(
-                "baseline_executor: could not clear stale server.log %s (%s); "
-                "a prior attempt's markers may bias failure classification.",
-                stale_server_log,
-                exc,
+        # A reused output_dir may still hold a previous attempt's server.log,
+        # whose terminal init markers would be read as this attempt's.
+        server_log = output_dir / "server.log"
+        attempt_index = open_bringup_attempt(output_dir)
+        # And the ready stamp beside it: a previous attempt's would make this
+        # attempt's boot look like it never happened.
+        clear_server_ready_stamp(str(server_log))
+
+        def record_bringup(*, wrapper_stderr: str = "", wrapper_stdout: str = "") -> str:
+            """Observe this attempt's boot once and name it on every later result.
+
+            Args:
+                wrapper_stderr: The launcher's stderr, fallback evidence.
+                wrapper_stdout: The launcher's stdout, fallback evidence.
+
+            Returns:
+                str: The server log text that was classified.
+            """
+            from ...bringup import observe_bringup, write_boot_observation
+
+            read = read_bringup_log(server_log)
+            verdict = observe_bringup(
+                server_log=read.text,
+                server_elapsed_sec=server_child_elapsed_sec(read.text),
+                wrapper_stderr=wrapper_stderr,
+                wrapper_stdout=wrapper_stdout,
+                session_dir=self.session_dir,
             )
-        # And the ready stamp beside it, for the same reason: a prior attempt's
-        # would make this attempt's boot look like it never happened.
-        clear_server_ready_stamp(str(stale_server_log))
+            capture_meta["boot_observation_path"] = write_boot_observation(
+                verdict.observation,
+                session_dir=self.session_dir,
+                output_dir=output_dir,
+                attempt=attempt_index,
+            )
+            capture_meta["boot_observation_degraded"] = read.degraded
+            return read.text
+
+        refusal = self._preflight_server_argv(
+            config_path=config_path,
+            framework=framework,
+            launch_env=env,
+            output_dir=output_dir,
+            attempt=attempt_index,
+            capture_meta=capture_meta,
+        )
+        if refusal is not None:
+            return refusal
+
         try:
             if serving_lease is not None:
                 # Ray-managed GPU execution (§12 T1): run inside the lease's
@@ -5009,7 +5305,7 @@ class BaselineExecutor:
                     label="benchmark",
                 ) as activity:
                     proc = await asyncio.to_thread(
-                        run_with_session_kill,
+                        launch,
                         cmd,
                         env=env,
                         cwd=str(output_dir),
@@ -5026,6 +5322,9 @@ class BaselineExecutor:
                 proc_stdout = proc.stdout
                 proc_stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
+            # A reaped timeout carries no wrapper streams; the server log is
+            # the whole of the evidence.
+            record_bringup()
             timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
@@ -5040,6 +5339,12 @@ class BaselineExecutor:
                 "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in timeout_harvested],
                 **capture_meta,
             }
+
+        server_log_text = record_bringup(
+            wrapper_stderr=proc_stderr or "",
+            wrapper_stdout=proc_stdout or "",
+        )
+        boot_observation_ref = capture_meta["boot_observation_path"]
 
         stopped = stopped_by_the_run(proc_returncode)
         if stopped is not None:
@@ -5087,27 +5392,17 @@ class BaselineExecutor:
         # may have reaped the hung parent with ``SERVER_DEAD_RETURNCODE``. Detect
         # that once here and reuse it across the failure branches so the failure
         # is classified ``server_init_dead``. Backend-agnostic (vLLM + SGLang).
-        server_death_excerpt = server_log_death_excerpt(str(output_dir / "server.log"))
+        server_death_excerpt = server_log_death_excerpt(str(server_log))
         server_init_dead = server_death_excerpt is not None or proc_returncode == SERVER_DEAD_RETURNCODE
         server_init_dead_error = server_death_excerpt or (
             "server engine/worker init failed (reaped by liveness watchdog); see server.log"
         )
 
-        # Detect cuda-graph capture failures (OOM-rooted ones excluded).
-        # Markers live in server.log; read a bounded tail for classification.
-        server_log_tail = ""
-        try:
-            slog = output_dir / "server.log"
-            if slog.exists():
-                with open(slog, "rb") as f:
-                    f.seek(0, 2)
-                    sz = f.tell()
-                    f.seek(max(0, sz - 65536))
-                    server_log_tail = f.read().decode("utf-8", "replace")
-        except OSError:
-            server_log_tail = ""
+        # The same read that produced the observation answers whether the wall
+        # is the recoverable cuda-graph capture one (OOM-rooted ones excluded)
+        # that arms the one-shot eager retry below.
         cuda_graph_capture_failed = _is_cuda_graph_capture_failure(
-            server_log_tail,
+            server_log_text,
             proc_stderr or "",
             proc_stdout or "",
         )
@@ -5175,6 +5470,7 @@ class BaselineExecutor:
                 err_class = _classify_subprocess_error(
                     subprocess_runtime_sec,
                     tail,
+                    proc_returncode,
                 )
                 return {
                     "status": "failed",
@@ -5223,6 +5519,7 @@ class BaselineExecutor:
                 error_class = _classify_subprocess_error(
                     subprocess_runtime_sec,
                     tail,
+                    proc_returncode,
                 )
                 error = tail
             elif not report_path.exists():
@@ -5293,6 +5590,10 @@ class BaselineExecutor:
             # than re-deriving from params, so a YAML/reference-env RUN_EVAL=false
             # is honored as an intentional opt-out.
             "run_eval_disabled": bool(run_eval_disabled),
+            # Where this round's boot observation landed, and whether the log
+            # it was classified from could be read.
+            "boot_observation_path": boot_observation_ref,
+            "boot_observation_degraded": capture_meta.get("boot_observation_degraded", ""),
         }
         _attach_baseline_launch_evidence(
             result,

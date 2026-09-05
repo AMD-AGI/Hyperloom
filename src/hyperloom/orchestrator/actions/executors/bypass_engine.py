@@ -22,6 +22,7 @@ unit-testable without a GPU, a real server, or the Magpie repository.
 
 from __future__ import annotations
 
+import http.client
 import os
 import time
 import urllib.request
@@ -316,16 +317,24 @@ def wait_for_server_ready(
     base_url: str,
     *,
     timeout_s: float,
+    server_exited: Callable[[], bool],
     poll_s: float = 2.0,
     probe: Callable[[str], int] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> bool:
-    """Poll ``<base_url>/health`` until ready or timeout.
+    """Wait for ``<base_url>/health`` until ready, the server exits, or timeout.
 
     Args:
         base_url: Server base URL.
         timeout_s: Max seconds to wait.
+        server_exited: Whether the server process has already exited. Required,
+            because a server that is gone will never answer ``/health`` and
+            waiting out the rest of ``timeout_s`` on it only holds the
+            ``server_lifecycle`` lane -- an hour per attempt on the enablement
+            rounds, whose whole subject is servers that fail to boot. Injected
+            rather than taken as a process handle to keep this module free of
+            process machinery, as its own contract promises.
         poll_s: Seconds between probes.
         probe: Injectable probe returning an HTTP status code; defaults to a
             real GET. Any exception/non-200 is treated as not-ready.
@@ -349,6 +358,10 @@ def wait_for_server_ready(
                 return True
         except Exception:  # noqa: BLE001 - not-ready yet; keep polling
             pass
+        # Checked after the probe, so a server that answered and exited in the
+        # same breath is still credited with having come up.
+        if server_exited():
+            return False
         sleep(poll_s)
     return False
 
@@ -424,3 +437,84 @@ def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None
         return do_probe(health_url) == 200
     except Exception:  # noqa: BLE001
         return False
+
+
+#: Tokens the boot probe asks for, and the floor it accepts. The floor is above
+#: one because a prefill-only server still answers the first token.
+_COMPLETION_PROBE_TOKENS = 8
+_COMPLETION_PROBE_MIN_TOKENS = 2
+
+
+def _json_post(url: str, payload: dict[str, Any], timeout_s: float) -> Any:
+    """POST ``payload`` as JSON and return the decoded body."""
+    import json as _json
+
+    request = urllib.request.Request(  # noqa: S310  # nosec B310 - fixed local serving endpoint
+        url,
+        data=_json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310
+        return _json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _json_get(url: str, timeout_s: float) -> Any:
+    """GET ``url`` and return the decoded JSON body."""
+    import json as _json
+
+    with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310
+        return _json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def one_short_completion(base_url: str, *, timeout_s: float = 120.0) -> tuple[bool, str]:
+    """Ask a served model for one short completion and say whether it produced one.
+
+    A 200 from ``/health`` is answered by a server whose engine has died;
+    generating tokens is the only evidence that the thing behind it serves.
+
+    Args:
+        base_url: Server base URL.
+        timeout_s: Budget for the whole exchange.
+
+    Returns:
+        tuple[bool, str]: ``(generated, detail)`` -- ``detail`` names what went
+        wrong when nothing was generated, and is empty on success.
+    """
+    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
+
+    root = base_url.rstrip("/")
+    deadline = time.monotonic() + float(timeout_s)
+
+    def _left() -> float:
+        return max(0.1, deadline - time.monotonic())
+
+    try:
+        listing = _json_get(f"{root}/v1/models", _left())
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return False, f"/v1/models: {type(exc).__name__}: {exc}"
+    entries = listing.get("data") if isinstance(listing, dict) else None
+    if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+        return False, "/v1/models registered no model"
+    model_id = str(entries[0].get("id") or "")
+    if not model_id:
+        return False, "/v1/models carries no model id"
+    try:
+        body = _json_post(
+            f"{root}/v1/completions",
+            {
+                "model": model_id,
+                "prompt": "hi",
+                "max_tokens": _COMPLETION_PROBE_TOKENS,
+                "temperature": 0,
+                "ignore_eos": True,
+                "stream": False,
+            },
+            _left(),
+        )
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return False, f"/v1/completions: {type(exc).__name__}: {exc}"
+    produced = generated_tokens(body)
+    if produced < _COMPLETION_PROBE_MIN_TOKENS:
+        return False, f"/v1/completions generated {produced} tokens (need {_COMPLETION_PROBE_MIN_TOKENS})"
+    return True, ""
