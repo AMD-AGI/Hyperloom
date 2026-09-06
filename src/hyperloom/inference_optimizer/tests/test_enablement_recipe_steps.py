@@ -221,6 +221,39 @@ def test_recipe_steps_artifact_selection_excludes_superseded_target():
     assert [a["kind"] for a in out["kept_artifacts"]] == ["late"]
 
 
+def test_a_kept_artifact_carries_the_root_its_own_resolution_returned():
+    """An artifact installed outside the framework tree is bound to its own root,
+    which is the only thing that says where the recipe must restore it."""
+    artifact = {"target": "/pkg/aiter/x.py", "rel_target": "aiter/x.py", "root": "/pkg"}
+    out = collect_enablement(
+        Path("/tmp/sess"),
+        {
+            "enablement_attempts": 1,
+            "enablement_kept_artifacts": [artifact],
+            "enablement_framework_root": "/fr",
+            "enablement_roots": [
+                {"id": "r1", "path": "/fr"},
+                {"id": "r2", "path": "/pkg"},
+            ],
+        },
+        [],
+    )
+    assert [a["root_id"] for a in out["kept_artifacts"]] == ["r2"]
+
+
+def test_a_kept_artifact_bound_to_no_recorded_root_carries_a_null_root_id():
+    out = collect_enablement(
+        Path("/tmp/sess"),
+        {
+            "enablement_attempts": 1,
+            "enablement_kept_artifacts": [{"target": "/x/a.py", "rel_target": "a.py", "root": "/x"}],
+            "enablement_roots": [{"id": "r1", "path": "/fr"}],
+        },
+        [],
+    )
+    assert out["kept_artifacts"][0]["root_id"] is None
+
+
 # ---- D2: whether historical build attempts appear --------------------------
 
 

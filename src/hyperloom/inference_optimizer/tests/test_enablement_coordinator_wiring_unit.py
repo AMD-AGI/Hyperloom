@@ -732,6 +732,39 @@ async def test_rearm_kept_stores_accepted_config():
 
 
 @pytest.mark.asyncio
+async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make():
+    """A KEEP that observed nothing must not inherit the previous KEEP's map.
+
+    The closure and the assertion set describe the image and interpreter of the
+    KEEP that observed them, so a standing value left in place would present
+    another KEEP's evidence as this one's and read as verified.
+    """
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake.shared_state.enablement.environment_closure = {"distributions": {"torch": "2.6"}}
+    fake.shared_state.enablement.installed_versions_at_keep = {"torch": "2.6"}
+    fake.shared_state.enablement.launch_evidence = {"recipe_digest": "sha256:old"}
+
+    fake._maybe_rearm_enablement({"status": "kept", "enablement": True})
+
+    assert fake.shared_state.enablement.environment_closure == {}
+    assert fake.shared_state.enablement.installed_versions_at_keep == {}
+    assert fake.shared_state.enablement.launch_evidence == {}
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_leaves_the_accepted_stack_records_a_round_did_not_touch():
+    """Stack identity accumulates: a round contributing none clears none."""
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake.shared_state.enablement.roots = [{"id": "r1", "path": "/fr"}]
+    fake.shared_state.enablement.base_sha = "a" * 40
+
+    fake._maybe_rearm_enablement({"status": "kept", "enablement": True})
+
+    assert fake.shared_state.enablement.roots == [{"id": "r1", "path": "/fr"}]
+    assert fake.shared_state.enablement.base_sha == "a" * 40
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     """The path the round reports is under runs/, which never reaches the archive."""
     cfg = tmp_path / "runs" / "integrate_patch" / "t1" / "integrate_patch.with_envs.yaml"

@@ -168,16 +168,21 @@ def _setup_step(cmd: str, *, occurrence: int | None) -> dict[str, Any]:
     }
 
 
+def root_ids_by_path(enablement: Mapping[str, Any]) -> dict[str, str]:
+    """Map each recorded root's path to the id every reference to it carries."""
+    return {
+        str(record.get("path") or ""): str(record.get("id") or "")
+        for record in (enablement.get("roots") or [])
+        if isinstance(record, Mapping)
+    }
+
+
 def _patch_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Project the accumulated patches in ``kept_patches`` order."""
     framework_root = str(enablement.get("framework_root") or "")
     patch_roots = enablement.get("patch_roots")
     patch_roots = patch_roots if isinstance(patch_roots, Mapping) else {}
-    roots_by_path = {
-        str(record.get("path") or ""): str(record.get("id") or "")
-        for record in (enablement.get("roots") or [])
-        if isinstance(record, Mapping)
-    }
+    roots_by_path = root_ids_by_path(enablement)
     steps: list[dict[str, Any]] = []
     for raw in enablement.get("kept_patches") or []:
         path = str(raw)

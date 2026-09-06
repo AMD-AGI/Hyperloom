@@ -1710,17 +1710,21 @@ def collect_enablement(
     if have_kept_patches:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
     kept_artifacts_raw = _eg(state, "kept_artifacts")
+    framework_root = str(_eg(state, "framework_root", "") or "")
     if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:
+        from hyperloom.orchestrator.enablement.recipe.steps import root_ids_by_path
+
+        root_ids = root_ids_by_path({"roots": _eg(state, "roots")})
         out["kept_artifacts"] = [
             {
                 "target": str(a.get("target") or ""),
                 "rel_target": str(a.get("rel_target") or ""),
                 "kind": str(a.get("kind") or ""),
+                "root_id": root_ids.get(str(a.get("root") or "") or framework_root) or None,
             }
             for a in kept_artifacts_raw
             if isinstance(a, dict) and a.get("target")
         ]
-    framework_root = str(_eg(state, "framework_root", "") or "")
     if framework_root:
         out["framework_root"] = framework_root
     if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
