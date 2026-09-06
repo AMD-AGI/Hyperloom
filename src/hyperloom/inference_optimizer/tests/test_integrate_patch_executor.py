@@ -1399,6 +1399,93 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     assert replayed["commands"] == ["pip install -U transformers"]
 
 
+def test_run_setup_commands_records_one_row_per_attempted_command(tmp_path: Path, monkeypatch):
+    """Occurrence identity needs every attempt, not just the ones that worked.
+
+    ``setup_commands`` dedupes to one string per command, so the ledger is the
+    only place a failed or skipped execution is recorded at all.
+    """
+    outcomes = {"pip install good": 0, "pip install bad": 1}
+
+    def _fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=outcomes.get(cmd, 0), stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    out = _run_setup_commands(
+        ["pip install good", "pip install bad", "rm -rf /tmp/x"],
+        cwd=tmp_path,
+        log_dir=tmp_path / "logs",
+        round_task_id="r1",
+        seq_start=4,
+    )
+    rows = out["executions"]
+    assert [row["outcome"] for row in rows] == ["applied", "failed", "skipped"]
+    assert [row["seq"] for row in rows] == [5, 6, 7]
+    assert {row["round_task_id"] for row in rows} == {"r1"}
+
+
+@pytest.mark.asyncio
+async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Path, monkeypatch):
+    """Setup mutates the shared venv before the apply, so its rows have to be
+    durable at the run site: this exit reports no outcome lists at all."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-ledger", patch_contents=[_BAD_PATCH])
+
+    def _installed(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+        row = build_execution_row(
+            seq=seq_start + 1,
+            round_task_id=round_task_id,
+            cmd_index=0,
+            cmd=commands[0],
+            source="proposed",
+            outcome="applied",
+            env={},
+            cwd=cwd,
+        )
+        return {"applied": list(commands), "skipped": [], "failed": [], "executions": [row]}
+
+    monkeypatch.setattr(ip_mod, "_run_setup_commands", _installed)
+
+    shared_state = SimpleNamespace(
+        enablement=EnablementRound(),
+        save=lambda _dir: None,
+        get_specialist_patch_verdict=lambda _subject: "approve",
+    )
+    task = Task(
+        task_id="t-int-ledger",
+        kind="integrate_patch",
+        state="queued",
+        params={
+            "specialist_task_id": "t-spec-ledger",
+            "framework_source_root": str(repo),
+            "enablement": True,
+            "enablement_setup_commands": ["pip install -U transformers"],
+        },
+        idempotency_key="t-int-ledger",
+        requires_lanes=tuple(),
+    )
+    ctx = RunnerContext(task=task, lease=None, extra={"shared_state": shared_state})
+
+    result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    assert result["status"] == "apply_failed"
+    ledger = shared_state.enablement.setup_executions
+    assert [row["outcome"] for row in ledger] == ["applied"]
+    assert ledger[0]["round_task_id"] == "t-spec-ledger"
+    # Nothing has judged the round yet, so no row claims the graded launch.
+    assert ledger[0]["round_disposition"] == "unreported"
+    assert ledger[0]["present_at_final_launch"] is False
+
+
 def test_integrate_patch_executor_imports_clean():
     """The real executor module must import without side effects."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
