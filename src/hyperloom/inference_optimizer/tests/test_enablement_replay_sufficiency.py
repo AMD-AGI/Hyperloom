@@ -895,3 +895,11 @@ def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():
     inputs = steps[0]["build_inputs"]
     assert inputs["repo_url"] == "https://github.com/org/repo"
     assert inputs["resolved_sha"] == "s" * 40
+
+
+def test_a_round_with_no_task_id_claims_no_ledger_rows():
+    """Rows a lane never identified stay unreported, never silently accepted."""
+    rows = [_row("pip install x", seq=1, task="r1")]
+    unchanged = mark_round_disposition(rows, round_task_id="", disposition="kept", accepted=True)
+    assert unchanged[0]["round_disposition"] == "unreported"
+    assert unchanged[0]["present_at_final_launch"] is False

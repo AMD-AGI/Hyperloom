@@ -315,9 +315,14 @@ class EnablementLane(CoordinatorCollaborator):
                     setattr(state.enablement, field_name, value)
 
         def _mark_setup_ledger(disposition: str, *, accepted: bool) -> None:
-            """Record this round's outcome onto the executions it performed."""
+            """Record this round's outcome onto the executions it performed.
+
+            A round with no task id of its own claims no rows: leaving them
+            ``unreported`` states that no lane observed them, which no rule reads
+            as verified.
+            """
             ledger = list(state.enablement.setup_executions or [])
-            if not ledger:
+            if not ledger or not _spec_tid:
                 return
             state.enablement.setup_executions = mark_round_disposition(
                 ledger,
