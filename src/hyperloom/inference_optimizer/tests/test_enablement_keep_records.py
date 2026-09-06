@@ -237,13 +237,27 @@ def test_neither_provisioning_nor_a_linked_build_names_a_package():
     """A build whose probe is another round's is not this KEEP's version source."""
     assert (
         keep_assertion_packages(
-            provision_versions={},
+            provision_versions=None,
             build_manifest=_build_manifest({"torch": "2.6"}),
             specialist_task_id="some-other-round",
         )
         == ()
     )
-    assert keep_assertion_packages(provision_versions={}, build_manifest=[], specialist_task_id=PROBE_TASK) == ()
+    assert keep_assertion_packages(provision_versions=None, build_manifest=[], specialist_task_id=PROBE_TASK) == ()
+
+
+def test_a_provisioning_stage_that_installed_nothing_borrows_no_build_names():
+    """An empty provisioning map is a stage that named nothing, not an absent one.
+
+    The build's names belong to a KEEP that reached its runtime through the
+    build; a round that provisioned its own asserts what that stage installed.
+    """
+    packages = keep_assertion_packages(
+        provision_versions={},
+        build_manifest=_build_manifest({"torch": "2.6"}),
+        specialist_task_id=PROBE_TASK,
+    )
+    assert packages == ()
 
 
 def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Path):
@@ -287,3 +301,25 @@ def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
         ctx, params, specialist_task_id="some-other-round", provision_result=None
     )
     assert assertions == {}
+
+
+def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Path):
+    """The caller must distinguish an absent provisioning result from an empty one."""
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    override = {
+        "runtime_python_exe": sys.executable,
+        "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+    }
+    provisioned = SimpleNamespace(
+        ok=True,
+        installed_versions={},
+        runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
+    )
+    closure, assertions = executor._probe_keep_environment(
+        ctx, {}, specialist_task_id=PROBE_TASK, provision_result=provisioned
+    )
+    assert assertions == {}
+    assert closure["distributions"]["demo"] == "2.0"

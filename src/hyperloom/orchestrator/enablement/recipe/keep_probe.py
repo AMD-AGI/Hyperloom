@@ -72,22 +72,35 @@ def keep_assertion_packages(
     build_manifest: Sequence[Any],
     specialist_task_id: str,
 ) -> tuple[str, ...]:
-    """Return the names whose versions are asserted at the KEEP.
+    """Return the package names whose versions are asserted at the KEEP.
 
-    A KEEP reached through a build's launch-only probe has no provisioning stage
-    at all, so keying the set on one would leave every accepted build -- the
-    principal path carrying version assertions -- permanently unobserved. The
-    linked build attempt's own map is then the version set that reached this
-    image. With neither source the set is empty, which the sufficiency rules read
-    as an assertion set never observed at the KEEP.
+    Both sources contribute names only. Every version in the assertion set is
+    the one the KEEP probe observes; substituting a provisioning-time or
+    build-time version is the defect that observation exists to close.
+
+    Args:
+        provision_versions: The round's provisioning map, or ``None`` when no
+            provisioning stage ran at all -- a KEEP reached through a build's
+            launch-only probe. A stage that ran and installed nothing names
+            nothing, and does not borrow the build's names.
+        build_manifest: The durable build manifest the linked attempt is joined
+            from. Read only when no provisioning stage ran, because keying the
+            names on a provisioning result would otherwise leave every accepted
+            build -- the principal path carrying version assertions --
+            permanently unobserved.
+        specialist_task_id: The round declaring this KEEP, whose probe the
+            linked build's routing sentinel names.
+
+    Returns:
+        The names to assert, empty when no source names any, which the
+        sufficiency rules read as an assertion set never observed at the KEEP.
     """
-    versions = dict(provision_versions or {})
-    if not versions:
-        _sentinel, row = select_linked_build(
-            {"build_manifest": list(build_manifest or []), "last_specialist_task_id": specialist_task_id}
-        )
-        versions = dict((row or {}).get("installed_versions") or {})
-    return tuple(str(name) for name in versions)
+    if provision_versions is not None:
+        return tuple(str(name) for name in provision_versions)
+    _sentinel, row = select_linked_build(
+        {"build_manifest": list(build_manifest or []), "last_specialist_task_id": specialist_task_id}
+    )
+    return tuple(str(name) for name in (row or {}).get("installed_versions") or {})
 
 
 def probe_environment_closure(

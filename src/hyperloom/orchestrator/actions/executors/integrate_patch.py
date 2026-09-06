@@ -3433,8 +3433,9 @@ class IntegratePatchExecutor:
         one, else the override the round was dispatched with -- a KEEP reached
         through a build's launch-only probe has no provisioning stage at all, so
         keying on it would leave every accepted build permanently unobserved.
-        The assertion set is sourced the same way, from the build attempt this
-        round's probe was opened for when no provisioning ran.
+        The packages named in the assertion set are sourced the same way, from
+        the build attempt this round's probe was opened for when no provisioning
+        stage ran; their versions are the probe's observation either way.
         """
         from ...enablement.recipe.keep_probe import (
             keep_assertion_packages,
@@ -3458,8 +3459,11 @@ class IntegratePatchExecutor:
             bypass_interpreter=resolve_benchmark_interpreter() if backend == "bypass" else "",
         )
         enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+        provision_versions = (
+            None if provision_result is None else getattr(provision_result, "installed_versions", None) or {}
+        )
         packages = keep_assertion_packages(
-            provision_versions=getattr(provision_result, "installed_versions", None),
+            provision_versions=provision_versions,
             build_manifest=getattr(enablement, "build_manifest", None) or [],
             specialist_task_id=specialist_task_id,
         )
