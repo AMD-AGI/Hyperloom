@@ -247,7 +247,10 @@ def _root_reasons(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]
     return reasons
 
 
-def _snapshot_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _snapshot_reasons(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
     """Judge the captured content against the stack it is supposed to contain."""
     snapshots = [s for s in (section.get("source_snapshots") or []) if isinstance(s, Mapping)]
     by_root = {str(s.get("root_id")): s for s in snapshots}
@@ -260,13 +263,14 @@ def _snapshot_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
     for snapshot in snapshots:
         if not snapshot.get("complete"):
             reasons.append(_reason("source_snapshot_incomplete", str(snapshot.get("root_id"))))
-    reasons.extend(_expected_op_reasons(section, by_root))
+    reasons.extend(_expected_op_reasons(section, by_root, steps))
     return reasons
 
 
 def _expected_op_reasons(
     section: Mapping[str, Any],
     by_root: Mapping[str, Mapping[str, Any]],
+    steps: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Match every expected target against the operation it was declared with.
 
@@ -275,6 +279,13 @@ def _expected_op_reasons(
     contains none of the accepted stack's changes.
     """
     expected = section.get("accepted_stack_targets")
+    declared = any(step.get("kind") == PATCH_KIND for step in steps) or bool(section.get("kept_artifacts"))
+    named = isinstance(expected, Mapping) and any(targets for targets in expected.values())
+    # A round dispatched with its mutation inputs stripped declares every target
+    # of the stack it replays and names none of them, which no per-target
+    # comparison below can reach.
+    if declared and not named:
+        return [_reason("accepted_stack_not_launched", "accepted_stack_targets")]
     if not isinstance(expected, Mapping):
         return []
     reasons: list[dict[str, Any]] = []
@@ -469,7 +480,7 @@ def evaluate_replay_sufficiency(
     reasons.extend(_activation_reasons(section))
     reasons.extend(_runtime_reasons(section))
     reasons.extend(_root_reasons(section, steps))
-    reasons.extend(_snapshot_reasons(section))
+    reasons.extend(_snapshot_reasons(section, steps))
     reasons.extend(_artifact_reasons(section))
     reasons.extend(_setup_reasons(enablement))
     reasons.extend(_build_reasons(enablement, steps))

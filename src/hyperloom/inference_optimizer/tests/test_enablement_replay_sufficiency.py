@@ -612,6 +612,38 @@ def test_snapshot_missing_an_accepted_patch_target_raises_accepted_stack_not_lau
     assert "accepted_stack_not_launched" in _codes(_decide({}, section))
 
 
+def test_a_stripped_round_names_no_target_and_raises_accepted_stack_not_launched():
+    """A launch-only probe replays the stack while declaring none of its targets.
+
+    Its own round contributes no applied patch, so the per-target comparison has
+    nothing to walk and the previous KEEP's self-consistent records survive in
+    durable state.
+    """
+    section = {
+        "roots": project_roots([{**_root(), "path": "/fr"}]),
+        "source_snapshots": [_snapshot()],
+        "accepted_stack_targets": {},
+    }
+    decision = _decide({"kept_patches": ["/p/1.patch"], "framework_root": "/fr"}, section)
+    reasons = [r for r in decision["reasons"] if r["code"] == "accepted_stack_not_launched"]
+    assert reasons and reasons[0]["blocks"] == "both"
+    assert decision["status"] == "insufficient"
+
+
+def test_a_kept_artifact_alone_also_demands_a_named_target():
+    section = {
+        "roots": project_roots([{**_root(), "path": "/fr"}]),
+        "source_snapshots": [_snapshot(files=(("srt/a.py", "upsert"),))],
+        "kept_artifacts": [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py"}],
+    }
+    assert "accepted_stack_not_launched" in _codes(_decide({}, section))
+
+
+def test_a_recipe_declaring_no_stack_is_not_faulted_for_naming_no_target():
+    section = {"roots": project_roots([{**_root(), "path": "/fr"}]), "source_snapshots": [_snapshot()]}
+    assert "accepted_stack_not_launched" not in _codes(_decide({}, section))
+
+
 # ---- 15. Environment closure at the KEEP (D6/D7) ---------------------------
 
 
