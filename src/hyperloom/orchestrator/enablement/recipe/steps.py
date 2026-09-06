@@ -99,7 +99,8 @@ def _build_step(
     if row is None:
         return [step]
     summary = attempt_summary(row)
-    action = row.get("action") if isinstance(row.get("action"), dict) else {}
+    raw_action = row.get("action")
+    action: dict[str, Any] = raw_action if isinstance(raw_action, dict) else {}
     step["ref"] = summary.get("ref") or None
     step["gpu_arch"] = summary.get("gpu_arch") or None
     # The summary defaults these to ""/0; a fabricated zero is indistinguishable

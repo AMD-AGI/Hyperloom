@@ -87,10 +87,7 @@ def _digest_pairs(env: Mapping[str, str]) -> str:
     env *value* would emit byte-identical inputs -- so the digest separates them
     while emitting no value.
     """
-    pairs = [
-        f"{key}=" if is_secret_shaped_env_name(key) else f"{key}={value}"
-        for key, value in sorted(env.items())
-    ]
+    pairs = [f"{key}=" if is_secret_shaped_env_name(key) else f"{key}={value}" for key, value in sorted(env.items())]
     return f"sha256:{hashlib.sha256(chr(10).join(pairs).encode('utf-8')).hexdigest()}"
 
 

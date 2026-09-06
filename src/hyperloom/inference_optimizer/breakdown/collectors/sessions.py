@@ -1526,6 +1526,97 @@ def _build_attempt_summary(manifest_entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: ``EnablementRound`` fields the recipe projection and its decision read.
+_RECIPE_STATE_FIELDS: tuple[str, ...] = (
+    "active_runtime",
+    "accepted_config",
+    "accepted_config_source",
+    "accepted_stack_targets",
+    "base_sha",
+    "build_manifest",
+    "environment_closure",
+    "framework_root",
+    "installed_versions_at_keep",
+    "kept_artifacts",
+    "kept_patches",
+    "kept_stack_action",
+    "last_specialist_task_id",
+    "launch_evidence",
+    "patch_roots",
+    "roots",
+    "runtime_build_task_id",
+    "setup_commands",
+    "setup_executions",
+    "source_snapshots",
+)
+
+
+def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Read the enablement fields the recipe contract is projected from."""
+    return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
+
+
+def _collect_recipe(
+    out: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    session_dir: Path,
+) -> None:
+    """Emit the ordered replay contract and the verdict over it.
+
+    ``recipe_steps`` is emitted only when non-empty, so a session that
+    contributed nothing emits no key at all. ``replay_sufficiency`` is emitted
+    unconditionally beside it: its own absence is the one absence that carries
+    meaning, and a consumer must read it as insufficient.
+    """
+    from hyperloom.orchestrator.enablement.recipe import build_recipe_steps, evaluate_replay_sufficiency
+    from hyperloom.orchestrator.enablement.recipe.projections import (
+        project_accepted_config,
+        project_launch_evidence,
+        project_roots,
+        project_runtime_provenance,
+        project_source_snapshots,
+    )
+
+    enablement = _recipe_state(state)
+    steps = build_recipe_steps(enablement, attempt_summary=_build_attempt_summary)
+    if steps:
+        out["recipe_steps"] = steps
+    accepted_config = project_accepted_config(enablement.get("accepted_config"))
+    if accepted_config:
+        config_path = str(_eg(state, "accepted_config_path", "") or "") or str(
+            _eg(state, "probe_config_path", "") or ""
+        )
+        if config_path:
+            accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
+        out["accepted_config"] = accepted_config
+    evidence, argv_refused = project_launch_evidence(enablement.get("launch_evidence"))
+    out["accepted_config_source"] = str(enablement.get("accepted_config_source") or "") or None
+    out["launch_evidence"] = evidence
+    for key, value in (
+        ("roots", project_roots(enablement.get("roots"))),
+        ("source_snapshots", project_source_snapshots(enablement.get("source_snapshots"))),
+        ("accepted_stack_targets", enablement.get("accepted_stack_targets") or {}),
+        ("base_sha", str(enablement.get("base_sha") or "") or None),
+        ("runtime_provenance", project_runtime_provenance(enablement)),
+        ("environment_closure", enablement.get("environment_closure") or None),
+        ("installed_versions_at_keep", enablement.get("installed_versions_at_keep") or None),
+    ):
+        if value:
+            out[key] = value
+    decision = evaluate_replay_sufficiency(enablement, steps=steps, section=out)
+    if argv_refused:
+        # A partially represented launch line is exactly the silent narrowing
+        # this contract exists to refuse.
+        decision = evaluate_replay_sufficiency(
+            enablement,
+            steps=steps,
+            section={**out, "launch_evidence": {**(evidence or {}), "observed_model_binding": {}}},
+        )
+    out["replay_sufficiency"] = decision
+    out["dependency_closure_status"] = "verified" if decision["status"] == "sufficient" else "unverified"
+
+
 def collect_enablement(
     session_dir: Path,
     state: dict[str, Any],
@@ -1643,12 +1734,6 @@ def collect_enablement(
         out["setting_script"] = str(
             _rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
         )
-    accepted_config = _eg(state, "accepted_config")
-    if isinstance(accepted_config, dict) and accepted_config:
-        out["accepted_config"] = {
-            "extra_server_args": str(accepted_config.get("extra_server_args") or ""),
-            "extra_envs": {str(k): str(v) for k, v in (accepted_config.get("extra_envs") or {}).items()},
-        }
     if have_eval:
         out["trigger_kind"] = eval_kind
         out["observed_accuracy"] = float(_eg(state, "observed_accuracy", 0.0) or 0.0)
@@ -1688,4 +1773,5 @@ def collect_enablement(
             "failure_class": str(last_build_failure_raw.get("failure_class") or ""),
             "failure_summary": str(last_build_failure_raw.get("failure_summary") or ""),
         }
+    _collect_recipe(out, state, session_dir=session_dir)
     return out

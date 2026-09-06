@@ -110,9 +110,7 @@ def probe_environment_closure(
     closure = {"interpreter_tag": str(payload.get("interpreter_tag") or ""), "distributions": distributions}
     lowered = {name.lower().replace("-", "_"): version for name, version in distributions.items()}
     assertions = {
-        pkg: lowered[pkg.lower().replace("-", "_")]
-        for pkg in packages
-        if pkg.lower().replace("-", "_") in lowered
+        pkg: lowered[pkg.lower().replace("-", "_")] for pkg in packages if pkg.lower().replace("-", "_") in lowered
     }
     return closure, assertions
 

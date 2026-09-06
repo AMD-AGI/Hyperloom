@@ -240,7 +240,8 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
     A URL-aware pass runs first, because the shipped redactor matches assignment
     and header shapes and never parses a URL, so a credentialed ``--index-url``
     would otherwise pass through unchanged. The redactor then covers the literal
-    token shapes a URL parse cannot see.
+    token shapes a URL parse cannot see. A credentialed operand is replaced by
+    its class name, so neither the userinfo nor the host it named survives.
     """
     text = str(cmd or "").strip()
     if not text:
@@ -255,7 +256,11 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
         if not operand:
             rebuilt.append(option)
             continue
-        safe = strip_url_userinfo(operand) if _class_for_pair(option, operand, family=family) else operand
+        # The whole operand goes, not just its userinfo: the host it names is
+        # the private index the credential unlocks, and the class alone is what
+        # a replay operator needs to know.
+        found = _class_for_pair(option, operand, family=family)
+        safe = f"<{found}>" if found else operand
         if option and option.startswith("-") and rebuilt and rebuilt[-1] == option:
             rebuilt[-1] = f"{option} {safe}"
         elif option and option.startswith("-"):

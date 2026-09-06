@@ -123,9 +123,7 @@ def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] 
         # Path-valued entries are attempt directories the rebuild re-derives; the
         # rest are build switches that change what gets launched.
         "runtime_env": {
-            str(k): str(v)
-            for k, v in (override.get("runtime_env") or {}).items()
-            if not _is_filesystem_path(str(v))
+            str(k): str(v) for k, v in (override.get("runtime_env") or {}).items() if not _is_filesystem_path(str(v))
         },
     }
 
@@ -184,9 +182,7 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             out[key] = dict(value) if isinstance(value, Mapping) else value
     requested_env = evidence.get("requested_server_env")
     if isinstance(requested_env, Mapping):
-        out["requested_server_env_keys"] = sorted(
-            str(k) for k in requested_env if not is_secret_shaped_env_name(k)
-        )
+        out["requested_server_env_keys"] = sorted(str(k) for k in requested_env if not is_secret_shaped_env_name(k))
     warm = evidence.get("warm_reuse")
     if isinstance(warm, Mapping):
         out["warm_reuse"] = {

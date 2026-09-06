@@ -443,6 +443,7 @@ def _run_setup_commands(
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+
     def _record(cmd: str, index: int, outcome: str) -> None:
         executions.append(
             build_execution_row(
@@ -3344,9 +3345,7 @@ class IntegratePatchExecutor:
         from ._patch_snapshot import _patch_touched_paths_split
 
         root = str(framework_root or "")
-        patch_roots = {
-            str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(v)
-        }
+        patch_roots = {str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(v)}
         contributions = collect_contributions(
             framework_root=root,
             patch_roots=patch_roots,

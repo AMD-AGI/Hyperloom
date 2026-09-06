@@ -281,9 +281,7 @@ def _expected_op_reasons(
     for root_id, targets in expected.items():
         snapshot = by_root.get(str(root_id))
         captured = {
-            str(f.get("rel")): str(f.get("op"))
-            for f in ((snapshot or {}).get("files") or [])
-            if isinstance(f, Mapping)
+            str(f.get("rel")): str(f.get("op")) for f in ((snapshot or {}).get("files") or []) if isinstance(f, Mapping)
         }
         if any(captured.get(str(rel)) != str(op) for rel, op in (targets or {}).items()):
             reasons.append(_reason("accepted_stack_not_launched", str(root_id)))
