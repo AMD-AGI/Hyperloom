@@ -268,6 +268,12 @@ class ProvisionResult:
         installed_versions: Package -> version map recorded post-install.
         log_path: Path to the provision log (for observability).
         error: Failure reason when ``ok`` is False.
+        resolved_ref: Commit the editable clone actually landed on. The action's
+            own ``ref`` is a branch or tag, which names different bytes tomorrow.
+        resolved_packages: ``{name: {version, artifact_digest}}`` for a wheel
+            acquisition. A version string is not the identity of the bytes
+            installed: the install runs ``--upgrade`` against the index, so
+            re-running it reproduces whatever that index holds at replay time.
     """
 
     ok: bool
@@ -275,6 +281,8 @@ class ProvisionResult:
     installed_versions: Mapping[str, str] = field(default_factory=dict)
     log_path: str = ""
     error: str = ""
+    resolved_ref: str = ""
+    resolved_packages: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for shared state / observability."""
@@ -284,6 +292,8 @@ class ProvisionResult:
             "installed_versions": dict(self.installed_versions),
             "log_path": self.log_path,
             "error": self.error,
+            "resolved_ref": self.resolved_ref,
+            "resolved_packages": {k: dict(v) for k, v in self.resolved_packages.items()},
         }
 
     @classmethod

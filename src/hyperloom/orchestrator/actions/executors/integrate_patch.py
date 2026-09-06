@@ -3286,7 +3286,16 @@ class IntegratePatchExecutor:
         # Record the KEEP'd attempt runtime so it survives rearm and every later
         # bench in this session re-activates it.
         if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
-            kept_result["enablement_kept_stack_action"] = stack_action.to_state()
+            # The action names a branch, a tag or an unpinned spec list; the
+            # resolved identity beside it is what makes the acquisition a
+            # rebuild path rather than a source that moves.
+            kept_result["enablement_kept_stack_action"] = {
+                **stack_action.to_state(),
+                "resolved_ref": str(getattr(provision_result, "resolved_ref", "") or ""),
+                "resolved_packages": {
+                    str(k): dict(v) for k, v in (getattr(provision_result, "resolved_packages", {}) or {}).items()
+                },
+            }
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
         # Editable-refresh the localized closure + snapshot a manifest that

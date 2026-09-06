@@ -15,11 +15,33 @@ import yaml
 
 from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
+    observed_model_binding_from_log,
     observed_sglang_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 log = logging.getLogger(__name__)
+
+
+def _digest_operand(value: str) -> str:
+    """Digest a model operand: two digests compare, the paths could not travel."""
+    text = str(value or "").strip()
+    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
+
+
+def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    """Derive the binding from an SGLang identity parse, which has no argv line."""
+    model = str(identity.get("model_path") or "")
+    if not model:
+        return {}
+    return {
+        "model_digest": _digest_operand(model),
+        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer_path") or "")),
+        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "tp": str(identity.get("tp_size") or ""),
+        "dp": str(identity.get("dp_size") or ""),
+        "pp": "",
+    }
 
 
 def build_launch_evidence(
@@ -56,11 +78,19 @@ def build_launch_evidence(
 
     observed_flags = ""
     observed_server_identity: dict[str, Any] = {}
+    observed_model_binding: dict[str, Any] = {}
     if actual_server_log:
         try:
             observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
+            # Read from the raw launch line, which still carries the operands
+            # ``split_launch_flags`` strips: without it the evidence records only
+            # the *requested* model and cannot detect a server that resolved a
+            # different one.
+            observed_model_binding = observed_model_binding_from_log(actual_server_log, resolved_framework)
             if not observed_flags and resolved_framework == "sglang":
                 observed_server_identity = observed_sglang_server_identity_from_log(actual_server_log)
+                if not observed_model_binding:
+                    observed_model_binding = _binding_from_identity(observed_server_identity)
         except Exception:  # noqa: BLE001 - evidence collection must not alter a measurement
             log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
 
@@ -80,6 +110,10 @@ def build_launch_evidence(
         "actual_server_log_path": actual_server_log or "",
         "observed_server_launch_flags": observed_flags,
         "observed_server_identity": observed_server_identity,
+        "observed_model_binding": observed_model_binding,
+        "requested_model_digest": _digest_operand(
+            str(model_path if model_path is not None else benchmark.get("model") or "")
+        ),
         "warm_reuse": {
             "reused_ready_server": reused,
             "provenance": (

@@ -761,3 +761,97 @@ def test_new_keys_do_not_change_the_r1a_projections():
     assert out["setup_commands"] == ["pip install -e ."]
     assert out["framework_root"] == "/sgl-workspace/sglang"
     assert out["replay_sufficiency"]["status"] == "insufficient"
+
+
+# ---- 5 (continued). The observed binding is read from every launcher spelling
+
+
+def _log(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_observed_model_binding_is_read_for_sglang_and_vllm(tmp_path):
+    from hyperloom.common.launch_log_evidence import observed_model_binding_from_log, split_launch_flags
+
+    sglang = _log(
+        tmp_path,
+        "sglang.log",
+        "INFO python3 -m sglang.launch_server --model-path /models/a --tp-size 8 --mem-fraction-static 0.9\n",
+    )
+    vllm_serve = _log(tmp_path, "vllm_serve.log", "INFO vllm serve /models/b --tensor-parallel-size 4\n")
+    vllm_module = _log(
+        tmp_path,
+        "vllm_module.log",
+        "INFO python -m vllm.entrypoints.openai.api_server --model /models/c --tp 2\n",
+    )
+    for path, framework, tp in ((sglang, "sglang", "8"), (vllm_serve, "vllm", "4"), (vllm_module, "vllm", "2")):
+        binding = observed_model_binding_from_log(path, framework)
+        assert binding["model_digest"].startswith("sha256:")
+        assert binding["tp"] == tp
+        assert "/models/" not in str(binding)
+    # The forwarded flags still carry no model or parallelism operand.
+    forwarded = split_launch_flags("--model /models/b --tensor-parallel-size 4 --mem-fraction-static 0.9")
+    assert forwarded == "--mem-fraction-static 0.9"
+
+
+def test_framework_outside_the_marker_table_has_no_observable_binding(tmp_path):
+    from hyperloom.common.launch_log_evidence import observed_model_binding_from_log
+
+    atom = _log(tmp_path, "atom.log", "INFO atom_server --model-path /models/a\n")
+    assert observed_model_binding_from_log(atom, "atom") == {}
+
+
+def test_evidence_builder_carries_the_binding_and_the_requested_digest(tmp_path):
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config = tmp_path / "materialized.yaml"
+    config.write_text("benchmark:\n  framework: vllm\n  model: /models/b\n", encoding="utf-8")
+    log = _log(tmp_path, "server.log", "INFO vllm serve /models/b --tensor-parallel-size 4\n")
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=tmp_path,
+    )
+    assert evidence["observed_model_binding"]["model_digest"] == evidence["requested_model_digest"]
+    projected, _refused = project_launch_evidence(evidence)
+    assert projected["observed_model_binding"]["tp"] == "4"
+
+
+# ---- 13 (continued). Resolved acquisition identity ------------------------
+
+
+def test_provision_result_carries_the_resolved_identity_fields():
+    from hyperloom.orchestrator.framework.stack_actions import ProvisionResult
+
+    state = ProvisionResult(
+        ok=True,
+        resolved_ref="c" * 40,
+        resolved_packages={"sglang": {"version": "0.4", "artifact_digest": "sha256:w"}},
+    ).to_state()
+    assert state["resolved_ref"] == "c" * 40
+    assert state["resolved_packages"]["sglang"]["artifact_digest"] == "sha256:w"
+
+
+def test_resolved_clone_ref_reads_the_commit_the_clone_landed_on():
+    from hyperloom.orchestrator.framework.adapters import _resolved_clone_ref
+
+    class _Completed:
+        returncode = 0
+        stdout = "d" * 40 + "\n"
+
+    assert _resolved_clone_ref("/checkout", run=lambda *_a, **_k: _Completed()) == "d" * 40
+
+
+def test_resolved_packages_reports_version_and_record_digest():
+    from hyperloom.orchestrator.framework.adapters import _resolved_packages
+
+    class _Completed:
+        returncode = 0
+        stdout = '{"sglang": {"version": "0.4", "artifact_digest": "sha256:w"}}'
+
+    resolved = _resolved_packages("/py", ["sglang"], run=lambda *_a, **_k: _Completed())
+    assert resolved == {"sglang": {"version": "0.4", "artifact_digest": "sha256:w"}}
+    assert _resolved_packages("/py", [], run=lambda *_a, **_k: _Completed()) == {}
