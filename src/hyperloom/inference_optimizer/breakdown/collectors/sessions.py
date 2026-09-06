@@ -1618,15 +1618,12 @@ def _collect_recipe(
     ):
         if value:
             out[key] = value
-    decision = evaluate_replay_sufficiency(enablement, steps=steps, section=out)
-    if argv_refused:
-        # A partially represented launch line is exactly the silent narrowing
-        # this contract exists to refuse.
-        decision = evaluate_replay_sufficiency(
-            enablement,
-            steps=steps,
-            section={**out, "launch_evidence": {**(evidence or {}), "observed_model_binding": {}}},
-        )
+    decision = evaluate_replay_sufficiency(
+        enablement,
+        steps=steps,
+        section=out,
+        launch_argv_refused=argv_refused,
+    )
     out["replay_sufficiency"] = decision
     out["dependency_closure_status"] = _closure_status(decision)
 

@@ -35,6 +35,10 @@ from .steps import command_digest
 _CMD_SANITIZED_CHARS = 160
 
 _REQUIREMENT_OPTIONS: frozenset[str] = frozenset({"-r", "--requirement", "--constraint"})
+
+#: pip's short spelling of ``--constraint``; admitted only for that family,
+#: because the same flag names a channel to conda.
+_PIP_CONSTRAINT_SHORT = "-c"
 _ARCHIVE_SUFFIXES: tuple[str, ...] = (".whl", ".tar.gz", ".tgz", ".zip", ".tar.bz2")
 _VCS_PREFIXES: tuple[str, ...] = ("git+", "hg+", "svn+")
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -81,12 +85,15 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
     """
     root = Path(cwd)
     _, tokens = split_env_assignments(cmd)
+    requirement_options = set(_REQUIREMENT_OPTIONS)
+    if installer_class(cmd) == "pip":
+        requirement_options.add(_PIP_CONSTRAINT_SHORT)
     identities: list[dict[str, Any]] = []
     unresolved: list[str] = []
     for option, operand in option_operands(tokens):
         if not operand:
             continue
-        if option in _REQUIREMENT_OPTIONS:
+        if option in requirement_options:
             identity = _file_identity(root / operand)
             if identity is None:
                 unresolved.append("requirements_file")

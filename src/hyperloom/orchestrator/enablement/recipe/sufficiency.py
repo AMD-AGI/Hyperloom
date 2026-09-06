@@ -497,6 +497,7 @@ def evaluate_replay_sufficiency(
     steps: Sequence[Mapping[str, Any]],
     section: Mapping[str, Any],
     delivered_paths: Iterable[str] | None = None,
+    launch_argv_refused: bool = False,
 ) -> dict[str, Any]:
     """Decide whether the projected recipe can be replayed.
 
@@ -507,12 +508,18 @@ def evaluate_replay_sufficiency(
         delivered_paths: The paths an export actually packages. When given, every
             path the recipe references must be among them or the export fails
             closed; when ``None`` no delivery is being assembled.
+        launch_argv_refused: Whether the sanitizer refused a launch line it could
+            not represent, so the evidence carries no observed argv at all.
 
     Returns:
         ``{schema_version, status, reasons}``, ``"sufficient"`` only when no
         reason stands.
     """
     reasons: list[dict[str, Any]] = []
+    if launch_argv_refused:
+        # A launch line the export cannot represent is not a thinner evidence
+        # object; nothing observed remains to confirm the requested settings.
+        reasons.append(_reason("activation_incomplete", "observed_server_launch_flags"))
     reasons.extend(_activation_reasons(section))
     reasons.extend(_runtime_reasons(section))
     reasons.extend(_root_reasons(section, steps))

@@ -461,6 +461,20 @@ def test_untokenizable_argv_is_refused_rather_than_partially_represented():
     assert "requested_server_args" not in projected
 
 
+def test_a_refused_argv_names_the_launch_line_it_could_not_represent():
+    section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": project_launch_evidence(_evidence())[0]}
+    decision = evaluate_replay_sufficiency({}, steps=[], section=section, launch_argv_refused=True)
+    refusal = [r for r in decision["reasons"] if r["scope"] == "observed_server_launch_flags"]
+    assert refusal and refusal[0]["code"] == "activation_incomplete"
+    assert decision["status"] == "insufficient"
+
+
+def test_a_represented_argv_names_no_refusal():
+    section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": project_launch_evidence(_evidence())[0]}
+    decision = evaluate_replay_sufficiency({}, steps=[], section=section)
+    assert not [r for r in decision["reasons"] if r["scope"] == "observed_server_launch_flags"]
+
+
 # ---- 10. Absence is still not fabrication ----------------------------------
 
 
@@ -830,6 +844,22 @@ def test_requirements_file_install_is_identified_or_blocks_replay(tmp_path):
     (tmp_path / "requirements.txt").write_text("foo==1.0\n", encoding="utf-8")
     identities, unresolved = setup_input_identity("pip install -r requirements.txt", cwd=tmp_path)
     assert unresolved == [] and identities[0]["kind"] == "requirements_file"
+
+
+def test_pips_short_constraint_spelling_is_a_requirements_file(tmp_path):
+    """``-c`` is ``--constraint`` to pip and a channel to conda, so the family
+    decides which one the operand is."""
+    row = _row("pip install -c constraints.txt foo", cwd=tmp_path)
+    assert row["unresolved_inputs"] == ["requirements_file"]
+    assert "setup_inputs_incomplete" in _codes(_decide({"setup_executions": [row]}))
+
+    (tmp_path / "constraints.txt").write_text("foo==1.0\n", encoding="utf-8")
+    identities, unresolved = setup_input_identity("pip install -c constraints.txt foo", cwd=tmp_path)
+    assert unresolved == [] and identities[0]["kind"] == "requirements_file"
+
+
+def test_a_conda_channel_is_not_read_as_a_constraints_file(tmp_path):
+    assert setup_input_identity("conda install -c conda-forge foo", cwd=tmp_path) == ([], [])
 
 
 def test_moving_vcs_ref_install_blocks_replay(tmp_path):
