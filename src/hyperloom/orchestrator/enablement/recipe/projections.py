@@ -16,7 +16,7 @@ from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 
-from .credentials import classify_credential_class, strip_url_userinfo
+from .credentials import classify_credential_value, strip_url_userinfo
 
 #: ``accepted_config`` keys Hyperloom's own revalidation applies. Two of the five
 #: are subtractive, so a projection that drops them replays a *superset* of the
@@ -138,9 +138,9 @@ def _project_acquisition(action: Any) -> dict[str, Any] | None:
     """Reduce the kept stack action to the inputs that re-create its venv."""
     if not isinstance(action, dict) or not action:
         return None
-    credential_class = None
-    for raw in (action.get("repo_url"), action.get("index_url")):
-        credential_class = credential_class or classify_credential_class(f"pip install --index-url {raw or ''}")
+    credential_class = classify_credential_value(str(action.get("repo_url") or "")) or classify_credential_value(
+        str(action.get("index_url") or ""), option="--index-url"
+    )
     resolved = action.get("resolved_packages")
     return {
         "acquisition_method": str(action.get("acquisition_method") or ""),

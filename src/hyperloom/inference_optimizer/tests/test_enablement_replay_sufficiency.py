@@ -11,6 +11,7 @@ from hyperloom.inference_optimizer.breakdown.collectors.sessions import _build_a
 from hyperloom.orchestrator.enablement.recipe import (
     build_recipe_steps,
     classify_credential_class,
+    classify_credential_value,
     detect_credential_channels,
     evaluate_replay_sufficiency,
     read_status,
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.enablement.recipe.projections import (
     project_roots,
     project_runtime_provenance,
 )
+from hyperloom.orchestrator.enablement.recipe.steps import command_digest
 from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
     build_execution_row,
     mark_round_disposition,
@@ -299,7 +301,9 @@ def test_credentialed_repo_url_is_stripped_and_classified():
 
     record = build_input_record(_Action(), installed_versions={}, ambient_env={}, fs_root=NO_FS)
     assert record["repo_url"] == "https://github.com/org/repo"
-    assert record["credential_class"] == "index_url"
+    # A repository URL is under no index option, so it takes the closed
+    # vocabulary's catch-all rather than borrowing a flag's class.
+    assert record["credential_class"] == "opaque_credential"
     assert build_driver_for(_Action()) == "builtin_plan"
 
 
@@ -318,6 +322,24 @@ def test_build_command_travels_as_an_identity_never_as_text():
     identity = record["build_command"]
     assert identity["argv0"] == "bash" and identity["credential_class"] == "index_url"
     assert "u:t@h" not in str(identity)
+
+
+def test_a_credentialed_build_input_blocks_replay():
+    for inputs in ({"credential_class": "opaque_credential"}, {"credential_channels": ["pip_index_env"]}):
+        row = _attempt("bA")
+        row["build_inputs"] = {**row["build_inputs"], **inputs}
+        state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+        assert "credential_required" in _codes(_decide(state)), inputs
+
+
+def test_a_credentialed_build_command_blocks_replay():
+    row = _attempt("bA", build_driver="custom_command")
+    row["build_inputs"] = {
+        **row["build_inputs"],
+        "build_command": {"argv0": "bash", "digest": "sha256:d", "credential_class": "index_url"},
+    }
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    assert "credential_required" in _codes(_decide(state))
 
 
 # ---- 5. Launch-evidence sanitization (D2) ----------------------------------
@@ -464,7 +486,7 @@ def test_credentialed_acquisition_url_is_exported_stripped_with_its_class():
         _runtime_state({"acquisition_method": "editable_ref", "repo_url": "https://u:t@h/r", "ref": "main"})
     )
     assert provenance["acquisition"]["repo_url"] == "https://h/r"
-    assert provenance["acquisition"]["credential_class"] == "index_url"
+    assert provenance["acquisition"]["credential_class"] == "opaque_credential"
 
 
 # ---- 6 / 14. Credential class and ambient channels (OD2) -------------------
@@ -476,6 +498,30 @@ def test_credential_classes_over_the_admitted_grammar():
     assert classify_credential_class("pip install --find-links https://u:t@h/links foo") == "find_links"
     assert classify_credential_class("conda install -c https://u:t@h/chan foo") == "channel"
     assert classify_credential_class("pip install foo") is None
+
+
+def test_an_inline_index_assignment_classifies_and_sanitizes_as_the_flag_does():
+    """The allowlist strips a leading KEY=VALUE, so both spellings are admitted."""
+    cmd = "PIP_INDEX_URL=https://user:token@host/simple pip install foo"
+    assert classify_credential_class(cmd) == "index_url"
+    row = _row(cmd)
+    assert "user:token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
+    assert row["credential_class"] == "index_url"
+    assert row["cmd_digest"] == command_digest(cmd)
+    state = {"setup_commands": [cmd], "setup_executions": _accepted([row])}
+    assert "credential_required" in _codes(_decide(state))
+
+
+def test_a_secret_shaped_assignment_keeps_its_own_class():
+    assert classify_credential_class("HF_TOKEN=abc pip install foo") == "env_assignment"
+    assert "abc" not in _row("HF_TOKEN=abc pip install foo")["cmd_sanitized"]
+
+
+def test_a_bare_credentialed_url_is_not_borrowed_from_the_index_flag():
+    assert classify_credential_value("https://u:t@h/r") == "opaque_credential"
+    assert classify_credential_value("git+https://u:t@h/r") == "vcs_url"
+    assert classify_credential_value("https://u:t@h/simple", option="--index-url") == "index_url"
+    assert classify_credential_value("https://h/r") is None
 
 
 def test_credential_class_records_no_userinfo_host_or_operand():

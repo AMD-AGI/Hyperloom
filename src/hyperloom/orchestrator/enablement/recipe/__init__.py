@@ -10,6 +10,7 @@ on whether that recipe can actually be replayed.
 
 from .credentials import (
     classify_credential_class,
+    classify_credential_value,
     detect_credential_channels,
     installer_class,
     sanitize_command_text,
@@ -20,6 +21,7 @@ from .sufficiency import evaluate_replay_sufficiency, read_status
 __all__ = [
     "build_recipe_steps",
     "classify_credential_class",
+    "classify_credential_value",
     "detect_credential_channels",
     "evaluate_replay_sufficiency",
     "installer_class",

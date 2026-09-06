@@ -413,7 +413,11 @@ def _credential_reasons(
         if step.get("kind") == BUILD_KIND:
             inputs = step.get("build_inputs") or {}
             command = inputs.get("build_command") or {}
-            if inputs.get("credential_class") or (isinstance(command, Mapping) and command.get("credential_class")):
+            if (
+                inputs.get("credential_class")
+                or inputs.get("credential_channels")
+                or (isinstance(command, Mapping) and command.get("credential_class"))
+            ):
                 reasons.append(_reason("credential_required", f"step[{index}]"))
     for row in enablement.get("setup_executions") or []:
         if isinstance(row, Mapping) and row.get("credential_channels"):

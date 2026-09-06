@@ -17,7 +17,12 @@ from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 
-from .credentials import classify_credential_class, detect_credential_channels, strip_url_userinfo
+from .credentials import (
+    classify_credential_class,
+    classify_credential_value,
+    detect_credential_channels,
+    strip_url_userinfo,
+)
 
 BUILTIN_PLAN_DRIVER = "builtin_plan"
 CUSTOM_COMMAND_DRIVER = "custom_command"
@@ -121,7 +126,10 @@ def _build_command_identity(argv: tuple[str, ...] | list[str]) -> dict[str, Any]
         return None
     credential_class = None
     for token in tokens[1:]:
-        credential_class = credential_class or classify_credential_class(f"pip install --index-url {token}")
+        # A ``-c`` operand is a command line in its own right, so the credential
+        # inside it sits under an option no argv-level scan reaches.
+        found = classify_credential_value(token) or (classify_credential_class(token) if " " in token else None)
+        credential_class = credential_class or found
     return {
         "argv0": tokens[0],
         "digest": f"sha256:{hashlib.sha256(chr(0).join(tokens).encode('utf-8')).hexdigest()}",
@@ -164,7 +172,7 @@ def build_input_record(
         "env_digest": _digest_pairs(envs),
         "ambient_keys": _visible_keys(ambient),
         "ambient_digest": _digest_pairs(ambient),
-        "credential_class": classify_credential_class(f"pip install --index-url {raw_repo}"),
+        "credential_class": classify_credential_value(raw_repo),
         "credential_channels": detect_credential_channels(ambient_env, fs_root=fs_root),
     }
 

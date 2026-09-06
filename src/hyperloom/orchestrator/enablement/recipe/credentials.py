@@ -37,11 +37,15 @@ _REGISTRY_OPTIONS: frozenset[str] = frozenset({"--registry", "--_auth", "--_auth
 _CHANNEL_OPTIONS: frozenset[str] = frozenset({"-c", "--channel"})
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+
+#: The ambient spelling of ``--index-url``; an inline assignment of one is the
+#: same flag by another name, and the allowlist admits it as readily.
+_PIP_INDEX_ENV_NAMES: tuple[str, ...] = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_INDEX_URL")
 _TRUSTED_BIN_PREFIX_RE = re.compile(r"^(?:/opt/[^/]+|/usr(?:/local)?|/bin|/sbin)(?:/[^/]+)*/")
 
 #: Ambient channels proved by a variable name.
 _ENV_CHANNELS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("pip_index_env", ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_INDEX_URL")),
+    ("pip_index_env", _PIP_INDEX_ENV_NAMES),
     ("pip_config", ("PIP_CONFIG_FILE",)),
     ("netrc", ("NETRC",)),
     ("keyring", ("PIP_KEYRING_PROVIDER",)),
@@ -131,6 +135,27 @@ def option_operands(tokens: Iterable[str]) -> list[tuple[str, str]]:
     return pairs
 
 
+def assignment_pairs(assignments: Iterable[str]) -> list[tuple[str, str, str]]:
+    """Pair each leading ``KEY=VALUE`` with the option its value is written as.
+
+    The setup allowlist strips these before matching an installer, so a
+    credentialed value written this way is admitted exactly as the flag
+    spelling is and has to classify and sanitize the same way.
+
+    Returns:
+        ``(name, option, value)`` triples; ``option`` is ``""`` when the name is
+        not the ambient spelling of a known flag.
+    """
+    triples: list[tuple[str, str, str]] = []
+    for assignment in assignments:
+        match = _ENV_ASSIGNMENT_RE.match(str(assignment))
+        if not match:
+            continue
+        name, value = match.group(1), match.group(2)
+        triples.append((name, "--index-url" if name in _PIP_INDEX_ENV_NAMES else "", value))
+    return triples
+
+
 def url_userinfo(token: str) -> str:
     """Return the userinfo component of ``token``, or ``""``.
 
@@ -202,6 +227,16 @@ _CLASS_ORDER: tuple[str, ...] = (
 )
 
 
+def classify_credential_value(value: str, *, option: str = "") -> str | None:
+    """Name the class of credential a single ``value`` carries, or ``None``.
+
+    Args:
+        value: The token to classify; never recorded, only classified.
+        option: The flag it was written under, when it was written under one.
+    """
+    return _class_for_pair(option, str(value or ""), family="pip") or None
+
+
 def classify_credential_class(cmd: str) -> str | None:
     """Name the class of credential ``cmd`` carries, or ``None``.
 
@@ -209,12 +244,11 @@ def classify_credential_class(cmd: str) -> str | None:
     found under are never recorded.
     """
     assignments, tokens = split_env_assignments(cmd)
-    for assignment in assignments:
-        match = _ENV_ASSIGNMENT_RE.match(assignment)
-        if match and is_secret_shaped_env_name(match.group(1)):
-            return "env_assignment"
+    if any(is_secret_shaped_env_name(name) for name, _option, _value in assignment_pairs(assignments)):
+        return "env_assignment"
     family = installer_class(cmd)
-    pairs = option_operands(tokens)
+    pairs = [(option, value) for _name, option, value in assignment_pairs(assignments)]
+    pairs += option_operands(tokens)
     found = [_class_for_pair(option, operand, family=family) for option, operand in pairs]
     ranked = [name for name in found if name]
     if ranked:
@@ -240,11 +274,15 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
     if not text:
         return ""
     try:
-        tokens = shlex.split(text)
+        shlex.split(text)
     except ValueError:
         return _clip(redact_secret_values(text), clip)
+    assignments, tokens = split_env_assignments(text)
     family = installer_class(text)
-    rebuilt: list[str] = []
+    rebuilt: list[str] = ["sudo"] if shlex.split(text)[:1] == ["sudo"] else []
+    for name, option, value in assignment_pairs(assignments):
+        found = _class_for_pair(option, value, family=family)
+        rebuilt.append(f"{name}=<{found}>" if found else f"{name}={value}")
     for option, operand in option_operands(tokens):
         if not operand:
             rebuilt.append(option)
