@@ -1544,7 +1544,6 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "launch_evidence",
     "patch_roots",
     "roots",
-    "runtime_build_task_id",
     "setup_commands",
     "setup_executions",
     "source_snapshots",

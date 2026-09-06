@@ -116,10 +116,16 @@ def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] 
     override = FrameworkRuntime.from_state(runtime).to_runtime_override()
     if not override:
         return None
+    from .steps import select_linked_build
+
+    sentinel, _row = select_linked_build(enablement)
     return {
         "override_keys": sorted(override),
         "acquisition": _project_acquisition(enablement.get("kept_stack_action")),
-        "build_task_id": str(enablement.get("runtime_build_task_id") or "") or None,
+        # A KEEP reached through a build's launch-only probe provisions nothing:
+        # the build the probe was opened for IS the rebuild path, and its
+        # recorded inputs are the recipe.
+        "build_task_id": str((sentinel or {}).get("task_id") or "") or None,
         # Path-valued entries are attempt directories the rebuild re-derives; the
         # rest are build switches that change what gets launched.
         "runtime_env": {

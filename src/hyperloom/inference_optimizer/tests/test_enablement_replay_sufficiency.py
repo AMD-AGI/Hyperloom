@@ -903,3 +903,15 @@ def test_a_round_with_no_task_id_claims_no_ledger_rows():
     unchanged = mark_round_disposition(rows, round_task_id="", disposition="kept", accepted=True)
     assert unchanged[0]["round_disposition"] == "unreported"
     assert unchanged[0]["present_at_final_launch"] is False
+
+
+def test_a_build_provisioned_runtime_names_that_build_as_its_rebuild_path():
+    """A KEEP through a launch-only probe provisions nothing; the build is the path."""
+    state = {
+        **_build_state([_attempt("bA"), {"task_id": "bA", "probe_task_id": "probe"}]),
+        "active_runtime": {"python_path": "/attempt/venv/bin/python"},
+    }
+    provenance = project_runtime_provenance(state)
+    assert provenance["build_task_id"] == "bA"
+    section = {"runtime_provenance": provenance}
+    assert "runtime_rebuild_required" not in _codes(_decide(state, section))

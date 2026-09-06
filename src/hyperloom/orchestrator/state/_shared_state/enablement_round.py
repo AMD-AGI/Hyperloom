@@ -115,8 +115,6 @@ class EnablementRound:
     installed_versions_at_keep: dict = field(default_factory=dict)
     # {interpreter_tag, distributions} of the accepted runtime.
     environment_closure: dict = field(default_factory=dict)
-    # Build attempt the accepted runtime came from, when it came from a build.
-    runtime_build_task_id: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":
