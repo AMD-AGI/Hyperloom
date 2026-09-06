@@ -91,7 +91,7 @@ class TargetedBuildExecutor:
                 shared_state.pending_targeted_build = {}
                 shared_state.save(session_dir)
 
-        self._record_result(result, shared_state, action=action, task_id=task.task_id)
+        self._record_result(result, shared_state, action=action)
         if not result.ok:
             raise RuntimeError(
                 f"targeted_build failed: failure_class={result.failure_class!r}"
@@ -100,7 +100,7 @@ class TargetedBuildExecutor:
         return result.to_state()
 
     @staticmethod
-    def _record_result(result: Any, shared_state: Any, *, action: Any = None, task_id: str = "") -> None:
+    def _record_result(result: Any, shared_state: Any, *, action: Any = None) -> None:
         """Append the build result to the manifest; record failure carrier.
 
         The inputs are recorded here because this is the one point where the
@@ -113,7 +113,6 @@ class TargetedBuildExecutor:
         manifest = list(getattr(shared_state.enablement, "build_manifest", []) or [])
         row = result.to_state()
         if action is not None:
-            row["task_id"] = str(task_id or "")
             row["build_driver"] = build_driver_for(action)
             row["build_inputs"] = build_input_record(
                 action,
