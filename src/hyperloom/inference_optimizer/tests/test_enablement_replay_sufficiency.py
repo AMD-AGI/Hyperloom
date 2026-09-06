@@ -192,6 +192,7 @@ def _attempt(task_id, **kw):
             "torch_constraint_mode": "constraint_file",
             "env_digest": "sha256:e",
             "ambient_digest": "sha256:a",
+            "ambient_keys": ["HOME", "PATH", "ROCM_PATH"],
             "build_command": None,
             "credential_class": None,
             "credential_channels": [],
@@ -324,6 +325,22 @@ def test_build_command_travels_as_an_identity_never_as_text():
     assert "u:t@h" not in str(identity)
 
 
+def test_an_ambient_closure_narrower_than_the_inherited_environment_is_incomplete():
+    """A digest over a hand-picked subset is indistinguishable from a full one,
+    so the key list beside it is what says which was computed."""
+    for keys in ([], ["ROCM_PATH", "PIP_INDEX_URL"], ["PATH"]):
+        row = _attempt("bA")
+        row["build_inputs"] = {**row["build_inputs"], "ambient_keys": keys}
+        state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+        assert "build_inputs_incomplete" in _codes(_decide(state)), keys
+
+
+def test_an_empty_installed_versions_map_is_incomplete():
+    row = _attempt("bA", installed_versions={})
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    assert "build_inputs_incomplete" in _codes(_decide(state))
+
+
 def test_a_credentialed_build_input_blocks_replay():
     for inputs in ({"credential_class": "opaque_credential"}, {"credential_channels": ["pip_index_env"]}):
         row = _attempt("bA")
@@ -391,6 +408,39 @@ def test_requested_setting_no_observed_field_confirms_is_activation_incomplete()
     section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": projected}
     codes = _codes(_decide({}, section))
     assert "activation_incomplete" in codes
+
+
+def _parallelism_section(**kw):
+    projected, _ = project_launch_evidence(_evidence(**kw))
+    return {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": projected}
+
+
+def test_a_width_the_binding_contradicts_is_a_mismatch():
+    """The extractor strips parallelism from the launch line, so only the
+    binding can confirm the width a recipe asked for."""
+    section = _parallelism_section(
+        requested_server_args="--tp-size 8 --mem-fraction-static 0.9",
+        observed_model_binding={"model_digest": "sha256:m", "tp": 2},
+    )
+    codes = _codes(_decide({}, section))
+    assert "launch_evidence_mismatch" in codes
+
+
+def test_a_width_the_binding_agrees_with_raises_nothing():
+    section = _parallelism_section(
+        requested_server_args="--tensor-parallel-size 8 --mem-fraction-static 0.9",
+        observed_model_binding={"model_digest": "sha256:m", "tp": 8},
+    )
+    codes = _codes(_decide({}, section))
+    assert "launch_evidence_mismatch" not in codes and "activation_incomplete" not in codes
+
+
+def test_a_width_no_binding_axis_reports_is_activation_incomplete():
+    section = _parallelism_section(
+        requested_server_args="--pp-size 4 --mem-fraction-static 0.9",
+        observed_model_binding={"model_digest": "sha256:m", "tp": 8},
+    )
+    assert "activation_incomplete" in _codes(_decide({}, section))
 
 
 def test_observed_value_contradicting_the_requested_one_is_a_mismatch():

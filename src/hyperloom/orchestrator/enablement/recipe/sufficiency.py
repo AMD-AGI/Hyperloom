@@ -65,23 +65,28 @@ _RUN_LOCAL_REQUESTED_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-#: Carried by ``observed_model_binding`` instead, and compared there.
-_MODEL_AND_PARALLELISM_FLAGS: frozenset[str] = frozenset(
-    {
-        "model",
-        "model_path",
-        "tokenizer",
-        "tokenizer_path",
-        "served_model_name",
-        "tensor_parallel_size",
-        "tp_size",
-        "tp",
-        "data_parallel_size",
-        "dp_size",
-        "pipeline_parallel_size",
-        "pp_size",
-    }
+#: The requested spellings of each parallelism axis ``observed_model_binding``
+#: reports, so the requested side is compared against the binding rather than
+#: against a launch line the extractor strips these from.
+_PARALLELISM_AXES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("tp", frozenset({"tensor_parallel_size", "tp_size", "tp"})),
+    ("dp", frozenset({"data_parallel_size", "dp_size"})),
+    ("pp", frozenset({"pipeline_parallel_size", "pp_size"})),
 )
+
+#: Compared through ``observed_model_binding.model_digest`` instead.
+_MODEL_IDENTITY_FLAGS: frozenset[str] = frozenset(
+    {"model", "model_path", "tokenizer", "tokenizer_path", "served_model_name"}
+)
+
+#: Carried by ``observed_model_binding`` instead, and compared there.
+_MODEL_AND_PARALLELISM_FLAGS: frozenset[str] = _MODEL_IDENTITY_FLAGS.union(
+    *(flags for _axis, flags in _PARALLELISM_AXES)
+)
+
+#: Names every spawned build inherits and the ambient closure excludes on no
+#: path, so a key list missing either was computed over less than the closure.
+_AMBIENT_FLOOR: frozenset[str] = frozenset({"PATH", "HOME"})
 
 _BUILTIN_REQUIRED_INPUTS: tuple[str, ...] = (
     "component",
@@ -166,7 +171,32 @@ def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
         reasons.append(_reason("activation_incomplete", "observed_model_binding"))
     elif requested_digest and requested_digest != str(binding.get("model_digest")):
         reasons.append(_reason("launch_evidence_mismatch", "model_digest"))
+    reasons.extend(_parallelism_reasons(evidence, binding))
     reasons.extend(_requested_vs_observed_reasons(evidence))
+    return reasons
+
+
+def _parallelism_reasons(
+    evidence: Mapping[str, Any],
+    binding: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Confirm each requested parallelism axis against the binding that reports it.
+
+    The extractor strips these operands from the observed launch line, so the
+    binding is the only observed side there is: without this comparison a server
+    graded at a different width certifies the recipe that asked for one.
+    """
+    requested_flags = _requested_flags(str(evidence.get("requested_server_args") or ""))
+    reasons: list[dict[str, Any]] = []
+    for axis, spellings in _PARALLELISM_AXES:
+        requested = next((v for f, v in requested_flags.items() if f in spellings and v), "")
+        if not requested:
+            continue
+        observed = str(binding.get(axis) or "").strip()
+        if not observed:
+            reasons.append(_reason("activation_incomplete", f"requested:{axis}"))
+        elif observed.lower() != requested.strip().lower():
+            reasons.append(_reason("launch_evidence_mismatch", f"requested:{axis}"))
     return reasons
 
 
@@ -379,6 +409,8 @@ def _build_reasons(
     missing = [key for key in _BUILTIN_REQUIRED_INPUTS if not inputs.get(key)]
     if not row.get("installed_versions"):
         missing.append("installed_versions")
+    if not _AMBIENT_FLOOR.issubset({str(k) for k in inputs.get("ambient_keys") or []}):
+        missing.append("ambient_keys")
     command = inputs.get("build_command")
     if driver == "custom_command" and not (isinstance(command, Mapping) and command.get("digest")):
         missing.append("build_command")
