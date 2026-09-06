@@ -395,6 +395,39 @@ def _setup_command_sources(
     return sources
 
 
+def _execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path: Path) -> bool:
+    """Run one allowlisted setup command, appending its output to the replay log.
+
+    Returns:
+        True when the command exited zero. A non-zero install is recorded but
+        does not hard-fail the integration -- the subsequent boot/gate is the
+        source of truth for runnability.
+    """
+    log.info("integrate_patch: enablement setup replay: %s", cmd)
+    try:
+        proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
+            cmd,
+            shell=True,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_SETUP_CMD_TIMEOUT_SEC,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
+        return False
+    try:
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
+    except OSError:
+        # Logging is best-effort.
+        pass
+    if proc.returncode != 0:
+        log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
+    return proc.returncode == 0
+
+
 def _run_setup_commands(
     commands: list[str],
     *,
@@ -476,34 +509,12 @@ def _run_setup_commands(
             log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
             _record(cmd, cmd_index, "skipped")
             continue
-        log.info("integrate_patch: enablement setup replay: %s", cmd)
-        try:
-            proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
-                cmd,
-                shell=True,
-                cwd=str(cwd),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_SETUP_CMD_TIMEOUT_SEC,
-            )
-            try:
-                with open(log_path, "a", encoding="utf-8") as fh:
-                    fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
-            except OSError:
-                # Logging is best-effort.
-                pass
-            if proc.returncode == 0:
-                applied.append(cmd)
-                _record(cmd, cmd_index, "applied")
-            else:
-                failed.append(cmd)
-                _record(cmd, cmd_index, "failed")
-                log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        if _execute_setup_command(cmd, cwd=cwd, env=env, log_path=log_path):
+            applied.append(cmd)
+            _record(cmd, cmd_index, "applied")
+        else:
             failed.append(cmd)
             _record(cmd, cmd_index, "failed")
-            log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
     return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
 
 
