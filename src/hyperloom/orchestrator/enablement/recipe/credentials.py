@@ -20,16 +20,14 @@ from urllib.parse import urlsplit, urlunsplit
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 
 #: Installer families the setup allowlist admits, keyed by the token that
-#: introduces the command. Only the Python family is covered by the KEEP-time
-#: distribution closure.
+#: introduces the command. Only the ``pip`` family is covered by the KEEP-time
+#: distribution closure; every other family mutates state that map cannot see.
 _INSTALLER_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("pip", ("pip", "pip3", "uv", "python", "python3")),
     ("apt", ("apt", "apt-get")),
     ("npm", ("npm", "pnpm", "yarn")),
     ("conda", ("conda", "mamba")),
 )
-
-_PYTHON_INSTALLER_FAMILY = "pip"
 
 _VCS_SCHEME_PREFIXES: tuple[str, ...] = ("git+", "hg+", "svn+")
 
@@ -85,11 +83,6 @@ def installer_class(cmd: str) -> str:
         if head in heads:
             return family
     return ""
-
-
-def is_python_installer(cmd: str) -> bool:
-    """True when ``cmd``'s effects are visible to the KEEP-time distribution map."""
-    return installer_class(cmd) == _PYTHON_INSTALLER_FAMILY
 
 
 def split_env_assignments(cmd: str) -> tuple[list[str], list[str]]:

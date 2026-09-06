@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .credentials import classify_credential_class
+from .projections import project_build_inputs
 
 SETUP_KIND = "setup"
 BUILD_KIND = "build"
@@ -109,9 +110,7 @@ def _build_step(
         step["component"] = summary.get("component")
     if "max_jobs" in action:
         step["max_jobs"] = summary.get("max_jobs")
-    inputs = row.get("build_inputs")
-    if isinstance(inputs, dict) and inputs:
-        step["build_inputs"] = dict(inputs)
+    step["build_inputs"] = project_build_inputs(row)
     step["build_driver"] = str(row.get("build_driver") or "").strip() or None
     return [step]
 

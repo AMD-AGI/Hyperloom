@@ -855,3 +855,43 @@ def test_resolved_packages_reports_version_and_record_digest():
     resolved = _resolved_packages("/py", ["sglang"], run=lambda *_a, **_k: _Completed())
     assert resolved == {"sglang": {"version": "0.4", "artifact_digest": "sha256:w"}}
     assert _resolved_packages("/py", [], run=lambda *_a, **_k: _Completed()) == {}
+
+
+# ---- 15 (continued). dependency_closure_status tracks the closure reasons ---
+
+
+def _collect(state):
+    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
+
+    return collect_enablement(Path("/tmp/sess"), {"enablement": {"attempts": 1, **state}}, [])
+
+
+def test_closure_status_is_unverified_while_a_closure_reason_stands():
+    out = _collect({"kept_patches": ["/p/1.patch"], "framework_root": "/fr"})
+    assert out["dependency_closure_status"] == "unverified"
+    assert out["replay_sufficiency"]["status"] == "insufficient"
+
+
+def test_closure_status_is_verified_when_only_unrelated_reasons_stand():
+    """A root a consumer cannot place does not make the dependency set unpinned."""
+    out = _collect(
+        {
+            "kept_patches": ["/p/1.patch"],
+            "framework_root": "/fr",
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
+    assert "root_unidentified" in codes
+    assert out["dependency_closure_status"] == "verified"
+
+
+def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():
+    row = _attempt("bA")
+    row["build_inputs"]["repo_url"] = "https://user:token@github.com/org/repo"
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    inputs = steps[0]["build_inputs"]
+    assert inputs["repo_url"] == "https://github.com/org/repo"
+    assert inputs["resolved_sha"] == "s" * 40

@@ -1551,6 +1551,21 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
 )
 
 
+#: Reasons that specifically deny a closed dependency set. The status cannot read
+#: "verified" while one stands: pinned components are not a pinned environment,
+#: and a closure captured over the Python layer alone does not cover a build or
+#: an installer outside it.
+_CLOSURE_DENYING_CODES: frozenset[str] = frozenset(
+    {"build_inputs_incomplete", "environment_closure_absent", "closure_scope_incomplete"}
+)
+
+
+def _closure_status(decision: dict[str, Any]) -> str:
+    """Return whether the recipe pins the dependency set, not merely components."""
+    denied = {str(r.get("code")) for r in decision.get("reasons") or []} & _CLOSURE_DENYING_CODES
+    return "unverified" if denied else "verified"
+
+
 def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
     """Read the enablement fields the recipe contract is projected from."""
     return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
@@ -1614,7 +1629,7 @@ def _collect_recipe(
             section={**out, "launch_evidence": {**(evidence or {}), "observed_model_binding": {}}},
         )
     out["replay_sufficiency"] = decision
-    out["dependency_closure_status"] = "verified" if decision["status"] == "sufficient" else "unverified"
+    out["dependency_closure_status"] = _closure_status(decision)
 
 
 def collect_enablement(
