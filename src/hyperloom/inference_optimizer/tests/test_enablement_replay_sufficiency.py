@@ -176,6 +176,7 @@ def test_credentialed_command_is_sanitized_without_losing_its_digest():
 def _attempt(task_id, **kw):
     row = {
         "ok": True,
+        "task_id": task_id,
         "attempt_root": f"/s/enablement/builds/{task_id}",
         "installed_versions": {"aiter_ref": "v1", "aiter_sha": "s" * 40, "arch": "gfx950"},
         "build_driver": "builtin_plan",
@@ -206,6 +207,18 @@ def test_build_binds_by_identity_not_by_position():
     state = _build_state([_attempt("bA"), _attempt("bB"), {"task_id": "bA", "probe_task_id": "probe"}])
     steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
     assert steps[0]["build_task_id"] == "bA"
+    assert "build_attempt_unjoined" not in _codes(_decide(state))
+
+
+def test_routing_merged_into_the_attempt_row_still_joins():
+    """Production leaves one row: routing merges its fields into the attempt row.
+
+    Recognizing a sentinel by the absence of an outcome skipped exactly that row,
+    so every executed build projected as unjoined.
+    """
+    state = _build_state([_attempt("bA", probe_task_id="probe")])
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    assert steps[0]["build_task_id"] == "bA" and steps[0]["build_driver"] == "builtin_plan"
     assert "build_attempt_unjoined" not in _codes(_decide(state))
 
 

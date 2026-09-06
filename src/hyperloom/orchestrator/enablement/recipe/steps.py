@@ -44,7 +44,7 @@ def command_digest(cmd: str) -> str:
 
 
 def _is_attempt_row(entry: Any) -> bool:
-    """True for a build-attempt row; routing sentinels carry no ``ok`` key."""
+    """True for a build-attempt row; a row with no outcome recorded none."""
     return isinstance(entry, dict) and entry.get("ok") is not None
 
 
@@ -60,6 +60,11 @@ def select_linked_build(enablement: Mapping[str, Any]) -> tuple[dict[str, Any] |
     order-independent, so concurrent completions interleaving in the manifest
     cannot bind a step to another build's row.
 
+    A sentinel is recognized by that equality alone, never by the absence of an
+    outcome: routing merges its fields into the attempt row of the same build
+    whenever one is already in the manifest, which for a build the executor ran
+    is always, so the linked sentinel and the joined row are usually one row.
+
     Returns:
         ``(None, None)`` when no sentinel is linked; ``(sentinel, None)`` when
         the linked build has no matching attempt row.
@@ -69,7 +74,7 @@ def select_linked_build(enablement: Mapping[str, Any]) -> tuple[dict[str, Any] |
     if not isinstance(manifest, list) or not final_task:
         return None, None
     for entry in manifest:
-        if not isinstance(entry, dict) or _is_attempt_row(entry):
+        if not isinstance(entry, dict):
             continue
         if str(entry.get("probe_task_id") or "").strip() != final_task:
             continue

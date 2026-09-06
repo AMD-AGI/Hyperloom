@@ -23,7 +23,9 @@ import json
 import logging
 import os
 import subprocess  # nosec B404 - local interpreter probe, argv-only, no shell.
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+
+from .steps import select_linked_build
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +64,30 @@ def resolve_keep_interpreter(
     if resolved:
         return resolved
     return bypass_interpreter if str(backend_name or "").strip().lower() == "bypass" else ""
+
+
+def keep_assertion_packages(
+    *,
+    provision_versions: Mapping[str, str] | None,
+    build_manifest: Sequence[Any],
+    specialist_task_id: str,
+) -> tuple[str, ...]:
+    """Return the names whose versions are asserted at the KEEP.
+
+    A KEEP reached through a build's launch-only probe has no provisioning stage
+    at all, so keying the set on one would leave every accepted build -- the
+    principal path carrying version assertions -- permanently unobserved. The
+    linked build attempt's own map is then the version set that reached this
+    image. With neither source the set is empty, which the sufficiency rules read
+    as an assertion set never observed at the KEEP.
+    """
+    versions = dict(provision_versions or {})
+    if not versions:
+        _sentinel, row = select_linked_build(
+            {"build_manifest": list(build_manifest or []), "last_specialist_task_id": specialist_task_id}
+        )
+        versions = dict((row or {}).get("installed_versions") or {})
+    return tuple(str(name) for name in versions)
 
 
 def probe_environment_closure(

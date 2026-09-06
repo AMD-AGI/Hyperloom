@@ -3329,6 +3329,7 @@ class IntegratePatchExecutor:
                 self._enablement_keep_records(
                     ctx,
                     params=params,
+                    specialist_task_id=specialist_task_id,
                     framework_root=framework_root,
                     applied=applied,
                     applied_artifacts=applied_artifacts,
@@ -3346,6 +3347,7 @@ class IntegratePatchExecutor:
         ctx: Any,
         *,
         params: dict[str, Any],
+        specialist_task_id: str,
         framework_root: Path | None,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
@@ -3398,7 +3400,12 @@ class IntegratePatchExecutor:
             dest_root=self.session_dir / "optimization_stack" / "enablement",
             session_dir=self.session_dir,
         )
-        closure, assertions = self._probe_keep_environment(params, provision_result=provision_result)
+        closure, assertions = self._probe_keep_environment(
+            ctx,
+            params,
+            specialist_task_id=specialist_task_id,
+            provision_result=provision_result,
+        )
         return {
             "enablement_roots": records,
             "enablement_patch_roots": patch_roots,
@@ -3414,8 +3421,10 @@ class IntegratePatchExecutor:
 
     def _probe_keep_environment(
         self,
+        ctx: Any,
         params: dict[str, Any],
         *,
+        specialist_task_id: str,
         provision_result: Any,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         """Observe the closure and assertion set under the accepted runtime.
@@ -3424,8 +3433,14 @@ class IntegratePatchExecutor:
         one, else the override the round was dispatched with -- a KEEP reached
         through a build's launch-only probe has no provisioning stage at all, so
         keying on it would leave every accepted build permanently unobserved.
+        The assertion set is sourced the same way, from the build attempt this
+        round's probe was opened for when no provisioning ran.
         """
-        from ...enablement.recipe.keep_probe import probe_environment_closure, resolve_keep_interpreter
+        from ...enablement.recipe.keep_probe import (
+            keep_assertion_packages,
+            probe_environment_closure,
+            resolve_keep_interpreter,
+        )
         from .benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
 
         override: dict[str, Any] = {}
@@ -3442,7 +3457,12 @@ class IntegratePatchExecutor:
             backend_name=backend,
             bypass_interpreter=resolve_benchmark_interpreter() if backend == "bypass" else "",
         )
-        packages = tuple(str(k) for k in (getattr(provision_result, "installed_versions", {}) or {}))
+        enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+        packages = keep_assertion_packages(
+            provision_versions=getattr(provision_result, "installed_versions", None),
+            build_manifest=getattr(enablement, "build_manifest", None) or [],
+            specialist_task_id=specialist_task_id,
+        )
         return probe_environment_closure(interpreter, override=override, packages=packages)
 
     def _finalize_localization_keep(

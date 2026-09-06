@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
-from hyperloom.orchestrator.actions.executors.integrate_patch import _git_head_sha
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _git_head_sha
 from hyperloom.orchestrator.enablement.recipe.keep_records import (
     build_root_records,
     capture_root_snapshots,
@@ -19,8 +21,14 @@ from hyperloom.orchestrator.enablement.recipe.keep_records import (
     collect_contributions,
     declared_targets,
 )
-from hyperloom.orchestrator.enablement.recipe.keep_probe import resolve_keep_interpreter
+from hyperloom.orchestrator.enablement.recipe.keep_probe import (
+    keep_assertion_packages,
+    probe_environment_closure,
+    resolve_keep_interpreter,
+)
 
+BUILD_TASK = "tb-1"
+PROBE_TASK = "probe-9"
 BASE_TEXT = "value = 1\n"
 PATCHED_TEXT = "value = 2\n"
 TARGET = "srt/module.py"
@@ -171,3 +179,111 @@ def test_keep_interpreter_prefers_the_override_then_the_bypass_backend():
     # Under any other backend the launching interpreter is not resolvable, and
     # naming a plausible one would reproduce the defect this closes.
     assert resolve_keep_interpreter({}, backend_name="magpie", bypass_interpreter="/c/py") == ""
+
+
+def _installed_dist(root: Path, name: str, version: str) -> str:
+    """Materialize an importable distribution and return its ``sys.path`` entry."""
+    info = root / f"site-{version}" / f"{name}-{version}.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
+    return str(info.parent)
+
+
+def _build_manifest(installed_versions: dict[str, str]) -> list[dict]:
+    """The single row routing leaves for an executed build: attempt and sentinel."""
+    return [
+        {
+            "ok": True,
+            "task_id": BUILD_TASK,
+            "probe_task_id": PROBE_TASK,
+            "attempt_root": f"/s/enablement/builds/{BUILD_TASK}",
+            "installed_versions": installed_versions,
+        }
+    ]
+
+
+def test_the_graded_override_decides_what_the_probe_observes(tmp_path: Path):
+    """A source build reaches its packages only through the override's prefixes.
+
+    A bare-environment probe would name a distribution set the graded server
+    never imported.
+    """
+    override = {"pythonpath_prefixes": [_installed_dist(tmp_path, "overlaid", "3.1")]}
+    closure, assertions = probe_environment_closure(sys.executable, override=override, packages=("overlaid",))
+    bare_closure, bare_assertions = probe_environment_closure(sys.executable, override=None, packages=("overlaid",))
+    assert closure["distributions"]["overlaid"] == "3.1" and assertions == {"overlaid": "3.1"}
+    assert "overlaid" not in bare_closure["distributions"] and bare_assertions == {}
+
+
+def test_a_build_reached_keep_asserts_the_linked_attempts_versions():
+    packages = keep_assertion_packages(
+        provision_versions=None,
+        build_manifest=_build_manifest({"torch": "2.6", "aiter_sha": "abc1234"}),
+        specialist_task_id=PROBE_TASK,
+    )
+    assert packages == ("torch", "aiter_sha")
+
+
+def test_a_provisioned_keep_asserts_its_own_map():
+    packages = keep_assertion_packages(
+        provision_versions={"sglang": "0.4"},
+        build_manifest=_build_manifest({"torch": "2.6"}),
+        specialist_task_id=PROBE_TASK,
+    )
+    assert packages == ("sglang",)
+
+
+def test_neither_provisioning_nor_a_linked_build_names_a_package():
+    """A build whose probe is another round's is not this KEEP's version source."""
+    assert (
+        keep_assertion_packages(
+            provision_versions={},
+            build_manifest=_build_manifest({"torch": "2.6"}),
+            specialist_task_id="some-other-round",
+        )
+        == ()
+    )
+    assert keep_assertion_packages(provision_versions={}, build_manifest=[], specialist_task_id=PROBE_TASK) == ()
+
+
+def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Path):
+    """The build map names the packages; only the KEEP probe supplies the versions.
+
+    Sourcing the names from ``provision_result`` alone left the launch-only probe
+    path -- the principal path carrying version assertions -- with an empty set,
+    which reads as never observed. The recorded version is the one the probe
+    finds, so a build-time map carried forward is visible as a stale value.
+    """
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+        }
+    }
+    closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id=PROBE_TASK, provision_result=None
+    )
+    assert assertions == {"demo": "2.0"}
+    assert closure["distributions"]["demo"] == "2.0"
+
+
+def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
+    """Fail closed: no provisioning and no linked build is no version source."""
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+        }
+    }
+    _closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id="some-other-round", provision_result=None
+    )
+    assert assertions == {}
