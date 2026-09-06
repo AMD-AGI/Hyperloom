@@ -159,20 +159,23 @@ def test_durable_command_capped_out_of_the_accepted_round_is_reported():
 
 
 def test_credentialed_command_is_sanitized_without_losing_its_digest():
-    spellings = (
-        "pip install --index-url https://user:token@host/simple pkg",
-        "pip install --index-url 'https://user:token@host/simple' pkg",
-        "pip install --index-url=https://user:token@host/simple pkg",
-    )
-    for cmd in spellings:
-        rows = [_row(cmd, seq=i, outcome=o) for i, o in enumerate(("applied", "failed", "skipped"), start=1)]
-        for row in rows:
-            assert "token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
-            assert row["credential_class"] == "index_url"
-        assert len({row["cmd_digest"] for row in rows}) == 1
+    """Sanitization is of the recorded text only: the digest that counts
+    occurrences is over the verbatim string, so the three spellings the
+    allowlist admits equally still collapse onto one command."""
+    cmd = "pip install --index-url https://user:token@host/simple pkg"
+    rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed", "skipped"), start=1)]
+    for row in rows:
+        assert "user:token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
+        assert row["cmd_digest"] == command_digest(cmd)
+    assert len({row["cmd_digest"] for row in rows}) == 1
 
-
-# ---- 3. Build join under concurrency (D6) ----------------------------------
+    attached = "pip install --index-url=https://user:token@host/simple pkg"
+    quoted = "pip install --index-url 'https://user:token@host/simple' pkg"
+    for spelling in (attached, quoted):
+        row = _row(spelling)
+        assert row["credential_class"] == "index_url"
+        assert "user:token" not in row["cmd_sanitized"]
+        assert row["cmd_digest"] == command_digest(spelling)
 
 
 def _attempt(task_id, **kw):
@@ -349,6 +352,28 @@ def test_a_credentialed_build_input_blocks_replay():
         assert "credential_required" in _codes(_decide(state)), inputs
 
 
+def test_a_credentialed_repo_url_recorded_by_the_builder_blocks_replay():
+    class _Action:
+        component = "aiter"
+        repo_url = "https://user:token@github.com/org/repo"
+        ref = "v1"
+        gpu_arch = "gfx950"
+        max_jobs = 8
+        torch_constraint_mode = "constraint_file"
+        build_command = ()
+        envs: dict = {}
+
+    row = _attempt("bA")
+    row["build_inputs"] = {
+        **row["build_inputs"],
+        **build_input_record(_Action(), installed_versions={}, ambient_env={"PATH": "/b", "HOME": "/h"}, fs_root=NO_FS),
+    }
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    codes = _codes(_decide(state))
+    assert "credential_required" in codes
+    assert "user:token" not in str(build_recipe_steps(state, attempt_summary=_build_attempt_summary))
+
+
 def test_a_credentialed_build_command_blocks_replay():
     row = _attempt("bA", build_driver="custom_command")
     row["build_inputs"] = {
@@ -461,6 +486,20 @@ def test_untokenizable_argv_is_refused_rather_than_partially_represented():
     assert "requested_server_args" not in projected
 
 
+def test_an_accepted_config_with_no_path_names_the_missing_path():
+    """The materialized config is an activation input, so its absence is named
+    as itself rather than folded into the generic evidence reason."""
+    decision = evaluate_replay_sufficiency({}, steps=[], section={"accepted_config": {"extra_envs": {"A": "1"}}})
+    scoped = [r for r in decision["reasons"] if r["scope"] == "config_path"]
+    assert scoped and scoped[0]["code"] == "activation_incomplete"
+
+
+def test_an_accepted_config_carrying_its_path_names_nothing():
+    section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": project_launch_evidence(_evidence())[0]}
+    decision = evaluate_replay_sufficiency({}, steps=[], section=section)
+    assert not [r for r in decision["reasons"] if r["scope"] == "config_path"]
+
+
 def test_a_refused_argv_names_the_launch_line_it_could_not_represent():
     section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": project_launch_evidence(_evidence())[0]}
     decision = evaluate_replay_sufficiency({}, steps=[], section=section, launch_argv_refused=True)
@@ -481,6 +520,13 @@ def test_a_represented_argv_names_no_refusal():
 def test_empty_accepted_config_keys_are_not_emitted_as_defaults():
     assert project_accepted_config({"extra_envs": {}, "extra_server_args": "", "args_mode": ""}) == {}
     assert project_accepted_config(None) == {}
+
+
+def test_an_empty_accepted_config_emits_a_null_source_and_null_evidence():
+    """Neither key is guessed from the branch the round happened to take."""
+    out = _collect({"kept_patches": ["/p/1.patch"], "framework_root": "/fr"})
+    assert "accepted_config" not in out
+    assert out["accepted_config_source"] is None and out["launch_evidence"] is None
 
 
 def test_five_accepted_config_keys_survive_the_projection():
@@ -1056,6 +1102,38 @@ def test_closure_status_is_verified_when_only_unrelated_reasons_stand():
     codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
     assert "root_unidentified" in codes
     assert out["dependency_closure_status"] == "verified"
+
+
+def test_closure_status_is_unverified_for_a_non_python_installer():
+    """Scope, not absence: the map is present and covers less than was installed."""
+    rows = _accepted([_row("apt-get install -y libfoo", seq=1, task="kept")], task="kept")
+    out = _collect(
+        {
+            "setup_commands": ["apt-get install -y libfoo"],
+            "setup_executions": rows,
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
+    assert "closure_scope_incomplete" in codes
+    assert out["dependency_closure_status"] == "unverified"
+
+
+def test_closure_status_is_unverified_while_the_build_inputs_are_incomplete():
+    row = _attempt("bA")
+    row["build_inputs"] = {**row["build_inputs"], "resolved_sha": ""}
+    out = _collect(
+        {
+            "build_manifest": [row, {"task_id": "bA", "probe_task_id": "probe"}],
+            "last_specialist_task_id": "probe",
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
+    assert "build_inputs_incomplete" in codes
+    assert out["dependency_closure_status"] == "unverified"
 
 
 def test_build_inputs_reach_the_emitted_step_stripped_of_credential_material():

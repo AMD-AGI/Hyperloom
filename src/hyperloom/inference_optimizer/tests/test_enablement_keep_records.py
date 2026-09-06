@@ -74,6 +74,65 @@ def test_base_sha_is_the_tree_the_patches_apply_to(repo: Path):
     assert _git(repo, "show", f"{post_keep}:{TARGET}") == PATCHED_TEXT.strip()
 
 
+def test_a_kept_patch_applies_exactly_once_to_the_recorded_base(repo: Path, tmp_path: Path):
+    """The recorded base is the tree an R1a patch step replays against.
+
+    Applying it to the post-KEEP commit is the failure the capture point exists
+    to prevent: that tree already holds the change.
+    """
+    patch = tmp_path / "1.patch"
+    patch.write_text(
+        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT.strip()}\n+{PATCHED_TEXT.strip()}\n",
+        encoding="utf-8",
+    )
+    recorded = _git_head_sha(repo)
+
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    ok, _note = _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
+    assert ok
+
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={str(repo): recorded},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    replay = tmp_path / "replay"
+    _git(repo.parent, "clone", "-q", str(repo), str(replay))
+    _git(replay, "checkout", "-q", records[0]["base_sha"])
+
+    _git(replay, "apply", str(patch))
+    assert (replay / TARGET).read_text(encoding="utf-8") == PATCHED_TEXT
+
+    # A second application has nothing left to change, which is what proves the
+    # recorded base was not already patched.
+    second = subprocess.run(
+        ["git", "-C", str(replay), "apply", "--check", str(patch)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode != 0
+
+
+def test_a_patch_replayed_against_the_post_keep_commit_is_a_second_application(repo: Path, tmp_path: Path):
+    patch = tmp_path / "1.patch"
+    patch.write_text(
+        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT.strip()}\n+{PATCHED_TEXT.strip()}\n",
+        encoding="utf-8",
+    )
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    _git_commit_kept(repo, "hyperloom KEEP", [TARGET])
+
+    refused = subprocess.run(
+        ["git", "-C", str(repo), "apply", "--check", str(patch)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+
+
 def test_root_record_carries_the_pre_keep_base_sha(repo: Path):
     recorded = _git_head_sha(repo)
     (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
