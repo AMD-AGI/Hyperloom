@@ -915,3 +915,20 @@ def test_a_build_provisioned_runtime_names_that_build_as_its_rebuild_path():
     assert provenance["build_task_id"] == "bA"
     section = {"runtime_provenance": provenance}
     assert "runtime_rebuild_required" not in _codes(_decide(state, section))
+
+
+def test_acquisition_channels_reach_runtime_provenance_and_block_replay():
+    """A runtime acquired over an authenticated remote names the class it needed."""
+    state = {
+        "active_runtime": {"python_path": "/attempt/venv/bin/python"},
+        "kept_stack_action": {
+            "acquisition_method": "editable_ref",
+            "repo_url": "https://h/r",
+            "ref": "main",
+            "resolved_ref": "c" * 40,
+            "credential_channels": ["ssh_agent"],
+        },
+    }
+    provenance = project_runtime_provenance(state)
+    assert provenance["acquisition"]["credential_channels"] == ["ssh_agent"]
+    assert "credential_required" in _codes(_decide(state, {"runtime_provenance": provenance}))

@@ -75,6 +75,7 @@ from ._nogit_patch import (
     _is_within,
     _revert_patches_no_git,
 )
+from ...enablement.recipe.credentials import detect_credential_channels
 from ...enablement.recipe.setup_ledger import build_execution_row
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
@@ -3306,6 +3307,10 @@ class IntegratePatchExecutor:
                 "resolved_packages": {
                     str(k): dict(v) for k, v in (getattr(provision_result, "resolved_packages", {}) or {}).items()
                 },
+                # The clone and the install inherit the whole process
+                # environment, so a runtime acquired over an authenticated
+                # remote replays no better than an install that was.
+                "credential_channels": detect_credential_channels(os.environ),
             }
             kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
