@@ -75,6 +75,7 @@ from ._nogit_patch import (
     _is_within,
     _revert_patches_no_git,
 )
+from ...enablement.recipe.setup_ledger import build_execution_row
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
@@ -373,7 +374,36 @@ def _resolve_setup_commands(
     return out
 
 
-def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dict[str, Any]:
+def _setup_command_sources(
+    *,
+    params: dict[str, Any],
+    done_payload: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Map each candidate command to whether it was inherited or proposed here.
+
+    A command replayed from the durable base and one this round's specialist
+    proposed carry different replay meaning, and the resolved list dedups them
+    into one string.
+    """
+    inherited = {str(c or "").strip() for c in (params.get("enablement_setup_commands") or [])}
+    sources: dict[str, str] = {cmd: "inherited" for cmd in inherited if cmd}
+    proposed = (done_payload or {}).get("setup_commands") or []
+    for raw in proposed:
+        cmd = str(raw or "").strip()
+        if cmd and cmd not in sources:
+            sources[cmd] = "proposed"
+    return sources
+
+
+def _run_setup_commands(
+    commands: list[str],
+    *,
+    cwd: Path,
+    log_dir: Path,
+    sources: dict[str, str] | None = None,
+    round_task_id: str = "",
+    seq_start: int = 0,
+) -> dict[str, Any]:
     """Replay allowlisted enablement setup commands (installs) before boot.
 
     Runs each allowlisted command non-interactively with a per-command timeout,
@@ -387,15 +417,23 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
         cwd: Working directory for the commands.
         log_dir: Directory to write ``enablement_setup.log`` into.
 
+    Args (continued):
+        sources: ``{cmd: "inherited"|"proposed"}`` for the ledger rows.
+        round_task_id: The round the executions belong to.
+        seq_start: Highest ledger ``seq`` already durable, so occurrence
+            identity stays monotonic across rounds.
+
     Returns:
-        dict[str, Any]: ``{"applied": [...], "skipped": [...], "failed": [...]}``
-        where ``applied`` are the allowlisted commands that ran (rc==0).
+        dict[str, Any]: ``{"applied", "skipped", "failed", "executions"}`` where
+        ``applied`` are the allowlisted commands that ran (rc==0) and
+        ``executions`` is one ledger row per ATTEMPTED command.
     """
     applied: list[str] = []
     skipped: list[str] = []
     failed: list[str] = []
+    executions: list[dict[str, Any]] = []
     if not commands:
-        return {"applied": applied, "skipped": skipped, "failed": failed}
+        return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -405,7 +443,21 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-    for cmd in commands:
+    def _record(cmd: str, index: int, outcome: str) -> None:
+        executions.append(
+            build_execution_row(
+                seq=int(seq_start) + len(executions) + 1,
+                round_task_id=round_task_id,
+                cmd_index=index,
+                cmd=cmd,
+                source=(sources or {}).get(str(cmd).strip(), "proposed"),
+                outcome=outcome,
+                env=env,
+                cwd=cwd,
+            )
+        )
+
+    for cmd_index, cmd in enumerate(commands):
         if not _is_allowlisted_setup_command(cmd):
             # Sanitised HERE, not at the reporting sites. This list is copied
             # verbatim into every result payload that carries
@@ -421,6 +473,7 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
             # re-authored and re-dropped until the budget ran out. The log is a
             # disk-backed surface too, so it gets the sanitised form as well.
             log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
+            _record(cmd, cmd_index, "skipped")
             continue
         log.info("integrate_patch: enablement setup replay: %s", cmd)
         try:
@@ -441,13 +494,52 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
                 pass
             if proc.returncode == 0:
                 applied.append(cmd)
+                _record(cmd, cmd_index, "applied")
             else:
                 failed.append(cmd)
+                _record(cmd, cmd_index, "failed")
                 log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
         except (subprocess.TimeoutExpired, OSError) as exc:
             failed.append(cmd)
+            _record(cmd, cmd_index, "failed")
             log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
-    return {"applied": applied, "skipped": skipped, "failed": failed}
+    return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
+
+
+def _git_head_sha(framework_root: Path | None) -> str:
+    """Return ``framework_root``'s HEAD, or ``""`` when it is not a git tree.
+
+    Read BEFORE any candidate mutation: ``base_sha`` names the tree the patches
+    apply to, so a read taken after the KEEP commit would name a tree that
+    already contains them and every recorded patch would replay onto its own
+    result.
+    """
+    if framework_root is None:
+        return ""
+    cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
+    if cp is None or getattr(cp, "returncode", 1) != 0:
+        return ""
+    return (getattr(cp, "stdout", "") or "").strip()
+
+
+def _durable_execution_seq(shared_state: Any) -> int:
+    """Return the highest ``seq`` already in the durable setup ledger."""
+    ledger = getattr(getattr(shared_state, "enablement", None), "setup_executions", None) or []
+    return max((int(row.get("seq") or 0) for row in ledger if isinstance(row, dict)), default=0)
+
+
+def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *, session_dir: Path) -> None:
+    """Append this round's execution rows to the durable, append-only ledger."""
+    rows = [row for row in (setup_result.get("executions") or []) if isinstance(row, dict)]
+    if shared_state is None or not rows:
+        return
+    ledger = list(getattr(shared_state.enablement, "setup_executions", None) or [])
+    ledger.extend(rows)
+    shared_state.enablement.setup_executions = ledger
+    try:
+        shared_state.save(session_dir)
+    except Exception:  # noqa: BLE001 — the ledger is written again at the rearm
+        log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
 
 
 def allowlisted_explicit_root(
@@ -2256,7 +2348,7 @@ class IntegratePatchExecutor:
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
         self._ip_base_artifact_replayed = False
-        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
+        setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
             if setup_cmds:
@@ -2264,7 +2356,15 @@ class IntegratePatchExecutor:
                     setup_cmds,
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id),
+                    sources=_setup_command_sources(params=params, done_payload=done_payload),
+                    round_task_id=specialist_task_id,
+                    seq_start=_durable_execution_seq(shared_state),
                 )
+                # Appended where the commands run, not where the round reports:
+                # several exits below return after setup has already mutated the
+                # shared venv, and one of them carries no enablement flag at all,
+                # so the rearm that would have recorded them never runs.
+                _append_setup_executions(shared_state, setup_result, session_dir=self.session_dir)
 
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         explicit_patches = params.get("patches") or None
@@ -2617,6 +2717,9 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — sentinel is best-effort
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
+        # Captured before the stash and before any apply: this is the tree the
+        # patches are about to be applied to.
+        ctx._ip_base_sha = _git_head_sha(framework_root)  # type: ignore[attr-defined]
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -3195,7 +3298,128 @@ class IntegratePatchExecutor:
         )
         if manifest:
             kept_result["enablement_localization_manifest"] = manifest
+        try:
+            kept_result.update(
+                self._enablement_keep_records(
+                    ctx,
+                    params=params,
+                    framework_root=framework_root,
+                    applied=applied,
+                    applied_artifacts=applied_artifacts,
+                    done_payload=done_payload,
+                    provision_result=provision_result,
+                    bench_result=bench_result,
+                )
+            )
+        except Exception:  # noqa: BLE001 — an absent record reads as insufficient, never as sufficient
+            log.exception("integrate_patch: enablement KEEP record capture failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
+
+    def _enablement_keep_records(
+        self,
+        ctx: Any,
+        *,
+        params: dict[str, Any],
+        framework_root: Path | None,
+        applied: list[Path],
+        applied_artifacts: list[dict[str, Any]],
+        done_payload: dict[str, Any] | None,
+        provision_result: Any,
+        bench_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Capture the per-root identity, payload and assertions of this KEEP.
+
+        Every value here is read at the KEEP: the roots the resolvers bound, the
+        pre-mutation ``base_sha`` captured before the apply, the byte-exact
+        content of each declared target, and the versions observed through the
+        interpreter the accepted bench launched.
+        """
+        from ...enablement.recipe.keep_records import (
+            build_root_records,
+            capture_root_snapshots,
+            collect_contributions,
+            declared_targets,
+        )
+        from ...framework.paths import resolve_session_framework_root
+        from ._patch_snapshot import _patch_touched_paths_split
+
+        root = str(framework_root or "")
+        patch_roots = {
+            str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(v)
+        }
+        contributions = collect_contributions(
+            framework_root=root,
+            patch_roots=patch_roots,
+            artifacts=applied_artifacts,
+        )
+        upserted, deleted = (
+            _patch_touched_paths_split(framework_root, applied) if framework_root is not None else ([], [])
+        )
+        base_sha = str(getattr(ctx, "_ip_base_sha", "") or "")
+        records = build_root_records(
+            contributions=contributions,
+            base_sha_by_root={root: base_sha} if root else {},
+            git_roots=[root] if root and _is_git_tree(Path(root)) else [],
+            session_framework_root=resolve_session_framework_root(),
+        )
+        targets = declared_targets(
+            framework_root=root,
+            upserted=upserted,
+            deleted=deleted,
+            artifacts=applied_artifacts,
+        )
+        snapshots = capture_root_snapshots(
+            records=records,
+            targets=targets,
+            dest_root=self.session_dir / "optimization_stack" / "enablement",
+            session_dir=self.session_dir,
+        )
+        closure, assertions = self._probe_keep_environment(params, provision_result=provision_result)
+        return {
+            "enablement_roots": records,
+            "enablement_patch_roots": patch_roots,
+            "enablement_base_sha": base_sha,
+            "enablement_source_snapshots": snapshots,
+            "enablement_accepted_stack_targets": {
+                str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
+            },
+            "enablement_launch_evidence": dict(bench_result.get("launch_evidence") or {}),
+            "enablement_environment_closure": closure,
+            "enablement_installed_versions_at_keep": assertions,
+        }
+
+    def _probe_keep_environment(
+        self,
+        params: dict[str, Any],
+        *,
+        provision_result: Any,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Observe the closure and assertion set under the accepted runtime.
+
+        The runtime is the round's own provisioning result when it provisioned
+        one, else the override the round was dispatched with -- a KEEP reached
+        through a build's launch-only probe has no provisioning stage at all, so
+        keying on it would leave every accepted build permanently unobserved.
+        """
+        from ...enablement.recipe.keep_probe import probe_environment_closure, resolve_keep_interpreter
+        from .benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
+
+        override: dict[str, Any] = {}
+        if provision_result is not None and getattr(provision_result, "ok", False):
+            override = provision_result.runtime.to_runtime_override()
+        if not override:
+            raw = params.get("runtime_override")
+            override = dict(raw) if isinstance(raw, dict) else {}
+        if not override:
+            return {}, {}
+        backend = resolve_backend_name()
+        interpreter = resolve_keep_interpreter(
+            override,
+            backend_name=backend,
+            bypass_interpreter=resolve_benchmark_interpreter() if backend == "bypass" else "",
+        )
+        packages = tuple(str(k) for k in (getattr(provision_result, "installed_versions", {}) or {}))
+        return probe_environment_closure(interpreter, override=override, packages=packages)
 
     def _finalize_localization_keep(
         self,

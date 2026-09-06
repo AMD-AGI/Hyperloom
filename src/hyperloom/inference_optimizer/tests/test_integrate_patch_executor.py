@@ -1368,9 +1368,9 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
 
     replayed: dict[str, Any] = {}
 
-    def _spy_run_setup(commands, *, cwd, log_dir):
+    def _spy_run_setup(commands, *, cwd, log_dir, **_ledger_kwargs):
         replayed["commands"] = list(commands)
-        return {"applied": list(commands), "skipped": [], "failed": []}
+        return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
 
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
 

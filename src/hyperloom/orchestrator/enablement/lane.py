@@ -16,6 +16,7 @@ from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator import _ENABLEMENT_MAX_STALL
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
 from ..phases._enablement_artifacts import role_path, snapshot_round, write_setting_script
+from .recipe.setup_ledger import mark_round_disposition
 
 import logging as _logging
 
@@ -297,6 +298,34 @@ class EnablementLane(CoordinatorCollaborator):
             state.enablement.kept_patches = flat_patches
             state.enablement.kept_artifacts = list(artifact_by_target.values())
 
+        def _stack_keep_recipe_records() -> None:
+            """Persist the KEEP's per-root identity, payload and assertions."""
+            for field_name in (
+                "roots",
+                "patch_roots",
+                "base_sha",
+                "source_snapshots",
+                "accepted_stack_targets",
+                "launch_evidence",
+                "environment_closure",
+                "installed_versions_at_keep",
+            ):
+                value = res.get(f"enablement_{field_name}")
+                if value:
+                    setattr(state.enablement, field_name, value)
+
+        def _mark_setup_ledger(disposition: str, *, accepted: bool) -> None:
+            """Record this round's outcome onto the executions it performed."""
+            ledger = list(state.enablement.setup_executions or [])
+            if not ledger:
+                return
+            state.enablement.setup_executions = mark_round_disposition(
+                ledger,
+                round_task_id=_spec_tid,
+                disposition=disposition,
+                accepted=accepted,
+            )
+
         def _reset_baseline_failure_backstop() -> None:
             """Clear the baseline-failure counters on enablement forward progress.
 
@@ -344,6 +373,8 @@ class EnablementLane(CoordinatorCollaborator):
                 # Replaced, not merged: what the KEEP bench launched already
                 # supersedes every advanced round that fed into it.
                 state.enablement.accepted_config = dict(effective)
+                state.enablement.accepted_config_source = "kept_bench"
+            _stack_keep_recipe_records()
             if str(state.enablement.origin or "") == "eval":
                 # eval-origin: the patch boots and re-passed accuracy in the gate,
                 # but tput/accuracy only become official once a GENUINE baseline
@@ -378,6 +409,10 @@ class EnablementLane(CoordinatorCollaborator):
                 )
                 cfg.setdefault("args_mode", "append")
                 state.enablement.accepted_config = cfg
+                # An advanced round is by construction not booted, so nothing
+                # observed this configuration; the tag is what keeps "verified"
+                # and "unverified" distinguishable at all.
+                state.enablement.accepted_config_source = "advanced_merge"
             new_log = str(res.get("enablement_launch_log") or "").strip()
             if new_log:
                 state.enablement.launch_log = new_log
@@ -389,6 +424,10 @@ class EnablementLane(CoordinatorCollaborator):
             if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
                 stop_set = "enablement_stalled"
+        _mark_setup_ledger(
+            status or "unreported",
+            accepted=status == "kept",
+        )
         # Set on every round so neither outlives the round it describes.
         state.enablement.last_grounding_drop_reason = [
             str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
