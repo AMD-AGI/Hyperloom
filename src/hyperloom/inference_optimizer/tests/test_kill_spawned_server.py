@@ -96,6 +96,79 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
     assert elapsed < 5.0, f"kill_my_spawned_server hung for {elapsed:.2f}s"
 
 
+def test_kill_my_spawned_server_reaps_a_server_the_child_setsid_ed(tmp_path):
+    """A server moved out of the wrapper's process group by ``setsid`` is reaped.
+
+    Magpie's wrappers ``setsid`` the serving process, which is precisely what
+    takes it out of the one process group this helper signals. The wrapper then
+    exits, the server reparents to init, and every rank it spawned keeps its
+    GPUs. Measured on MI355X: a torn-down ATOM server left eight per-rank workers
+    alive holding 2,188,381 MiB.
+    """
+    marker = "atom.entrypoints.openai_server"
+    info = tmp_path / "server.pid"
+    wrapper_script = tmp_path / "wrapper.py"
+    wrapper_script.write_text(
+        "\n".join(
+            [
+                "import subprocess, sys, time",
+                # setsid equivalent: the server gets its own session, so its pgid
+                # is no longer the wrapper's.
+                "p = subprocess.Popen(",
+                "    [sys.executable, '-c', 'import sys, time; _ = sys.argv[1]; time.sleep(120)', sys.argv[2]],",
+                "    start_new_session=True,",
+                ")",
+                "open(sys.argv[1], 'w').write(str(p.pid))",
+                "time.sleep(120)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(wrapper_script), str(info), marker],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **new_session_kwargs(),
+    )
+    server_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if info.exists():
+                txt = info.read_text(encoding="utf-8").strip()
+                if txt:
+                    server_pid = int(txt)
+                    break
+            time.sleep(0.05)
+        assert server_pid is not None, "wrapper never wrote the server pid"
+
+        # It really did escape: a different process group from the one signalled.
+        assert os.getpgid(server_pid) != os.getpgid(proc.pid)
+
+        kill_my_spawned_server(proc, grace_seconds=1.5)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(server_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with pytest.raises(ProcessLookupError):
+            os.kill(server_pid, 0)
+    finally:
+        for pid in (server_pid, proc.pid):
+            if pid is not None:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def test_kill_my_spawned_server_reaps_grandchildren():
     """A child that spawns a grandchild leaves no surviving descendant after the helper returns."""
     proc = subprocess.Popen(
