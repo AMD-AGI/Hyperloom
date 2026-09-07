@@ -21,6 +21,10 @@ Two ways this silently degrades into a duplicate of the plain 12h leg — avoid 
 - In docker mode the variable must be set **inside the same `docker exec`** that runs
   `optimize`. Exporting it on the host does not reach the optimizer.
 
+Before launching, confirm `.env` still carries the backend the setup turn selected —
+`grep '^KERNEL_OPT_BACKEND_ORDER=' "$REPO_ROOT/.env"` must print `forge`. Anything else
+means the value was lost between setup and here; fix that before starting a 12-hour run.
+
 After launch, confirm the backend actually took effect by reading the resolved value the
 optimizer recorded in the session `state.json`:
 
@@ -68,6 +72,10 @@ continue without asking. Load LLM API keys/base URLs and `FRAMEWORK` from `.env`
   skill's docker mode). Do **not** start a new container and do **not** change its
   device/isolation flags. Otherwise (baremetal) run directly and do not run `docker`.
 - Do **not** modify `USER_DATA_PATH`.
+- **Do** start `robustness_monitor.sh` as the optimizer skill's monitoring section
+  describes. It resumes only a run that died with no `stop_reason`, no `phase=CLOSE` and
+  no `final.md`, so it cannot rewrite the terminal this gate reads. Skipping it makes
+  this leg less crash-tolerant than its siblings and the results stop being comparable.
 - Do **not** print or copy secret values into output, reports, or logs.
 
 ## Termination — do not end this turn until the run is launched
