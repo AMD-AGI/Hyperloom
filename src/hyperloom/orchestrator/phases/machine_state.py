@@ -854,6 +854,13 @@ def redistribute_budget_pct(
     Idempotent: once a phase is 0 its freed share is 0, so re-running per tick
     is a no-op.
 
+    An absorber is capped at ``1.0``: an override plus the share it absorbs can
+    otherwise exceed a full wall clock, and the excess is time that does not
+    exist. Without the cap that out-of-range result is re-checked by
+    :func:`normalize_budget_pct` downstream, mistaken for a bad *user* override,
+    dropped, and replaced by the phase default — leaving the phase with *less*
+    budget than the caller asked for.
+
     Args:
         base (dict[str, float]): A ``phase -> pct`` map, already sanitized by
             :func:`normalize_budget_pct`.
@@ -883,6 +890,18 @@ def redistribute_budget_pct(
     else:
         # No weighted absorber left → park the freed share on SWEEP (always on).
         out[PHASE_SWEEP] = float(out.get(PHASE_SWEEP, 0.0)) + freed
+    # Own our output: a share above a full wall clock is unspendable, and
+    # leaving it in place makes the downstream re-normalize drop it back to the
+    # phase default (i.e. *less* budget than asked for). Discard the excess.
+    for p in absorbers:
+        if float(out.get(p, 0.0)) > 1.0:
+            log.warning(
+                "phase budget: capping %s at 1.0 (redistribution reached %.4f); "
+                "lower its --*-pct override to reclaim the excess elsewhere",
+                p,
+                float(out[p]),
+            )
+            out[p] = 1.0
     return out
 
 

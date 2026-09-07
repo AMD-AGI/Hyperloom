@@ -200,13 +200,11 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 5. Include `--max-minutes-framework-pct 0.50` and `--max-minutes-sweep-pct 0.01`
-   in the optimize command. With `--no-kernel`, KERNEL_AGENT is disabled and its
-   budget share is redistributed mostly to FRAMEWORK_AGENT (~99% of wall clock).
-   Do **not** raise `0.50`: redistribution *adds* the freed KERNEL_AGENT share on
-   top of this value, and a post-redistribution share above `1.0` is rejected as
-   out-of-range and silently falls back to the `0.40` default — leaving
-   FRAMEWORK_AGENT with *less* budget than intended. `0.50` redistributes to
-   `0.99`, which is the effective ceiling.
+   in the optimize command. These are the value *before* redistribution: with
+   `--no-kernel`, KERNEL_AGENT is disabled and its freed share is added on top,
+   so `0.50` becomes ~0.99 of wall clock for FRAMEWORK_AGENT. Raising `0.50`
+   buys almost nothing — the post-redistribution share is capped at a full wall
+   clock, and the excess is discarded.
    Do **not** pass `--no-framework-agent` — that skips OPTIMIZE entirely.
 6. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
 7. Include `--no-enable-conc-sweep` in the optimize command so the SWEEP-phase post-optimization concurrency sweep is skipped.

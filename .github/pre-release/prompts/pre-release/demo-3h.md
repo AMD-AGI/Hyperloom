@@ -16,7 +16,7 @@ exact default flags.
 
   ```
   --tp 1 --conc 64 --isl 1024 --osl 1024 --precision bf16 --max-hours 3
-  --max-minutes-framework-pct 0.90 --max-minutes-sweep-pct 0.01
+  --max-minutes-framework-pct 0.50 --max-minutes-sweep-pct 0.01
   --no-kernel --no-enable-conc-sweep --no-enable-roofline
   ```
 
