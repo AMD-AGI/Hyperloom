@@ -34,6 +34,7 @@ from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.scheduler import ANALYSIS_BUDGET_SEC
 from kernelforge.kernel_rewrite_controller.task_publisher import (
     TaskPublicationResult,
+    pending_rejections,
     publish_complete_staged_tasks,
 )
 from kernelforge.llm.git import git
@@ -53,6 +54,12 @@ _PUBLISH_POLL_SEC = 0.5
 # read costs the Agent no turn.
 _MAX_GREP_MATCHES = 200
 _MAX_READ_LINES = 2000
+
+# How many times the session may be held open over a refused draft. One round
+# is what an ordinary contract slip needs; a draft that still fails after this
+# many is one the agent cannot fix from the reason it was given, and spending
+# the rest of the analysis budget on it buys nothing.
+_MAX_STOP_DENIALS = 3
 
 
 @dataclass(frozen=True)
@@ -105,8 +112,10 @@ async def _cap_investigation_result(input_data, _tool_use_id, _context) -> dict:
 class _AnalysisToolGuard:
     """Confine Agent writes to staging and bound what its reads may return."""
 
-    def __init__(self, staging_root: Path) -> None:
+    def __init__(self, staging_root: Path, *, max_stop_denials: int = _MAX_STOP_DENIALS) -> None:
         self.staging_root = staging_root.resolve()
+        self.max_stop_denials = max(0, int(max_stop_denials))
+        self.stop_denials = 0
 
     def hooks(self) -> AgentHooks:
         return AgentHooks(
@@ -123,8 +132,39 @@ class _AnalysisToolGuard:
                     matcher="Read|Grep",
                     callback=_cap_investigation_result,
                 ),
-            ]
+            ],
+            # Stop is a lifecycle event rather than a tool, so it carries no
+            # matcher; ``_hook_matcher`` forwards one only when it is set.
+            stop=[AgentHook(matcher="", callback=self._on_stop)],
         )
+
+    async def _on_stop(self, _input_data, _tool_use_id, _context) -> dict:
+        """Refuse to end the session while a draft stands refused.
+
+        The host validates out of process on a timer, so an agent that writes a
+        malformed draft and stops hears nothing: the run reports fewer tasks than
+        the agent believes it published, and a whole analysis budget buys zero
+        operators over a field it could have corrected in one turn. Denials are
+        capped because a draft breaking a rule the agent cannot satisfy would
+        otherwise spend the rest of the budget failing in place.
+        """
+        pending = pending_rejections(self.staging_root)
+        if not pending or self.stop_denials >= self.max_stop_denials:
+            return {}
+        self.stop_denials += 1
+        refusals = "\n".join(f"- {draft}: {reason}" for draft, reason in sorted(pending.items()))
+        return {
+            "decision": "block",
+            "reason": (
+                "The host refused these staged tasks, so they were never published:\n"
+                f"{refusals}\n"
+                "Each refusal is also written to rejection.json inside the draft's own "
+                "directory. Correct the task.json the reason names and the host will "
+                "revalidate it within a few seconds; delete the draft instead if the "
+                "operator turned out not to be publishable. Do not stop with a draft "
+                f"still refused (attempt {self.stop_denials} of {self.max_stop_denials})."
+            ),
+        }
 
     async def _on_pre_disallowed_tool(self, _input_data, _tool_use_id, _context) -> dict:
         return {
@@ -251,7 +291,6 @@ task.json must use this exact top-level structure:
   "schema_version": 1,
   "identity": {
     "producer": "forge-loop",
-    "kernel_name": "<normalized operator name>",
     "framework": "<framework>",
     "framework_version": "<version>",
     "backend": "<backend>",
@@ -260,7 +299,7 @@ task.json must use this exact top-level structure:
   "base_commit": "",
   "repo_root": "<absolute Git top-level>",
   "kernel_path": "<repo-relative source path>",
-  "operator_name": "<name that normalizes to identity.kernel_name>",
+  "operator_name": "<entry point spelled as its source spells it>",
   "driver_path": "driver.py",
   "source_files": ["<repo-relative path>"],
   "target_functions": ["<function>"],
@@ -281,6 +320,12 @@ task.json must use this exact top-level structure:
 Do not place identity fields at the top level. evidence must be a JSON list,
 even when one detailed evidence object is sufficient. The host pins base_commit
 to the current repo HEAD before publication.
+identity carries no kernel_name: the host derives that dimension from
+operator_name, so supplying one of your own decides nothing. Give operator_name
+the entry point as the source writes it, keeping camel case and any namespace
+prefix -- `aiter::fusedAddRmsNorm`, not `fused_add_rms_norm`. Upstream
+pull-request search splits that spelling into terms, and a name normalized
+before it arrives has no boundaries left to split on.
 All identity values must use normalized lowercase ASCII. For example, write
 `"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
 kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
@@ -304,6 +349,13 @@ Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget
 trying to prove an implementation. Do not write state.json and do not modify
 source repositories or handoff files.
+
+The host validates each draft a few seconds after you stop writing to it, and
+takes the directory away once it passes. A draft still sitting in staging with
+a `rejection.json` beside it was refused and was never published: read that
+file, fix what its reason names, and the host will try again on its own. Delete
+the draft instead if the operator turned out not to be publishable. You cannot
+end the session while a refused draft remains.
 """
 
 

@@ -56,6 +56,17 @@ _OPTIONAL_TASK_FIELDS = frozenset(
 )
 _TASK_FIELDS = _REQUIRED_TASK_FIELDS | _OPTIONAL_TASK_FIELDS
 _IDENTITY_FIELDS = frozenset(KERNEL_CANONICAL_DIMENSIONS)
+#: ``kernel_name`` is the address form of ``operator_name`` rather than a
+#: dimension of its own, so the host derives it and the agent does not supply
+#: it. A draft that still carries one is accepted and the value replaced: the
+#: agent has no channel to hear a refusal on, so a rule it can only learn by
+#: breaking costs the whole analysis budget.
+_AGENT_IDENTITY_FIELDS = _IDENTITY_FIELDS - {"kernel_name"}
+#: What ``normalize_operator_name`` answers when no usable name survives. Read
+#: from the normalizer rather than spelled out so the two cannot drift. Every
+#: unnameable operator would otherwise share one canonical id, and with it one
+#: task directory, one patch pointer and one knowledge-base page.
+_UNNAMEABLE_OPERATOR = normalize_operator_name("")
 
 
 def _required_string(payload: dict[str, Any], field_name: str) -> str:
@@ -74,17 +85,29 @@ def _string_list(payload: dict[str, Any], field_name: str, *, paths: bool = Fals
     return tuple(item.strip() for item in value)
 
 
-def _identity(payload: Any) -> tuple[KernelRecipeIdentity, str]:
+def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity, str]:
+    """Build the six-tuple, deriving ``kernel_name`` from ``operator_name``.
+
+    Deriving rather than checking is what keeps the controller's canonical id
+    and the knowledge-base page forge-loop writes to at one address. The loop
+    resolves its page from ``--operator-name`` alone, so a ``kernel_name`` the
+    agent chose independently could disagree with it, and the disagreement is
+    silent: reads land on a page no write reached, and one operator accumulates
+    two half-filled histories.
+    """
     if not isinstance(payload, dict):
         raise TaskContractError("identity must be a JSON object")
-    missing = _IDENTITY_FIELDS - set(payload)
+    missing = _AGENT_IDENTITY_FIELDS - set(payload)
     unknown = set(payload) - _IDENTITY_FIELDS
     if missing:
         raise TaskContractError(f"identity is missing fields: {', '.join(sorted(missing))}")
     if unknown:
         raise TaskContractError(f"identity has unknown fields: {', '.join(sorted(unknown))}")
+    kernel_name = normalize_operator_name(operator_name)
+    if kernel_name == _UNNAMEABLE_OPERATOR:
+        raise TaskContractError(f"operator_name normalizes to no usable kernel name: {operator_name!r}")
     try:
-        identity = KernelRecipeIdentity.from_mapping(payload)
+        identity = KernelRecipeIdentity.from_mapping({**payload, "kernel_name": kernel_name})
         operator_id = kernel_recipe_canonical_id(identity)
     except ValueError as error:
         raise TaskContractError(str(error)) from error
@@ -118,7 +141,10 @@ def parse_task_payload(
     if isinstance(version, bool) or version != TASK_SCHEMA_VERSION:
         raise TaskContractError(f"unsupported task schema {version!r}; expected {TASK_SCHEMA_VERSION}")
 
-    identity, operator_id = _identity(payload.get("identity"))
+    # Read ahead of the identity: ``identity.kernel_name`` is this name's
+    # address form, so the six-tuple cannot be built before it.
+    operator_name = _required_string(payload, "operator_name")
+    identity, operator_id = _identity(payload.get("identity"), operator_name=operator_name)
     root = Path(task_dir).expanduser().resolve()
     if enforce_directory_identity and root.name != operator_directory_name(operator_id):
         raise TaskContractError(f"task directory {root.name!r} does not match canonical operator id {operator_id!r}")
@@ -150,13 +176,6 @@ def parse_task_payload(
         raise TaskContractError(f"driver_path escapes task directory: {driver_path!r}") from error
     if not driver_file.is_file():
         raise TaskContractError(f"driver_path is not a file: {driver_path!r}")
-
-    operator_name = _required_string(payload, "operator_name")
-    if normalize_operator_name(operator_name) != identity.kernel_name:
-        raise TaskContractError(
-            "operator_name does not normalize to identity.kernel_name: "
-            f"{normalize_operator_name(operator_name)!r} != {identity.kernel_name!r}"
-        )
 
     priority = payload.get("priority")
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:

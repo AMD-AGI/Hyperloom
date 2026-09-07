@@ -124,11 +124,39 @@ def test_driver_must_exist_inside_task_directory(task_dir: Path, task_payload: d
         parse_task_payload(task_payload, task_dir=task_dir)
 
 
-def test_operator_name_must_match_identity(task_dir: Path, task_payload: dict) -> None:
-    task_payload["operator_name"] = "paged_attention"
+def test_kernel_name_is_derived_from_the_operator_name(task_dir: Path, task_payload: dict) -> None:
+    """One name in, one address out.
 
-    with pytest.raises(ValueError, match="does not normalize"):
-        parse_task_payload(task_payload, task_dir=task_dir)
+    forge-loop resolves its knowledge-base page from ``--operator-name`` alone,
+    so the dimension has to come from the same string the loop will see.
+    """
+    task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+    assert task.operator_name == "backend::Fused.MoE-Kernel"
+    assert task.identity.kernel_name == "fused_moe"
+
+
+def test_an_agent_supplied_kernel_name_is_replaced_rather_than_refused(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """The agent hears no refusal, so a stale draft is corrected, not thrown out."""
+    task_payload["identity"] = {**task_payload["identity"], "kernel_name": "paged_attention"}
+
+    task = parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
+
+    assert task.identity.kernel_name == "fused_moe"
+
+
+def test_an_operator_name_that_normalizes_to_nothing_is_refused(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    """Every unnameable operator would otherwise share one canonical id."""
+    task_payload["operator_name"] = "<<>>"
+
+    with pytest.raises(ValueError, match="no usable kernel name"):
+        parse_task_payload(task_payload, task_dir=task_dir, enforce_directory_identity=False)
 
 
 def test_identity_backend_must_be_registered(task_dir: Path, task_payload: dict) -> None:

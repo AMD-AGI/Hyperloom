@@ -29,6 +29,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     _system_prompt,
     run_opportunity_analysis,
 )
+from kernelforge.kernel_rewrite_controller.task_publisher import REJECTION_FILENAME
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -426,6 +427,52 @@ def test_write_hook_allows_staging_and_denies_other_paths(tmp_path: Path) -> Non
 
     assert allowed == {}
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def _refused_draft(staging_root: Path, name: str = "draft") -> Path:
+    draft = staging_root / name
+    draft.mkdir(parents=True)
+    (draft / REJECTION_FILENAME).write_text(
+        json.dumps({"draft": name, "reason": "identity.backend must be registered"}),
+        encoding="utf-8",
+    )
+    return draft
+
+
+def test_the_session_cannot_end_while_a_draft_stands_refused(tmp_path: Path) -> None:
+    """Validation is out of process, so stopping is the agent's last chance to hear."""
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging)
+
+    blocked = asyncio.run(protection._on_stop({}, "", None))
+
+    assert blocked["decision"] == "block"
+    assert "identity.backend must be registered" in blocked["reason"]
+    assert REJECTION_FILENAME in blocked["reason"]
+
+
+def test_a_session_with_nothing_refused_ends_normally(tmp_path: Path) -> None:
+    protection = _AnalysisToolGuard(tmp_path / "staging")
+
+    assert asyncio.run(protection._on_stop({}, "", None)) == {}
+
+
+def test_stop_denials_are_capped_so_an_unfixable_draft_cannot_eat_the_budget(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    _refused_draft(staging)
+    protection = _AnalysisToolGuard(staging, max_stop_denials=2)
+
+    decisions = [asyncio.run(protection._on_stop({}, "", None)) for _ in range(3)]
+
+    assert [decision.get("decision") for decision in decisions] == ["block", "block", None]
+
+
+def test_the_prompt_names_the_file_refusals_are_written_to() -> None:
+    """The agent can only read the note if the contract tells it the name."""
+    assert REJECTION_FILENAME in _system_prompt()
 
 
 def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:

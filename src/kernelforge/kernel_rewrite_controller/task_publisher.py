@@ -31,6 +31,13 @@ log = logging.getLogger(__name__)
 #: atomic, so the pair existing does not mean the pair is finished.
 PUBLISH_QUIESCENT_SEC = 5.0
 
+#: Where a refusal is left for the agent to read, inside the draft it refused.
+#: Validation runs out of process on a timer, so there is no tool result to
+#: return the reason on; without a file the agent finishes the session believing
+#: it published, which is the failure this whole path exists to prevent. The
+#: name is stable so the prompt can point at it.
+REJECTION_FILENAME = "rejection.json"
+
 
 @dataclass(frozen=True)
 class TaskPublicationResult:
@@ -52,8 +59,13 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
             value = identity.get(field)
             if not isinstance(value, str):
                 continue
-            stripped = value.strip()
-            identity[field] = normalize_operator_name(stripped) if field == "kernel_name" else stripped.lower()
+            identity[field] = value.strip().lower()
+        # Host-owned, like base_commit and driver_path below: the parser derives
+        # it too, and writing it here is what makes the published task.json state
+        # the identity the controller went on to use rather than the draft's.
+        operator_name = normalized.get("operator_name")
+        if isinstance(operator_name, str) and operator_name.strip():
+            identity["kernel_name"] = normalize_operator_name(operator_name)
         normalized["identity"] = identity
     repo_root = normalized.get("repo_root")
     if isinstance(repo_root, str):
@@ -171,6 +183,44 @@ def _newest_mtime(root: Path) -> float:
     return newest
 
 
+def _write_rejection(staged: Path, reason: str) -> None:
+    """Leave the refusal beside the draft that earned it.
+
+    Best-effort: a staging directory that cannot be written to is one the agent
+    cannot revise either, and losing the note must not stop the scan from
+    reporting the refusal through its ordinary return value.
+    """
+    try:
+        atomic_write_text(
+            staged / REJECTION_FILENAME,
+            json.dumps({"draft": staged.name, "reason": reason}, indent=2, sort_keys=True) + "\n",
+        )
+    except OSError:
+        log.warning("could not record the refusal of staged task %s", staged.name)
+
+
+def pending_rejections(staging_root: Path) -> dict[str, str]:
+    """Return the refusal still standing against each staged draft.
+
+    A published draft is deleted whole and a re-refused one is overwritten, so
+    the note's presence is what says the draft is currently refused.
+    """
+    root = Path(staging_root)
+    if not root.is_dir():
+        return {}
+    pending: dict[str, str] = {}
+    for entry in sorted(root.iterdir(), key=lambda path: path.name):
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        try:
+            payload = json.loads((entry / REJECTION_FILENAME).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            pending[entry.name] = str(payload.get("reason") or "")
+    return pending
+
+
 def publish_complete_staged_tasks(
     layout: ControllerLayout,
     *,
@@ -212,19 +262,22 @@ def publish_complete_staged_tasks(
         if result.published:
             log.info("published operator task %s from %s", result.operator_id, entry.name)
         else:
-            # The agent gets no feedback channel, so a rejected draft is
-            # otherwise invisible: it stays in staging and the run just reports
-            # one fewer task than the agent believes it wrote.
             log.warning("rejected staged task %s: %s", entry.name, result.reason)
+            # Written before the mtime is remembered, so the note itself is part
+            # of what "unchanged" means; a draft the agent then revises reads as
+            # changed and is offered again.
+            _write_rejection(entry, result.reason)
             if refused is not None:
-                refused[entry.name] = newest
+                refused[entry.name] = _newest_mtime(entry)
         results.append(result)
     return tuple(results)
 
 
 __all__ = [
     "PUBLISH_QUIESCENT_SEC",
+    "REJECTION_FILENAME",
     "TaskPublicationResult",
+    "pending_rejections",
     "publish_complete_staged_tasks",
     "publish_staged_task",
 ]
