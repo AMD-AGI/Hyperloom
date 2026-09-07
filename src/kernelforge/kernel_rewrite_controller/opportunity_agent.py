@@ -309,6 +309,7 @@ task.json must use this exact top-level structure:
     "dtype": "<runtime dtype>"
   }],
   "priority": 0,
+  "gpu_pct": 15.3,
   "reason": "<why this measured workload may improve>",
   "evidence": [{
     "level": "<measured|corroborated|inferred>",
@@ -319,6 +320,10 @@ task.json must use this exact top-level structure:
 Do not place identity fields at the top level. evidence must be a JSON list,
 even when one detailed evidence object is sufficient. The host pins base_commit
 to the current repo HEAD before publication.
+gpu_pct is this operator's share of end-to-end GPU time, the measured number
+your ranking already rests on. It is recorded and reported, never checked and
+never acted on, so no task is refused over it; omit it when you have only
+corroborated evidence rather than trade it for a figure you did not measure.
 identity carries no kernel_name: the host derives that dimension from
 operator_name, so supplying one of your own decides nothing. Give operator_name
 the entry point as the source writes it, keeping camel case and any namespace

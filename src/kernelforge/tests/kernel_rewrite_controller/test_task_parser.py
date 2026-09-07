@@ -258,6 +258,26 @@ def test_an_identity_with_an_extra_dimension_keeps_the_six_tuple(
     assert outcome.task.operator_id == operator_id
 
 
+@pytest.mark.parametrize("value", [15.3, "15.3%", None, {"decode": 15.3}])
+def test_gpu_pct_is_carried_in_any_shape_the_agent_wrote(
+    task_dir: Path,
+    task_payload: dict,
+    value: object,
+) -> None:
+    """Observational only: refusing over its formatting would cost an operator."""
+    task_payload["gpu_pct"] = value
+
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.gpu_pct == value
+
+
+def test_a_task_without_gpu_pct_is_still_valid(task_dir: Path, task_payload: dict) -> None:
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.gpu_pct is None
+
+
 def test_shape_cases_are_carried_verbatim(task_dir: Path, task_payload: dict) -> None:
     """No code reads a case, so a shape the contract disagrees with still ships."""
     task_payload["shape_cases"] = [1, {"name": "decode"}]

@@ -80,6 +80,10 @@ class KernelRewriteTask:
     priority: int
     source_files: tuple[str, ...] = ()
     target_functions: tuple[str, ...] = ()
+    #: Share of end-to-end GPU time the agent attributed to this operator.
+    #: Observational: it is never read to decide anything, and no shape is
+    #: required of it, so a task is never refused over what the agent wrote.
+    gpu_pct: Any = None
     #: Untyped on purpose: nothing reads these, they exist so the driver author
     #: and a later reader can see which shapes the operator was chosen for.
     shape_cases: tuple[Any, ...] = ()

@@ -52,6 +52,7 @@ _OPTIONAL_TASK_FIELDS = frozenset(
         "shape_cases",
         "reason",
         "evidence",
+        "gpu_pct",
     }
 )
 _TASK_FIELDS = _REQUIRED_TASK_FIELDS | _OPTIONAL_TASK_FIELDS
@@ -211,6 +212,9 @@ def parse_task_payload(
         shape_cases=tuple(copy.deepcopy(shape_cases)),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
+        # Unchecked by contract: it is read by people, not by the run, and a
+        # refusal here would trade an operator for a number's formatting.
+        gpu_pct=copy.deepcopy(payload.get("gpu_pct")),
     )
 
 

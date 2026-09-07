@@ -161,6 +161,11 @@ def render_operator_report(
         f"- **Kernel path:** `{task.kernel_path}`",
         f"- **Correctness:** `{'passed' if details.get('correctness_passed', True) else 'failed'}`",
     ]
+    # Rendered as written. It is the agent's account of why this operator was
+    # worth a campaign, and a reader comparing patches wants it beside the
+    # speedup; nothing downstream computes with it.
+    if task.gpu_pct is not None:
+        lines.append(f"- **Operator share of E2E GPU time:** `{task.gpu_pct}`")
     if details.get("mean_case_speedup") is not None:
         lines.append(f"- **Mean case speedup:** `{float(details['mean_case_speedup']):.6f}x`")
     if details.get("iteration") is not None:
