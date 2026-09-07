@@ -98,7 +98,9 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # singleton at assembly (recorded per-iteration so the backend's workdir
     # pruning never erases history).
     "critic_iterations": "item",
-    "robustness_signals": "item",
+    # One row per robustness-agent turn, recorded when its envelope settles and
+    # folded into the ``robustness`` view at assembly.
+    "robustness_turn": "item",
     "specialist_runs": "item",
     "optimization_stack": "item",
     "kernel_optimization_summary": "singleton",

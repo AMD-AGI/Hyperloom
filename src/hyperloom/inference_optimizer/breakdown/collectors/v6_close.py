@@ -11,11 +11,14 @@ case this key has to be able to state.
 
 The CLOSE sequencer records the close-out as it performs it (see
 :mod:`..recorder.close_out`), and this collector's job is to put that recording
-on the wire. Two things are still done here rather than at author time:
-``robustness.signals`` is joined in from ``critic_robustness``, where the
-signals are already recorded once and are not worth recording twice, and the
-step vocabulary is checked so a producer that starts emitting a new step name
-surfaces as a warning instead of passing unnoticed.
+on the wire. One thing is still done here
+rather than at author time: the step vocabulary is checked so a producer that
+starts emitting a new step name surfaces as a warning instead of passing
+unnoticed.
+
+What the agent itself raised is not here. It is recorded per turn by
+:mod:`..recorder.robustness_out` and exported as the top-level ``robustness``
+key; this block carries only the close-out's own verdict about it.
 
 **The section is written twice, and the first pass is deliberately partial.**
 ``session_breakdown`` is itself a step in the middle of the sequence, so when
@@ -163,7 +166,6 @@ def _artifact_package_path(steps: list[dict[str, Any]], session_dir: Path) -> st
 def collect_v6_close(
     session_dir: Path,
     state: Any,
-    critic_robustness: Any,
     warnings: list[str],
     recorded: Any = None,
 ) -> dict[str, Any]:
@@ -172,8 +174,6 @@ def collect_v6_close(
     Args:
         session_dir (Path): Absolute session root.
         state (Any): The V5 ``state.json`` mapping, read only by the fallback.
-        critic_robustness (Any): The V5 ``critic_robustness`` section, whose
-            ``robustness_signals`` are already in the V6 signal shape.
         warnings (list[str]): V6 warning sink (mutated in place).
         recorded (Any): The recorder's ``close`` fragment, when present. It is
             authoritative: the sequencer states what it did as it does it, and
@@ -186,23 +186,21 @@ def collect_v6_close(
         than vanishing.
     """
     session_dir = Path(session_dir)
-    signals = _dict_rows(_mapping(critic_robustness).get("robustness_signals"))
     if isinstance(recorded, dict) and recorded:
-        return _recorded_close(recorded, signals=signals, warnings=warnings)
-    return _projected_close(session_dir, _mapping(state), signals=signals, warnings=warnings)
+        return _recorded_close(recorded, warnings=warnings)
+    return _projected_close(session_dir, _mapping(state), warnings=warnings)
 
 
 def _recorded_close(
     recorded: dict[str, Any],
     *,
-    signals: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
     """Put the recorded close-out on the wire.
 
     The verdict, the timestamps, the artifact paths and the escalation are all
     read straight through: each was stated by the step that knew it. Only the
-    signals are joined in, and only the step vocabulary is checked.
+    only the step vocabulary is checked.
     """
     steps = [_close_step(row) for row in _dict_rows(recorded.get("steps"))]
     _warn_unknown_vocabulary(steps, warnings)
@@ -222,7 +220,6 @@ def _recorded_close(
             # Recorded alongside the verdict so a reader can check the
             # escalation against the reason it was drawn from.
             "stop_reason": str(recorded.get("stop_reason") or ""),
-            "signals": signals,
         },
         "artifacts": {
             "final_json_path": artifacts.get("final_json_path") or None,
@@ -267,7 +264,6 @@ def _projected_close(
     session_dir: Path,
     state: dict[str, Any],
     *,
-    signals: list[dict[str, Any]],
     warnings: list[str],
 ) -> dict[str, Any]:
     """Derive the close-out from ``state.json`` for a session that recorded none.
@@ -316,7 +312,6 @@ def _projected_close(
         "robustness": {
             "escalated": stop_reason.lower() == ESCALATED_STOP_REASON,
             "stop_reason": stop_reason,
-            "signals": signals,
         },
         "artifacts": {
             "final_json_path": _existing_rel(session_dir, reports_dir / "final.json"),

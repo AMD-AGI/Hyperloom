@@ -16,7 +16,7 @@ into a ``{section: value}`` mapping ready to drop into the
 
 A compose/normalize pass runs last and reconciles across fragments:
 ``versions`` collapses to a ``{tool: meta}`` map (last write per tool wins),
-``critic_iterations`` / ``robustness_signals`` and the ``kernel_*``
+``critic_iterations`` and the ``kernel_*``
 substreams are folded into their composed sections, and competing kernel
 route operations are rewritten to ``status="superseded"``. Bad/partial
 fragments are skipped and noted in ``warnings``.
@@ -193,6 +193,7 @@ def assemble_parts(
         out[section] = rec.get("payload")
 
     _normalize_kernel_route_operations(out)
+    _compose_robustness(out)
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
     _compose_close(out)
@@ -510,26 +511,47 @@ def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
     return [row for row in steps if isinstance(row, dict)] if isinstance(steps, list) else []
 
 
+def _compose_robustness(out: dict[str, Any]) -> None:
+    """Fold the ``robustness_turn`` item substream into the ``robustness``
+    view, ordered by turn. Pops the raw substream so it doesn't leak into the
+    breakdown envelope.
+
+    Args:
+        out: The assembled section mapping mutated in place.
+    """
+    rows = out.pop("robustness_turn", None)
+    if not isinstance(rows, list):
+        return
+    def _turn_of(row: dict[str, Any]) -> int:
+        try:
+            return int(row.get("turn_idx") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    turns = sorted(
+        (r for r in rows if isinstance(r, dict)),
+        key=lambda r: (_turn_of(r), str(r.get("ts") or "")),
+    )
+    out["robustness"] = {"turns": turns}
+
+
 def _compose_critic_robustness(out: dict[str, Any]) -> None:
-    """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams
-    into the ``critic_robustness`` singleton. Pops the raw substreams so they
-    don't leak into the breakdown envelope.
+    """Fold the ``critic_iterations`` item substream into the
+    ``critic_robustness`` singleton. Pops the raw substream so it doesn't leak
+    into the breakdown envelope.
 
     Args:
         out: The assembled section mapping mutated in place.
     """
     critic_iters = out.pop("critic_iterations", None)
-    rob_signals = out.pop("robustness_signals", None)
-    if critic_iters is None and rob_signals is None:
+    if critic_iters is None:
         return
     # A directly-recorded singleton takes precedence over substreams.
     if "critic_robustness" in out:
         return
     critic_iters = critic_iters if isinstance(critic_iters, list) else []
-    rob_signals = rob_signals if isinstance(rob_signals, list) else []
     out["critic_robustness"] = {
         "critic_iterations": critic_iters,
-        "robustness_signals": rob_signals,
         "kb_writes_summary": _kb_writes_summary(critic_iters),
     }
 

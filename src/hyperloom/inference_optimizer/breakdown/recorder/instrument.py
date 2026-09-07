@@ -3879,66 +3879,6 @@ def record_critic_iteration(
         trace_skip(reason="writer raised", section="critic_iterations", error=exc)
 
 
-def record_robustness_signal(
-    session_dir: Path | str | None,
-    *,
-    workdir: Path | str | None,
-    producer: str = "robustness",
-) -> None:
-    """Record one ``critic_robustness.robustness_signals`` item.
-
-    Reads ``signal.json`` / ``action.json`` from the just-written ``workdir``
-    (idempotent on the workdir name) so the signal is captured before the
-    robustness backend prunes old workdirs; payload mirrors the collector.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        workdir (Path | str | None): the just-written robustness workdir holding
-            ``signal.json`` / ``action.json`` (idempotency key); a falsy value
-            is a no-op.
-        producer (str): the breakdown producer label (defaults to
-            ``robustness``).
-    """
-    if not session_dir or not workdir:
-        trace_skip(reason="no session_dir" if not session_dir else "no workdir", section="robustness_signals")
-        return
-    try:
-        wd = Path(workdir)
-        signal_data = read_json(wd / "signal.json", default={}, require_dict=True)
-        action_data = read_json(wd / "action.json", default={}, require_dict=True)
-        payload = {
-            "ts": str(signal_data.get("ts") or action_data.get("ts") or ""),
-            "signal": str(signal_data.get("signal") or signal_data.get("kind") or ""),
-            "action": str(action_data.get("action") or action_data.get("kind") or ""),
-            "workdir": _rel(wd, session_dir),
-        }
-        _recorder(session_dir, producer).record_item(
-            "robustness_signals",
-            payload,
-            key=wd.name,
-        )
-        operation_id = _stable_id("op", "robustness", wd.name)
-        record_operation(
-            session_dir,
-            operation_id=operation_id,
-            root_operation_id=operation_id,
-            kind="robustness",
-            name=str(payload.get("signal") or "robustness signal"),
-            status="succeeded" if payload.get("action") else "partial",
-            source="robustness_recorder_hook",
-            executor_class="llm_agent",
-            purpose="recovery",
-            producer=producer,
-            ended_at=str(payload.get("ts") or ""),
-            outputs=payload,
-            extensions={"metadata_completeness": "partial" if not payload.get("signal") else "available"},
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record_robustness_signal failed", exc_info=True)
-        trace_skip(reason="writer raised", section="robustness_signals", error=exc)
-
-
 def record_singleton_section(
     session_dir: Path | str | None,
     section: str,
@@ -4350,7 +4290,6 @@ __all__ = [
     "record_phase_event",
     "record_measurement",
     "record_operation",
-    "record_robustness_signal",
     "record_session_validation",
     "record_singleton_section",
     "record_specialist_round",

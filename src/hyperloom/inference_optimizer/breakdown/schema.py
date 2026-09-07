@@ -1063,35 +1063,19 @@ class CriticIteration(TypedDict, total=False):
     framework_reviews: list[dict[str, Any]]
 
 
-class RobustnessSignal(TypedDict, total=False):
-    """A fault/recovery event handled during the session.
-
-    Attributes:
-        ts (str): ISO UTC timestamp of the signal.
-        signal (str): Signal type (``crash`` / ``stall`` / ``disk_full`` /
-            ``cluster_fault`` / ...).
-        action (str): Recovery action taken in response.
-        workdir (str): Working directory associated with the signal.
-    """
-
-    ts: str
-    signal: str  # crash / stall / disk_full / cluster_fault / ...
-    action: str  # what was done
-    workdir: str
-
-
 class CriticRobustness(TypedDict, total=False):
-    """Critic-review iterations and robustness signals for the session.
+    """Critic-review iterations for the session.
+
+    What the robustness agent raised is carried by the top-level
+    :class:`V6Robustness` instead.
 
     Attributes:
         critic_iterations (list[CriticIteration]): Critic-agent review passes.
-        robustness_signals (list[RobustnessSignal]): Fault/recovery events handled.
         kb_writes_summary (CriticKBWritesSummary): Tally of the critic
             iterations' verdicts (``total`` plus ``by_verdict``).
     """
 
     critic_iterations: list[CriticIteration]
-    robustness_signals: list[RobustnessSignal]
     # KB writes proxied through the critic's ``commit-review`` protocol.
     kb_writes_summary: "CriticKBWritesSummary"
 
@@ -4424,6 +4408,66 @@ class V6CriticReview(TypedDict, total=False):
     outcome: dict[str, Any]
 
 
+class V6RobustnessIntent(TypedDict, total=False):
+    """One intent the robustness agent raised on a turn.
+
+    Attributes:
+        type (str): The intent type the agent emitted.
+        severity (str): How urgent the agent called it, when it said.
+        topic (str): What the intent is about, when it said.
+        payload (dict[str, Any]): The intent payload, verbatim.
+    """
+
+    type: str
+    severity: str
+    topic: str
+    payload: dict[str, Any]
+
+
+class V6RobustnessTurn(TypedDict, total=False):
+    """The robustness agent's account of one turn.
+
+    ``outcome`` distinguishes a turn that produced intents from one the agent
+    could not complete, which is the distinction the section it replaces could
+    not express: a mute agent and a silent session looked identical.
+
+    Attributes:
+        turn_idx (int): The agent turn this row describes.
+        outcome (Literal): ``intents`` when the envelope validated,
+            ``invalid_envelope`` when it failed validation, ``no_envelope``
+            when the agent emitted none.
+        ts (str): ISO UTC timestamp of the turn.
+        tick_index (int): The optimizer tick the agent reported.
+        intents (list[V6RobustnessIntent]): What the agent raised.
+        parse_warnings (list[str]): Parse problems the agent reported.
+        workdir (str): The turn's workdir, as a provenance pointer.
+        detail (str): Why a turn without intents ended that way.
+    """
+
+    turn_idx: int
+    outcome: Literal["intents", "invalid_envelope", "no_envelope"]
+    ts: str
+    tick_index: int
+    intents: list[V6RobustnessIntent]
+    parse_warnings: list[str]
+    workdir: str
+    detail: str
+
+
+class V6Robustness(TypedDict, total=False):
+    """What the robustness agent raised, outside the business timeline.
+
+    The agent watches the session from the side, so its turns belong to no
+    phase or macro cycle and it keeps a fixed top-level place instead. An
+    empty ``turns`` is an answer, not a gap: the agent never completed a turn.
+
+    Attributes:
+        turns (list[V6RobustnessTurn]): One row per agent turn, by turn order.
+    """
+
+    turns: list[V6RobustnessTurn]
+
+
 class V6Close(TypedDict, total=False):
     """V6 session finalization result exposed outside the business timeline.
 
@@ -4439,6 +4483,8 @@ class V6Close(TypedDict, total=False):
     end_time: str
     close_sequence_done: bool
     steps: list[dict[str, Any]]
+    # The close-out's verdict about robustness (escalation + stop reason). What
+    # the agent itself raised is in the top-level ``robustness`` key.
     robustness: dict[str, Any]
     artifacts: dict[str, Any]
     # Absent when the session never attempted to publish its Recipe.
@@ -5558,6 +5604,7 @@ class SessionBreakdown(TypedDict, total=False):
     outcome: V6Outcome
     timeline: list[V6TimelineEvent]
     close: V6Close
+    robustness: V6Robustness
 
     warnings: list[str]
     source_files: SourceFiles
@@ -5637,7 +5684,6 @@ __all__ = [
     "PhaseSegment",
     "RecommendedKernel",
     "RejectedKernel",
-    "RobustnessSignal",
     "SessionBreakdown",
     "SessionMeta",
     "SpecialistDomainBreakdown",
@@ -5666,6 +5712,9 @@ __all__ = [
     "V6ToolVersion",
     "V6BaselineProgress",
     "V6Close",
+    "V6Robustness",
+    "V6RobustnessIntent",
+    "V6RobustnessTurn",
     "V6ConcSweepArm",
     "V6ConcSweepExt",
     "V6EnablementAttempt",

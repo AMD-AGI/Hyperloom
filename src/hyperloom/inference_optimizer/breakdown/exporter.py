@@ -535,12 +535,17 @@ def build(
         v6_warnings,
         default={},
     )
+    v6_robustness = _safe_collect(
+        "robustness",
+        lambda: collectors.collect_v6_robustness(assembled.get("robustness")),
+        v6_warnings,
+        default={},
+    )
     v6_close = _safe_collect(
         "close",
         lambda: collectors.collect_v6_close(
             sd,
             state,
-            critic_robustness,
             v6_warnings,
             recorded=assembled.get("close"),
         ),
@@ -587,6 +592,7 @@ def build(
         "outcome": outcome,
         "timeline": timeline,
         "close": v6_close,
+        "robustness": v6_robustness,
         "warnings": warnings,
         "source_files": source_files,
     }
@@ -878,19 +884,12 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
 
         fresh_warnings: list[str] = []
         state = _load_session_json(state_path(sd), "state.json", fresh_warnings)
-        critic_robustness = _safe_collect(
-            "critic_robustness",
-            lambda: collectors.collect_critic_robustness(sd, fresh_warnings),
-            fresh_warnings,
-            default={},
-        )
         # Re-assembled rather than reused from the export: this pass runs after
         # the sequencer's last act, so the fragments now carry the verdict and
         # the artifact paths that did not exist when the breakdown was written.
         fresh = collectors.collect_v6_close(
             sd,
             state,
-            critic_robustness,
             fresh_warnings,
             recorded=_load_assembled(sd, fresh_warnings).get("close"),
         )

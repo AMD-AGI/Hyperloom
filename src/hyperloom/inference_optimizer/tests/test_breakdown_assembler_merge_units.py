@@ -149,18 +149,35 @@ def test_the_first_recognised_id_field_decides_identity():
 # ---- substream composition ----
 
 
-def test_critic_and_robustness_substreams_fold_into_one_section():
-    out = {
-        "critic_iterations": [{"iteration": 1}],
-        "robustness_signals": [{"name": "gain_plateau"}],
-    }
+def test_the_critic_substream_folds_into_one_section():
+    out = {"critic_iterations": [{"iteration": 1}]}
     asm._compose_critic_robustness(out)
 
-    assert "critic_iterations" not in out and "robustness_signals" not in out
+    assert "critic_iterations" not in out
     section = out["critic_robustness"]
     assert section["critic_iterations"] == [{"iteration": 1}]
-    assert section["robustness_signals"] == [{"name": "gain_plateau"}]
     assert "kb_writes_summary" in section
+
+
+def test_robustness_turns_fold_in_turn_order():
+    out = {
+        "robustness_turn": [
+            {"turn_idx": 2, "outcome": "intents"},
+            {"turn_idx": 1, "outcome": "no_envelope"},
+        ]
+    }
+    asm._compose_robustness(out)
+
+    assert "robustness_turn" not in out
+    assert [t["turn_idx"] for t in out["robustness"]["turns"]] == [1, 2]
+
+
+def test_a_session_with_no_robustness_turns_gets_no_section():
+    """Absence of the substream is not an empty agent -- it never ran."""
+    out = {}
+    asm._compose_robustness(out)
+
+    assert "robustness" not in out
 
 
 def test_a_recorded_section_outranks_the_substreams():

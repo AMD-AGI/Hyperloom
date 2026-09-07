@@ -173,6 +173,7 @@ from .v6 import (
     collect_v6_timeline as collect_v6_timeline,
 )
 from .v6_close import collect_v6_close as collect_v6_close
+from .v6_robustness import collect_v6_robustness as collect_v6_robustness
 from .v6_stages import project_conc_sweep_event as project_conc_sweep_event
 
 __all__ = [
@@ -195,6 +196,7 @@ __all__ = [
     "collect_telemetry",
     "collect_token_usage",
     "collect_v6_close",
+    "collect_v6_robustness",
     "collect_v6_metadata",
     "langfuse_block",
     "collect_v6_outcome",

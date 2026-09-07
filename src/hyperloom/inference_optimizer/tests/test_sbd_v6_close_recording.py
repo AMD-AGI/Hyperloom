@@ -52,7 +52,6 @@ def _close(session_dir: Path, *, warnings: list[str] | None = None) -> dict[str,
     return collect_v6_close(
         session_dir,
         {},
-        {},
         warnings if warnings is not None else [],
         recorded=recorded,
     )

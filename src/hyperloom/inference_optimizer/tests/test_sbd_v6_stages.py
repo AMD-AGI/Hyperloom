@@ -172,7 +172,7 @@ def test_close_is_degraded_while_the_breakdown_predates_the_rest_of_the_sequence
         ]
     )
 
-    close = collect_v6_close(tmp_path, state, {}, [])
+    close = collect_v6_close(tmp_path, state, [])
 
     assert close["status"] == "degraded"
     assert close["close_sequence_done"] is False
@@ -197,7 +197,7 @@ def test_close_is_succeeded_only_when_every_step_settled_and_the_sequence_finish
         close_sequence_done=True,
     )
 
-    assert collect_v6_close(tmp_path, state, {}, [])["status"] == "succeeded"
+    assert collect_v6_close(tmp_path, state, [])["status"] == "succeeded"
 
 
 def test_close_succeeds_even_though_sequencer_started_never_leaves_running(tmp_path):
@@ -221,7 +221,7 @@ def test_close_succeeds_even_though_sequencer_started_never_leaves_running(tmp_p
     )
     warnings: list[str] = []
 
-    close = collect_v6_close(tmp_path, state, {}, warnings)
+    close = collect_v6_close(tmp_path, state, warnings)
 
     assert close["status"] == "succeeded"
     # ``fact_finalize`` is emitted by the sequencer but was missing from the V6
@@ -240,7 +240,7 @@ def test_close_still_waits_on_a_step_that_really_is_running(tmp_path):
         close_sequence_done=True,
     )
 
-    assert collect_v6_close(tmp_path, state, {}, [])["status"] == "degraded"
+    assert collect_v6_close(tmp_path, state, [])["status"] == "degraded"
 
 
 def test_close_passes_through_an_unknown_step_and_warns(tmp_path):
@@ -253,7 +253,7 @@ def test_close_passes_through_an_unknown_step_and_warns(tmp_path):
     )
     warnings: list[str] = []
 
-    close = collect_v6_close(tmp_path, state, {}, warnings)
+    close = collect_v6_close(tmp_path, state, warnings)
 
     # Dropping it would lose a step the producer really recorded.
     assert [step["step"] for step in close["steps"]] == ["teleport_to_s3", "done"]
@@ -270,13 +270,13 @@ def test_close_reports_degraded_when_a_step_failed(tmp_path):
         close_sequence_done=True,
     )
 
-    close = collect_v6_close(tmp_path, state, {}, [])
+    close = collect_v6_close(tmp_path, state, [])
     assert close["status"] == "degraded"
     assert close["steps"][0]["detail"] == "task_state='failed'"
 
 
 def test_close_without_any_step_reports_failed(tmp_path):
-    close = collect_v6_close(tmp_path, {"phase_history": []}, {}, [])
+    close = collect_v6_close(tmp_path, {"phase_history": []}, [])
 
     assert close["status"] == "failed"
     assert close["steps"] == []
@@ -286,7 +286,7 @@ def test_close_without_any_step_reports_failed(tmp_path):
 def test_close_falls_back_to_the_phase_entry_when_no_step_was_recorded(tmp_path):
     state = {"phase_history": [{"from_phase": "SWEEP", "to_phase": "CLOSE", "ts": "2026-08-27T05:00:00+00:00"}]}
 
-    assert collect_v6_close(tmp_path, state, {}, [])["start_time"] == "2026-08-27T05:00:00+00:00"
+    assert collect_v6_close(tmp_path, state, [])["start_time"] == "2026-08-27T05:00:00+00:00"
 
 
 def test_close_collects_steps_split_across_phase_history_rows(tmp_path):
@@ -306,22 +306,24 @@ def test_close_collects_steps_split_across_phase_history_rows(tmp_path):
         "close_sequence_done": True,
     }
 
-    close = collect_v6_close(tmp_path, state, {}, [])
+    close = collect_v6_close(tmp_path, state, [])
     assert [step["step"] for step in close["steps"]] == ["report", "done"]
     assert close["status"] == "succeeded"
 
 
-def test_close_surfaces_robustness_escalation_and_its_signals(tmp_path):
+def test_close_surfaces_robustness_escalation(tmp_path):
+    """The close-out reports its verdict about robustness, not what was raised.
+
+    What the agent raised is the top-level ``robustness`` key's job; ``close``
+    answers only whether the session was stopped over it.
+    """
     state = _close_state([{"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"}])
     state["stop_reason"] = "robustness_escalated"
-    signals = [
-        {"ts": "2026-08-27T04:00:00+00:00", "signal": "crash", "action": "restart", "workdir": "robustness-workdir/0"}
-    ]
 
-    close = collect_v6_close(tmp_path, state, {"robustness_signals": signals}, [])
+    close = collect_v6_close(tmp_path, state, [])
 
     assert close["robustness"]["escalated"] is True
-    assert close["robustness"]["signals"] == signals
+    assert "signals" not in close["robustness"]
 
 
 def test_close_artifacts_point_only_at_files_that_exist(tmp_path):
@@ -337,7 +339,7 @@ def test_close_artifacts_point_only_at_files_that_exist(tmp_path):
         ]
     )
 
-    artifacts = collect_v6_close(tmp_path, state, {}, [])["artifacts"]
+    artifacts = collect_v6_close(tmp_path, state, [])["artifacts"]
 
     assert artifacts["final_json_path"] == "reports/final.json"
     assert artifacts["final_md_path"] is None
@@ -358,7 +360,7 @@ def test_close_ignores_a_skipped_artifact_package_detail(tmp_path):
         ]
     )
 
-    assert collect_v6_close(tmp_path, state, {}, [])["artifacts"]["artifact_package_path"] is None
+    assert collect_v6_close(tmp_path, state, [])["artifacts"]["artifact_package_path"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +771,7 @@ def test_an_unknown_close_step_status_is_reported(tmp_path):
             }
         ],
     }
-    section = collect_v6_close(tmp_path, state, {}, warnings)
+    section = collect_v6_close(tmp_path, state, warnings)
 
     # Passed through unchanged -- inventing ``done`` is the one thing this key
     # cannot afford -- but no longer silent about it.

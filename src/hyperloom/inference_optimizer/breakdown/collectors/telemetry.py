@@ -34,16 +34,19 @@ def collect_critic_robustness(
     """Collect the critic / robustness section.
 
     Walks ``critic-workdir/<iter>/`` for review + emit JSON (verdict, topic,
-    truncated summary, artifact paths) and ``robustness-workdir/<iter>/`` for
-    signal + action JSON, then summarizes critic verdicts.
+    truncated summary, artifact paths), then summarizes critic verdicts.
+
+    What the robustness agent raised is not here: it is recorded per turn and
+    exported as the top-level ``robustness`` key. This used to walk
+    ``robustness-workdir`` for ``signal.json`` / ``action.json``, two files
+    nothing writes, so it only ever produced one blank row per directory.
 
     Args:
         session_dir (Path): Absolute session root.
         warnings (list[str]): Shared warnings list (mutated in place).
 
     Returns:
-        dict[str, Any]: ``{"critic_iterations", "robustness_signals",
-        "kb_writes_summary"}``.
+        dict[str, Any]: ``{"critic_iterations", "kb_writes_summary"}``.
     """
     critic_iters: list[dict[str, Any]] = []
     critic_root = session_dir / "critic-workdir"
@@ -71,29 +74,11 @@ def collect_critic_robustness(
                 }
             )
 
-    robustness_signals: list[dict[str, Any]] = []
-    rob_root = session_dir / "robustness-workdir"
-    if rob_root.exists():
-        for iter_dir in sorted(rob_root.iterdir(), key=lambda p: p.name):
-            if not iter_dir.is_dir():
-                continue
-            signal_data = _load_json_safe(iter_dir / "signal.json", warnings) or {}
-            action_data = _load_json_safe(iter_dir / "action.json", warnings) or {}
-            robustness_signals.append(
-                {
-                    "ts": str(signal_data.get("ts") or action_data.get("ts") or ""),
-                    "signal": str(signal_data.get("signal") or signal_data.get("kind") or ""),
-                    "action": str(action_data.get("action") or action_data.get("kind") or ""),
-                    "workdir": _rel(iter_dir, session_dir) or str(iter_dir),
-                }
-            )
-
     # kb_writes_summary: commit-review counts by verdict, reusing the parsed iters.
     kb_writes_summary = _critic_kb_writes_summary(critic_iters)
 
     return {
         "critic_iterations": critic_iters,
-        "robustness_signals": robustness_signals,
         "kb_writes_summary": kb_writes_summary,
     }
 
