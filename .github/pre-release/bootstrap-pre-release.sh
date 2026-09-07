@@ -503,13 +503,23 @@ run_leg() {
 # cannot get a deduplicating driver must fail loudly instead.
 DOCKER_DRIVERS="${DOCKER_DRIVERS:-overlay2 fuse-overlayfs}"
 
+# dockerd defaults docker0 (and every container on it) to MTU 1500, but the pod's
+# uplink is a k8s overlay at 1450. The mismatch is a PMTU blackhole: small HTTPS
+# requests succeed while bulk wheel downloads from files.pythonhosted.org stall until
+# they time out (observed 2026-09-07 on every docker leg; the baremetal legs, which
+# use the pod netns directly, saw zero timeouts). Derive it from the uplink rather
+# than pinning a constant, so a cluster on a different overlay stays correct.
+_docker_uplink="$(ip -o route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}')"
+DOCKER_MTU="${DOCKER_MTU:-$(ip -o link show "${_docker_uplink:-eth0}" 2>/dev/null | grep -oE 'mtu [0-9]+' | awk '{print $2}')}"
+DOCKER_MTU="${DOCKER_MTU:-1450}"
+
 # Start a detached dockerd on one driver; 0 when the socket answers. Cleans up the
 # failed daemon so the next driver starts from a clean socket.
 start_dockerd_with_driver() {
   local driver="$1" data_root="$2" dlog="/var/log/dockerd-${1}.log" i
   mkdir -p "$data_root" || return 1
-  log "starting pod-local dockerd (driver=$driver, data-root=$data_root)"
-  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver='$driver' --data-root='$data_root' >'$dlog' 2>&1" \
+  log "starting pod-local dockerd (driver=$driver, data-root=$data_root, mtu=$DOCKER_MTU)"
+  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver='$driver' --data-root='$data_root' --mtu='$DOCKER_MTU' >'$dlog' 2>&1" \
     </dev/null >/dev/null 2>&1 &
   for i in $(seq 1 60); do
     docker info >/dev/null 2>&1 && { log "dockerd up after ${i}s (driver=$driver)"; return 0; }

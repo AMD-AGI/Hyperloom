@@ -8,7 +8,10 @@
 #
 # A leg PASSes only when ALL hold (design §9):
 #   1. state.json stop_reason is a clean terminal exit (same set as optimize CLI exit 0),
-#   2. crash_count is within tolerance (read from state.json).
+#   2. crash_count is within tolerance (read from state.json),
+#   3. close_sequence_done is true. stop_reason is stamped on the phase transition into
+#      CLOSE, so on its own it cannot tell a finished run from one that stalled mid-close;
+#      a leg that stalls stays PENDING here and fails when its pod hits the deadline.
 # final.json is not required; bootstrap may fail waiting for it while optimize succeeded.
 # TARGET_GAIN still flows to optimize via the demo skill; it is NOT used here to judge PASS.
 # When the gate is already FAIL, poll keeps running until every leg reaches a terminal
@@ -334,7 +337,7 @@ is_clean_stop_reason() {
 
 # Judge one leg from state.json. Echoes "PASS"|"PENDING"|"FAIL|<reason>".
 judge_leg() {
-  local leg="$1" wphase="$2" sdir state gain stop crashes
+  local leg="$1" wphase="$2" sdir state gain stop crashes closed
   sdir="$(leg_session_dir "$leg")"
   if [ -z "$sdir" ] || [ ! -d "$sdir" ]; then
     echo "PENDING|no session dir yet (workload phase=$wphase)"; return
@@ -346,7 +349,9 @@ judge_leg() {
   stop="$(state_json_query "$state" '.stop_reason // ""')"
   gain="$(state_json_query "$state" '.cumulative_gain_validated // 0')"
   crashes="$(state_json_query "$state" '.crash_count // 0')"
-  if [ "$stop" = "__UNREADABLE__" ] || [ "$gain" = "__UNREADABLE__" ] || [ "$crashes" = "__UNREADABLE__" ]; then
+  closed="$(state_json_query "$state" '.close_sequence_done // false')"
+  if [ "$stop" = "__UNREADABLE__" ] || [ "$gain" = "__UNREADABLE__" ] || [ "$crashes" = "__UNREADABLE__" ] ||
+     [ "$closed" = "__UNREADABLE__" ]; then
     echo "PENDING|state.json not readable (workload phase=$wphase)"; return
   fi
   if [ "$crashes" -gt "$MAX_CRASHES" ] 2>/dev/null; then
@@ -356,6 +361,11 @@ judge_leg() {
     echo "PENDING|state.json stop_reason not set yet (workload phase=$wphase)"; return
   fi
   if is_clean_stop_reason "$stop"; then
+    # stop_reason is stamped on the phase transition, before the CLOSE sequence
+    # runs; only close_sequence_done proves the run actually finished closing.
+    if [ "$closed" != "true" ]; then
+      echo "PENDING|stop=${stop} but close_sequence_done=false (CLOSE still running or stalled)"; return
+    fi
     echo "PASS|stop=${stop} gain=${gain}%"; return
   fi
   echo "FAIL|stop_reason=${stop} (not a clean terminal exit)"

@@ -24,6 +24,7 @@ tests pin the invariants it depends on.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -462,6 +463,83 @@ def test_a_stale_session_pin_cannot_pass_the_gate(poll_script: str, tmp_path: Pa
 
     pin.write_text(f"{finished}\nthis-run\n", encoding="utf-8")
     assert _leg_session_dir(poll_script, tmp_path, leg, "this-run") == str(finished)
+
+
+def test_nested_dockerd_matches_the_pod_uplink_mtu(bootstrap_script: str) -> None:
+    """docker0 defaults to 1500 while the pod overlay is 1450; the gap blackholes bulk TLS."""
+    assert "--mtu='$DOCKER_MTU'" in bootstrap_script
+    # Derived from the uplink rather than pinned, so another overlay stays correct.
+    assert 'DOCKER_MTU="${DOCKER_MTU:-$(ip -o link show' in bootstrap_script
+    assert 'DOCKER_MTU="${DOCKER_MTU:-1450}"' in bootstrap_script
+
+
+def _judge_leg(poll_script: str, runs_dir: Path, leg: str, run_tag: str, wphase: str = "Running") -> str:
+    """Run the real judge_leg() out of the poll script."""
+    lines = poll_script.splitlines()
+    fns = []
+    for name in ("leg_session_dir() {", "state_json_query() {", "is_clean_stop_reason() {", "judge_leg() {"):
+        start = next(i for i, line in enumerate(lines) if line.startswith(name))
+        end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+        fns.append("\n".join(lines[start : end + 1]))
+    body = "\n".join(fns)
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'runs_dir="$1"; RUN_TAG="$2"; MAX_CRASHES=0\n{body}\njudge_leg "$3" "$4"',
+            "_",
+            str(runs_dir),
+            run_tag,
+            leg,
+            wphase,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _stage_leg(runs_dir: Path, leg: str, run_tag: str, state: dict) -> None:
+    """Write a leg's session pin + state.json the way a pod would."""
+    session = runs_dir / leg / "session"
+    sdir = session / "Qwen3-8B" / "20260907T000000Z-abcdef01"
+    sdir.mkdir(parents=True)
+    (session / ".session_dir").write_text(f"{sdir}\n{run_tag}\n", encoding="utf-8")
+    (sdir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_a_leg_that_stalled_mid_close_does_not_pass(poll_script: str, tmp_path: Path) -> None:
+    """stop_reason is stamped entering CLOSE, so it alone cannot prove the run finished."""
+    tag = "this-run"
+    _stage_leg(
+        tmp_path,
+        "baremetal-vllm-3h",
+        tag,
+        {"stop_reason": "time_exhausted", "crash_count": 0, "close_sequence_done": False},
+    )
+    verdict = _judge_leg(poll_script, tmp_path, "baremetal-vllm-3h", tag)
+    assert verdict == (
+        "PENDING|stop=time_exhausted but close_sequence_done=false (CLOSE still running or stalled)"
+    )
+
+
+def test_a_leg_that_finished_closing_passes(poll_script: str, tmp_path: Path) -> None:
+    """A clean stop_reason with the close sequence recorded done is the PASS case."""
+    tag = "this-run"
+    _stage_leg(
+        tmp_path,
+        "docker-sglang-3h",
+        tag,
+        {
+            "stop_reason": "sweep_done",
+            "crash_count": 0,
+            "close_sequence_done": True,
+            "cumulative_gain_validated": 1.83,
+        },
+    )
+    verdict = _judge_leg(poll_script, tmp_path, "docker-sglang-3h", tag)
+    assert verdict == "PASS|stop=sweep_done gain=1.83%"
 
 
 def test_the_run_tag_reaches_the_pod_and_the_poll(dispatch_script: str, bootstrap_script: str) -> None:
