@@ -196,6 +196,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Teardown reaches the server its own wrapper `setsid`-ed away.**
+  `kill_my_spawned_server` signals one process group: the wrapper's. Magpie's
+  wrappers `setsid` the serving process, which is exactly what moves it out of
+  that group — the wrapper then exits, the server reparents to init, and every
+  rank it spawned keeps its GPUs. This is the teardown used wherever
+  server_lifecycle does not apply, which includes every profile round, since
+  reuse is ineligible once `torch_profiler` is on. Measured on MI355X: a
+  torn-down ATOM server left eight per-rank workers alive holding 2,188,381 MiB;
+  signalling the escaped group freed all of it.<br/>
+  Escaped groups are now enumerated *before* anything is signalled, because the
+  link that attributes them to this run — the wrapper still being their parent —
+  disappears the moment the wrapper dies. Attribution is by descent from our own
+  wrapper rather than by cmdline: a framework this repository has not heard of is
+  still ours, and the per-rank workers of the ATOM build measured here carry no
+  identifying argv at all (`multiprocessing.spawn` children, indistinguishable
+  from any other Python process by name). Nothing outside the tree we launched is
+  ever signalled.
+
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
   three axes carried nothing under an agentic replay — request shapes come from
