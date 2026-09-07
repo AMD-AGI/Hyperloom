@@ -24,8 +24,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 from hyperloom.common.io import atomic_write_text
+
+from .kernel_evidence import (
+    _resolve_forge_server_log,
+    _resolve_forge_untuned_csv,
+    _resolve_fusion_decode_trace,
+    _resolve_trace_shape_manifest,
+    resolve_fp8_quant_type,
+)
 
 CONTEXT_FILENAME = "kernel-context.json"
 
@@ -177,6 +186,59 @@ def _pick(
     return value
 
 
+def _normalize_precision(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def resolve_workload_precision_and_quant(state: Any, payload: Mapping[str, Any]) -> tuple[str, str]:
+    """Resolve runtime precision and quant_type from payload, server args, or session."""
+    from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+
+    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+
+    if payload.get("precision"):
+        precision = _normalize_precision(payload["precision"])
+        quant_type = str(payload.get("quant_type") or "auto").strip()
+        if precision == "fp8" and quant_type.lower() == "auto":
+            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = resolve_fp8_quant_type(model_path, gpu_type, framework)
+        return precision, quant_type
+
+    current_best = getattr(state, "current_best", None) or {}
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
+    extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
+    ref_envs = dict(getattr(state, "reference_envs", None) or {})
+    per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
+        ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
+    )
+
+    quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
+
+    if quantization_arg == "fp8":
+        precision = "fp8"
+        if per_token_signal:
+            quant_type = "per_token"
+        else:
+            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+            quant_type = resolve_fp8_quant_type(model_path, gpu_type, framework)
+        return precision, quant_type
+
+    if quantization_arg in ("fp4", "mxfp4"):
+        return quantization_arg, "fp4"
+
+    precision = _normalize_precision(getattr(state, "precision", ""))
+    if not precision:
+        precision = "bf16"
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    if precision == "fp8" and quant_type.lower() == "auto":
+        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
+        quant_type = resolve_fp8_quant_type(model_path, gpu_type, framework)
+    return precision, quant_type
+
+
 def build_workload_facts(
     state: Any,
     *,
@@ -186,12 +248,10 @@ def build_workload_facts(
     from hyperloom.common.model_paths import resolve_serving_model_path
     from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
-    from .request_handlers import _resolve_forge_precision_and_quant
-
     incoming = dict(overrides or {})
     context = _workload_context(state)
     model_path = _text(_pick(incoming, context, state, "model_path"))
-    precision, quant_type = _resolve_forge_precision_and_quant(state, incoming)
+    precision, quant_type = resolve_workload_precision_and_quant(state, incoming)
     # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
     # serve; probing only the hub cache here would reject a repo id the running
     # server resolved fine.
@@ -273,27 +333,13 @@ def build_serving_facts(
     )
 
 
-def discover_evidence(
+def _build_evidence_index(
     state: Any,
     session_dir: Path,
     *,
     workload: WorkloadFacts,
     overrides: Mapping[str, Any] | None = None,
 ) -> EvidenceIndex:
-    """Find every artifact this session produced. Reads only; never materializes.
-
-    The scanners still live in :mod:`request_handlers` and are imported here
-    rather than at module scope, because that module imports this one. They are
-    called from exactly this function, which is what makes the collection
-    single-source; moving them out is a separate change.
-    """
-    from .request_handlers import (
-        _resolve_forge_server_log,
-        _resolve_forge_untuned_csv,
-        _resolve_fusion_decode_trace,
-        _resolve_trace_shape_manifest,
-    )
-
     incoming = dict(overrides or {})
     analysis = getattr(state, "last_trace_analyze", None)
     analysis = analysis if isinstance(analysis, Mapping) else {}
@@ -349,7 +395,7 @@ def build_kernel_context(
         macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
         workload=workload,
         serving=build_serving_facts(state, env_spec=env_spec, overrides=overrides),
-        evidence=discover_evidence(state, Path(session_dir), workload=workload, overrides=overrides),
+        evidence=_build_evidence_index(state, Path(session_dir), workload=workload, overrides=overrides),
     )
 
 
@@ -372,8 +418,6 @@ __all__ = [
     "ServingFacts",
     "WorkloadFacts",
     "build_kernel_context",
-    "build_serving_facts",
-    "build_workload_facts",
-    "discover_evidence",
+    "resolve_workload_precision_and_quant",
     "write_kernel_context",
 ]

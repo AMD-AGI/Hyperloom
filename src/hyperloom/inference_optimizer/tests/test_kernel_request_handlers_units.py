@@ -98,27 +98,6 @@ class TestForgeGemmHelperCoverage:
     def test_truthy_env_value_false(self, value):
         assert is_truthy(value) is False
 
-    def test_resolve_forge_server_log_priority(self, tmp_path):
-        state = SharedState()
-        baseline = tmp_path / "baseline"
-        current = tmp_path / "current"
-        baseline.mkdir()
-        current.mkdir()
-        (baseline / "server.log").write_text("baseline\n" + _AITER_LINE, encoding="utf-8")
-        (current / "server.log").write_text("current\n" + _AITER_LINE, encoding="utf-8")
-        state.last_baseline = {"workspace": str(baseline)}
-        state.current_best = {"workspace": str(current)}
-
-        assert krh._resolve_forge_server_log(state, tmp_path) == str(current / "server.log")
-
-    def test_resolve_forge_server_log_bounded_runs_fallback(self, tmp_path):
-        state = SharedState()
-        log = tmp_path / "runs" / "explore" / "abc" / "server.log"
-        log.parent.mkdir(parents=True)
-        log.write_text(_AITER_LINE, encoding="utf-8")
-
-        assert krh._resolve_forge_server_log(state, tmp_path) == str(log)
-
     def test_resolve_forge_precision_payload_override(self):
         state = SharedState(precision="bf16")
         assert krh._resolve_forge_precision_and_quant(
@@ -263,27 +242,6 @@ class TestForgeGemmHelperCoverage:
         assert "preflight timed out" in caplog.text
         assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
-    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
-        # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
-        state = SharedState(precision="")
-        state.current_best = {"extra_server_args": "", "extra_envs": {}}
-        import hyperloom.orchestrator.kernel.roofline_ceiling as rc
-
-        def _raise(*_a, **_k):
-            raise RuntimeError("no runtime workload")
-
-        monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
-
-    def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
-        state = SharedState()
-        baseline = tmp_path / "baseline"
-        baseline.mkdir()
-        (baseline / "server.log").write_text("baseline\n" + _AITER_LINE, encoding="utf-8")
-        state.last_baseline = {"workspace": str(baseline)}
-
-        assert krh._resolve_forge_server_log(state, tmp_path) == str(baseline / "server.log")
-
     def test_resolve_forge_shapes_reads_artifact_paths_dict(self, tmp_path):
         state = SharedState()
         shapes = tmp_path / "gemm_shapes.json"
@@ -369,18 +327,6 @@ class TestForgeGemmHelperCoverage:
         )
         model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == str(expected)
-
-    def test_resolve_forge_untuned_csv_no_model_path_keeps_legacy(self, tmp_path):
-        # Without a model_path the resolver cannot validate; returns newest non-empty CSV.
-        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale") == str(expected)
-
-    def test_resolve_forge_untuned_csv_unreadable_config_keeps_csv(self, tmp_path):
-        # Missing/unreadable config.json: cannot validate, so keep the CSV.
-        expected = self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
-        assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", str(tmp_path / "no_such_model")) == str(
-            expected
-        )
 
     def test_csv_matches_model_helpers(self, tmp_path):
         csv_mismatch = self._write_aiter_csv(

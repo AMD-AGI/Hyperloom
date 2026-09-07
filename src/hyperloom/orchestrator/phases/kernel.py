@@ -2409,7 +2409,7 @@ class KernelPhase(PhaseHandler):
         unreachable, so validating it burns two full benchmark rounds on a config
         the server cannot load.
         """
-        from ..kernel.request_handlers import _resolve_forge_server_log
+        from ..kernel.kernel_evidence import _resolve_forge_server_log
 
         try:
             log_path = _resolve_forge_server_log(self.shared_state, self.session_dir)

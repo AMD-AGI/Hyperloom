@@ -67,6 +67,11 @@ def test_build_cmd_maps_all_options():
     assert "--thorough" in cmd
 
 
+def test_build_cmd_forwards_shapes_manifest():
+    cmd = forge_gemm_tuning._build_cmd({**_payload(), "shapes_manifest": "/tmp/manifest.json"})
+    assert cmd[cmd.index("--shapes-manifest") + 1] == "/tmp/manifest.json"
+
+
 def test_preflight_and_inner_cli_use_the_same_interpreter():
     """The readiness probe must describe the command the wrapper will run."""
     probe = krh._forge_gemm_tune_probe_cmd()

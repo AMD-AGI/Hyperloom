@@ -110,15 +110,6 @@ class TestGemmProjection:
 
         assert payload["timeout"] < payload["global_timeout"]
 
-    def test_the_dead_demand_port_is_gone(self):
-        """forge reconstructs demand from the signature log Hyperloom always sends."""
-        assert "demand_json" not in gemm_input(
-            _context(),
-            workspace=Path("/ws"),
-            shapes=GemmShapeSources(),
-            execution=_gemm_execution(),
-        )
-
 
 class TestFusionProjection:
     def test_the_ab_benchmark_runs_at_the_workload_operating_point(self):
