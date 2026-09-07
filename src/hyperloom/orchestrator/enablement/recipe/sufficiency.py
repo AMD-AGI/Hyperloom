@@ -436,9 +436,6 @@ def _build_reasons(
         missing.append("installed_versions")
     if not _AMBIENT_FLOOR.issubset({str(k) for k in inputs.get("ambient_keys") or []}):
         missing.append("ambient_keys")
-    command = inputs.get("build_command")
-    if driver == "custom_command" and not (isinstance(command, Mapping) and command.get("digest")):
-        missing.append("build_command")
     # A command the platform spawns unread cannot be shown to depend only on the
     # recorded inputs, so it is incomplete however complete the rest is.
     if missing or driver == "custom_command":
