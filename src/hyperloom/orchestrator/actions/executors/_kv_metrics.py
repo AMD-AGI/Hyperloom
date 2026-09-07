@@ -41,9 +41,13 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_METRICS_PORT",
+    "KV_ARTIFACT_NAME",
+    "PHASES",
     "KvMetricsPoller",
+    "KvMetricsRecorder",
     "KvSample",
     "canonical_label_key",
+    "counter_delta",
     "parse_prometheus_text",
     "resolve_metrics_port",
     "sample_from_families",
@@ -551,3 +555,241 @@ class KvMetricsPoller:
             return None
         sample = sample_from_families(parse_prometheus_text(body))
         return sample if sample.has_readings() else None
+
+
+#: Artifact the recorder writes, alongside the round's ``server.log``.
+KV_ARTIFACT_NAME = "kv_metrics.json"
+
+#: Collection phases. An engine process outlives the window that is actually
+#: being measured by a wide margin, and mixing them makes every statistic
+#: meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately
+#: cold cache, and ``eval`` drives accuracy traffic whose shape has nothing to
+#: do with the throughput benchmark. Only ``measured`` may enter a comparison.
+PHASES = ("boot", "warmup", "measured", "eval")
+
+#: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A
+#: three-hour round at the scrape interval below lands well over this.
+_MAX_STORED_ROWS = 5000
+
+#: Floor between scrapes. The loop this runs in can iterate faster than its
+#: nominal 0.5s when a deadline bounds the slice, so the interval is enforced
+#: on the monotonic clock rather than by counting passes.
+_MIN_SCRAPE_INTERVAL_SEC = 0.5
+
+
+def counter_delta(first: dict[str, float], last: dict[str, float]) -> float | None:
+    """Increment of a labelled counter between two observations.
+
+    Diffed per label series rather than on a flat total, because an engine
+    restart zeroes its series: a flat subtraction would go negative, and
+    clamping that to zero would quietly discard the whole window. When a series
+    ends below where it started it is treated as having restarted, and only the
+    post-restart count is credited -- the increments before the restart are
+    genuinely unrecoverable, and inventing them would be worse than losing them.
+
+    Args:
+        first (dict[str, float]): Series readings at window open.
+        last (dict[str, float]): Series readings at window close.
+
+    Returns:
+        float | None: Total increment, or ``None`` when the counter was never
+        observed at all -- which is not the same as an increment of zero.
+    """
+    if not first and not last:
+        return None
+    total = 0.0
+    for key, end in last.items():
+        start = first.get(key)
+        total += end if start is None or end < start else end - start
+    return total
+
+
+class KvMetricsRecorder:
+    """Collects phase-tagged KV samples for one benchmark round.
+
+    Owns everything stateful about collection so the watchdog loop it hangs off
+    keeps a single call per pass and one ``finally``. Like the poller, nothing
+    here raises: a recorder that fails must cost the round nothing.
+
+    The phase machine is driven by markers the loop already detects, plus
+    aiperf's own phase lines under AgentX. It is never inferred from elapsed
+    time, because the boundaries move by tens of minutes between rounds -- an
+    AgentX warmup alone was measured at nearly 18 of them.
+    """
+
+    def __init__(
+        self,
+        *,
+        poller: KvMetricsPoller,
+        output_path: str | None = None,
+        scope: dict[str, Any] | None = None,
+        min_interval_sec: float = _MIN_SCRAPE_INTERVAL_SEC,
+    ) -> None:
+        """Prepare a recorder without contacting anything.
+
+        Args:
+            poller (KvMetricsPoller): The endpoint reader.
+            output_path (str | None): Where :meth:`close` writes its artifact.
+                ``None`` collects in memory only, which is what the tests and
+                any caller without a workspace want.
+            scope (dict[str, Any] | None): Identity carried into the artifact so
+                a consumer never has to join against another file to learn which
+                variant and round produced it.
+            min_interval_sec (float): Floor between scrapes.
+        """
+        self._poller = poller
+        self._output_path = output_path
+        self._scope = dict(scope or {})
+        self._min_interval = float(min_interval_sec)
+        self._phase = "boot"
+        self._rows: list[dict[str, Any]] = []
+        self._last_scrape_mono: float | None = None
+        self._phase_marks: list[dict[str, Any]] = []
+        self._first_counters: dict[str, dict[str, float]] = {}
+        self._last_counters: dict[str, dict[str, float]] = {}
+        self._capacity_tokens: float | None = None
+        self._capacity_gb: float | None = None
+        self._closed = False
+
+    @property
+    def phase(self) -> str:
+        """Current collection phase."""
+        return self._phase
+
+    def note_phase(self, phase: str, mono: float) -> None:
+        """Record a phase transition.
+
+        Args:
+            phase (str): One of :data:`PHASES`. Anything else is ignored rather
+                than raising -- an unrecognised marker must not end collection.
+            mono (float): Monotonic instant of the transition.
+        """
+        if phase not in PHASES or phase == self._phase:
+            return
+        self._phase = phase
+        self._phase_marks.append({"phase": phase, "mono": round(float(mono), 3), "ts": time.time()})
+
+    def tick(self, mono: float) -> None:
+        """Scrape if the interval has elapsed, tagging the sample with the phase.
+
+        Args:
+            mono (float): The loop's current monotonic instant.
+        """
+        if self._closed:
+            return
+        if self._last_scrape_mono is not None and (mono - self._last_scrape_mono) < self._min_interval:
+            return
+        self._last_scrape_mono = mono
+        try:
+            sample = self._poller.sample()
+        except Exception:  # noqa: BLE001 - collection must never fail a round
+            log.debug("kv_metrics: sample failed", exc_info=True)
+            return
+        if sample is None:
+            return
+        self._absorb(sample)
+
+    def _absorb(self, sample: KvSample) -> None:
+        """Fold one sample into the row buffer and the counter windows.
+
+        Args:
+            sample (KvSample): The reading to record.
+        """
+        # Pool capacity is only observable while the engine is up; latch the
+        # first non-null reading so the artifact still carries it after a round
+        # that ended with the server gone.
+        if self._capacity_tokens is None and sample.capacity_tokens is not None:
+            self._capacity_tokens = sample.capacity_tokens
+        if self._capacity_gb is None and sample.capacity_gb is not None:
+            self._capacity_gb = sample.capacity_gb
+        for name, series in (("retract", sample.retract_total), ("preempt", sample.preempt_total)):
+            if not series:
+                continue
+            self._first_counters.setdefault(name, dict(series))
+            self._last_counters[name] = dict(series)
+        self._rows.append(
+            {
+                "phase": self._phase,
+                "ts": round(sample.ts, 3),
+                "mono": round(sample.mono, 3),
+                "active_pool_usage": sample.active_pool_usage,
+                "physical_pool_usage": sample.physical_pool_usage,
+                "used_tokens": sample.used_tokens,
+                "evictable_tokens": sample.evictable_tokens,
+                "retract_total": sum(sample.retract_total.values()) if sample.retract_total else None,
+                "preempt_total": sum(sample.preempt_total.values()) if sample.preempt_total else None,
+            }
+        )
+
+    def rows(self) -> list[dict[str, Any]]:
+        """Collected rows, stride-downsampled to the row cap.
+
+        Returns:
+            list[dict[str, Any]]: Phase-tagged samples in collection order.
+        """
+        if len(self._rows) <= _MAX_STORED_ROWS:
+            return list(self._rows)
+        stride = max(1, len(self._rows) // _MAX_STORED_ROWS)
+        return self._rows[::stride]
+
+    def summary(self, *, aborted: bool = False) -> dict[str, Any]:
+        """Build the artifact payload.
+
+        Args:
+            aborted (bool): Whether the round left through an exception path.
+                Recorded rather than inferred so a consumer can tell a window
+                that closed from one that was cut short.
+
+        Returns:
+            dict[str, Any]: The artifact. ``available`` is tri-state: ``None``
+            means the endpoint was never reached one way or the other, which is
+            not the same as reaching it and finding no pressure.
+        """
+        return {
+            "schema_version": 1,
+            "source": "metrics",
+            "url": self._poller.url,
+            "available": self._poller.available,
+            "aborted": bool(aborted),
+            "scope": self._scope,
+            "capacity_tokens": self._capacity_tokens,
+            "capacity_gb": self._capacity_gb,
+            "phase_marks": self._phase_marks,
+            "retract_delta": counter_delta(
+                self._first_counters.get("retract", {}),
+                self._last_counters.get("retract", {}),
+            ),
+            "preempt_delta": counter_delta(
+                self._first_counters.get("preempt", {}),
+                self._last_counters.get("preempt", {}),
+            ),
+            "sample_count": len(self._rows),
+            "samples": self.rows(),
+        }
+
+    def close(self, *, aborted: bool = False) -> dict[str, Any]:
+        """Finish collection and write the artifact when a path was given.
+
+        Idempotent: the loop's ``finally`` may run after a caller has already
+        closed explicitly.
+
+        Args:
+            aborted (bool): Whether the round is unwinding through an exception.
+
+        Returns:
+            dict[str, Any]: The artifact payload, written or not.
+        """
+        payload = self.summary(aborted=aborted)
+        if self._closed or not self._output_path:
+            self._closed = True
+            return payload
+        self._closed = True
+        try:
+            from pathlib import Path
+
+            from hyperloom.common.io import atomic_write_json
+
+            atomic_write_json(Path(self._output_path), payload)
+        except Exception:  # noqa: BLE001 - an unwritten artifact must not fail a round
+            log.debug("kv_metrics: could not write %s", self._output_path, exc_info=True)
+        return payload
