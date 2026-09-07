@@ -1,8 +1,4 @@
-"""Stdio MCP server for upstream PR retrieval.
-
-Prefixed tool names avoid collisions, and the REST client enforces request
-budgets.
-"""
+"""Stdio MCP server for upstream PR retrieval."""
 
 from __future__ import annotations
 
@@ -281,8 +277,8 @@ async def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:
     if method == "tools/list":
         return {"tools": TOOL_DEFINITIONS}
     if method == "tools/call":
-        # Not ``or {}``: a falsy-but-wrong value such as [] would coerce to an
-        # empty object and slip past the type check below.
+        # Not ``or {}``: a falsy-but-wrong value such as [] would coerce to an empty object and slip past the type
+        # check below.
         arguments = params.get("arguments")
         if arguments is None:
             arguments = {}

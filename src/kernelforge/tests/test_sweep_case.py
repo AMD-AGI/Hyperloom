@@ -44,8 +44,7 @@ def _sweep(driver: str, **kwargs) -> dict:
     return asyncio.run(sweep_case(driver_script=driver, **kwargs))
 
 
-# A driver that honours the flag: one case in, that case's lines out. It reads
-# its one swept constant and echoes it, the way the prompt asks a source to.
+# A driver that honours the flag: one case in, that case's lines out.
 _NARROWING_DRIVER = """
 import argparse, os, sys
 p = argparse.ArgumentParser()
@@ -87,8 +86,6 @@ def _runs(tally: pathlib.Path) -> int:
 
 
 # argparse with plain parse_args: an unknown flag is exit 2 before anything runs.
-# This is the shape that produced 221 failures and zero measurements -- the
-# driver measures perfectly well, it just will not be handed --bench-case.
 _FLAG_REJECTING_DRIVER = """
 import argparse
 p = argparse.ArgumentParser()
@@ -101,8 +98,8 @@ print("case_ms: sq7211 4.000000")
 """
 
 
-# A driver that honours the flag AND validates its argument: an undeclared case
-# id is exit 2, which is byte-for-byte what argparse says about an unknown flag.
+# A driver that honours the flag AND validates its argument: an undeclared case id is exit 2, which is byte-for-byte
+# what argparse says about an unknown flag.
 _CASE_CHECKING_DRIVER = """
 import argparse, sys
 p = argparse.ArgumentParser()
@@ -233,22 +230,19 @@ sys.exit(1)
     assert "median_ms" not in result
     assert f"also exit 1 with {SWEEP_CASE_FLAG}" in result["message"]
     assert _runs(tally) == 2
-    # Nothing was learned about the argument parser, so the next probe of a
-    # working configuration still gets its case narrowed.
+    # Nothing was learned about the argument parser, so the next probe of a working configuration still gets its case
+    # narrowed.
     assert not _CASE_FLAG_REJECTED
 
 
 def test_a_bad_case_id_is_not_recorded_as_a_rejection_of_the_flag(tmp_path):
-    """This driver KNOWS --bench-case; it refused the case id, and it says so
-    the same way an unknown flag does -- non-zero, then fine without it. Reading
-    that as a broken parser would cost every later probe of a valid case a whole
-    suite and its spread, permanently, for a driver that was working."""
+    """This driver KNOWS --bench-case; it refused the case id, and it says so"""
     driver, tally = _counting_driver(tmp_path, _CASE_CHECKING_DRIVER)
     missing = _sweep(driver, case_id="sq99")
     assert missing["success"] is False
     assert "NO TIMING FOR CASE 'sq99'" in missing["message"]
-    # The whole suite the retry ran is the list of cases this driver declares,
-    # and sq99 is not on it, so the flag is not what was refused.
+    # The whole suite the retry ran is the list of cases this driver declares, and sq99 is not on it, so the flag is
+    # not what was refused.
     assert "the case id and not the flag" in missing["message"]
     assert _runs(tally) == 2
     assert not _CASE_FLAG_REJECTED
@@ -262,8 +256,7 @@ def test_a_bad_case_id_is_not_recorded_as_a_rejection_of_the_flag(tmp_path):
 
 
 def test_a_declared_case_the_flag_still_refused_does_memoise(tmp_path):
-    """The other side of the same evidence: the case came back in the suite, so
-    the argument was satisfiable and the parser is what would not take it."""
+    """The other side of the same evidence: the case came back in the suite, so"""
     driver, tally = _counting_driver(tmp_path, _FLAG_REJECTING_DRIVER)
     assert _sweep(driver)["success"]
     assert list(_CASE_FLAG_REJECTED.values()) == [True]
@@ -466,9 +459,8 @@ print("case_ms: sq64 0.500000")
 # ---------- knobs the source named first ------------------------------------
 
 
-# The knob one competing agent flipped to win a benchmark: read by the source
-# under its own name, and no more likely to print forge's echo than any other
-# third-party constant.
+# The knob one competing agent flipped to win a benchmark: read by the source under its own name, and no more likely
+# to print forge's echo than any other third-party constant.
 _THIRD_PARTY_KNOB = "GPTOSS_SWIGLU_MXFP4_BF16_BOUND"
 
 
@@ -621,9 +613,7 @@ print("case_ms: sq64 0.500000")
     ],
 )
 def test_a_verbatim_sweep_cannot_move_the_cache_or_change_the_compiler(tmp_path, name):
-    """Same class as the device and toolchain names already refused: each of
-    these makes the probe compile, or compile against, something other than
-    what the gate will read, so the number would not describe this source."""
+    """Same class as the device and toolchain names already refused: each of"""
     marker = tmp_path / "ran.txt"
     driver = _driver(
         tmp_path,
@@ -642,9 +632,7 @@ print("case_ms: sq64 0.500000")
 
 @pytest.mark.parametrize("name", ["HSA_XNACK", "AMD_SERIALIZE_KERNEL", "TRITON_DEBUG"])
 def test_the_open_tuning_families_stay_sweepable_verbatim(tmp_path, name):
-    """The reserved list must not swallow the knobs a sweep exists to vary: a
-    runtime tuning variable changes how the source runs, which is the question,
-    not what the source is."""
+    """The reserved list must not swallow the knobs a sweep exists to vary: a"""
     driver = _driver(
         tmp_path,
         f"""

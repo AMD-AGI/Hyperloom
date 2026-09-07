@@ -1,8 +1,4 @@
-"""Coverage tests for tuning_db read/query logic.
-
-Persistence is disabled (_TUNING_DB_WRITE_ENABLED=False), so log() is a no-op.
-These tests seed the on-disk files directly to exercise the read/query paths.
-"""
+"""Coverage tests for tuning_db read/query logic."""
 
 from __future__ import annotations
 
@@ -248,8 +244,8 @@ def test_add_transfer_rule_new_and_update(tmp_path):
     db.add_transfer_rule(
         rule_id="r1", description="first", scope="all", parameter="wpe", recommended_value=2, evidence=["e1", "e2"]
     )
-    # Writes are disabled, so nothing persisted; seed the existing rule and
-    # verify the update branch merges evidence/confidence in memory.
+    # Writes are disabled, so nothing persisted; seed the existing rule and verify the update branch merges
+    # evidence/confidence in memory.
     _seed_rules(
         db,
         [

@@ -95,10 +95,7 @@ class _NoopEvolver:
         return {}
 
 
-# The stand-in for "budget is not what this test is about". It has to clear the
-# round admission guard, which prices a whole round -- planning, a session worth
-# starting, the canonical measurement and the finalize reserve -- so a value near
-# the reserve itself would silently turn these tests into admission tests.
+# The stand-in for "budget is not what this test is about".
 _AMPLE_BUDGET_SEC = 12 * 3600.0
 
 
@@ -352,17 +349,10 @@ def test_a_near_miss_is_pinned_so_the_retrieval_map_points_at_it(
     tmp_path,
     monkeypatch,
 ):
-    """A gain the KEEP gate rejected is still the best lead the run has.
-
-    ``REVERT_PERF`` covers both a regression and a real gain that landed in the
-    band between the incumbent and the accept threshold. The long-horizon prompt
-    carries a retrieval map instead of the candidate diffs, and only KEEPs were
-    ever pinned, so the most promising rejected work sat in the archive with
-    nothing pointing at it and was re-derived from scratch.
-    """
+    """A gain the KEEP gate rejected is still the best lead the run has."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
-    # A real 0.5% gain on every measurement, but spread widely enough that its
-    # mean does not clear the t bound on its own scatter.
+    # A real 0.5% gain on every measurement, but spread widely enough that its mean does not clear the t bound on its
+    # own scatter.
     scores = [1.00100, 1.00520, 1.00950]
 
     assert not passes_keep_threshold(scores, best_mean_case_speedup=1.0)
@@ -378,13 +368,7 @@ def test_a_near_miss_is_pinned_so_the_retrieval_map_points_at_it(
 
 
 def test_a_regression_is_not_pinned(tmp_path, monkeypatch):
-    """The other half of the split: a candidate that lost is not a lead.
-
-    The absence of a pin is the whole verdict. A failed candidate is
-    deliberately not recorded as a spent direction anywhere else either: it does
-    not become a permanent search constraint, and the trajectory already carries
-    what happened as fact.
-    """
+    """The other half of the split: a candidate that lost is not a lead."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
 
     loop._record_iteration_outcome(
@@ -400,13 +384,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
     tmp_path,
     monkeypatch,
 ):
-    """The pin the retrieval map is built around outlives later near-misses.
-
-    Near-misses are pinned into the same list as the KEEP behind the current
-    best, and a run produces far more of them than KEEPs, so eviction purely by
-    age drops the best lineage after eight later pins. It is only released once
-    another KEEP takes its place.
-    """
+    """The pin the retrieval map is built around outlives later near-misses."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
     loop.run_state.best = BestRecord(
         iteration=3,
@@ -448,18 +426,7 @@ def _empty_diff(iteration):
 
 
 def test_a_new_search_mode_starts_its_own_empty_diff_streak(tmp_path, monkeypatch):
-    """Two empty diffs escalate the search, so the count is per search mode.
-
-    Counting over iterations instead means that once the streak is at the
-    threshold every later attempt is escalated away on its first empty diff, on
-    one datum -- and the attempt hit hardest is the diversification the previous
-    escalation just forced.
-
-    Every outcome here records the same ``plan``, so a reset can only come from
-    the mode. That is the pairing this test exists for: the end-to-end case
-    proves one mode keeps counting across reworded headlines, and this one proves
-    a mode change resets even when the headline does not change.
-    """
+    """Two empty diffs escalate the search, so the count is per search mode."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
     headline = "rewrite the reduction with warp shuffles"
 
@@ -492,14 +459,7 @@ def test_a_new_search_mode_starts_its_own_empty_diff_streak(tmp_path, monkeypatc
 
 
 def _stackable_workspace(loop, workspace, *, candidates=2):
-    """Archive rejected gains whose diffs touch well-separated parts of the kernel.
-
-    Each candidate wins one case and loses the other, alternating, so any two of
-    opposite parity are mutually complementary and the field of selectable pairs
-    grows as the square of the count -- which is what a streak draws on. The
-    lines are further apart than a diff hunk carries context, so any two of the
-    patches apply over each other.
-    """
+    """Archive rejected gains whose diffs touch well-separated parts of the kernel."""
     edits = (
         (0, "line_0 = 0", "line_0 = 100", "prefill"),
         (11, "line_11 = 11", "line_11 = 111", "decode"),
@@ -591,14 +551,7 @@ def _recording_lane_factory(seen):
 
 
 async def test_a_lane_is_told_to_run_the_serialized_driver(tmp_path, monkeypatch):
-    """A lane that ran the driver itself would time against its own siblings.
-
-    The lock lives in the wrapper, so the round has to hand it to the factory --
-    which installs it as the command the lane's own instructions name -- and the
-    plan has to explain the wait it causes, which those instructions cannot know
-    about. The plan the archive records stays the direction the lane was
-    assigned, without either wrapped around it.
-    """
+    """A lane that ran the driver itself would time against its own siblings."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
     seen: list[dict] = []
 
@@ -727,14 +680,7 @@ def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=Fal
 
 
 def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
-    """One real fan-out iteration, run for what its fallback path costs.
-
-    Every way a fan-out round ends with an empty queue hands the iteration to
-    the ordinary single-session path, which plans for itself. Planning is
-    dispatch plus every specialist plus synthesis -- the most expensive thing an
-    iteration buys -- so what these tests read off ``rounds`` is how many times
-    one iteration bought it.
-    """
+    """One real fan-out iteration, run for what its fallback path costs."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, lanes=2)
     monkeypatch.setattr(loop, "_run_orchestration", _counting_plan(loop, workspace, rounds, **plan_kwargs))
@@ -755,12 +701,7 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
 
 
 def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
-    """Retrying an outage inside the iteration it stopped cannot clear it.
-
-    The backend that just refused the fan-out round is the backend the fallback
-    path would ask, moments later, for the same round -- so the iteration pays
-    twice and trips the orchestration circuit breaker twice for one outage.
-    """
+    """Retrying an outage inside the iteration it stopped cannot clear it."""
     rounds: list[int] = []
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds, unavailable=True)
@@ -795,13 +736,7 @@ def test_lanes_that_produced_nothing_do_not_buy_the_round_again(tmp_path, monkey
 
 
 def test_candidates_refused_at_intake_do_not_buy_the_round_again(tmp_path, monkeypatch, capsys):
-    """The one path where every lane produced something and none of it counts.
-
-    A candidate refused at the boundary has already cost its own session, and
-    the round it came from has already cost the planning. Both are spent before
-    the refusal is known, so charging the same iteration for a second round
-    would answer a candidate that must not be measured by buying another one.
-    """
+    """The one path where every lane produced something and none of it counts."""
     rounds: list[int] = []
     tampered = "--- a/driver.py\n+++ b/driver.py\n@@ -1 +1 @@\n-pass\n+print('tampered')\n"
 
@@ -817,8 +752,8 @@ def test_candidates_refused_at_intake_do_not_buy_the_round_again(tmp_path, monke
 
     assert rounds == [2]
     assert decisions == ["NO_CHANGES"]
-    # Pin the path: both candidates were refused, not merely unmeasurable for
-    # some other reason that would reach the same iteration count.
+    # Pin the path: both candidates were refused, not merely unmeasurable for some other reason that would reach the
+    # same iteration count.
     output = capsys.readouterr().out
     assert output.count("candidate rejected") == 2
     assert "driver.py" in output
@@ -840,12 +775,7 @@ def test_a_lane_infrastructure_failure_does_not_buy_the_round_again(tmp_path, mo
 
 
 def _seed_round_costs(workspace, *, planning_sec, lanes=3, rounds=2):
-    """A campaign resumed with a durable record of what its rounds have cost.
-
-    Observed cost only exists on a campaign that has run, so these tests resume
-    one -- which is also the shape the guard matters most in, since the rounds
-    that were killed in production were the last ones of a long run.
-    """
+    """A campaign resumed with a durable record of what its rounds have cost."""
     subprocess.run(
         ["git", "checkout", "-b", "test-loop"],
         cwd=workspace,
@@ -894,9 +824,8 @@ def _round_admission_loop(
         "_run_orchestration",
         _counting_plan(loop, workspace, rounds),
     )
-    # One round is all these tests need to see admitted, narrowed or refused;
-    # the second is starved so the campaign ends on the older reserve guard
-    # rather than on the one under test.
+    # One round is all these tests need to see admitted, narrowed or refused; the second is starved so the campaign
+    # ends on the older reserve guard rather than on the one under test.
     monkeypatch.setattr(
         loop,
         "_time_remaining",
@@ -931,9 +860,8 @@ def test_a_round_the_budget_can_finish_is_admitted_unchanged(tmp_path, monkeypat
 def test_a_round_the_budget_cannot_finish_narrows_instead_of_starting(tmp_path, monkeypatch):
     """A narrower round is worth more than a wide one that is killed halfway."""
     rounds: list[int] = []
-    # A minute more than the single-lane round -- whose planning bound is the
-    # seeded three-lane round less the two plan reads the Critic is spared --
-    # and well short of what two lanes would cost.
+    # A minute more than the single-lane round -- whose planning bound is the seeded three-lane round less the two
+    # plan reads the Critic is spared -- and well short of what two lanes would cost.
     remaining = 2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC + ADMISSION_SESSION_SEC + FIRST_ROUND_MEASUREMENT_SEC + 60.0
 
     loop, _ = _round_admission_loop(
@@ -981,10 +909,7 @@ def test_a_refused_round_is_reported_as_a_refusal_not_as_an_empty_round(tmp_path
     assert loop._round_budget_summary()["refused"]
 
 
-# What an earlier session of the campaign already banked: 45 minutes of
-# planning inside 50 minutes of wall-clock. The session under test then runs
-# for seconds, which is the whole point -- the numerator outlives the process,
-# the process clock does not.
+# What an earlier session of the campaign already banked: 45 minutes of planning inside 50 minutes of wall-clock.
 _BANKED_PLANNING_SEC = 45.0 * 60.0
 _BANKED_CAMPAIGN_SEC = 50.0 * 60.0
 
@@ -994,17 +919,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
     monkeypatch,
     capsys,
 ):
-    """The reviewer's reproduction, in the case the feature was built for.
-
-    ``round_costs.planning_total_sec`` is campaign-cumulative and survives
-    across sessions; this process's wall-clock does not. Divided one by the
-    other, a resumed session running minutes against 45 cumulative minutes of
-    planning published a share of several hundred percent -- in the operator
-    summary and in ``optimization_report.md``'s ``Round Budget`` section.
-
-    The share must be a share: bounded by 100, and equal to the division of the
-    two numbers published beside it, both of which measure the campaign.
-    """
+    """The reviewer's reproduction, in the case the feature was built for."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
     subprocess.run(
         ["git", "checkout", "-b", "test-loop"],
@@ -1032,8 +947,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
             ),
         )
     )
-    # One iteration, then out -- so this session's own clock stays far below
-    # the planning it inherited.
+    # One iteration, then out -- so this session's own clock stays far below the planning it inherited.
     monkeypatch.setattr(
         loop,
         "_time_remaining",
@@ -1044,8 +958,8 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
 
     summary = loop._round_budget_summary()
     share = summary["planning_share_pct"]
-    # The banked planning is still there, and the campaign clock now covers it
-    # rather than being replaced by this session's few seconds.
+    # The banked planning is still there, and the campaign clock now covers it rather than being replaced by this
+    # session's few seconds.
     assert summary["planning_total_sec"] == pytest.approx(_BANKED_PLANNING_SEC)
     assert summary["campaign_sec"] >= _BANKED_CAMPAIGN_SEC
     assert 0 < share <= 100.0
@@ -1054,9 +968,8 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
         abs=0.05,
     )
 
-    # The operator summary -- the line that printed "450% of the run" -- and
-    # the published report both say it about the campaign now, and both stay
-    # inside 100.
+    # The operator summary -- the line that printed "450% of the run" -- and the published report both say it about
+    # the campaign now, and both stay inside 100.
     printed = next(
         line for line in capsys.readouterr().out.splitlines() if "Rounds planned across the campaign" in line
     )
@@ -1067,8 +980,8 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
     assert f"- Planning share of campaign wall-clock: {share:.0f}%" in report
     assert f"- Campaign wall-clock: {summary['campaign_sec'] / 60:.1f} min" in report
 
-    # And the campaign clock is durable, so the NEXT session inherits a span
-    # that still covers the planning inside it rather than starting over.
+    # And the campaign clock is durable, so the NEXT session inherits a span that still covers the planning inside it
+    # rather than starting over.
     reloaded = LoopStateStore(str(workspace)).load().round_costs
     assert reloaded.campaign_sec >= reloaded.planning_total_sec
     assert 0 < reloaded.planning_share_pct() <= 100.0
@@ -1229,11 +1142,7 @@ def test_a_lane_candidate_that_edits_the_driver_never_reaches_the_tree(
     monkeypatch,
     capsys,
 ):
-    """The driver is the measurement boundary; a lane session has no gate at all.
-
-    Lanes run with the in-session gate off, so no protected-path hook is
-    installed, and a lane's diff carries every tracked modification it made.
-    """
+    """The driver is the measurement boundary; a lane session has no gate at all."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     driver = workspace / "driver.py"
     canonical = driver.read_text()
@@ -1279,9 +1188,7 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
     monkeypatch,
     capsys,
 ):
-    """Defence in depth: a bypass the protected-path rule missed still cannot
-    reach a measurement, and the tree is returned to canonical before the next
-    candidate inherits it."""
+    """Defence in depth: a bypass the protected-path rule missed still cannot"""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     driver = workspace / "driver.py"
     loop.ic = replace(
@@ -1331,15 +1238,7 @@ def test_a_queued_candidate_survives_a_keep_that_only_moved_its_context(
     tmp_path,
     monkeypatch,
 ):
-    """A sibling's KEEP must not discard a session over a textual near-miss.
-
-    A round's lanes are partitioned so that no two edit the same code, but a
-    hunk is located by the lines around it, so a KEEP three lines away moves
-    the context out from under a candidate that changed nothing it touched.
-    The diff names the blobs it was written against and the lane copies share
-    the canonical object store, so it is merged against them rather than being
-    dropped for a mismatch that is not a disagreement.
-    """
+    """A sibling's KEEP must not discard a session over a textual near-miss."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     kernel = workspace / "kernel.py"
     kernel.write_text("def kernel():\n    a = 1\n    b = 2\n    c = 3\n    y = 4\n    d = 5\n    e = 6\n    return y\n")
@@ -1375,11 +1274,7 @@ def test_a_queued_candidate_that_edits_the_same_lines_is_still_dropped(
     tmp_path,
     monkeypatch,
 ):
-    """Merging against the recorded blobs must not become a way to guess.
-
-    Two edits to the same line are a disagreement, not a moved context, and
-    resolving one would measure a tree no plan describes.
-    """
+    """Merging against the recorded blobs must not become a way to guess."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     kernel = workspace / "kernel.py"
     kernel.write_text("def kernel():\n    y = 4\n    return y\n")
@@ -1409,11 +1304,7 @@ def test_a_queued_candidate_that_edits_the_same_lines_is_still_dropped(
 
 
 def test_a_stalled_run_stacks_two_rejected_gains(tmp_path, monkeypatch):
-    """The cheapest thing to try once single patches stop clearing the gate.
-
-    Neither candidate passed alone, they win on different cases, and stacking
-    them spends a measurement but no Implementer session.
-    """
+    """The cheapest thing to try once single patches stop clearing the gate."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0}
     loop._best_case_times = {"prefill": 1.0, "decode": 1.0}
@@ -1435,17 +1326,7 @@ def test_a_stalled_run_stacks_two_rejected_gains(tmp_path, monkeypatch):
 
 
 def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, monkeypatch):
-    """The round's plan has only one consumer, and a stack is not it.
-
-    A fan-out round can come back with an empty queue while still holding the
-    plan it bought -- one lane plan, a dispatch the budget refused, a lane
-    failure -- and the queue being empty is exactly the condition that lets a
-    stack take the iteration. A stacked iteration records a result, which is
-    what stops the next process from recovering the round, so planning
-    (dispatch, every specialist, synthesis) would be paid for and thrown away.
-    The stall that selected the pair is untouched by spending the plan, so the
-    attempt is deferred, not lost.
-    """
+    """The round's plan has only one consumer, and a stack is not it."""
     cases = {"prefill": 1.0, "decode": 1.0}
     loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True, baseline_case_times=cases)
     loop.ic = replace(loop.ic, lanes=2)
@@ -1493,20 +1374,13 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
     # One round planned, and the iteration spent it rather than buying another.
     assert rounds == [2]
     assert [e.get("decision") for e in events if e["type"] == "iteration_result"] == ["NO_CHANGES"]
-    # Two things at once: the pair and the stall the branch needs were both in
-    # place -- so the assertions above are about precedence, not about a stack
-    # that could never have formed -- and the attempt is deferred, not retired.
+    # Two things at once: the pair and the stall the branch needs were both in place -- so the assertions above are
+    # about precedence, not about a stack that could never have formed -- and the attempt is deferred, not retired.
     assert loop._select_merge_attempt() is not None
 
 
 def _three_candidate_workspace(loop, workspace):
-    """Archive three rejected gains: the best pair clashes, the runner-up does not.
-
-    Iterations 1 and 2 rewrite the same line to different values, so they cover
-    the most cases between them and cannot both be applied. Iteration 3 wins one
-    of the same cases as 2 from the other end of the file, so (1, 3) is the pair
-    left once (1, 2) is out and it stages cleanly.
-    """
+    """Archive three rejected gains: the best pair clashes, the runner-up does not."""
     loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
     kernel = workspace / "kernel.py"
     kernel.write_text("\n".join(f"line_{n} = {n}" for n in range(12)) + "\n")
@@ -1557,14 +1431,7 @@ def _three_candidate_workspace(loop, workspace):
 
 
 def test_a_pair_that_would_not_stage_is_not_selected_again(tmp_path, monkeypatch):
-    """A textual clash between two archived diffs is the same clash next stall.
-
-    The selector returns the pair covering the most cases, so a decline the run
-    does not remember wins every later selection, fails identically, and blocks
-    the runner-up that would have staged for the rest of the campaign. Nothing
-    in the archive records it: a pair that never reached a measurement is never
-    archived.
-    """
+    """A textual clash between two archived diffs is the same clash next stall."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0, "mixed": 1.0}
     loop._best_case_times = {"prefill": 1.0, "decode": 1.0, "mixed": 1.0}
@@ -1608,14 +1475,7 @@ def test_a_tree_that_carried_work_does_not_retire_the_pair(tmp_path, monkeypatch
 
 
 def test_a_streak_refusal_does_not_retire_the_pair(tmp_path, monkeypatch):
-    """The other obstacle that is a fact about the iteration, not about the pair.
-
-    A refusal is ruled on before ``_stage_merge_attempt`` runs, so the pair's
-    diffs are never read, let alone applied to each other -- there is no verdict
-    on them to remember. Remembering one anyway turns the streak limit from a
-    deferral into a drop, and costs the campaign a measurement that nothing was
-    ever wrong with.
-    """
+    """The other obstacle that is a fact about the iteration, not about the pair."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0, "mixed": 1.0}
     loop._best_case_times = {"prefill": 1.0, "decode": 1.0, "mixed": 1.0}
@@ -1629,9 +1489,8 @@ def test_a_streak_refusal_does_not_retire_the_pair(tmp_path, monkeypatch):
 
     loop._decline_merge_attempt(4, pair, refusal, about_the_iteration=True)
 
-    # Reported, because a selected pair that reached no measurement is not the
-    # same event as no pair at all -- and still selectable, because the report
-    # was about the iteration.
+    # Reported, because a selected pair that reached no measurement is not the same event as no pair at all -- and
+    # still selectable, because the report was about the iteration.
     assert [
         (item["obstacle"], item["first_iteration"], item["second_iteration"])
         for item in LoopStateStore(str(workspace)).read_events()
@@ -1644,12 +1503,7 @@ def test_a_streak_refusal_does_not_retire_the_pair(tmp_path, monkeypatch):
 
 
 def test_an_archive_that_lost_a_diff_says_so_and_does_not_claim_a_conflict(tmp_path, monkeypatch):
-    """A missing entry and a clashing patch ask for opposite responses.
-
-    A clash is a fact about two candidates and says the archive is working. An
-    entry the archive cannot produce says it lost a candidate it claims to hold,
-    which the retrieval map and every resumed run are also reading.
-    """
+    """A missing entry and a clashing patch ask for opposite responses."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0}
     loop._best_case_times = {"prefill": 1.0, "decode": 1.0}
@@ -1666,11 +1520,7 @@ def test_an_archive_that_lost_a_diff_says_so_and_does_not_claim_a_conflict(tmp_p
 
 
 def test_stacking_can_be_turned_off(tmp_path, monkeypatch):
-    """It changes what the ordinary single-session path does at every --lanes.
-
-    An operator comparing against a run that predates it needs the older
-    behaviour back, and no amount of stall state should reach it.
-    """
+    """It changes what the ordinary single-session path does at every --lanes."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, merge_stacking=False)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0}
@@ -1682,13 +1532,7 @@ def test_stacking_can_be_turned_off(tmp_path, monkeypatch):
 
 
 def test_stacking_never_discards_work_it_did_not_stage(tmp_path, monkeypatch):
-    """Returning to canonical takes every tracked edit, not just the staged ones.
-
-    Two patches that clash send the tree back to HEAD, which would delete an
-    edit that was already there. The loop should reach this on a clean tree, but
-    that is an invariant of earlier paths -- a stacking attempt must not enforce
-    it by destroying the evidence that it was broken.
-    """
+    """Returning to canonical takes every tracked edit, not just the staged ones."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0}
     loop._best_case_times = {"prefill": 1.0, "decode": 1.0}
@@ -1709,13 +1553,7 @@ def test_stacking_never_discards_work_it_did_not_stage(tmp_path, monkeypatch):
 
 
 def test_a_supervisor_intervention_does_not_retire_a_stack_worth_measuring(tmp_path, monkeypatch):
-    """The stall a stack answers to is the one only a KEEP clears.
-
-    A memo redirects the next Implementer session; it does not measure the two
-    complementary gains already sitting in the archive. Gating on the cooldown
-    counter meant each of the 37 interventions across the 2026-08 archives
-    silently retired a stall this mechanism was written for.
-    """
+    """The stall a stack answers to is the one only a KEEP clears."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._baseline_case_times = {"prefill": 1.0, "decode": 1.0}
     loop._best_case_times = {"prefill": 1.0, "decode": 1.0}
@@ -1789,14 +1627,7 @@ def _stalled_loop_behind_a_full_queue(
 
 
 async def _reverting_iteration(_iteration, **_kwargs):
-    """A candidate that measured cleanly and the KEEP gate turned down.
-
-    Which is the outcome a stacked attempt has to have for a streak to be
-    possible at all: it leaves ``unresolved_stall_iters`` higher than it found
-    it. An ``IterationResult`` the constructor rejects would be caught by the
-    loop's own crash guard and archived as a CRASH instead, which is a
-    different decision on a different path.
-    """
+    """A candidate that measured cleanly and the KEEP gate turned down."""
     return IterationResult(
         iteration=_iteration,
         duration_sec=0.0,
@@ -1808,15 +1639,7 @@ async def _reverting_iteration(_iteration, **_kwargs):
 
 
 def test_a_queue_that_never_empties_does_not_starve_stacking(tmp_path, monkeypatch):
-    """The queue holds the iteration only while it is still the thing working.
-
-    A fan-out round refills whenever the queue drains, so on the thirty archived
-    runs of 2026-08-22 and 08-23 a candidate was waiting on 409 of 549
-    iterations. Deferring to that unconditionally is a gate stacking can never
-    pass, and the mechanism ran 5 times on archives holding 20 pairs. Once the
-    run is as stalled as a stack requires, the queue yields -- and it yields the
-    iteration, not the candidates, which are still queued afterwards.
-    """
+    """The queue holds the iteration only while it is still the thing working."""
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
@@ -1827,9 +1650,8 @@ def test_a_queue_that_never_empties_does_not_starve_stacking(tmp_path, monkeypat
     precedence = [item for item in events if item.get("type") == "merge_took_precedence"]
 
     assert len(staged) == 1
-    # The two counts answer different questions and the second cannot be read
-    # off the first: how often a stack was measured, and how often one went
-    # ahead of a candidate already paid for.
+    # The two counts answer different questions and the second cannot be read off the first: how often a stack was
+    # measured, and how often one went ahead of a candidate already paid for.
     assert len(precedence) == 1
     assert precedence[0]["lane_queue_depth"] == 2
     assert precedence[0]["unresolved_stall_iters"] == MERGE_ATTEMPT_STALL_THRESHOLD
@@ -1837,12 +1659,7 @@ def test_a_queue_that_never_empties_does_not_starve_stacking(tmp_path, monkeypat
 
 
 def test_a_fresh_run_still_measures_the_candidates_it_bought(tmp_path, monkeypatch):
-    """Precedence is the stall's, not stacking's.
-
-    A queued candidate is kept 55.1% of the time while the search is still
-    producing and 33.7% from the stall threshold on; the first of those numbers
-    is why the queue keeps the iteration until the run has stopped resolving.
-    """
+    """Precedence is the stall's, not stacking's."""
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, stall=MERGE_ATTEMPT_STALL_THRESHOLD - 1)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
@@ -1855,13 +1672,7 @@ def test_a_fresh_run_still_measures_the_candidates_it_bought(tmp_path, monkeypat
 
 
 def test_taking_precedence_and_failing_to_stage_costs_the_queue_nothing(tmp_path, monkeypatch):
-    """A stack that cannot be built is not a turn anyone spent.
-
-    The obstacle is still reported -- a selected pair that reaches no
-    measurement is the failure this mechanism's counters exist to expose -- and
-    the candidate that would have been displaced is measured by the same
-    iteration, so nothing counts as displaced that was not.
-    """
+    """A stack that cannot be built is not a turn anyone spent."""
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(
         loop,
@@ -1894,34 +1705,14 @@ def _longest_consecutive_run(iterations):
 
 
 def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch):
-    """A stall the archive keeps answering is not a licence to hold the loop.
-
-    A stacked attempt reverts, so it leaves ``unresolved_stall_iters`` higher
-    than it found it, and it drains nothing, so nothing about having run one
-    makes the next one less likely. The pairs give out eventually -- the stack
-    a streak archives carries the stacking prefix and ``eligible_candidates``
-    skips it, so the pool is frozen while the streak spends it -- but only
-    after as many iterations as the pool has pairs, which goes as the square of
-    the pool. The queue-empty branch is where the next round is priced, so a
-    streak that runs that long is a campaign that never asks whether it can
-    still afford one.
-
-    Four archived gains offer four complementary pairs here, which is enough
-    to hold two lane candidates for four iterations. What the limit must do to
-    them is defer, not drop: all four are still measured, in streaks of at most
-    two, and the iteration the limit takes back goes to the queue.
-    """
+    """A stall the archive keeps answering is not a licence to hold the loop."""
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, candidates=4, iterations=5)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
     asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
-    # Each of those iterations has to have reached the KEEP gate and been
-    # turned down there, because that is the outcome that leaves the stall
-    # standing and lets the next stack be selected. An iteration that raises
-    # instead is caught by the loop's own crash guard and archived as a CRASH,
-    # which leaves the merge events below asserting over a streak driven by a
-    # different decision on a different path.
+    # Each of those iterations has to have reached the KEEP gate and been turned down there, because that is the
+    # outcome that leaves the stall standing and lets the next stack be selected.
     assert [result.crashed for result in loop.results] == [False] * 5
 
     events = LoopStateStore(str(workspace)).read_events()
@@ -1929,11 +1720,10 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
     precedence = [item for item in events if item.get("type") == "merge_took_precedence"]
 
     assert _longest_consecutive_run(staged) == MERGE_PRECEDENCE_STREAK_LIMIT
-    # The limit defers a pair rather than refusing it: all four are still
-    # measured inside these five iterations.
+    # The limit defers a pair rather than refusing it: all four are still measured inside these five iterations.
     assert len(staged) == 4
-    # And the iteration the limit took back went to the queue, which is one
-    # shallower for the last two stacks than it was for the first two.
+    # And the iteration the limit took back went to the queue, which is one shallower for the last two stacks than it
+    # was for the first two.
     assert [item["lane_queue_depth"] for item in precedence] == [2, 2, 1, 1]
     assert [(item["iter"], item["obstacle"]) for item in events if item.get("type") == "merge_attempt_declined"] == [
         (
@@ -1944,16 +1734,7 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
 
 
 def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
-    """The queue's length is not the number of measurements a stack displaces.
-
-    ``_take_lane_candidate`` returns a single candidate, and only after
-    ``_next_lane_candidate`` has dropped every entry that would move the
-    measurement surface or whose diff no longer applies. So a stack goes ahead
-    of at most one measurement and possibly none, and which it is cannot be
-    known without popping the queue and writing the tree. Here one of the three
-    entries could never have been measured at all and one is still queued when
-    the run ends, against a recorded depth of three.
-    """
+    """The queue's length is not the number of measurements a stack displaces."""
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, iterations=2)
     loop._lane_queue.insert(
         0,
@@ -1978,12 +1759,7 @@ def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
 
 
 def test_an_unscored_candidate_is_not_pinned(tmp_path, monkeypatch):
-    """A candidate that measured nothing cannot claim to have beaten anything.
-
-    The pin gate reads the KEEP score, so a missing one has to fail
-    closed. Reading it as a gain would point the retrieval map at work that was
-    never shown to be worth re-reading.
-    """
+    """A candidate that measured nothing cannot claim to have beaten anything."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
 
     recorded = loop._record_iteration_outcome(
@@ -2000,12 +1776,7 @@ def test_gain_over_pristine_is_pinned_before_the_first_keep(
     tmp_path,
     monkeypatch,
 ):
-    """A missing incumbent is the pristine 1.0, matching the KEEP gate.
-
-    Reading it as "no gain is possible" would lose every near miss of the
-    cold-start iterations, where a real gain over pristine is necessarily still
-    below the threshold.
-    """
+    """A missing incumbent is the pristine 1.0, matching the KEEP gate."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
     loop.best_mean_case_speedup = None
 
@@ -2023,12 +1794,7 @@ def test_a_regression_before_the_first_keep_is_not_pinned(
     tmp_path,
     monkeypatch,
 ):
-    """The pristine fallback is a real bar, not a waiver.
-
-    Paired with the test above: together they show a missing incumbent is read
-    as 1.0 rather than as "anything qualifies", which would pin every cold-start
-    candidate including the ones slower than the kernel they started from.
-    """
+    """The pristine fallback is a real bar, not a waiver."""
     loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
     loop.best_mean_case_speedup = None
 
@@ -2141,29 +1907,15 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
     monkeypatch,
     capsys,
 ):
-    """The relationship ``budget_reserve_sec``'s defining comment states.
-
-    That comment once said a round is admitted only when what remains covers
-    its estimated cost ON TOP of the reserve. The code has never done that:
-    both admission checks are handed ``_time_remaining()`` with nothing
-    subtracted, so the reserve and a round's own requirement are two
-    independent lower bounds and the larger of them binds -- ``max``, not a
-    sum. That is deliberate, because the reserve is already withheld once by
-    ``_is_budget_exhausted()`` and charging it again inside a round's cost
-    refused rounds that went on to produce a KEEP.
-
-    Pinned here so the comment cannot drift away from the code again in either
-    direction: subtracting the reserve at either call site, or stacking it into
-    a requirement, fails this test.
-    """
+    """The relationship ``budget_reserve_sec``'s defining comment states."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, lanes=3)
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState()
     reserve = float(loop.ic.budget_reserve_sec)
 
-    # A campaign with no round of its own, so both requirements are the
-    # constants and this test reads them rather than restating them.
+    # A campaign with no round of its own, so both requirements are the constants and this test reads them rather than
+    # restating them.
     no_history: list = []
     admission_required = admit_round(
         remaining_sec=0.0,
@@ -2199,20 +1951,17 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
     assert loop._admit_next_round(1) == 3
     assert loop._admit_dispatch(1) is True
     assert loop._is_budget_exhausted() is False
-    # Both checks priced the round against the UNRESERVED remaining time. A
-    # reserve subtracted at either call site shows up here as a smaller number.
+    # Both checks priced the round against the UNRESERVED remaining time.
     assert seen == [between, between]
 
-    # Each bound refuses on its own, and neither needs the other's help. Above
-    # the round requirement but below the reserve: the round would be
-    # affordable, and the loop still will not start a session.
+    # Each bound refuses on its own, and neither needs the other's help.
     assert dispatch_required < reserve
     monkeypatch.setattr(loop, "_time_remaining", lambda: dispatch_required + 1.0)
     assert loop._admit_dispatch(2) is True
     assert loop._is_budget_exhausted() is True
 
-    # And the other way round: above the reserve but below what the cheapest
-    # round costs, the reserve is satisfied and the round is still refused.
+    # And the other way round: above the reserve but below what the cheapest round costs, the reserve is satisfied and
+    # the round is still refused.
     assert round_required > reserve
     monkeypatch.setattr(loop, "_time_remaining", lambda: reserve + 1.0)
     assert loop._is_budget_exhausted() is False
@@ -2278,8 +2027,8 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._last_pmc_full = ""
     loop.evolver = SimpleNamespace(on_benchmark=lambda **_kwargs: None)
     loop.config = SimpleNamespace(gpu_target="gfx942")
-    # No round is open around these iterations, so the measurement they run is
-    # charged to nothing -- which is also what a drain iteration does.
+    # No round is open around these iterations, so the measurement they run is charged to nothing -- which is also
+    # what a drain iteration does.
     loop._round_started_at = None
     loop._round_measurement_sec = 0.0
     return loop, benchmark_calls
@@ -2342,8 +2091,8 @@ def _faster_bench(candidate_ms=1.0 / 1.05):
 
 
 def _canonical_workspace(tmp_path, command: str) -> Path:
-    # The arena fails a task that declares no compile_command, so the gate needs
-    # a Step 1 that passes before it reaches the correctness command under test.
+    # The arena fails a task that declares no compile_command, so the gate needs a Step 1 that passes before it
+    # reaches the correctness command under test.
     tmp_path.joinpath("config.yaml").write_text(
         yaml.safe_dump(
             {
@@ -2357,12 +2106,7 @@ def _canonical_workspace(tmp_path, command: str) -> Path:
 
 @pytest.mark.asyncio
 async def test_snr_pass_with_failing_canonical_suite_is_reverted(tmp_path, monkeypatch, capsys):
-    """The mla-decode run: 33.4 dB cleared forge's gate, 0.02468 broke the task's.
-
-    The SNR probe passes, the candidate is 5% faster, and the task's own suite
-    rejects it. That candidate must not be kept, and the tolerance it broke --
-    not the dB figure -- has to reach the agent.
-    """
+    """The mla-decode run: 33.4 dB cleared forge's gate, 0.02468 broke the task's."""
     workspace = _canonical_workspace(
         tmp_path,
         "raise AssertionError('normalized max err 0.02468 too high')",
@@ -2413,11 +2157,7 @@ async def test_workspace_declaring_no_correctness_command_cannot_keep(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_workspace_without_a_config_keeps_on_the_snr_verdict_alone(tmp_path, monkeypatch, capsys):
-    """Non-arena runs (flydsl, fusion, the examples) must keep working.
-
-    There is no canonical suite to consult, so the SNR verdict still decides --
-    but the operator is told the KEEP carries nothing else behind it.
-    """
+    """Non-arena runs (flydsl, fusion, the examples) must keep working."""
     loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
 
     result = await loop.run_one_iteration(1)
@@ -2581,14 +2321,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
     tmp_path,
     monkeypatch,
 ):
-    """A leftover process the reaper could not clear is still holding the GPU.
-
-    The session ended, the candidate is on disk, and the benchmark that decides
-    KEEP is about to run against a device something else is using. That number
-    would be this candidate's plus whatever it is sharing the device with, and
-    the loop would act on it -- so the measurement is skipped and the candidate
-    reverted, the same way a protected-integrity violation is handled.
-    """
+    """A leftover process the reaper could not clear is still holding the GPU."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     kernel = workspace / "kernel.py"
     validation_calls: list[int] = []
@@ -2614,8 +2347,8 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
     )
 
     assert validation_calls == []
-    # Unmeasured means unkept: HEAD stays at the last state a benchmark ever
-    # backed, rather than carrying a candidate nobody verified.
+    # Unmeasured means unkept: HEAD stays at the last state a benchmark ever backed, rather than carrying a candidate
+    # nobody verified.
     assert kernel.read_text() == "def kernel():\n    return 1\n"
     assert "4321" in loop.results[0].workspace_contention
     assert loop.results[0].kept is False
@@ -2628,13 +2361,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
 
 
 def _fake_device(monkeypatch, holders: dict[int, int]) -> dict[int, int]:
-    """The device state the hazard re-check reads, without a process on it.
-
-    ``holders`` maps pid to start time for whatever currently has a device node
-    open; mutating it afterwards is how a test frees the device. Both of the
-    reaper's readers are replaced, so nothing here depends on what is really
-    running on the machine the suite is on.
-    """
+    """The device state the hazard re-check reads, without a process on it."""
 
     def _read_proc(pid: int):
         if pid not in holders:
@@ -2659,15 +2386,7 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
     tmp_path,
     monkeypatch,
 ):
-    """The device is not per-lane, so neither is a lane that could not clear it.
-
-    Dropping the contended lane and measuring its healthy sibling is the wrong
-    half of the response: what the lane left running is on the same GPU the
-    canonical benchmark is about to use, so the number the round would take is
-    the sibling's plus whatever is still benching. The round takes no
-    measurement, and the sibling's candidate -- already paid for -- stays queued
-    for an iteration that can measure it.
-    """
+    """The device is not per-lane, so neither is a lane that could not clear it."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, lanes=2)
     rounds: list[int] = []
@@ -2712,21 +2431,13 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
     assert loop.results[0].kept is False
     assert loop.results[0].validation_passed is False
     assert "4321" in loop.results[0].workspace_contention
-    # Refused, not discarded: the healthy lane's session was the expensive part
-    # and its candidate is still worth measuring once the device is free.
+    # Refused, not discarded: the healthy lane's session was the expensive part and its candidate is still worth
+    # measuring once the device is free.
     assert [item.plan for item in loop._lane_queue] == ["tune prefill"]
 
 
 def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
-    """A probe is a benchmark, and the device it holds is not the round's alone.
-
-    A specialist killed by its session timeout mid-probe leaves a process on the
-    same GPU the canonical measurement is about to use. The lanes queue behind
-    it on the campaign sentinel; the canonical measurement takes no lock and
-    would have run straight into it. So the analysis phase's teardown finding
-    becomes a hazard exactly as a contended lane's does, and the round it
-    belongs to measures nothing.
-    """
+    """A probe is a benchmark, and the device it holds is not the round's alone."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, lanes=2)
     loop.config = SimpleNamespace(
@@ -2774,20 +2485,13 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
     assert loop.results[0].validation_passed is False
     assert "4321" in loop.results[0].workspace_contention
     assert "probe round" in loop.results[0].workspace_contention
-    # Bought and kept: the lane sessions were the expensive part, and their
-    # candidates are still worth measuring once the device is free.
+    # Bought and kept: the lane sessions were the expensive part, and their candidates are still worth measuring once
+    # the device is free.
     assert [item.plan for item in loop._lane_queue] == ["tune prefill"]
 
 
 def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
-    """Nothing about an iteration ending makes a foreign process let go.
-
-    The first iteration refuses because the reaper said so. The second has no
-    reaper finding of its own -- it never ran a session -- and must still refuse
-    while the device is held, then run as usual once it is free. Both
-    directions, decided by the device rather than by how many iterations have
-    passed.
-    """
+    """Nothing about an iteration ending makes a foreign process let go."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
     holders = _fake_device(monkeypatch, {4321: 99})
     monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
@@ -2830,12 +2534,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     tmp_path,
     monkeypatch,
 ):
-    """A foreign process may hold the device for the rest of the campaign.
-
-    Retrying until the budget runs out spends a whole run producing nothing
-    while reporting nothing wrong, which is no better than the bad measurement
-    the refusal exists to prevent. The run ends under a reason of its own.
-    """
+    """A foreign process may hold the device for the rest of the campaign."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=20)
     _fake_device(monkeypatch, {4321: 99})
     monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
@@ -2855,18 +2554,13 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
 
     assert loop.termination_reason == "device_contended"
     assert set(decisions) == {"REVERT_CONTENDED"}
-    # The iteration that found it plus the ones it refused after: the re-check
-    # that exhausts the hazard runs before that iteration spends anything, so
-    # the run stops there rather than filing one more unmeasured result.
+    # The iteration that found it plus the ones it refused after: the re-check that exhausts the hazard runs before
+    # that iteration spends anything, so the run stops there rather than filing one more unmeasured result.
     assert len(decisions) == MAX_BLOCKED_ITERATIONS - 1
 
 
 def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatch):
-    """An outage and a deliberate no-op leave the same empty diff.
-
-    Only the end reason separates them, and recording the outage as NO_CHANGES
-    tells the next Session that the agent looked and chose to change nothing.
-    """
+    """An outage and a deliberate no-op leave the same empty diff."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
     async def api_failed_agent(_kernel_path, _history, session_sink):
@@ -2973,13 +2667,7 @@ def test_orchestration_context_publishes_the_campaign_editable_sources(
     tmp_path,
     monkeypatch,
 ):
-    """The campaign's declared source set reaches the planner verbatim.
-
-    ``campaign.source_files`` is ``[kernel, *sources]`` de-duplicated, so entry 0
-    is the primary kernel path and the rest keep campaign order. Data and config
-    files ride the same list as sources do -- a tuned CSV on that list is an
-    editable file, and the planner has to be told so.
-    """
+    """The campaign's declared source set reaches the planner verbatim."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
     kernel = str((workspace / "kernel.py").resolve())
@@ -3512,14 +3200,7 @@ def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
     tmp_path,
     monkeypatch,
 ):
-    """The mla_decode sequence: three REVERTs, an intervention, then DIVERSIFY.
-
-    While both mechanisms read one counter, the intervention zeroed it and
-    ``_update_search_policy`` read the zero fourteen lines later, so the
-    no-improvement route into DIVERSIFY could never fire: four and seven
-    interventions in the 2026-08-18 batch produced no mode switch at all.
-    Asking for advice and changing search direction are now simultaneous.
-    """
+    """The mla_decode sequence: three REVERTs, an intervention, then DIVERSIFY."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=3)
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState()
@@ -3580,12 +3261,7 @@ def test_a_flat_window_of_keeps_diversifies_a_campaign_that_never_stalled(
     tmp_path,
     monkeypatch,
 ):
-    """Every iteration improved, so nothing else in the policy would fire.
-
-    The stall streak is 0 and stays 0 for as long as the ladder produces any
-    gain at all, which is exactly the campaign that refines one direction to the
-    end of its budget.
-    """
+    """Every iteration improved, so nothing else in the policy would fire."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=3)
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState(
@@ -3608,17 +3284,13 @@ def test_a_flat_window_of_keeps_diversifies_a_campaign_that_never_stalled(
     assert decision.mode == SEARCH_MODE_DIVERSIFY
     assert decision.reason_codes == ("DIMINISHING_RETURNS",)
     assert persisted.search_reason_codes == ["DIMINISHING_RETURNS"]
-    # The ratio the decision was taken on is part of its audit trail: without it
-    # the log says a window was flat but not how flat.
+    # The ratio the decision was taken on is part of its audit trail: without it the log says a window was flat but
+    # not how flat.
     assert recorded[-1]["window_gain_ratio"] == pytest.approx(0.02, abs=1e-9)
 
 
 def test_a_diversification_starts_the_marginal_gain_window_again():
-    """The round that acted on a flat window cannot be inside the next one.
-
-    Otherwise the same flat outcomes are still in reach once mode residence
-    expires, and the campaign diversifies again on evidence it already spent.
-    """
+    """The round that acted on a flat window cannot be inside the next one."""
     older = [_kept_outcome(offset + 1, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW + 1)]
     diversified = _kept_outcome(
         MARGINAL_GAIN_WINDOW + 2,
@@ -3646,13 +3318,7 @@ def test_a_diversification_starts_the_marginal_gain_window_again():
 def test_a_diversification_that_concluded_nothing_is_still_a_boundary(
     failed_decision,
 ):
-    """A round that failed still separates two directions.
-
-    The outcomes that fired the trigger are on the far side of it. If the failed
-    round is skipped before its mode is read, the scan walks back into them and
-    the campaign diversifies again on evidence it already spent -- with only
-    mode residence left to brake it.
-    """
+    """A round that failed still separates two directions."""
     older = [_kept_outcome(offset + 1, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW + 1)]
     failed = make_event(
         "iteration_result",
@@ -3670,11 +3336,7 @@ def test_a_diversification_that_concluded_nothing_is_still_a_boundary(
 
 
 def test_an_exploit_outcome_that_concluded_nothing_is_transparent():
-    """An infrastructure failure inside one direction is not a boundary.
-
-    Only a mode change is. Otherwise a single gateway outage would keep the
-    window from ever filling on a campaign that never left EXPLOIT.
-    """
+    """An infrastructure failure inside one direction is not a boundary."""
     events = [
         _kept_outcome(1, 1.50),
         make_event(
@@ -3714,13 +3376,7 @@ def test_a_supervisor_direction_gets_a_window_of_its_own():
     ],
 )
 def test_a_window_without_a_usable_anchor_names_why(anchor, reason):
-    """A ratio needs a score to divide by, and a missing one is not a flat one.
-
-    Each of these would otherwise become a gain: a missing or non-numeric score
-    read as zero, a bool read as a speedup of 1.0, and a zero or NaN anchor
-    turning the division into an exception or an infinity that compares false
-    against every floor. They are different facts and are reported as such.
-    """
+    """A ratio needs a score to divide by, and a missing one is not a flat one."""
     events = [_kept_outcome(1, anchor)] + [
         _kept_outcome(offset + 2, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW)
     ]
@@ -3745,13 +3401,7 @@ def test_an_unevaluable_window_says_so_in_the_decision_event(
     monkeypatch,
     capsys,
 ):
-    """A trigger that cannot run must not log like one that ran and found gain.
-
-    ``make_event`` drops None fields, so a bare ratio of None leaves the event
-    identical whether the window was short, the score series unusable, or the
-    ladder healthy. A campaign whose incumbent score is never recorded has this
-    trigger disabled for its whole life; that fact has to be legible.
-    """
+    """A trigger that cannot run must not log like one that ran and found gain."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, supervise_after=3)
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState()
@@ -3789,12 +3439,7 @@ def test_repeated_empty_diffs_escalate_before_the_generic_stall_threshold(
     tmp_path,
     monkeypatch,
 ):
-    """Consecutive empty diffs must force a new direction on their own.
-
-    A direction the Implementer cannot express as an edit costs a whole session
-    per attempt, so waiting for ``supervise_after`` no-improvement iterations
-    lets the same fruitless direction be retried at full price.
-    """
+    """Consecutive empty diffs must force a new direction on their own."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
     observed_modes = []
 
@@ -3831,14 +3476,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
     tmp_path,
     monkeypatch,
 ):
-    """Rewording the same direction must not reset the streak.
-
-    Every session is asked to close with a fresh one-line ``PLAN:`` headline in
-    plain prose, so two sessions handed the same direction never word it the
-    same way. Counting the streak against that sentence therefore reset it on
-    every iteration and the escalation could only ever fire in a test that
-    pinned one literal across sessions.
-    """
+    """Rewording the same direction must not reset the streak."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
     headlines = [
         "fuse the two reduction passes",
@@ -3864,15 +3502,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
 
 
 def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
-    """An outage measured nothing, so it neither extends nor resets the streak.
-
-    Both halves are visible in the mode observed per iteration: the third
-    session still explores because the outage did not count as an empty diff,
-    and the fourth diversifies because the outage did not discard the first one
-    either. Skipping the outage outright is what makes the second half work: it
-    ran under EXPLOIT like its neighbours, but reading its mode at all would let
-    an outcome that measured nothing speak for the direction.
-    """
+    """An outage measured nothing, so it neither extends nor resets the streak."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=4)
     plans = ["fuse the two passes", "", "fuse the two passes", "fuse the two passes"]
     observed_modes = []
@@ -3901,13 +3531,7 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
     tmp_path,
     monkeypatch,
 ):
-    """A session that died measured nothing either, so it is transparent too.
-
-    AGENT_ERROR is produced on the same empty-diff branch as API_ERROR. It stays
-    out of INFRASTRUCTURE_DECISIONS because that set also picks the cumulative
-    counter bucket and there is none for an agent error, so it is the streak
-    that has to read it as an attempt which never reached the kernel.
-    """
+    """A session that died measured nothing either, so it is transparent too."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=4)
     plan = "fuse the two passes"
     observed_modes = []
@@ -3937,14 +3561,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
     tmp_path,
     monkeypatch,
 ):
-    """The streak window counts outcomes, so outages cannot exhaust it.
-
-    An iteration writes several events, so a window measured in raw log events
-    covers only a handful of iterations: five interleaved outages would push the
-    first empty diff out of it and silently disable the escalation. The streak
-    is rebuilt from that same log rather than carried in a schema field, so what
-    each session saw is asserted directly.
-    """
+    """The streak window counts outcomes, so outages cannot exhaust it."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=8)
     plan = "fuse the two passes"
     observed_modes = []
@@ -3968,27 +3585,21 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
     resumed_streak = loop._consecutive_no_changes(reopened.recent_results(NO_CHANGES_STREAK_WINDOW))
 
     assert decisions == ["NO_CHANGES"] + ["API_ERROR"] * 5 + ["NO_CHANGES"] * 2
-    # Without this the run would not exercise the distinction: a window counted
-    # in raw events would still have held every outcome.
+    # Without this the run would not exercise the distinction: a window counted in raw events would still have held
+    # every outcome.
     assert len(events) > NO_CHANGES_STREAK_WINDOW
-    # The last session is the whole point: it reached two only because the first
-    # empty diff was still inside the window after five outages, and because the
-    # outages neither reset it nor counted toward it.
+    # The last session is the whole point: it reached two only because the first empty diff was still inside the
+    # window after five outages, and because the outages neither reset it nor counted toward it.
     assert observed_streaks == [0, 1, 1, 1, 1, 1, 1, 2]
     assert observed_modes[-1] == "DIVERSIFY"
     assert live.search_reason_codes == ["REPEATED_NO_CHANGES"]
-    # Reading the same log back reaches the same verdict for the mode the run
-    # now sits in: the escalation moved it to DIVERSIFY, under which only the
-    # last iteration's empty diff has been observed.
+    # Reading the same log back reaches the same verdict for the mode the run now sits in: the escalation moved it to
+    # DIVERSIFY, under which only the last iteration's empty diff has been observed.
     assert resumed_streak == 1
 
 
 def test_the_outcome_window_is_servable_from_the_cache_or_refused(tmp_path):
-    """The streak window must be answerable in full, from memory, or fail.
-
-    A short answer is indistinguishable from a short streak, so the cache is
-    sized for the window and a wider request is refused instead of truncated.
-    """
+    """The streak window must be answerable in full, from memory, or fail."""
     store = LoopStateStore(str(tmp_path))
     for iteration in range(1, NO_CHANGES_STREAK_WINDOW + 2):
         store.append_event(make_event("iteration_started", iteration))
@@ -5331,16 +4942,7 @@ def test_reconcile_skips_republishing_a_best_the_manifest_already_names(
     tmp_path,
     monkeypatch,
 ):
-    """A resume that changed nothing must not report persistence as degraded.
-
-    Reconciliation republishes run_state.best to repair a crashed manifest, but
-    a resumed session recomputes session_index and experiment_id that differ
-    from what the stored manifest was written with. Republishing an
-    already-current best then tripped the same-iteration conflict guard and set
-    persistence_degraded, while the KEEP, the git state and run_state.best were
-    all intact -- two resumed sessions in the 12-hour run ended degraded for
-    exactly that harmless divergence.
-    """
+    """A resume that changed nothing must not report persistence as degraded."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
     head = loop._git("rev-parse", "HEAD").strip()
@@ -6696,11 +6298,7 @@ async def _refuted_summarizer(_prompt: str) -> str:
 
 
 def test_record_lesson_carries_a_refuted_cannot_as_an_open_direction(tmp_path, monkeypatch, capsys):
-    """The session's own experiment killed its premise; the axis is reachable.
-
-    Scoring this as an obligation discharged would leave the record IN SCOPE
-    and still suppressing the direction the same line proved open.
-    """
+    """The session's own experiment killed its premise; the axis is reachable."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
@@ -6777,13 +6375,7 @@ def test_record_lesson_says_when_no_premise_was_recorded(tmp_path, monkeypatch):
 
 
 def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(tmp_path, monkeypatch, capsys):
-    """An I/O failure must not become a factual claim about the source.
-
-    ``_read_source_file`` collapses an unreadable file to "", which scans as a
-    kernel that assigns nothing: every pinned constant reported missing,
-    every stored negative re-opened, and no way to tell that from a kernel that
-    really did move on.
-    """
+    """An I/O failure must not become a factual claim about the source."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     asyncio.run(
@@ -6843,18 +6435,13 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(tmp_path, monkeypa
 
 
 async def _positive_summarizer(_prompt: str) -> str:
-    # Complies with the summary prompt's contract: the record itself states
-    # that no direction it covers measured worse.
+    # Complies with the summary prompt's contract: the record itself states that no direction it covers measured
+    # worse.
     return "widened the tile on every case; 1.2x, nothing measured worse\nNEGATIVES: none"
 
 
 def test_a_pin_that_moved_to_a_sibling_file_is_not_reported_as_dropped(tmp_path, monkeypatch):
-    """Tile and dispatch constants live outside the anchor kernel.
-
-    The implementer prompt says so itself. Checking only the anchor turns a
-    constant that moved into a constant the task no longer assigns, which
-    re-opens every negative measured under it.
-    """
+    """Tile and dispatch constants live outside the anchor kernel."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     sibling = workspace / "tiles.py"
@@ -6912,13 +6499,7 @@ def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_the_pin(tmp
 
 
 def test_an_iteration_that_measured_no_negative_is_not_reopenable(tmp_path, monkeypatch):
-    """Nothing in the document was closed, so there is nothing to re-open.
-
-    Only the summarizer writes HELD-FIXED:, and only for a direction that
-    measured WORSE. Treating its absence as a re-opened premise labels every
-    positive iteration RE-OPENABLE and degrades the store to "nothing is
-    settled".
-    """
+    """Nothing in the document was closed, so there is nothing to re-open."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
@@ -6989,14 +6570,7 @@ async def _unmarked_summarizer(_prompt: str) -> str:
 
 
 def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(tmp_path, monkeypatch):
-    """The loop kept a candidate; the record says four directions measured worse.
-
-    Those four are invisible to the loop — they were reverted before the
-    candidate it measured — so deciding from its own verdict would stamp this
-    document "no measured negative" and, with no HELD-FIXED line, render it IN
-    SCOPE. That promotes four negatives measured under unknown constants into a
-    standing ban. The document's own marker is what the loop has to read.
-    """
+    """The loop kept a candidate; the record says four directions measured worse."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
@@ -7009,8 +6583,8 @@ def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(tmp_p
                 "session_started": True,
                 "summarize": _in_session_negative_summarizer,
                 "plan": "widen the tile",
-                # The in-session gate allowed on the first Stop, so it logged
-                # nothing: findings cannot catch these either.
+                # The in-session gate allowed on the first Stop, so it logged nothing: findings cannot catch these
+                # either.
                 "findings": "",
             },
         )
@@ -7059,12 +6633,7 @@ def test_a_document_without_the_marker_is_unknown_not_negative_free(tmp_path, mo
 
 
 def test_a_record_that_never_answered_the_disproof_question_says_so(tmp_path, monkeypatch, capsys):
-    """An unanswered question is the state no verdict fires on, so it is printed.
-
-    Nothing reads the prose for "cannot", so a session that ignored the marker
-    leaves any feasibility claim in its record resting on the citation rule
-    alone. That is the one degradation an operator cannot see in the verdict.
-    """
+    """An unanswered question is the state no verdict fires on, so it is printed."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
@@ -7109,11 +6678,7 @@ def test_the_loops_own_negative_overrides_a_record_that_claims_none(tmp_path, mo
 
 
 def test_a_crash_is_a_measured_negative(tmp_path, monkeypatch):
-    """CRASH starts with no REVERT and leaves no speedup, so only a whitelist sees it.
-
-    A session cut off before the Stop hook also leaves no findings, so nothing
-    else in the loop's view would report this iteration as having gone wrong.
-    """
+    """CRASH starts with no REVERT and leaves no speedup, so only a whitelist sees it."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
@@ -7146,12 +6711,7 @@ def test_a_build_failure_is_a_measured_negative(tmp_path, monkeypatch):
 
 
 def test_a_machine_written_document_is_decided_by_the_loops_verdict_alone(tmp_path, monkeypatch):
-    """The loop authored it, so the loop's view of it is complete.
-
-    A fallback document contains what the loop observed and nothing else, so
-    there is no unseen reverted direction for a marker to report — and no
-    summarizer to write one.
-    """
+    """The loop authored it, so the loop's view of it is complete."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
@@ -7175,11 +6735,7 @@ def test_a_machine_written_document_is_decided_by_the_loops_verdict_alone(tmp_pa
 
 
 def test_one_unreadable_sibling_does_not_indict_the_constant_it_holds(tmp_path, monkeypatch, capsys):
-    """Part of the declared source went unchecked; say that, do not guess.
-
-    Dropping the unreadable file leaves the survivors looking like the whole
-    declared set, so a constant living in the missing one reads as deleted.
-    """
+    """Part of the declared source went unchecked; say that, do not guess."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     sibling = workspace / "tiles.py"
@@ -7487,13 +7043,7 @@ def test_record_lesson_skips_the_summarizer_with_no_time_left(tmp_path, monkeypa
 
 
 def test_record_lesson_still_summarizes_when_no_session_can_be_admitted(tmp_path, monkeypatch):
-    """The last iteration of a session is the one whose record matters most.
-
-    The loop stops admitting implementer sessions well before the clock runs out
-    (``budget_reserve_sec``), but the campaign is resumable and its next
-    session reads this document. Gating the summary on the session-admission
-    reserve silently dropped that handoff record.
-    """
+    """The last iteration of a session is the one whose record matters most."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
     # Below the session-admission reserve, far above what a summary needs.
@@ -7536,8 +7086,8 @@ def test_record_lesson_survives_a_failing_summarizer(tmp_path, monkeypatch, caps
     )
 
     assert "OUTCOME: CRASH" in store.read(8)
-    # The reason must reach the operator, not just log.debug: an outcome-only
-    # run is otherwise indistinguishable from a provider that cannot resume.
+    # The reason must reach the operator, not just log.debug: an outcome-only run is otherwise indistinguishable from
+    # a provider that cannot resume.
     printed = capsys.readouterr().out
     assert "RuntimeError" in printed
     assert "session gone" in printed
@@ -7669,14 +7219,7 @@ def _stub_measurement(monkeypatch, walls):
 
 
 def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypatch):
-    """Lock the whole chain the feature exists for.
-
-    agent edits -> session_sink["summarize"] -> lessons/iter_NNN.md
-    -> next iteration's prompt.
-
-    Every hop has a unit test; this asserts they are actually connected, which
-    is where a wiring regression would otherwise hide.
-    """
+    """Lock the whole chain the feature exists for."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2)
     # Two iterations: the first improves and is kept, the second does not.
     _stub_measurement(monkeypatch, walls=[0.5, 0.9])
@@ -7705,8 +7248,8 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
     assert "128-bit loads" in first
     assert "OUTCOME: KEEP" in first
 
-    # ...and the second iteration's prompt carried it, plus the absolute path
-    # of the directory holding the full history.
+    # ...and the second iteration's prompt carried it, plus the absolute path of the directory holding the full
+    # history.
     assert len(prompts) == 2
     assert "vectorized the global load" not in prompts[0]  # nothing to inject yet
     assert "128-bit loads" in prompts[1]
@@ -7716,11 +7259,7 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
 
 
 def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
-    """The digest is reserved for the supervisor once the header renders.
-
-    Both carry the recent iterations, so inlining them together would spend the
-    prompt budget saying the same thing twice.
-    """
+    """The digest is reserved for the supervisor once the header renders."""
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2)
     _stub_measurement(monkeypatch, walls=[0.5, 0.9])
 
@@ -7747,15 +7286,7 @@ def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
 
 
 def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
-    """The rule that blocks harness edits also says what it does not forbid.
-
-    `mhc-fused` banned a host-side weight cache to keep "perturbed inputs
-    refresh", costing a mechanism worth 11.3%. The harness does not perturb that
-    tensor, and the agent could have read it. The enforced boundary -- do not edit
-    what measures you -- was never stated, so a stricter one was inferred from it.
-    Both rule blocks must carry the clarification, or one template keeps the
-    ambiguity the other lost.
-    """
+    """The rule that blocks harness edits also says what it does not forbid."""
     from kernelforge.orchestrator import agent as agent_module
 
     source = Path(agent_module.__file__).read_text()
@@ -7765,8 +7296,8 @@ def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
     ]
     for marker in enforcement:
         assert marker in source, f"rule block missing: {marker}"
-        # The prompts are wrapped source literals, so a clause can be split across
-        # lines; compare on collapsed whitespace rather than the wrapped text.
+        # The prompts are wrapped source literals, so a clause can be split across lines; compare on collapsed
+        # whitespace rather than the wrapped text.
         block = " ".join(source[source.index(marker) : source.index(marker) + 900].split())
         assert "are NOT gaming" in block, f"boundary not stated near: {marker}"
         assert "read the harness" in block, f"no read-before-refusing near: {marker}"

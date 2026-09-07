@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Claiming fusions the framework implements but ships switched OFF.
-
-Repro of the miss: the pipeline treated "vLLM has a compile pass for this chain"
-as "vLLM already fuses it" and dropped the candidate. Nearly every PassConfig
-fusion flag defaults to None (off), so the fusion never ran and nobody enabled it.
-The pass state must be READ from the target install (never hardcoded) and a pass
-that exists but is off must surface as an enable-the-switch recipe.
-"""
+"""Claiming fusions the framework implements but ships switched OFF."""
 
 from __future__ import annotations
 
@@ -77,8 +70,7 @@ class TestPatternRoute:
         assert len(cp) == 1, f"expected an enable-the-pass recipe, got {[r.pattern_id for r in recipes]}"
         r = cp[0]
         assert r.compile_pass_flag == QK_FLAG
-        # Points at the framework's pass config, NOT the model file: that is the
-        # file the emitted patch edits.
+        # Points at the framework's pass config, NOT the model file: that is the file the emitted patch edits.
         assert r.source_file == "/fw/vllm/config/compilation.py"
         assert r.already_satisfied is False
         assert r.to_dict()["compile_pass_flag"] == QK_FLAG
@@ -97,11 +89,7 @@ class TestPatternRoute:
         assert all(r.candidate_kind != "compile_pass" for r in recipes)
 
     def test_state_matrix(self, tmp_path):
-        """enabled deletes; disabled claims; absent / undecidable keep authoring.
-
-        Collapsing the last two into "already satisfied" silently deleted work the
-        framework is NOT doing for us.
-        """
+        """enabled deletes; disabled claims; absent / undecidable keep authoring."""
         cases = {
             # (probe kwargs) -> (compile_pass proposed?, qk authoring kept?)
             "enabled": (dict(enabled=True), False, False),
@@ -109,8 +97,8 @@ class TestPatternRoute:
             "absent": (dict(present=False, enabled=None, config_file="", source="absent"), False, True),
             "undecidable-level": (dict(enabled=None, source="level-dynamic"), False, True),
             "probe-error": (dict(enabled=False, error="boom"), False, True),
-            # Disabled but the optimization level pins it: flipping the PassConfig
-            # default would not take, so it must not be claimed.
+            # Disabled but the optimization level pins it: flipping the PassConfig default would not take, so it must
+            # not be claimed.
             "level-pinned-off": (dict(enabled=False, source="level"), False, True),
         }
         for label, (kw, want_compile_pass, want_authoring) in cases.items():
@@ -156,16 +144,10 @@ class TestPatternRoute:
 
 
 class TestRanking:
-    """Enabling the framework's own pass must outrank authoring a kernel.
+    """Enabling the framework's own pass must outrank authoring a kernel."""
 
-    Only the top recipe is acted on, and a compile_pass is a one-line deterministic
-    flip onto a vendor-tuned kernel, while a new_fusion costs an LLM authoring loop
-    plus compile/parity risk. Ranking by trigger share alone would spend the
-    expensive path first and leave the free win unclaimed.
-    """
-
-    # residual add+rmsnorm (0.34) outranks qk-norm+rope (0.22) on trigger share, so
-    # the compile_pass candidate is NOT first unless kind is ranked ahead of share.
+    # residual add+rmsnorm (0.34) outranks qk-norm+rope (0.22) on trigger share, so the compile_pass candidate is NOT
+    # first unless kind is ranked ahead of share.
     SHARES = {"gemm": 0.4, "add": 0.20, "rmsnorm": 0.14, "rope": 0.08}
     BODY = (
         "class Layer:\n"
@@ -368,8 +350,7 @@ class TestProbe:
         assert st.present is False and st.enabled is None and st.missed is False
 
     def test_level_resolved_flag_is_unknown_not_off(self, monkeypatch):
-        # vLLM's optimization level resolves this one from the FULL VllmConfig, so
-        # the probe cannot tell. Claiming it would invent no-op work.
+        # vLLM's optimization level resolves this one from the FULL VllmConfig, so the probe cannot tell.
         st = self._run(monkeypatch, stdout=_probe_stdout({QK_FLAG: _flag_item(None, "level-dynamic")}))
         assert st.present is True and st.enabled is None
         assert st.missed is False and st.source == "level-dynamic"
@@ -392,12 +373,7 @@ class TestProbe:
 
 
 class TestProbeSourceAgainstFakeVllm:
-    """Runs the REAL probe script against a synthetic vLLM.
-
-    The precedence rules live in the subprocess source, so asserting them through
-    stubbed stdout would only test the parser. These build a fake ``vllm`` package
-    and execute the probe for real.
-    """
+    """Runs the REAL probe script against a synthetic vLLM."""
 
     def _fake_vllm(self, tmp_path, *, level_module: str = "", pass_config_extra: str = ""):
         pkg = tmp_path / "vllm"
@@ -426,8 +402,8 @@ class TestProbeSourceAgainstFakeVllm:
         return payload
 
     def test_no_level_api_falls_back_to_the_pass_config_default(self, tmp_path):
-        # CONFIRMED absent: the class default IS the effective value, so this is a
-        # sound fallback rather than an unknown.
+        # CONFIRMED absent: the class default IS the effective value, so this is a sound fallback rather than an
+        # unknown.
         payload = self._probe(self._fake_vllm(tmp_path))
         assert payload["error"] == ""
         assert payload["level_api"].startswith("absent")
@@ -468,8 +444,8 @@ class TestProbeSourceAgainstFakeVllm:
         assert item == {"present": True, "enabled": None, "source": "level-dynamic"}
 
     def test_broken_level_api_reports_an_error_instead_of_guessing_off(self, tmp_path):
-        # The API exists but does not read as expected: every verdict must be voided,
-        # otherwise a None attribute reads as False and gets claimed.
+        # The API exists but does not read as expected: every verdict must be voided, otherwise a None attribute reads
+        # as False and gets claimed.
         level = (
             "OPTIMIZATION_LEVEL_TO_CONFIG = None\n"  # not a mapping -> raises on .get
             "class VllmConfig:\n"
@@ -544,8 +520,8 @@ class TestTargetIdentity:
     """Probe, edit and serving must all address ONE install."""
 
     def test_config_outside_the_requested_framework_root_fails_closed(self, monkeypatch):
-        # The run was told which framework to target; probing/editing a different
-        # install must stop the run, not proceed silently.
+        # The run was told which framework to target; probing/editing a different install must stop the run, not
+        # proceed silently.
         def fake_run(cmd, **kw):
             payload = _probe_stdout({QK_FLAG: _flag_item(False)}, config_file="/other/vllm/config/compilation.py")
             return subprocess.CompletedProcess(cmd, 0, payload, "")

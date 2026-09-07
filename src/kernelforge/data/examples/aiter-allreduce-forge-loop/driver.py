@@ -1,29 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-"""Forge driver for TP4 custom all-reduce (raw) and fused all-reduce + RMSNorm.
-
-The same file serves two roles, selected purely by the presence of ``RANK`` /
-``LOCAL_RANK`` in the environment:
-
-* **self-launch** (no RANK): validates resources, rebuilds the aiter JIT module
-  when the source hash changed, then re-executes itself under
-  ``torch.distributed.run --standalone --nproc-per-node=N``.
-* **worker** (RANK present): binds one GPU, initialises the aiter custom
-  all-reduce communicator and runs correctness / benchmark / profile.
-
-The two branches are mutually exclusive, so the driver can be invoked both by
-today's single-process Forge (``python driver.py``) and by a future distributed
-launcher (``torchrun ... driver.py``) without any code change.
-
-Output contract (rank 0 only):
-  correctness -> ``SNR: <db> dB`` / ``allclose: <bool>`` / ``max_diff: <float>``
-  benchmark   -> ``case_ms: <case_id> <ms> [unscored]`` per case,
-                 ``mean_ms: <ms>``,
-                 plus one single-line ``__FORGE_DISTRIBUTED_RESULT__{...}__``.
-
-The loop's authoritative KEEP decision uses the independently measured
-``case_ms`` values; ``mean_ms`` is diagnostic.
-"""
+"""Forge driver for TP4 custom all-reduce (raw) and fused all-reduce + RMSNorm."""
 
 from __future__ import annotations
 
@@ -42,24 +19,11 @@ from dataclasses import dataclass, field
 import torch
 import torch.distributed as dist
 
-# --------------------------------------------------------------------------
 # Constants
-# --------------------------------------------------------------------------
 
 SENTINEL = "__FORGE_DISTRIBUTED_RESULT__"
 def _default_tp() -> int:
-    """Rank count to use when the caller did not name one.
-
-    forge invokes the driver for validation and benchmarking with no extra
-    arguments, so anything hard-coded here becomes the configuration those
-    stages actually measure. A fixed default is therefore wrong twice over: it
-    silently benchmarks a rank count nobody asked for, and it disagrees with the
-    --nproc-per-node the profiler launches with, which then fails the driver's
-    own WORLD_SIZE check.
-
-    Derived instead, most specific first: an explicit rank count from the
-    launcher, then the visible device count, then a last-resort constant.
-    """
+    """Rank count to use when the caller did not name one."""
     for var in ("FORGE_NPROC_PER_NODE", "WORLD_SIZE"):
         try:
             value = int(os.environ.get(var) or 0)
@@ -96,9 +60,7 @@ STAMP_NAME = ".forge_ar_source.stamp"
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
 
 
-# --------------------------------------------------------------------------
 # Case model
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -126,18 +88,13 @@ class Case:
 
 
 def _suite_tp4_thresholds(dtype: str = "bf16") -> list[Case]:
-    """Full case set frozen by the design doc.
-
-    ``sensitive`` marks the cases whose dispatch actually changes across the
-    swept thresholds; only those feed the diagnostic group aggregate.
-    """
+    """Full case set frozen by the design doc."""
     cases: list[Case] = []
-    # raw: default crossover is 160 KiB. Any threshold in the swept 128-256 KiB
-    # range flips rows 8..16 (128-256 KiB), so all of them are sensitive.
+    # raw: default crossover is 160 KiB.
     for rows in (8, 9, 10, 11, 12, 14, 16):
         cases.append(Case("raw", rows, 8192, dtype, sensitive=True))
-    # rows=1 (16 KiB) stays 1-stage and rows=32 (512 KiB) stays 2-stage for
-    # every candidate threshold: diagnostics only.
+    # rows=1 (16 KiB) stays 1-stage and rows=32 (512 KiB) stays 2-stage for every candidate threshold: diagnostics
+    # only.
     for rows in (1, 32):
         cases.append(Case("raw", rows, 8192, dtype, sensitive=False))
     # fused: crossover at 128 KiB on total_bytes.
@@ -152,22 +109,7 @@ def _suite_tp4_thresholds(dtype: str = "bf16") -> list[Case]:
 
 
 def _suite_tp4_wide(dtype: str = "bf16") -> list[Case]:
-    """Wider case set that also scores the kernels themselves, not just the
-    crossover threshold.
-
-    ``tp4_thresholds`` deliberately scores only threshold-sensitive cases, which
-    is right while the optimization variable is a constant. Once the kernels are
-    being rewritten that set is too narrow: small payloads always take the
-    1-stage path and large ones always take 2-stage, so neither shows up in the
-    score even though both are real inference regimes (decode is small-payload).
-    So nearly every case contributes to the equal-weight score.
-
-    Two cases are excluded from the score anyway, on measured grounds: their
-    run-to-run spread is physically large and does NOT shrink with more sampling
-    (quadrupling the iteration count moved 21%->16% and 13%->12%), because the
-    fluctuation outlasts a single measurement window. They remain in ``cases``
-    for visibility but are excluded from the KEEP score.
-    """
+    """Wider case set that also scores the kernels themselves, not just the"""
     cases: list[Case] = []
     # 16-32 KiB: always 1-stage. Sensitive to the 1-stage kernel, not the cut.
     for rows in (1, 2):
@@ -188,25 +130,13 @@ def _suite_tp4_wide(dtype: str = "bf16") -> list[Case]:
     for rows in (16, 17):
         cases.append(Case("fused", rows, 4096, dtype, sensitive=True))
     cases.append(Case("fused", 32, 8192, dtype, sensitive=True))
-    # 1 MiB: measured spread 21%, ~80% of this group's score noise. Largest
-    # payload in the suite, so it most likely rides a power or interconnect
-    # limit rather than a sampling artifact.
+    # 1 MiB: measured spread 21%, ~80% of this group's score noise.
     cases.append(Case("fused", 64, 8192, dtype, sensitive=False))
     return cases
 
 
 def _suite_default(dtype: str = "bf16", tp: int = 2) -> list[Case]:
-    """Threshold sweep sized for whatever rank count the caller asked for.
-
-    aiter dispatches 1-stage below a byte cut that depends on world size --
-    160 KiB at up to 4 ranks, 80 KiB at up to 8 -- and 2-stage above it. The
-    cases are placed either side of that cut so the sweep measures the dispatch
-    decision itself rather than one arbitrary payload, which is what makes this
-    usable at any rank count instead of only the two that were hand-tuned.
-
-    The named suites below stay for the configurations with a measured baseline;
-    this one is the default so a two-GPU box can run the example unmodified.
-    """
+    """Threshold sweep sized for whatever rank count the caller asked for."""
     hidden = 7168
     row_bytes = hidden * DTYPES[dtype].itemsize
     cut_bytes = (160 if tp <= 4 else 80) * 1024
@@ -220,21 +150,7 @@ def _suite_default(dtype: str = "bf16", tp: int = 2) -> list[Case]:
 
 
 def _suite_tp8_k3(dtype: str = "bf16") -> list[Case]:
-    """TP8 / gfx950 case set sized for Kimi-K3 (hidden=7168, bf16).
-
-    One row is 7168 * 2 = 14 KiB, so the TP8 raw cut
-    (``world_size_ <= 8 && bytes < 80*1024``) lands at 5.71 rows. The measured
-    baseline on 8xMI355X at commit 36c421f7f shows the 1-stage path peaking just
-    below that cut (rows=5) and 2-stage beating it immediately above (rows=6).
-
-    The sweep itself lives in ``program.md`` -- single source of truth, since it
-    also carries the measured case suite. Do not restate the
-    numbers here; two copies have already drifted apart once.
-
-    Rows 1..5 are the cases a lowered threshold would flip, so they carry the
-    score together with the 2-stage band above the cut. Rows 64 is the real
-    Kimi-K3 decode payload at conc=64 (896 KiB).
-    """
+    """TP8 / gfx950 case set sized for Kimi-K3 (hidden=7168, bf16)."""
     cases: list[Case] = []
     # 14-70 KiB: forced 1-stage by the 80 KiB cut today; these flip if it drops.
     for rows in (1, 2, 3, 4, 5):
@@ -242,19 +158,15 @@ def _suite_tp8_k3(dtype: str = "bf16") -> list[Case]:
     # 84-224 KiB: already 2-stage, so this band scores the 2-stage kernel.
     for rows in (6, 7, 8, 12, 16):
         cases.append(Case("raw", rows, 7168, dtype, sensitive=True))
-    # 896 KiB: production decode payload at conc=64, well below the 4 MiB
-    # write_mode branch this task must not touch.
+    # 896 KiB: production decode payload at conc=64, well below the 4 MiB write_mode branch this task must not touch.
     cases.append(Case("raw", 64, 7168, dtype, sensitive=True))
-    # Fused allreduce+rmsnorm keeps its own 128 KiB cut on total_bytes. Carried
-    # as diagnostics only -- the raw dispatch is this task's target, and
-    # the fused path has no measured baseline sweep yet.
+    # Fused allreduce+rmsnorm keeps its own 128 KiB cut on total_bytes.
     for rows in (4, 8, 9, 16):
         cases.append(Case("fused", rows, 7168, dtype, sensitive=False))
     return cases
 
 
-# Named suites, plus the rank-derived default. Shared by the --shape parser and
-# the FORGE_COLLECTIVE_SUITE default so both accept exactly the same names.
+# Named suites, plus the rank-derived default.
 _SUITE_BUILDERS = {
     "default": lambda d: _suite_default(d, DEFAULT_TP),
     "tp4_thresholds": _suite_tp4_thresholds,
@@ -278,26 +190,13 @@ def _validate_suite_tp(name: str, tp: int) -> None:
 
 
 def parse_shape(spec: str) -> tuple[list[Case], dict]:
-    """Parse a ``key=value,...`` shape string into concrete cases.
-
-    Two callers pass no cases of their own, and they need opposite things:
-
-    * The literal ``default`` comes from the task preflight, which only probes
-      that the driver answers at all, before any shape is known. One cheap case
-      keeps that probe fast.
-    * An empty string comes from validation and benchmarking, which pass no
-      driver arguments. Those decide KEEP, so they have to measure the whole
-      suite -- the crossover sweep, the production row count and fused diagnostics.
-      Treating them like the probe scores the campaign on a
-      single 1x7168 case and silently drops everything the task is about.
-    """
+    """Parse a ``key=value,...`` shape string into concrete cases."""
     spec_norm = (spec or "").strip().lower()
     if spec_norm == "default":
         return [Case("raw", 1, 7168, "bf16")], {"tp": str(DEFAULT_TP)}
     if spec_norm == "":
-        # forge passes no shape, so a named suite chosen by the operator has no
-        # other way in: without this the campaign always measures the derived
-        # default while the launcher's SUITE only affects its own self-check.
+        # forge passes no shape, so a named suite chosen by the operator has no other way in: without this the
+        # campaign always measures the derived default while the launcher's SUITE only affects its own self-check.
         name = (os.environ.get("FORGE_COLLECTIVE_SUITE") or "default").strip()
         builder = _SUITE_BUILDERS.get(name)
         if builder is None:
@@ -324,8 +223,7 @@ def parse_shape(spec: str) -> tuple[list[Case], dict]:
     graph = int(kv.get("graph", 0))
 
     if "suite" in kv:
-        # Named measured suites are valid only at their frozen rank count. The
-        # default suite derives its cases from the requested rank count.
+        # Named measured suites are valid only at their frozen rank count.
         tp = int(kv.get("tp", DEFAULT_TP))
         builders = dict(
             _SUITE_BUILDERS,
@@ -347,9 +245,7 @@ def parse_shape(spec: str) -> tuple[list[Case], dict]:
     return [Case(target, rows, hidden, dtype, graph)], kv
 
 
-# --------------------------------------------------------------------------
 # Self-launch branch
-# --------------------------------------------------------------------------
 
 
 def _repo_root() -> str:
@@ -365,11 +261,9 @@ def _source_hash(root: str) -> str:
             with open(path, "rb") as f:
                 h.update(f.read())
         except OSError as exc:
-            # Folding a missing source into a stable "<missing>" marker keeps the
-            # digest constant, so the stamp file matches, the JIT rebuild is
-            # skipped, and every run afterwards measures a stale binary while
-            # reporting the edit as applied. A source that cannot be read means
-            # the tree is wrong, so say so.
+            # Folding a missing source into a stable "<missing>" marker keeps the digest constant, so the stamp file
+            # matches, the JIT rebuild is skipped, and every run afterwards measures a stale binary while reporting
+            # the edit as applied.
             raise RuntimeError(
                 f"cannot hash JIT source {path!r}: {exc}. The digest guards the "
                 "rebuild stamp, so continuing would measure a stale module."
@@ -383,12 +277,7 @@ def _jit_dir() -> str:
 
 
 def _ensure_jit_built(root: str, verbose: bool = True) -> str:
-    """Rebuild the JIT module once per source change, guarded by a stamp file.
-
-    Without this gate every Forge sub-process (5 validation stages, bench,
-    baseline, in-session gate) would recompile from scratch because
-    ``AITER_REBUILD`` is inherited by the whole process tree.
-    """
+    """Rebuild the JIT module once per source change, guarded by a stamp file."""
     digest = _source_hash(root)
     stamp = os.path.join(_jit_dir(), STAMP_NAME)
     module = os.path.join(_jit_dir(), f"{JIT_MODULE}.so")
@@ -398,7 +287,6 @@ def _ensure_jit_built(root: str, verbose: bool = True) -> str:
                 return digest
     except OSError:
         # No stamp, or it is unreadable: treat the cache as cold and rebuild.
-        # A missing stamp is the normal first-run state, not an error.
         pass
 
     env = dict(os.environ)
@@ -424,18 +312,7 @@ _CHILD_PROC: "subprocess.Popen | None" = None
 
 
 def _kill_child_group(*_args) -> None:
-    """Tear down torchrun and, through it, every rank.
-
-    Deliberately signals the torchrun PID rather than a process group. This
-    driver stays in the process group its caller created, because that caller
-    kills the whole group on timeout and SIGKILL is neither catchable nor
-    deliverable across a session boundary: a torchrun in its own session would
-    survive the group kill with four GPUs still allocated, and no handler here
-    would ever run to clean it up.
-
-    SIGTERM first so torchrun reaps its own workers, then SIGKILL for the case
-    where it is wedged.
-    """
+    """Tear down torchrun and, through it, every rank."""
     global _CHILD_PROC
     if _CHILD_PROC is None:
         return
@@ -452,8 +329,7 @@ def _kill_child_group(*_args) -> None:
         proc.kill()
         proc.wait(timeout=10)
     except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
-        # Already gone, not ours to signal, or unreapable. Nothing further we
-        # can do here, and raising would mask the original failure.
+        # Already gone, not ours to signal, or unreapable.
         pass
 
 
@@ -485,8 +361,8 @@ def self_launch(argv: list[str], nproc: int) -> int:
         os.path.abspath(__file__),
         *argv,
     ]
-    # No start_new_session: staying in the caller's process group is what makes
-    # the caller's group-wide timeout kill reach torchrun and every rank.
+    # No start_new_session: staying in the caller's process group is what makes the caller's group-wide timeout kill
+    # reach torchrun and every rank.
     proc = subprocess.Popen(cmd, env=env)
     _CHILD_PROC = proc
     atexit.register(_kill_child_group)
@@ -498,9 +374,7 @@ def self_launch(argv: list[str], nproc: int) -> int:
         _kill_child_group()
 
 
-# --------------------------------------------------------------------------
 # Worker helpers
-# --------------------------------------------------------------------------
 
 
 def _snr_db(ref: torch.Tensor, got: torch.Tensor) -> float:
@@ -568,17 +442,7 @@ def init_worker(tp_size: int) -> WorkerCtx:
     return WorkerCtx(rank, local_rank, world_size, device, tp_group, ca_comm=ca_comm)
 
 
-# Dispatch-check state for this process, held in one mutable object so the
-# checker can rebind fields without `global`.
-#
-# ``checks`` is how many shapes were confirmed to dispatch to custom all-reduce.
-# A negative check raises, so a run that reaches the payload has only positive
-# ones — but the count still carries information a hardcoded flag cannot: it
-# separates "checked and passed" from "never checked at all".
-#
-# ``probed`` marks the one live probe per process that proves the communicator
-# is really serving the custom path; repeating it would add a collective to
-# every case.
+# Dispatch-check state for this process, held in one mutable object so the checker can rebind fields without `global`.
 _CUSTOM_AR = {"checks": 0, "probed": False}
 
 
@@ -591,13 +455,10 @@ def _assert_custom_ar(ctx: WorkerCtx, x: torch.Tensor, prefill_support: bool) ->
             "the measurement would not exercise the custom kernel"
         )
     if not _CUSTOM_AR["probed"]:
-        # should_custom_ar() only predicts from payload size and contiguity: it
-        # stays True on a communicator that failed to initialise, and every
-        # sample would then time the RCCL fallback while the run still looks
-        # correct. custom_all_reduce() returns None on exactly that path
-        # (`self.disabled or not should_custom_ar`), so one probe turns the
-        # prediction into an observation. Every rank reaches this together --
-        # the driver is SPMD -- so the collective inside the probe is safe.
+        # should_custom_ar() only predicts from payload size and contiguity: it stays True on a communicator that
+        # failed to initialise, and every sample would then time the RCCL fallback while the run still looks correct.
+        # custom_all_reduce() returns None on exactly that path (`self.disabled or not should_custom_ar`), so one
+        # probe turns the prediction into an observation.
         if ctx.ca_comm.custom_all_reduce(x.clone()) is None:
             raise RuntimeError(
                 "custom_all_reduce() returned None: the communicator is disabled "
@@ -618,18 +479,11 @@ def _quick_reduce_guard() -> None:
         )
 
 
-# --------------------------------------------------------------------------
 # Per-case candidate / reference
-# --------------------------------------------------------------------------
 
 
 def _make_inputs(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke") -> dict:
-    """Build rank-distinct inputs so a no-op all-reduce cannot pass.
-
-    ``stability`` scales the inputs up so that a shortcut accumulating in low
-    precision overflows or loses the tail; BF16 saturates near 3.4e38, and a
-    4-way sum of 1e4-scale values still leaves headroom for the reference.
-    """
+    """Build rank-distinct inputs so a no-op all-reduce cannot pass."""
     gen = torch.Generator(device="cuda").manual_seed(seed + ctx.rank)
     dtype = DTYPES[case.dtype]
     shape = (case.rows, case.hidden)
@@ -673,9 +527,7 @@ def run_reference(case: Case, ctx: WorkerCtx, inp: dict):
     return out, residual_out
 
 
-# --------------------------------------------------------------------------
 # Correctness
-# --------------------------------------------------------------------------
 
 
 def check_case(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke") -> dict:
@@ -703,12 +555,7 @@ def check_case(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke") -> di
 
 
 def check_graph_case(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke") -> dict:
-    """Same comparison, but with the candidate captured into a CUDA graph.
-
-    ``graph_capture()`` already wraps ``ca_comm.capture()``, which is what
-    flushes the IPC buffer registrations on exit; capturing outside it raises
-    from the extension.
-    """
+    """Same comparison, but with the candidate captured into a CUDA graph."""
     from aiter.dist.parallel_state import graph_capture
 
     static_inp = _make_inputs(case, ctx, seed, mode)
@@ -734,8 +581,8 @@ def check_graph_case(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke")
         graph.replay()
         torch.cuda.synchronize()
 
-        # Validate before loading the next input so a stale replay output cannot
-        # be overwritten or compared against the previous replay's reference.
+        # Validate before loading the next input so a stale replay output cannot be overwritten or compared against
+        # the previous replay's reference.
         if case.target == "raw":
             pairs = [("out", ref, got)]
         else:
@@ -747,9 +594,7 @@ def check_graph_case(case: Case, ctx: WorkerCtx, seed: int, mode: str = "smoke")
     return {"snr_db": snr, "max_diff": max_diff, "finite": finite}
 
 
-# --------------------------------------------------------------------------
 # Benchmark
-# --------------------------------------------------------------------------
 
 
 def bench_case(case: Case, ctx: WorkerCtx, warmup: int, iters: int, seed: int) -> float:
@@ -762,18 +607,6 @@ def bench_case(case: Case, ctx: WorkerCtx, warmup: int, iters: int, seed: int) -
     torch.cuda.synchronize()
 
     # Capture a chain of collectives into one CUDA graph, then replay it.
-    #
-    # Two earlier approaches were measured and rejected:
-    #   * one call per barrier -> 6-10% run-to-run spread, because a rank leaving
-    #     the barrier late makes the collective wait and that jitter lands in the
-    #     sample;
-    #   * an eager burst -> stable but CPU-bound: every size from 16 KiB to
-    #     512 KiB reported the same ~21.7 us, i.e. the Python dispatch cost, not
-    #     the kernel.
-    # Replaying a captured chain removes the per-call CPU cost while keeping the
-    # collectives serialised on one stream, so the result is real device-side
-    # latency. graph_capture() also wraps ca_comm.capture(), which is what
-    # flushes the IPC buffer registrations on exit.
     from aiter.dist.parallel_state import graph_capture
 
     chain = max(1, iters)
@@ -821,17 +654,11 @@ def _geomean(values: list[float]) -> float:
     return math.exp(sum(math.log(max(v, 1e-12)) for v in values) / len(values))
 
 
-# --------------------------------------------------------------------------
 # Worker entry
-# --------------------------------------------------------------------------
 
 
 def _emit_sentinel(payload: dict) -> None:
-    """Emit exactly one single-line sentinel.
-
-    Multi-line JSON would be torn apart by the other ranks writing to the same
-    pipe; a compact line under PIPE_BUF is written atomically.
-    """
+    """Emit exactly one single-line sentinel."""
     line = SENTINEL + json.dumps(payload, separators=(",", ":")) + SENTINEL
     if len(line.encode()) >= 4096:
         raise RuntimeError(f"sentinel too large for an atomic write: {len(line)} bytes")
@@ -851,15 +678,7 @@ def worker_main(args: argparse.Namespace) -> int:
             if args.profile_run and args.profile_case:
                 cases = [c for c in cases if c.case_id == args.profile_case] or cases[:1]
 
-            # Repeat the whole sweep in-process and keep the per-case MEDIAN of
-            # the round medians. Process-to-process variation (fresh IPC buffers,
-            # clock state) dominates the run-to-run spread, so repeating inside
-            # one launch is far cheaper than relaunching torchrun.
-            #
-            # Median, not min: min always picks the luckiest round, which biases
-            # the estimate low and stays extremal-sensitive no matter how many
-            # rounds are added. The keep/revert gate compares two such estimates,
-            # so a biased-but-noisy statistic wastes the whole repeat budget.
+            # Repeat the whole sweep in-process and keep the per-case MEDIAN of the round medians.
             per_case: dict[str, float] = {}
             rounds: list[dict[str, float]] = []
             for _ in range(max(1, args.repeat)):
@@ -889,9 +708,8 @@ def worker_main(args: argparse.Namespace) -> int:
             groups: dict[str, dict] = {}
             for case in cases:
                 g = groups.setdefault(case.group, {"cases": []})
-                # ``scored`` travels with the case so consumers do not have to
-                # re-derive which cases back the score from a second list that
-                # can drift out of step with this one.
+                # ``scored`` travels with the case so consumers do not have to re-derive which cases back the score
+                # from a second list that can drift out of step with this one.
                 g["cases"].append({
                     "case_id": case.case_id,
                     "median_ms": per_case[case.case_id],
@@ -899,10 +717,7 @@ def worker_main(args: argparse.Namespace) -> int:
                 })
 
             if rank0:
-                # Mark the cases outside the score. Profiling picks the slowest
-                # case to analyse, and the slowest here is an excluded one, so
-                # without the mark the whole profile-and-optimize chain aims at
-                # a shape the gate never reads.
+                # Mark the cases outside the score.
                 scored_by_id = {c.case_id: c.sensitive for c in cases}
                 for cid, ms in per_case.items():
                     tag = "" if scored_by_id.get(cid, True) else " unscored"
@@ -912,10 +727,8 @@ def worker_main(args: argparse.Namespace) -> int:
                     "kind": "integrated_bench",
                     "world_size": ctx.world_size,
                     "metrics": groups,
-                    # Measured, not asserted: every benched shape passed a
-                    # dispatch check, and the count says how many did. A run
-                    # that somehow benched nothing reports False rather than
-                    # claiming a custom path it never exercised.
+                    # Measured, not asserted: every benched shape passed a dispatch check, and the count says how many
+                    # did.
                     "custom_ar_active": _CUSTOM_AR["checks"] > 0,
                     "custom_ar_checks": _CUSTOM_AR["checks"],
                     "source_hash": _source_hash(_repo_root())[:16],
@@ -926,17 +739,7 @@ def worker_main(args: argparse.Namespace) -> int:
                         json.dump(payload, f, indent=2)
             return 0
 
-        # Correctness modes. The loop's formal validation passes no arguments,
-        # so every benchmark case runs both eager and graph correctness. An
-        # explicit --mode keeps graph= selection for focused diagnostics.
-        #
-        # The default, smoke, uses unit-scale inputs, where a rank publishing
-        # its buffer before its peers have read the previous one still produces
-        # a plausible sum -- the known race in the publish path survives it.
-        # stability scales inputs by 1e4 so a shortcut accumulating in low
-        # precision, or a read of a half-updated buffer, moves the result far
-        # enough to fail SNR. Validating only under smoke is what lets that
-        # class of defect reach a KEEP.
+        # Correctness modes.
         modes = [args.mode] if args.mode else ["smoke", "stability"]
         worst_snr = 200.0
         worst_diff = 0.0
@@ -962,8 +765,7 @@ def worker_main(args: argparse.Namespace) -> int:
             print(f"SNR: {worst_snr:.2f} dB")
             print(f"allclose: {passed}")
             print(f"max_diff: {worst_diff:.6e}")
-        # The parser treats SNR as authoritative, so a failure must also be
-        # visible in the exit code.
+        # The parser treats SNR as authoritative, so a failure must also be visible in the exit code.
         return 0 if passed else 1
     finally:
         from aiter.dist.parallel_state import (
@@ -977,18 +779,15 @@ def worker_main(args: argparse.Namespace) -> int:
         torch.cuda.empty_cache()
 
 
-# --------------------------------------------------------------------------
 # CLI
-# --------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Forge TP8 all-reduce driver (Kimi-K3)")
-    # The driver owns case selection, so the default must be the full scored
-    # suite rather than one probe case.
+    # The driver owns case selection, so the default must be the full scored suite rather than one probe case.
     p.add_argument("--shape", default="", help="e.g. suite=tp8_k3,tp=8,dtype=bf16; empty derives the rank count from the launcher")
-    # default=None distinguishes "caller chose smoke" from "caller said
-    # nothing", which decides whether the full correctness matrix runs.
+    # default=None distinguishes "caller chose smoke" from "caller said nothing", which decides whether the full
+    # correctness matrix runs.
     p.add_argument("--mode", default=None,
                    choices=["smoke", "stability", "determinism"])
     p.add_argument("--warmup", type=int, default=10)

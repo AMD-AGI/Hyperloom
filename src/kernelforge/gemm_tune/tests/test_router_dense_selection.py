@@ -1,26 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The dense GEMM the runtime dispatches is not the one ``precision`` names.
-
-Regression cover for a quantized MoE model whose dense traffic is bf16. Five
-production sessions tuned ``a4w4_blockscale`` for two hours apiece while the
-serving process looked up ``bf16_tuned_gemm.csv`` twenty thousand times and
-found nothing, because the dense branch was an if/elif chain on one scalar and
-the bf16 arm sat behind the fp4 arm.
-"""
+"""The dense GEMM the runtime dispatches is not the one ``precision`` names."""
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.router import select_tuners
 
 
 def _mxfp4_moe_profile(**kwargs):
-    """A quark mxfp4 MoE checkpoint, shaped like MiniMax-M3-MXFP4.
-
-    The ``exclude`` list is the real one, collapsed: quark leaves lm_head and
-    every attention projection at bf16, so ~99% of the weight bytes are fp4 and
-    ~100% of the dense GEMM calls are not.
-    """
+    """A quark mxfp4 MoE checkpoint, shaped like MiniMax-M3-MXFP4."""
     defaults = {
         "model_path": "/fake/MiniMax-M3-MXFP4",
         "is_moe": True,
@@ -138,13 +126,7 @@ class TestQuantizedModelsStillTuneBf16Dense:
         assert "sglang_dense_bf16" not in names
 
     def test_dense_fp8_with_only_lm_head_excluded_gets_a_bf16_fallback(self):
-        """No non-lm_head exclusion means the config gives no positive signal for
-        a bf16 dense pass, so it is not selected to run unconditionally. But an
-        fp8 tuning that comes back empty still leaves the excluded projections
-        running in bf16, which is the retry Hyperloom used to launch as a second
-        subprocess. Change 3 pushes it down: the bf16 pass is selected as a
-        ``fallback`` that runs in this same call only if the fp8 tuner produced
-        no candidate, so a winning fp8 run pays nothing for it."""
+        """No non-lm_head exclusion means the config gives no positive signal for"""
         profile = _mxfp4_moe_profile(
             is_moe=False,
             num_experts=0,
@@ -188,8 +170,8 @@ class TestQuantizedModelsStillTuneBf16Dense:
         )
         by_name = {s.name: s for s in specs if s.should_run}
         assert "sglang_dense_bf16" in by_name
-        # A non-lm_head exclusion is positive evidence bf16 dense is dispatched,
-        # so the pass runs unconditionally -- not merely as an fp8-barren fallback.
+        # A non-lm_head exclusion is positive evidence bf16 dense is dispatched, so the pass runs unconditionally --
+        # not merely as an fp8-barren fallback.
         assert by_name["sglang_dense_bf16"].fallback is False
 
     def test_fp32_weights_are_not_handed_to_the_bf16_tuner(self):

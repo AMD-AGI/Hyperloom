@@ -574,9 +574,7 @@ def test_codex_backend_materializes_custom_agent_roles(
         ("workspace-write", False, "read-only"),
         ("workspace-write", True, "workspace-write"),
         ("read-only", False, "read-only"),
-        # The role is not clamped to the parent in either direction. No caller
-        # declares a writable role under a read-only parent today; the trio and
-        # the orchestrator both give a writable parent read-only roles.
+        # The role is not clamped to the parent in either direction.
         ("read-only", True, "workspace-write"),
     ],
 )
@@ -586,16 +584,7 @@ def test_codex_role_sandbox_comes_from_the_role_not_the_parent(
     writable: bool,
     expected: str,
 ) -> None:
-    """Confine a subagent by what the role may do, whatever the parent resolved.
-
-    The sandbox is the only enforcement a native role has: the role config takes
-    a description, a config file and nickname candidates, and the config file it
-    points at carries no tool allowlist. Widening a read-only reviewer to match a
-    parent running under ``bypass`` would leave its prompt as the only thing
-    standing between it and the worktree. A host with no bubblewrap therefore
-    cannot run native roles, which limits the paths that use them rather than
-    what those roles are allowed to do.
-    """
+    """Confine a subagent by what the role may do, whatever the parent resolved."""
     backend = CodexBackend(
         runtime=AgentRuntimeConfig(
             provider="codex",
@@ -655,13 +644,7 @@ def test_normalize_codex_sdk_usage_uses_last_turn() -> None:
 
 
 def test_normalize_codex_sdk_result_reports_an_sdk_error_as_an_api_failure() -> None:
-    """An in-band SDK error is not a finished agent.
-
-    The SDK reports a provider-side failure on an otherwise "completed" turn, so
-    labelling it ``agent_stopped`` made a rate limit indistinguishable from a
-    deliberate no-op: resume never fired, and the empty diff was recorded as
-    NO_CHANGES -- an optimization verdict about a kernel nobody looked at.
-    """
+    """An in-band SDK error is not a finished agent."""
     result = _normalize_sdk_result(
         SimpleNamespace(
             final_response=None,
@@ -697,11 +680,7 @@ def test_normalize_codex_sdk_result_keeps_a_turn_cap_terminal() -> None:
 
 
 def test_codex_execution_error_carries_the_thread_it_established() -> None:
-    """A transport failure after ``thread_start`` must not strand the session.
-
-    By then the thread holds every turn spent reading, building and benchmarking,
-    so ``session_resume`` continues it instead of opening a new one.
-    """
+    """A transport failure after ``thread_start`` must not strand the session."""
     exc = CodexExecutionError("Codex SDK execution failed: connection reset", session_id="thread-7")
 
     assert exc.session_id == "thread-7"
@@ -861,9 +840,8 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     assert session["progress_log"] == []
     assert captured["spec"].progress_log is session["progress_log"]
     assert session["plan"] == "vectorize loads"
-    # The implementer no longer authors its own takeaway: a stray LESSON: line in
-    # its output is ignored, and the record is written afterwards by a dedicated
-    # summarizer session. This fake provider cannot resume, so there is none.
+    # The implementer no longer authors its own takeaway: a stray LESSON: line in its output is ignored, and the
+    # record is written afterwards by a dedicated summarizer session.
     assert "lesson" not in session
     assert session["summarize"] is None
     assert session["end_reason"] == "resume_unavailable"
@@ -1003,16 +981,7 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Judge an implementer turn against what it inherited, not against HEAD.
-
-    forge-loop writes its own ledger -- campaign_config.json, events.jsonl,
-    lessons, supervisor notes -- into the very workspace it then hands the
-    implementer, and the kernel's runtime leaves a JIT cache there too. A turn
-    judged against HEAD is refused for that inherited state before the agent is
-    asked anything, so every iteration is skipped and the whole kernel budget
-    goes to refusals. What the turn itself did is still judged, by comparing
-    against the snapshot taken when it started.
-    """
+    """Judge an implementer turn against what it inherited, not against HEAD."""
     captured: dict[str, AgentRunSpec] = {}
 
     class FakeCodexBackend:
@@ -1671,11 +1640,7 @@ def _read_only_spec(cwd: Path) -> AgentRunSpec:
 
 
 def test_workspace_guard_skips_a_read_only_session_outside_git(tmp_path: Path) -> None:
-    """A session that cannot write has no rollback to protect.
-
-    Demanding a git worktree of it refuses to run for a caller who simply has
-    none -- discovery analyzing an installed framework, say.
-    """
+    """A session that cannot write has no rollback to protect."""
     plain_dir = tmp_path / "not-a-repo"
     plain_dir.mkdir()
     guard = WorkspaceGuard(_read_only_spec(plain_dir))
@@ -1702,11 +1667,7 @@ def test_workspace_guard_skips_a_read_only_session_in_a_dirty_worktree(
 
 
 def test_workspace_guard_still_runs_for_a_read_only_resume(tmp_path: Path) -> None:
-    """Its whole point is the verify() check that dirty state came back intact.
-
-    Skipping on read-only alone would drop that silently, and the only thing
-    keeping it alive today is that this path happens to declare target files.
-    """
+    """Its whole point is the verify() check that dirty state came back intact."""
     repo, _kernel, _driver = _make_repo(tmp_path)
     spec = replace(_read_only_spec(repo), read_only_resume=True)
 
@@ -1821,16 +1782,7 @@ def _author_spec(repo: Path, kernel: Path, driver: Path) -> AgentRunSpec:
 def test_codex_dirty_baseline_rejects_an_undone_inherited_stage(
     tmp_path: Path,
 ) -> None:
-    """Judge an index change on its own, not by where the path ends up.
-
-    A turn that unstages a file the caller had staged leaves it untracked on
-    disk. The deviation is detected -- the index record for that path no longer
-    matches the baseline -- but reporting it in whichever bucket the path now
-    occupies hands it to the rule for that bucket, and ``allow_untracked``
-    forgives untracked paths. The caller's staged work is undone and the turn is
-    accepted. An index that no longer matches the one the turn inherited is a
-    violation wherever the file itself went.
-    """
+    """Judge an index change on its own, not by where the path ends up."""
     from kernelforge.agent_backends import codex as codex_module
 
     repo, kernel, driver = _make_repo(tmp_path)
@@ -1849,22 +1801,14 @@ def test_codex_dirty_baseline_rejects_an_undone_inherited_stage(
 def test_codex_writable_author_restore_failure_is_not_swallowed(
     tmp_path: Path,
 ) -> None:
-    """A recovery that could not run must not report a clean rollback.
-
-    ``rollback()`` turns a failed ``allow_dirty_baseline`` recovery into a raised
-    rejection, so the restore it calls cannot suppress the error. A Git-ignored
-    target is recorded nowhere but its own snapshot, and a suppressed write would
-    leave the rejected turn's edit on disk.
-    """
+    """A recovery that could not run must not report a clean rollback."""
     from kernelforge.agent_backends import codex as codex_module
 
     repo, kernel, driver = _make_repo(tmp_path)
     guard = codex_module.WorkspaceGuard(_author_spec(repo, kernel, driver))
     guard.prepare()
 
-    # Fail only the target-snapshot step. Patching every write would raise from an
-    # earlier recovery step, which never suppressed anything, and the test would
-    # pass whether or not this step propagates.
+    # Fail only the target-snapshot step.
     targets = set(guard.target_snapshots)
     assert targets, "the author spec must allowlist at least one target"
     real_write_bytes = Path.write_bytes
@@ -1878,21 +1822,15 @@ def test_codex_writable_author_restore_failure_is_not_swallowed(
     with mock.patch.object(Path, "write_bytes", selective_write):
         with pytest.raises(WorkspaceSafetyError, match="could not be restored") as raised:
             guard.rollback()
-    # A restore that could not run says nothing about what the session did, and the
-    # author classifies it by this marker: marked, it abandoned the recipe -- and
-    # rollback also runs while unwinding a plain timeout.
+    # A restore that could not run says nothing about what the session did, and the author classifies it by this
+    # marker: marked, it abandoned the recipe -- and rollback also runs while unwinding a plain timeout.
     assert raised.value.agent_safety_rejection is False
 
 
 def test_codex_safety_error_marks_a_verdict_and_not_a_failed_query(
     tmp_path: Path,
 ) -> None:
-    """The two things this one class carries must be distinguishable.
-
-    The fusion author refuses to retry a workspace-safety VERDICT, and used to
-    recognise one by class name -- so a ``git`` call that timed out on NFS
-    abandoned the recipe exactly like a session that edited a protected file.
-    """
+    """The two things this one class carries must be distinguishable."""
     from kernelforge.agent_backends import workspace_guard as guard_module
 
     repo, _kernel, _driver = _make_repo(tmp_path)
@@ -1907,12 +1845,7 @@ def test_codex_verify_rejection_survives_a_failing_second_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The author needs the violating paths, not a complaint about a restore.
-
-    ``verify()`` already restored the baseline before raising, so the caller's
-    rollback is a second one; under ``allow_dirty_baseline`` its own failure raises
-    and replaced the violation list the author logs and hands to the next attempt.
-    """
+    """The author needs the violating paths, not a complaint about a restore."""
     from kernelforge.agent_backends import codex as codex_module
 
     repo, kernel, driver = _make_repo(tmp_path)
@@ -1977,8 +1910,8 @@ def test_codex_writable_author_accepts_inherited_dirty_non_target_state(
     result = asyncio.run(_backend(fake).run(_author_spec(repo, kernel, driver)))
 
     assert kernel.read_text() == "VALUE = 'authored'\n"
-    # Only the paths this turn actually changed are reported; the inherited dirty
-    # files are not the author's edits and must not be attributed to it.
+    # Only the paths this turn actually changed are reported; the inherited dirty files are not the author's edits and
+    # must not be attributed to it.
     assert result.file_changes == ["kernel.py"]
     assert result.target_edit_count == 1
     assert helper.read_text() == "HELPER = 'operator edit'\n"
@@ -2126,14 +2059,7 @@ def test_codex_backend_accepts_untracked_state_the_caller_declared(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Start an implementer turn beside untracked state the orchestrator allowed.
-
-    forge-loop writes its own experiment ledger into the workspace it hands the
-    implementer, so every iteration starts beside untracked files nobody asked the
-    agent about. The orchestrator says that is expected with ``allow_untracked``,
-    which the resume branch honours -- an implementer branch that ignores it rejects
-    the loop's own bookkeeping and skips every candidate without spending a turn.
-    """
+    """Start an implementer turn beside untracked state the orchestrator allowed."""
     repo, kernel, driver = _make_repo(tmp_path)
     ledger = repo / "forge_experiments"
     ledger.mkdir()
@@ -2164,11 +2090,7 @@ def test_codex_backend_names_the_state_that_blocked_the_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Report which paths made the worktree dirty, not merely that it was.
-
-    The bare refusal costs an operator a manual worktree inspection to learn
-    what to clean, which is the whole content of the answer.
-    """
+    """Report which paths made the worktree dirty, not merely that it was."""
     repo, kernel, driver = _make_repo(tmp_path)
     ledger = repo / "forge_experiments"
     ledger.mkdir()
@@ -2343,9 +2265,7 @@ def test_the_guard_does_not_hold_the_repositorys_own_bookkeeping(tmp_path: Path)
 
 
 def test_git_housekeeping_during_a_session_is_not_a_violation(tmp_path: Path) -> None:
-    """git rewrites its own bookkeeping unprompted -- refreshing a stale stat
-    cache rewrites the index, and a build touching files is enough to cause it.
-    Held as bytes, that housekeeping read as the session tampering."""
+    """git rewrites its own bookkeeping unprompted -- refreshing a stale stat"""
     repo, _kernel, _driver = _make_repo(tmp_path)
     guard = WorkspaceGuard(replace(_read_only_spec(repo), read_only_resume=True))
     guard.prepare()

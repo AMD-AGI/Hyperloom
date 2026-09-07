@@ -1,8 +1,4 @@
-"""Sanitize, persist, and render upstream PR references.
-
-External text enters the system prompt and is untrusted. Snapshots preserve
-shown PR heads and cache empty queries.
-"""
+"""Sanitize, persist, and render upstream PR references."""
 
 from __future__ import annotations
 
@@ -54,8 +50,8 @@ PROVENANCE_NAME = "provenance.json"
 DEFAULT_MAX_BYTES = 4096
 # Five 700-byte entries plus the disclaimer fit within 4 KiB.
 MAX_ENTRY_BYTES = 700
-# Service, parsing, and filesystem failures a best-effort caller absorbs so this
-# subsystem can never decide the outcome of the run that hosts it.
+# Service, parsing, and filesystem failures a best-effort caller absorbs so this subsystem can never decide the
+# outcome of the run that hosts it.
 PR_KB_RECOVERABLE = (OSError, ValueError, PRMonitorError)
 LIST_ITEMS = 8
 DEFAULT_EMPTY_TTL_HOURS = 24
@@ -365,8 +361,8 @@ class PRRefsResult:
     # Validated owner/repo for the on-demand tools.
     repo: str = ""
     stats: dict[str, Any] = field(default_factory=dict)
-    # Set only when the caller deferred persistence; hand it to
-    # ``commit_snapshot`` once the campaign is allowed to write.
+    # Set only when the caller deferred persistence; hand it to ``commit_snapshot`` once the campaign is allowed to
+    # write.
     pending_snapshot: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -393,10 +389,7 @@ def identify_repo_by_path(
     hint: str = "",
     budget_sec: float | None = None,
 ) -> tuple[str, int, str]:
-    """Return the path owner, request count, and any degraded reason.
-
-    Name affinity resolves ties; all candidates are probed concurrently.
-    """
+    """Return the path owner, request count, and any degraded reason."""
     if not file_path or not tracked:
         return "", 0, ""
     ordered = sorted(tracked, key=lambda r: -_name_affinity(hint, r))
@@ -451,20 +444,14 @@ def collect_references(
     budget_sec: float = 0.0,
     persist: bool = True,
 ) -> PRRefsResult:
-    """Resolve, discover, persist, and render upstream PR references.
-
-    With ``persist=False`` nothing is written; the updated snapshot is returned
-    as ``pending_snapshot`` so a caller that must clear a guard first can commit
-    it later without leaving a trace behind a rejected invocation.
-    """
-    # One absolute cutoff for every stage below: preflight, repository listing,
-    # snapshot loading, path probing, discovery, and enrichment spend the same
-    # seconds.
+    """Resolve, discover, persist, and render upstream PR references."""
+    # One absolute cutoff for every stage below: preflight, repository listing, snapshot loading, path probing,
+    # discovery, and enrichment spend the same seconds.
     budget = budget_sec or float(os.environ.get("PR_KB_BUDGET_SEC", "30") or 30)
     deadline = time.monotonic() + budget
     client = client or PRMonitorClient()
-    # Load after starting the clock so a slow filesystem cannot silently extend
-    # the lookup beyond the caller's finalization reserve.
+    # Load after starting the clock so a slow filesystem cannot silently extend the lookup beyond the caller's
+    # finalization reserve.
     snapshot = load_snapshot(workspace_dir)
 
     def expired() -> bool:

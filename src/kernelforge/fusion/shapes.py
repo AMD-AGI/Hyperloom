@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resolve representative decode shapes from a model's ``config.json``.
-
-Kernel-level validation needs realistic tensor shapes (hidden size, head count,
-head dim, intermediate size, ...) for the fused op chain. These come from the HF
-``config.json`` plus a decode batch size (from the trace or a default), NOT from
-booting the model -- keeping validation cheap and e2e-free.
-"""
+"""Resolve representative decode shapes from a model's ``config.json``."""
 
 from __future__ import annotations
 
@@ -44,16 +38,7 @@ def _first(cfg: dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def resolve_decode_shapes(model_path: str | Path, *, decode_batch: int = 16) -> dict[str, Any]:
-    """Derive representative decode shapes from a model config.
-
-    Args:
-        model_path: Model directory (containing ``config.json``) or file path.
-        decode_batch: Number of concurrent decode tokens (T). Defaults to 16.
-
-    Returns:
-        A best-effort shape dict. Missing fields are omitted rather than guessed;
-        ``model_type`` is always present ("" if unknown) so downstream can branch.
-    """
+    """Derive representative decode shapes from a model config."""
     cfg = load_model_config(model_path)
     hidden = _first(cfg, "hidden_size", "d_model", "n_embd")
     n_heads = _first(cfg, "num_attention_heads", "n_head")

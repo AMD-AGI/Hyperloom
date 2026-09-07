@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Pure-logic tests for per-shape production split-K trial (no GPU).
-
-``_supports`` is the only GPU-touching call; monkeypatching it exercises the
-scan / control-gate / memoization logic on any host.
-"""
+"""Pure-logic tests for per-shape production split-K trial (no GPU)."""
 
 from __future__ import annotations
 
@@ -68,8 +64,7 @@ def test_make_support_fn_memoizes_per_shape(monkeypatch):
 
 
 class TestResolveDevice:
-    """`_resolve_device` pins the in-process trial to the tuner's assigned card
-    instead of always using device 0 (review: multi-tenant wrong-GPU)."""
+    """`_resolve_device` pins the in-process trial to the tuner's assigned card"""
 
     def test_empty_gpu_ids_defaults_to_cuda(self, monkeypatch):
         for k in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
@@ -93,8 +88,7 @@ class TestResolveDevice:
         assert mod._resolve_device("7") == "cuda"
 
     def test_make_support_fn_accepts_gpu_ids(self, monkeypatch):
-        # gpu_ids is threaded through without touching the GPU (control fails
-        # -> None) and does not raise.
+        # gpu_ids is threaded through without touching the GPU (control fails -> None) and does not raise.
         monkeypatch.setattr(mod, "_supports", lambda m, n, k, sk, device="cuda": False)
         fn = make_support_fn(gpu_ids="1")
         assert fn(64, 5120, 5120) is None

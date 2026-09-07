@@ -1,33 +1,4 @@
-"""One backend-agnostic Rewrite record layout, on KB Store or on disk.
-
-A rewrite candidate is a record under a producer-owned ``kernel:`` identity: a
-knowledge document describing the port and the ported file itself, kept out of
-the document as byte-exact artifact data. Both backends store exactly that, so a
-run can move between them without the reader learning a second shape. Reads
-first rank metadata, then materialize only the selected candidates as isolated
-bundles::
-
-    <destination>/<session-id>/recipe.json
-    <destination>/<session-id>/files/**
-
-The identity's ``producer`` owns an independent candidate index and champion;
-``backend`` describes the final implementation type. The canonical id carries
-both, so the existing ranking and pointer policy needs no producer special case.
-The KB Store must accept that producer dimension in its canonical schema; until
-it does, remote producer-owned identities remain a live deployment blocker.
-
-The champion is a pointer, not a filter. A correct port that loses to the
-source baseline is still the only thing that saves the next run from redoing
-PORT, so candidates are recorded whether or not they win; only the pointer is
-gated on speedup.
-
-A record's ``speedup`` is what its producer claims, which is not evidence for
-any other run: a claim that no consumer reproduced can be arbitrarily inflated
-and would otherwise win the ranking forever. ``measured_speedup`` is the value
-a consumer measured after actually applying the record, so ranking puts every
-measured candidate ahead of every merely claimed one and a consumer amends the
-record it measured.
-"""
+"""One backend-agnostic Rewrite record layout, on KB Store or on disk."""
 
 from __future__ import annotations
 
@@ -72,12 +43,7 @@ class RewriteRecordError(RuntimeError):
 
 @dataclass(frozen=True)
 class RewriteCandidate:
-    """A recorded port, ranked on measured evidence before a bare claim.
-
-    ``speedup`` is what the record's own document claims. ``measured_speedup``
-    is present only once a consumer applied this record and measured it, and it
-    is the value ranking trusts.
-    """
+    """A recorded port, ranked on measured evidence before a bare claim."""
 
     session_id: str
     knowledge: dict[str, Any]
@@ -162,18 +128,7 @@ def _with_preserved_measurement(
     *,
     recorded: Any,
 ) -> dict[str, Any]:
-    """Carry a consumer's measurement across a replacing write of one record.
-
-    A producer writes its own claim; a consumer that measured the candidate
-    amends the same record with what it actually got, and the ranking then trusts
-    the measurement over the claim. Replacing the record would throw that away
-    and hand the ranking back the claim that lost, so the measured value is
-    carried over unless this write supplies one of its own.
-
-    Ownership stays with the measurer: an unusable recorded value is dropped
-    rather than propagated, because a claim is the one thing a record always has
-    and a measurement is only worth keeping while it is still a measurement.
-    """
+    """Carry a consumer's measurement across a replacing write of one record."""
     payload = dict(knowledge)
     if payload.get(MEASURED_SPEEDUP_KEY) is not None:
         return payload
@@ -218,12 +173,7 @@ def canonical_relpath(canonical_id: str) -> Path:
 
 
 def _ranking_key(candidate: RewriteCandidate) -> tuple[int, float, str]:
-    """Order measured candidates first, then by value, then by identity.
-
-    A claim no consumer reproduced ranks below every measured candidate however
-    large it is; the session id makes the order total so two runs reading the
-    same records select the same candidates.
-    """
+    """Order measured candidates first, then by value, then by identity."""
     return (
         1 if candidate.measured_speedup is None else 0,
         -(candidate.ranked_speedup or 0.0),
@@ -526,9 +476,7 @@ class KBStoreRewriteRecords:
                         raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
                     expected.add(rel_path)
 
-                # The upstream SDK lists internally. Pin that call to the
-                # validated snapshot so the download neither repeats the
-                # request nor observes a different set of paths.
+                # The upstream SDK lists internally.
                 original_listing = self._client.list_session_files
 
                 def validated_listing(
@@ -629,11 +577,7 @@ class KBStoreRewriteRecords:
         session_id: str,
         measured_speedup: float,
     ) -> None:
-        """Merge the measured value into the candidate's own session document.
-
-        Merge mode amends the record the producer wrote instead of rewriting it,
-        so the claim, the artifacts and the opaque payload all survive.
-        """
+        """Merge the measured value into the candidate's own session document."""
         self._client.put_knowledge(
             canonical_id,
             {MEASURED_SPEEDUP_KEY: _checked_measured_speedup(measured_speedup)},
@@ -777,13 +721,7 @@ class LocalRewriteRecords:
 
     @staticmethod
     def _recorded_measurement(session_dir: Path) -> Any:
-        """The measured value already on this record, or None when there is none.
-
-        A first write has no record to read, so absence is the ordinary case and
-        never an error. A record that exists but cannot be parsed is treated the
-        same way: the replacing write is what repairs it, and refusing to write
-        would leave the unreadable document in place.
-        """
+        """The measured value already on this record, or None when there is none."""
         document = session_dir / KNOWLEDGE_FILENAME
         if document.is_symlink() or not document.is_file():
             return None
@@ -901,12 +839,7 @@ class LocalRewriteRecords:
 
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:
-    """Pick a backend from the process-wide knowledge configuration.
-
-    Returns ``None`` when remote mode is selected without KB Store
-    credentials, which is the same "recorded nothing, cold start" outcome the
-    rest of the rewrite path already handles.
-    """
+    """Pick a backend from the process-wide knowledge configuration."""
     from kernelforge.knowledge.experience_store import (
         KnowledgeStoreMode,
         knowledge_config_from_runtime,

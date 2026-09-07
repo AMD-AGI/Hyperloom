@@ -29,9 +29,8 @@ class Iteration:
     allclose: bool | None = None
     max_diff: float | None = None
 
-    # Raw aggregate diagnostic; not the optimization objective and not monotonic,
-    # but it withdraws the published improvement badge when it contradicts the
-    # score (see BestResultPublisher.publish).
+    # Raw aggregate diagnostic; not the optimization objective and not monotonic, but it withdraws the published
+    # improvement badge when it contradicts the score (see BestResultPublisher.publish).
     wall_ms: float | None = None
     # Equal-weight arithmetic mean of per-case speedups.
     mean_case_speedup: float | None = None
@@ -53,8 +52,8 @@ class Iteration:
     notes: str = ""
 
     def to_dict(self) -> dict:
-        # Keep existing semantics: skip falsy/empty fields for compactness, but
-        # preserve the new ones explicitly when populated.
+        # Keep existing semantics: skip falsy/empty fields for compactness, but preserve the new ones explicitly when
+        # populated.
         return {k: v for k, v in self.__dict__.items() if v is not None and v != "" and v != {} and v != []}
 
     @classmethod
@@ -101,20 +100,14 @@ class Experiment:
     iterations: list[Iteration] = field(default_factory=list)
     changes_reverted: list[str] = field(default_factory=list)
 
-    # NEW: total LLM token spend for the whole run, summed from terminal
-    # provider usage records (see tracker/usage.py). Canonical
-    # keys: input_tokens / output_tokens / cache_creation_input_tokens /
-    # cache_read_input_tokens / total_cost_usd / cost_available / cost_source /
-    # calls. Empty until the loop finishes (or when no agent ran), so an external
-    # caller can distinguish unavailable provider pricing from a real zero cost.
+    # NEW: total LLM token spend for the whole run, summed from terminal provider usage records (see
+    # tracker/usage.py).
     llm_usage: dict = field(default_factory=dict)
 
-    # Remote experience KB observability for forge-loop: selected warm-start
-    # solution, apply outcome, write-back reason, and written slugs.
+    # Remote experience KB observability for forge-loop: selected warm-start solution, apply outcome, write-back
+    # reason, and written slugs.
     kb_experience: dict = field(default_factory=dict)
-    # Last validated KEEP committed by forge-loop. This is persisted before
-    # post-KEEP profiling so an external timeout owner can recover the best
-    # source and measurements even when the loop never writes its final result.
+    # Last validated KEEP committed by forge-loop.
     checkpoint: dict = field(default_factory=dict)
 
     def add_iteration(self, **kwargs) -> Iteration:
@@ -233,11 +226,7 @@ class Experiment:
         return best.mean_case_speedup
 
     def consecutive_reverts(self) -> int:
-        """How many of the most-recent iterations were REVERTs in a row.
-
-        Used by the orchestrator to bail out of a session that's only
-        producing reverts (cross-session signal).
-        """
+        """How many of the most-recent iterations were REVERTs in a row."""
         n = 0
         for it in reversed(self.iterations):
             if it.decision == "REVERT":

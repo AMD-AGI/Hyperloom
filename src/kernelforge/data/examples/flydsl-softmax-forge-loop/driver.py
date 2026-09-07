@@ -1,30 +1,4 @@
-"""Measurement driver for the forge-loop FlyDSL softmax example.
-
-forge-loop treats the driver as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout. This driver implements the three
-modes of that contract:
-
-  * Correctness  ``python driver.py`` -> runs the complete suite and prints
-    ``SNR: <db> dB`` (and ``allclose: True/False``).
-    forge invokes this once as the driver-owned complete correctness suite.
-
-  * Benchmark    ``python driver.py --warmup <n> --iters <n>
-    --bench-mode`` -> prints ``wall_ms`` samples plus one ``case_ms`` aggregate.
-    forge takes the median of those samples as the kernel's wall time.
-
-  * Profiling    ``python driver.py --profile-run`` -> the driver selects the
-    profile case, runs only the target kernel, and exits without reference/timing.
-
-The driver is the correctness ORACLE and the perf MEASURER; forge never edits it
-(it is a protected measurement file). It imports the kernel under optimization by
-its stable public builder ``build_softmax_module`` from ``softmax_kernel.py``.
-
-Stream routing lives HERE, not in the kernel: the FlyDSL launcher takes a
-``stream`` kwarg, and this driver always passes the CURRENT stream. Under the
-CUDA-graph harness the current stream IS the capture stream, so the kernel is
-recorded into the graph. Keeping this in the (protected) driver means the agent
-cannot accidentally break graph capture by editing the kernel.
-"""
+"""Measurement driver for the forge-loop FlyDSL softmax example."""
 
 from __future__ import annotations
 
@@ -48,8 +22,8 @@ _SEED = 0
 
 _TORCH_DTYPE = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
 
-# build_softmax_module JIT-compiles per (M, N, dtype); cache so correctness and
-# bench of the same shape do not recompile.
+# build_softmax_module JIT-compiles per (M, N, dtype); cache so correctness and bench of the same shape do not
+# recompile.
 _MODULE_CACHE: dict[tuple[int, int, str], object] = {}
 
 
@@ -73,11 +47,7 @@ def _make_input(rows: int, cols: int, dtype: str, device: str) -> torch.Tensor:
 
 
 def _launch_on_current_stream(launch_fn, x: torch.Tensor, out: torch.Tensor, rows: int) -> None:
-    """Run the FlyDSL kernel on whatever stream is currently active.
-
-    Queried at call time on purpose: under torch.cuda.graph the active stream is
-    the private capture stream, so the launch gets recorded into the graph.
-    """
+    """Run the FlyDSL kernel on whatever stream is currently active."""
     stream = fx.Stream(torch.cuda.current_stream().cuda_stream)
     launch_fn(x, out, rows, stream=stream)
 
@@ -114,8 +84,8 @@ def _run_correctness(rows: int, cols: int, dtype: str, device: str) -> int:
 
 
 def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device: str) -> int:
-    # Static tensors allocated once; the graph harness replays the op on the same
-    # memory so it times GPU execution, not host launch overhead.
+    # Static tensors allocated once; the graph harness replays the op on the same memory so it times GPU execution,
+    # not host launch overhead.
     x = _make_input(rows, cols, dtype, device)
     out = torch.empty_like(x)
     launch_fn = _build(rows, cols, dtype)
@@ -124,8 +94,8 @@ def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device
     def step():
         _launch_on_current_stream(launch_fn, x, out, rows)
 
-    # dirty + verify prove the graph actually captured the kernel (an uncaptured
-    # launch would leave `out` at its dirtied value and fail verify -> eager).
+    # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave `out` at its
+    # dirtied value and fail verify -> eager).
     result = cuda_graph_bench(
         step,
         warmup=warmup,

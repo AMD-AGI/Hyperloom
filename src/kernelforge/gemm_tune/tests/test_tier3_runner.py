@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The door to the generated tier, and what it takes to get through it.
-
-Five checkpoints in order -- gate, generate, sandbox, contract, referee -- each
-ruling out a different kind of wrong and each ending the attempt without
-touching the tuning run that hosts it. The referee is last and decisive:
-everything before it can be satisfied by a script that reports what it was asked
-to report, and only the referee establishes that a kernel actually got faster.
-"""
+"""The door to the generated tier, and what it takes to get through it."""
 
 from __future__ import annotations
 
@@ -44,9 +37,8 @@ def _clean_gate_env(monkeypatch):
 
 class TestGate:
     def test_open_by_default_for_a_table_nothing_owns(self):
-        # The other conditions already restrict this to gaps where no tuner
-        # exists, so the time a generated one spends is not taken from a tuner
-        # that would have covered the table -- there is none.
+        # The other conditions already restrict this to gaps where no tuner exists, so the time a generated one spends
+        # is not taken from a tuner that would have covered the table -- there is none.
         d = gate.should_generate([_gap()])
         assert d.allowed and d.gap.table == "odd.csv"
 
@@ -67,8 +59,7 @@ class TestGate:
         assert gate.should_generate([_gap()]).allowed
 
     def test_a_tuner_that_exists_never_opens_the_gate(self, monkeypatch):
-        # Whatever the whitelist says. Generating a second tuner for a table
-        # that already has one papers over whatever stopped the first.
+        # Whatever the whitelist says.
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
         for kind in ("not_selected", "skipped"):
             d = gate.should_generate([_gap(kind=kind, tuner="a8w8")])
@@ -101,8 +92,8 @@ class TestSandbox:
         return p
 
     def test_expected_files_decide_the_outcome_not_the_exit_code(self, tmp_path):
-        # The aiter tuners in this same pipeline exit 1 on complete success, so
-        # a script's return code cannot be the signal here either.
+        # The aiter tuners in this same pipeline exit 1 on complete success, so a script's return code cannot be the
+        # signal here either.
         out = tmp_path / "out.csv"
         script = self._script(
             tmp_path,
@@ -259,10 +250,7 @@ class TestLedger:
 
 
 class TestPlanPreviewsWhatRunDoes:
-    """A preview that answers a different question than the thing it previews
-    is worse than no preview: it is consulted precisely when someone is
-    unsure, and it was showing TunableOp skipped for inputs under which the
-    real run selects it."""
+    """A preview that answers a different question than the thing it previews"""
 
     def _src(self, name):
         import inspect
@@ -290,12 +278,7 @@ class TestPlanPreviewsWhatRunDoes:
 
 
 class TestTheCliActuallyReachesTier3:
-    """The whole tier was unreachable from production and nothing said so.
-
-    Every stage had tests and they all passed, because they called the stages
-    directly. Nothing asserted that the CLI ever calls any of them, so the
-    tier sat fully built and entirely disconnected.
-    """
+    """The whole tier was unreachable from production and nothing said so."""
 
     def test_the_cli_has_a_call_site(self):
         import inspect
@@ -308,8 +291,8 @@ class TestTheCliActuallyReachesTier3:
         assert source.count("_attempt_tier3(") >= 2
 
     def test_it_runs_after_the_selected_tuners_not_beside_them(self):
-        # This ordering is the guarantee that a generated tuner cannot take
-        # time from one that was going to produce something.
+        # This ordering is the guarantee that a generated tuner cannot take time from one that was going to produce
+        # something.
         import inspect
 
         from kernelforge.gemm_tune import cli
@@ -326,20 +309,14 @@ class TestTheCliActuallyReachesTier3:
 
 
 class TestTheProviderCallMatchesTheProviderAPI:
-    """The authoring call is only exercised with a real provider installed.
-
-    Nothing else here reaches it, so a wrong argument list sits undetected
-    until the one run that tries to generate -- and that run is exactly the
-    one nobody is watching. These pin the call against the real signatures.
-    """
+    """The authoring call is only exercised with a real provider installed."""
 
     def test_the_runtime_call_binds_against_the_real_signature(self):
         import inspect
 
         registry = pytest.importorskip("kernelforge.agent_backends.registry")
 
-        # What generate.call_agent passes. ``provider`` is positional and
-        # required; calling it with keywords only raises TypeError.
+        # What generate.call_agent passes.
         inspect.signature(registry.resolve_agent_runtime).bind(
             "claude",
             model="",

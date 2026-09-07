@@ -220,9 +220,8 @@ def run_forge_loop(
         start_new_session=True,
     )
     timed_out = False
-    # Counted rather than logged per tick: the probe fires about once a second
-    # for up to ninety minutes, so one line each would bury the run while none
-    # at all hides a probe that never worked and cost every interim publication.
+    # Counted rather than logged per tick: the probe fires about once a second for up to ninety minutes, so one line
+    # each would bury the run while none at all hides a probe that never worked and cost every interim publication.
     probe_failures = 0
     while True:
         remaining = invocation.deadline_unix - time.time()

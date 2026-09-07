@@ -514,12 +514,7 @@ def test_revert_leaves_an_allowlisted_file_the_candidate_did_not_create(tmp_path
 
 
 def test_move_below_the_floor_is_not_covered_however_quiet_the_runs():
-    """The floor, not the spread: 0.88% clears the KEEP gate and stops here.
-
-    Named for what it checks. The move never reaches the dispersion test --
-    ``test_move_smaller_than_the_cases_own_measurement_spread_is_not_covered``
-    is the one that does.
-    """
+    """The floor, not the spread: 0.88% clears the KEEP gate and stops here."""
     loop = _coverage_loop({"decode-t64": 10.0})
     loop.results = [
         _keep_with_runs(
@@ -601,12 +596,7 @@ def test_floor_ratio_is_configurable_and_not_read_off_the_keep_gate():
 
 
 def test_rendered_ledger_states_the_rule_it_applied():
-    """The strong wording only where a per-measurement record backs it.
-
-    Was asserting that a KEEP with no ``measurements`` still rendered "every
-    independent measurement" -- pinning in place the claim this change exists
-    to remove.
-    """
+    """The strong wording only where a per-measurement record backs it."""
     floor_only = _coverage_loop({"decode-t64": 10.0})
     floor_only.results = [_keep(1, {"decode-t64": 8.0})]
 
@@ -633,12 +623,7 @@ def test_rendered_ledger_states_the_rule_it_applied():
 
 
 def test_forge_loop_option_reaches_the_campaign_and_survives_resume(tmp_path, monkeypatch):
-    """The allowlist has to arrive through the real construction path.
-
-    A field only the tests can set is a field production never sets, and an
-    empty allowlist admits nothing: no new file could ship, and none would be
-    removed by a REVERT either.
-    """
+    """The allowlist has to arrive through the real construction path."""
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
     args = _base_args(workspace, kernel, driver)
@@ -667,15 +652,7 @@ def test_campaign_configuration_refuses_a_recursive_allowlist_pattern(tmp_path, 
 
 
 def test_forge_loop_offers_the_option_and_prefers_the_campaigns_copy():
-    """The click option itself, plus the one hop nothing else covers.
-
-    ``test_forge_loop_option_reaches_the_campaign_and_survives_resume``
-    already exercises CLI value -> campaign -> store -> IterationConfig
-    behaviourally. What it cannot see is that ``forge_loop`` then OVERWRITES
-    the invocation's value with the campaign's, which is what makes the
-    allowlist immutable across a resume. Only that assignment is read off the
-    source, by pattern rather than by slicing, so reformatting cannot fail it.
-    """
+    """The click option itself, plus the one hop nothing else covers."""
     from kernelforge import cli
 
     option = next(param for param in cli.forge_loop.params if param.name == "commit_new_paths")
@@ -690,13 +667,7 @@ def test_forge_loop_offers_the_option_and_prefers_the_campaigns_copy():
 
 
 def test_move_smaller_than_the_cases_own_measurement_spread_is_not_covered():
-    """The dispersion rule itself: clears the floor, faster everywhere, still noise.
-
-    2% is well over the 1% floor and every run is faster than the 10.0 before,
-    so the first two conditions pass and only the spread test can reject it.
-    Deleting that test (``CONFIG_COVERAGE_DISPERSION_MULTIPLE = 0.0``) makes
-    this the only assertion in the file that notices.
-    """
+    """The dispersion rule itself: clears the floor, faster everywhere, still noise."""
     loop = _coverage_loop({"decode-t64": 10.0})
     loop.results = [
         _keep_with_runs(
@@ -737,12 +708,7 @@ def test_floor_only_coverage_is_reported_as_such_to_the_planner():
 
 
 def test_v6_campaign_config_still_resumes_with_an_empty_allowlist(tmp_path, monkeypatch):
-    """A campaign written before the allowlist existed has to keep resuming.
-
-    ``save`` guards on ``load``, so a version this loop refuses to read is a
-    campaign with no way back. 6 differs from 7 only by the missing
-    ``commit_new_paths``, and missing means empty.
-    """
+    """A campaign written before the allowlist existed has to keep resuming."""
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
     resolve_campaign(**_base_args(workspace, kernel, driver))
@@ -758,8 +724,8 @@ def test_v6_campaign_config_still_resumes_with_an_empty_allowlist(tmp_path, monk
 
     assert reloaded.commit_new_paths == []
     assert reloaded == fresh
-    # Immutability still holds: the in-memory normalization to 7 must not read
-    # as a config that changed under the campaign.
+    # Immutability still holds: the in-memory normalization to 7 must not read as a config that changed under the
+    # campaign.
     store.save(reloaded)
 
 
@@ -839,13 +805,7 @@ def test_retained_allowlisted_file_reaches_the_next_implementer(tmp_path, monkey
 
 
 def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeypatch):
-    """Resume recovery discards, and it runs before the first iteration.
-
-    A snapshot taken only at the top of the loop leaves that discard with
-    none, and the no-snapshot branch used to clean the whole allowlisted set
-    -- ``git clean`` on an untracked file the operator put there, with no way
-    back.
-    """
+    """Resume recovery discards, and it runs before the first iteration."""
     from kernelforge.tests.test_campaign_cross_process import (
         _initialize_workspace,
         _make_loop as _campaign_loop,

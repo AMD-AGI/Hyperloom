@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Program text for the PORT phase — instructs the flydsl to translate the
-source kernel into FlyDSL, correctness first. Injected as the agent system prompt
-(stable across attempts, so the SDK prompt cache reuses it).
-
-The interface the port must satisfy is NOT hard-coded here (it varies by
-operator). Instead the task's measurement driver is embedded read-only: it is the
-single source of truth for how ``build_<op>_module`` and its launch callable are
-invoked, so the agent matches the real call signatures rather than a fixed rowwise
-shape.
-"""
+"""Program text for the PORT phase — instructs the flydsl to translate the"""
 
 from __future__ import annotations
 
@@ -21,9 +12,7 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 _MAX_SOURCE_CHARS = 16000  # keep the embedded source bounded for the prompt
 _MAX_DRIVER_CHARS = 8000  # the driver is small; cap defensively
 
-# Per source language: the markdown fence to embed it under, and the name to call
-# it by. A HIP kernel fenced as ``python`` misleads the agent in the block it
-# reads most closely.
+# Per source language: the markdown fence to embed it under, and the name to call it by.
 _SOURCE_PRESENTATION: dict[str, tuple[str, str]] = {
     "triton": ("python", "Triton"),
     "hip": ("cpp", "HIP"),

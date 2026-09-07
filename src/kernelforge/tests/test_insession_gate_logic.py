@@ -1,13 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the in-session gate decision logic (loop/insession_gate.py).
-
-Complements test_insession_gate_protection.py (which covers path protection).
-The gate is harness-protection only: it lets the Agent edit and self-test a
-candidate, and on Stop it either BLOCKS (a protected measurement file changed)
-or ALLOWS and hands the candidate to the outer IterationLoop — the sole
-authority for canonical correctness, benchmark, KEEP, and REVERT. No GPU and no
-agent SDK subprocess are needed here."""
+"""Unit tests for the in-session gate decision logic (loop/insession_gate.py)."""
 
 from __future__ import annotations
 
@@ -23,9 +16,7 @@ def _run(coro):
 
 
 def test_insession_gate_has_no_duplicate_module_defs():
-    """Guard the F811 blind spot: ruff/Pyflakes does NOT flag redefinition of
-    *annotated* module-level functions, so a duplicate (e.g. a bad merge) can
-    silently shadow the real one. Assert each top-level def name is unique."""
+    """Guard the F811 blind spot: ruff/Pyflakes does NOT flag redefinition of"""
     import ast
     import collections
 
@@ -132,10 +123,8 @@ def test_make_agent_hooks_shape(tmp_path):
     assert len(hooks.pre_tool_use) == 2
     assert len(hooks.post_tool_use) == 1
     assert len(hooks.stop) == 1
-    # The Stop hook runs correctness AND bench, so its ceiling has to cover both
-    # stages plus slack -- under a multi-rank driver each is a full launch, and a
-    # timeout sized for one of them loses the verdict mid-bench. Upstream now
-    # exposes that sum as a field; check both so the two cannot drift apart.
+    # The Stop hook runs correctness AND bench, so its ceiling has to cover both stages plus slack -- under a
+    # multi-rank driver each is a full launch, and a timeout sized for one of them loses the verdict mid-bench.
     assert gate.stage_timeout_sec == 1800
     assert gate.bench_timeout_sec == 300
     assert gate.hook_timeout_sec == 2820
@@ -226,12 +215,6 @@ def test_count_target_edits_accepts_absolute_implementation_paths(tmp_path):
 
 
 # ── Stop hook decisions ────────────────────────────────────────────────────────
-#
-# The gate runs two layers on Stop: (1) harness protection (BLOCK if a protected
-# measurement file changed, bounded by max_stop_blocks -> harness_tampered), then
-# (2) self-correction — canonical correctness + bench: BLOCK unless the kernel is
-# correct AND faster than best. The canonical checks are monkeypatched here so no
-# GPU/driver subprocess is needed.
 
 import kernelforge.loop.insession_gate as gate_module
 
@@ -375,15 +358,7 @@ def test_stop_blocks_when_correct_but_not_faster(tmp_path, monkeypatch):
 
 
 def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path, monkeypatch):
-    """PORT-mode contract: with correctness_only=True the gate allows a CORRECT
-    kernel and MUST NOT run the benchmark / perf gate at all.
-
-    This pins the seam between the two phases that share this one gate: the PORT
-    phase (rewrite_by_flydsl) depends on the perf branch being skipped, so a future
-    change to the OPTIMIZE-only perf logic (mean case speedup / ``bench_wallclock``) can
-    never silently break PORT. best_ms is set and the (spy) bench would report a
-    far-SLOWER time that would BLOCK in perf mode — yet correctness_only allows.
-    """
+    """PORT-mode contract: with correctness_only=True the gate allows a CORRECT"""
     gate, _ = _gate(
         tmp_path,
         correctness_only=True,
@@ -408,8 +383,8 @@ def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path,
 
 
 def test_stop_hands_off_when_block_budget_exhausted(tmp_path, monkeypatch):
-    # Budget is checked BEFORE the canonical validation, so an exhausted session
-    # hands off immediately (the fakes would otherwise report correct+faster).
+    # Budget is checked BEFORE the canonical validation, so an exhausted session hands off immediately (the fakes
+    # would otherwise report correct+faster).
     gate, _ = _gate(tmp_path, max_blocks=2)
     _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
     gate.block_count = gate.max_blocks
@@ -421,8 +396,6 @@ def test_stop_hands_off_when_block_budget_exhausted(tmp_path, monkeypatch):
 
 def test_stop_block_cap_hands_off_as_harness_tampered(tmp_path):
     # An agent that never restores a tampered harness must not block forever.
-    # After max_stop_blocks blocks the gate allows the stop and flags it so the
-    # outer loop force-REVERTs; the block count never exceeds the cap.
     gate, workspace = _gate(tmp_path, max_stop_blocks=2)
     (workspace / "forge_driver.py").write_text("print('driver')\nhacked=1\n")
 
@@ -443,8 +416,8 @@ def test_stop_block_cap_hands_off_as_harness_tampered(tmp_path):
 def test_stop_fails_open_on_exception(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path)
 
-    # Force the protection check to raise; the gate must fail OPEN (allow stop)
-    # so a hook crash can never hang the session — the outer loop re-validates.
+    # Force the protection check to raise; the gate must fail OPEN (allow stop) so a hook crash can never hang the
+    # session — the outer loop re-validates.
     def boom():
         raise RuntimeError("gate crash")
 

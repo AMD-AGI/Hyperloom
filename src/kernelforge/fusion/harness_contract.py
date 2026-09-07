@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The contract the fusion harness must satisfy.
-
-Two prompts state this contract -- the per-recipe authoring prompt, which knows
-the exact path and env flags, and the fusion kernel backend's system prompt, which does
-not. They render from here so the harness an author writes and the harness the
-loop parses cannot describe different files.
-"""
+"""The contract the fusion harness must satisfy."""
 
 from __future__ import annotations
 
@@ -15,12 +9,7 @@ from .validate import DEFAULT_SNR_THRESHOLD_DB, DEFAULT_TARGET_SPEEDUP
 
 
 def harness_contract(harness_path: str = "", env_flags: str = "") -> str:
-    """Render the contract, naming the path and flags when the caller knows them.
-
-    :class:`~kernelforge.fusion.validate.HarnessKernelRunner` runs this exact
-    file and parses ONE JSON object from its stdout, so an author who does not
-    produce it fails every validation attempt with "harness not found".
-    """
+    """Render the contract, naming the path and flags when the caller knows them."""
     where = f"at EXACTLY:\n    {harness_path}" if harness_path else "at the harness path the task gives you."
     flags = f"`{env_flags}`" if env_flags else "the fusion env flag(s)"
     return f"""

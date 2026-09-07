@@ -190,19 +190,16 @@ def test_controller_full_path_publishes_a_shared_base_patch(
     assert patch_dir.is_dir()
     assert "VALUE = 2" in (patch_dir / "change.patch").read_text(encoding="utf-8")
 
-    # The pin has to survive in the durable record, not only in the returned
-    # object: it is the only place an operator can read what this campaign built
-    # against without opening every task.
+    # The pin has to survive in the durable record, not only in the returned object: it is the only place an operator
+    # can read what this campaign built against without opening every task.
     base_commit = _git(repo, "rev-parse", "HEAD")
     assert state.repository_pins == {str(repo): base_commit}
     assert state.skipped_task_count == 0
     persisted = json.loads((tmp_path / "output" / "controller" / "state.json").read_text(encoding="utf-8"))
     assert persisted["repository_pins"] == {str(repo): base_commit}
 
-    # A campaign spends nearly all its budget inside forge-loop, and the
-    # controller is the only place that sees both the spend and the operator it
-    # bought. It runs out of process, so the totals have to reach disk for
-    # Hyperloom's ledger to pick them up.
+    # A campaign spends nearly all its budget inside forge-loop, and the controller is the only place that sees both
+    # the spend and the operator it bought.
     assert persisted["forge_llm_usage"] == [
         {
             "operator_id": operator_id,
@@ -223,9 +220,8 @@ def test_an_unpublishable_validated_result_records_its_reason_durably(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    # Hyperloom throws this process's stdout and stderr away when it hard-kills
-    # the controller, so the reason a validated best commit never shipped has to
-    # reach disk or it reaches nobody.
+    # Hyperloom throws this process's stdout and stderr away when it hard-kills the controller, so the reason a
+    # validated best commit never shipped has to reach disk or it reaches nobody.
     repo = _source_repo(tmp_path)
     _wire_fake_analysis(monkeypatch, _TaskAgentBackend(repo))
     monkeypatch.setattr(dispatcher, "run_forge_loop", _successful_forge)
@@ -277,9 +273,7 @@ def test_invalid_agent_task_becomes_no_result_without_starting_forge(
     assert state.task_count == 0
     assert state.patch_count == 0
 
-    # A count cannot say which contract rule the agent broke, and that is this
-    # stage's usual failure. The reason has to reach disk because Hyperloom
-    # discards this process's streams when it hard-kills the controller.
+    # A count cannot say which contract rule the agent broke, and that is this stage's usual failure.
     assert [rejected["draft"] for rejected in state.analysis_rejected_tasks] == ["draft"]
     assert state.analysis_rejected_tasks[0]["reason"] == "invalid staged task: repo_root must be an absolute path"
     analysis = json.loads(

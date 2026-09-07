@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the review fixes: harness contract in the author prompt, the
-combined (fuse-all) recipe, and the fusion-scoped emit patch."""
+"""Tests for the review fixes: harness contract in the author prompt, the"""
 
 from __future__ import annotations
 
@@ -77,13 +76,7 @@ class TestCombinedRecipe:
 
 
 class TestArtifactId:
-    """Artifact filenames are built from ``Recipe.pattern_id``, which is not a
-    filesystem-safe string. LLM-proposed recipes are named ``llm:<pattern>`` and
-    _combined_recipe joins them with ``+``, so a combined id both contains ``:``
-    and grows without bound. NFS rejects ``:`` in a path component with EINVAL and
-    every filesystem caps a component at NAME_MAX, so writing
-    ``author_<pattern_id>.log`` raised OSError and failed the whole authoring
-    attempt."""
+    """Artifact filenames are built from ``Recipe.pattern_id``, which is not a"""
 
     def test_combined_llm_id_is_reduced_to_safe_characters(self):
         combined = _combined_recipe(
@@ -120,8 +113,7 @@ class TestArtifactId:
             assert re.fullmatch(r"[A-Za-z0-9_.-]+", safe)
 
     def test_authoring_writes_artifacts_under_sanitized_names(self, tmp_path, monkeypatch):
-        """Locks the call site, not just the helper: both the prompt dump and the
-        author log must go through sanitization."""
+        """Locks the call site, not just the helper: both the prompt dump and the"""
         combined = _combined_recipe(
             [
                 _recipe(pattern_id="llm:qk_norm_rope", env_flag="Q_FUSED_QK"),
@@ -163,8 +155,8 @@ class TestScopedEmit:
             ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "base"],
         ):
             subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
-        # Simulate a fusion: edit lfm2.py + add a new fused module + dirty an
-        # UNRELATED tracked file (must NOT appear in the scoped patch).
+        # Simulate a fusion: edit lfm2.py + add a new fused module + dirty an UNRELATED tracked file (must NOT appear
+        # in the scoped patch).
         (mdir / "lfm2.py").write_text("# eager\n# fused edit\n", encoding="utf-8")
         (mdir / "lfm2_fused.py").write_text("# triton kernel\n", encoding="utf-8")
         (repo / "unrelated.py").write_text("# pre-existing\n# dirty\n", encoding="utf-8")

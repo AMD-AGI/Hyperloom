@@ -58,11 +58,7 @@ def test_resolve_codex_gateway_uses_the_openai_line(monkeypatch):
 
 
 def test_resolve_codex_gateway_rejects_retired_keys(monkeypatch):
-    """Neither SAFE_API_KEY nor FORGE_API_KEY configures the supervisor.
-
-    Both used to satisfy the lookup, so a deployment carrying only one of them
-    looked healthy while authenticating with a credential nobody configured.
-    """
+    """Neither SAFE_API_KEY nor FORGE_API_KEY configures the supervisor."""
     for k in _GATEWAY_ENV:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://direct/v1")
@@ -76,11 +72,7 @@ def test_resolve_codex_gateway_rejects_retired_keys(monkeypatch):
 
 @pytest.mark.parametrize("override", [None, {}, {"base_url": "https://partial/v1"}])
 def test_empty_gateway_override_defers_to_the_environment(monkeypatch, override):
-    """An override that resolves to nothing must not shadow the environment.
-
-    LlmGateway has no truthiness, so `self.gateway or _resolve_gateway()` treated
-    an empty override as configured and stopped reading OPENAI_*.
-    """
+    """An override that resolves to nothing must not shadow the environment."""
     from kernelforge.agent_backends.base import AgentRuntimeConfig
     from kernelforge.agent_backends.codex import CodexBackend
 
@@ -119,11 +111,7 @@ def test_complete_gateway_override_wins(monkeypatch):
 
 
 def test_provider_overrides_forwards_every_header(monkeypatch):
-    """All of the provider's headers reach codex, not just the gateway NTID.
-
-    An APIM subscription key is as mandatory as ``user``; forwarding only the
-    latter silently dropped it and the gateway answered 401.
-    """
+    """All of the provider's headers reach codex, not just the gateway NTID."""
     from kernelforge.agent_backends.codex import _provider_overrides
 
     for k in _GATEWAY_ENV:

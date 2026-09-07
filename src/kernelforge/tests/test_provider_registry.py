@@ -25,16 +25,7 @@ from kernelforge.config import Config
 
 @pytest.fixture(autouse=True)
 def isolated_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry.
-
-    ``register_agent_provider`` writes into module-level state that outlives
-    the test that called it, and the registry offers no way to unregister. Each
-    fake registered below would therefore stay visible to every later test in
-    the same worker process, which is how these tests came to depend on the
-    order xdist happened to shard them in. Discovery runs first so the snapshot
-    already holds the built-ins and any installed plugin; the module globals
-    are then rebound to copies that monkeypatch drops during teardown.
-    """
+    """Give every test in this module its own copy of the provider registry."""
     registry.discover_agent_providers()
     monkeypatch.setattr(registry, "_providers", dict(registry._providers))
     monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
@@ -42,14 +33,7 @@ def isolated_provider_registry(monkeypatch):
 
 @pytest.fixture
 def only_registered_providers(isolated_provider_registry, monkeypatch):
-    """Empty the registry so a test's own registration order is the only order.
-
-    ``select_default_agent_provider`` falls back to registration order when no
-    available provider claims the model, so any provider the environment
-    happens to make available wins that fallback. A test measuring the order it
-    registers itself must therefore not inherit the built-ins: the answer has
-    to be the same whether or not the optional claude/codex SDKs are installed.
-    """
+    """Empty the registry so a test's own registration order is the only order."""
     monkeypatch.setattr(registry, "_providers", {})
 
 
@@ -122,24 +106,13 @@ def test_builtin_providers_are_registered() -> None:
 
 
 def test_builtin_providers_declare_the_session_environment_they_apply() -> None:
-    """Both built-ins apply AgentRunSpec.env to the session they spawn.
-
-    Claude hands it to the SDK as ClaudeAgentOptions.env and Codex merges it into
-    the app server's child environment. The declaration is what the Implementer
-    lane path reads before it agrees to run several sessions at once, because a
-    provider that dropped the overlay would run them all out of one build cache.
-    """
+    """Both built-ins apply AgentRunSpec.env to the session they spawn."""
     assert get_agent_provider("claude").capabilities.session_env
     assert get_agent_provider("codex").capabilities.session_env
 
 
 def test_only_a_hook_running_provider_declares_stop_hooks() -> None:
-    """stop_hooks gates AgentRunSpec.hooks as a whole, and Codex runs none of it.
-
-    Claude translates the PreToolUse, PostToolUse and Stop groups through one
-    path keyed on ``spec.hooks is not None``; Codex has no equivalent, so a
-    session it runs carries no protection hook however the caller builds one.
-    """
+    """stop_hooks gates AgentRunSpec.hooks as a whole, and Codex runs none of it."""
     assert get_agent_provider("claude").capabilities.stop_hooks
     assert not get_agent_provider("codex").capabilities.stop_hooks
 
@@ -301,11 +274,7 @@ def test_external_entry_point_provider_is_discovered(monkeypatch) -> None:
 
         @staticmethod
         def select(*, group):
-            """Filter fake entries by the public provider group.
-
-            The loader also probes the deprecated ``kernel_agents.*`` group, so
-            an unknown group must come back empty rather than raise.
-            """
+            """Filter entries; the deprecated ``kernel_agents.*`` group stays empty."""
             if group == registry.PROVIDER_ENTRY_POINT_GROUP:
                 return [_EntryPoint()]
             assert group == registry.LEGACY_PROVIDER_ENTRY_POINT_GROUP

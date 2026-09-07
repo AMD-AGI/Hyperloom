@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The smoke must exercise the tree the loop patched, or say that it did not.
-
-The server imports the installed package. Point --framework-root anywhere else
-and it boots stock code with the fusion flag set, comes up clean, and the loop
-records SERVING SMOKE OK for a kernel that was never loaded -- a pass certifying
-exactly the thing the smoke exists to check.
-"""
+"""The smoke must exercise the tree the loop patched, or say that it did not."""
 
 from __future__ import annotations
 

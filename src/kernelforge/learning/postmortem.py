@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PostMortem — extract lessons from experiments and grow the knowledge base.
-
-After each experiment completes, the PostMortem analyzer:
-  1. Reviews the full iteration history
-  2. Identifies what worked and what failed
-  3. Extracts reusable lessons as structured knowledge
-  4. Writes new knowledge files or updates existing ones
-  5. Captures non-obvious findings (the "surprises")
-
-This is how agents get stronger over time — each experiment
-leaves behind knowledge that future experiments can use.
-"""
+"""PostMortem — extract lessons from experiments and grow the knowledge base."""
 
 from __future__ import annotations
 
@@ -39,27 +28,13 @@ class Lesson:
 
 
 class PostMortem:
-    """Extracts and persists lessons from completed experiments.
-
-    Usage:
-        pm = PostMortem(knowledge_dir=writable_knowledge_root())
-        lessons = pm.analyze(experiment)
-        pm.save_lessons(lessons)
-    """
+    """Extracts and persists lessons from completed experiments."""
 
     def __init__(self, knowledge_dir: str | Path):
         self.knowledge_dir = Path(knowledge_dir)
 
     def analyze(self, experiment: Experiment) -> list[Lesson]:
-        """Analyze an experiment and extract lessons.
-
-        Looks for:
-          - Configurations that caused regressions (pitfalls to avoid)
-          - Changes that gave big improvements (optimizations to remember)
-          - Unexpected PMC counter patterns
-          - Occupancy cliffs (VGPR transitions)
-          - Plateau patterns (what was tried when stuck)
-        """
+        """Analyze an experiment and extract lessons."""
         lessons = []
 
         if not experiment.iterations:
@@ -172,13 +147,7 @@ class PostMortem:
         return lessons
 
     def save_lessons(self, lessons: list[Lesson]) -> list[Path]:
-        """Write lessons to the knowledge base as markdown files.
-
-        New lessons are appended to the appropriate backend's learned/ directory.
-        ``knowledge_dir`` must be a writable root (see
-        ``kernelforge.resources.writable_knowledge_root``), never the packaged
-        curated tree.
-        """
+        """Write lessons to the knowledge base as markdown files."""
         saved = []
         for lesson in lessons:
             # Determine target directory

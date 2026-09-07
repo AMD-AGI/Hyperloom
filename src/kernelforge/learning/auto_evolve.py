@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Auto-evolution pipeline — continuous knowledge base growth.
-
-Hooks into the experiment lifecycle so learning happens automatically:
-
-  1. AFTER every benchmark → log to the tuning DB
-  2. AFTER an experiment ends → run the postmortem, extract lessons,
-     discover transfer rules
-"""
+"""Auto-evolution pipeline — continuous knowledge base growth."""
 
 from __future__ import annotations
 
@@ -35,12 +28,7 @@ class AutoEvolver:
 
     @classmethod
     def from_config(cls, config: Config) -> AutoEvolver:
-        """Create an AutoEvolver from standard config.
-
-        Both sinks are *writers*, so they target the writable knowledge root --
-        a directory next to the user's experiments, not anything inside the
-        installed package.
-        """
+        """Create an AutoEvolver from standard config."""
         kb_dir = writable_knowledge_root()
         return cls(
             tuning_db=TuningDatabase(kb_dir / "tuning_db"),

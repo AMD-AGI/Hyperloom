@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for robust handling of inline / malformed shapes & csv inputs.
-
-Regression cover for the OSError(ENAMETOOLONG) crash: callers passed inline
-JSON content in --shapes-json instead of a file path, and Path(inline).is_file()
-raised OSError(36), killing the dense tuner at elapsed_s=0.
-"""
+"""Tests for robust handling of inline / malformed shapes & csv inputs."""
 
 from __future__ import annotations
 
@@ -35,11 +30,7 @@ _STUB_FP8 = "torch.float8_e4m3fn"
 
 @pytest.fixture
 def stub_fp8_dtype(monkeypatch):
-    """Resolve dtypes without aiter so these stay pure unit tests.
-
-    Production reads the dtype from the installed aiter and raises when it
-    cannot; only the integration tests below exercise the real mapping.
-    """
+    """Resolve dtypes without aiter so these stay pure unit tests."""
     monkeypatch.setattr(ac, "_aiter_dtype_str", lambda alias: _STUB_FP8)
     return _STUB_FP8
 
@@ -117,8 +108,8 @@ Shape | Pre(us) | Post(us) | Improve | Reason
 
 
 def test_resolve_input_csv_preserves_recorded_shapes_in_fast_mode(tmp_path):
-    # Recorded rows are never rewritten; the guard only appends the decode
-    # buckets this capture cannot serve (M=16 already answers 1/4/16).
+    # Recorded rows are never rewritten; the guard only appends the decode buckets this capture cannot serve (M=16
+    # already answers 1/4/16).
     csv = tmp_path / "untuned.csv"
     csv.write_text("M,N,K\n16,1536,7168\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv)
@@ -140,11 +131,7 @@ def test_resolve_input_csv_augments_recorded_shapes_in_thorough_mode(tmp_path):
 
 
 def test_resolve_input_csv_covers_decode_m_when_capture_is_prefill_only(tmp_path):
-    """Repro: shape capture recorded only a large prefill M (e.g. 2095), missing
-    the decode band. Fast mode would then tune the wrong operating point -> micro
-    win but E2E regression (observed -18.45% on Qwen3.5-122B). The resolved CSV
-    must add the decode-representative M while keeping the recorded prefill M.
-    """
+    """Repro: shape capture recorded only a large prefill M (e.g. 2095), missing"""
     shapes = tmp_path / "forge_shapes.json"
     shapes.write_text(
         json.dumps(
@@ -160,8 +147,8 @@ def test_resolve_input_csv_covers_decode_m_when_capture_is_prefill_only(tmp_path
     rows = out.read_text(encoding="utf-8").strip().splitlines()
     m_values = {int(r.split(",")[0]) for r in rows[1:]}
     assert 2095 in m_values  # recorded prefill point preserved
-    # One row per decode lookup bucket for conc=64; 16 also answers M=1/4, and
-    # nothing above the concurrency cap is tuned.
+    # One row per decode lookup bucket for conc=64; 16 also answers M=1/4, and nothing above the concurrency cap is
+    # tuned.
     assert {16, 32, 64}.issubset(m_values)
     assert 128 not in m_values
     # NK pairs preserved for every M.
@@ -170,9 +157,7 @@ def test_resolve_input_csv_covers_decode_m_when_capture_is_prefill_only(tmp_path
 
 
 def test_resolve_input_csv_covers_decode_m_for_prefill_only_manifest(tmp_path, monkeypatch):
-    """The shapes_manifest branch must also get decode coverage: a manifest can
-    capture only large prefill M (same CUDA Graph gap), so it flows through the
-    same fast-mode decode guard instead of returning early."""
+    """The shapes_manifest branch must also get decode coverage: a manifest can"""
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}", encoding="utf-8")  # presence only; writer is patched
 
@@ -189,8 +174,7 @@ def test_resolve_input_csv_covers_decode_m_for_prefill_only_manifest(tmp_path, m
 
 
 def test_resolve_input_csv_preserves_capture_that_already_covers_decode(tmp_path):
-    """A capture holding every decode bucket is left untouched in fast mode (no
-    needless tuning-time blow-up)."""
+    """A capture holding every decode bucket is left untouched in fast mode (no"""
     shapes = tmp_path / "forge_shapes.json"
     shapes.write_text(
         json.dumps(
@@ -222,8 +206,7 @@ def _group_m(csv: Path) -> dict[tuple[str, str], set[int]]:
 
 
 def test_decode_coverage_is_decided_per_dispatch_group(tmp_path):
-    """aiter looks a config up per (M,N,K), so decode rows for one projection say
-    nothing about another. Only the group that lacks buckets gets rows."""
+    """aiter looks a config up per (M,N,K), so decode rows for one projection say"""
     csv = tmp_path / "untuned.csv"
     csv.write_text(
         "M,N,K\n"
@@ -240,8 +223,7 @@ def test_decode_coverage_is_decided_per_dispatch_group(tmp_path):
 
 
 def test_decode_coverage_ignores_m_outside_the_decode_grid(tmp_path):
-    """M=100 sits below the ceiling but pads to bucket 112, which no decode M
-    dispatches to, so the group still needs real bucket rows."""
+    """M=100 sits below the ceiling but pads to bucket 112, which no decode M"""
     csv = tmp_path / "untuned.csv"
     csv.write_text("M,N,K\n100,8704,3072\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=64)
@@ -256,8 +238,7 @@ def test_decode_coverage_ignores_m_outside_the_decode_grid(tmp_path):
     [(64, {16, 32, 128, 256}), (128, {16, 32, 64, 256})],
 )
 def test_one_decode_grid_member_does_not_cover_the_other_buckets(tmp_path, recorded, expected_added):
-    """A tuned M=64 row is never consulted for runtime M=16 or M=32: each probes
-    its own exact/padded keys. Holding one grid member is not coverage."""
+    """A tuned M=64 row is never consulted for runtime M=16 or M=32: each probes"""
     csv = tmp_path / "untuned.csv"
     csv.write_text(f"M,N,K\n{recorded},8704,3072\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=256)
@@ -268,8 +249,7 @@ def test_one_decode_grid_member_does_not_cover_the_other_buckets(tmp_path, recor
 
 
 def test_decode_bucket_16_serves_the_smaller_grid_members(tmp_path):
-    """M=1/2/4/8 all pad into bucket 16, so a single row covers them -- the guard
-    must not emit one row per small M."""
+    """M=1/2/4/8 all pad into bucket 16, so a single row covers them -- the guard"""
     csv = tmp_path / "untuned.csv"
     csv.write_text("M,N,K\n2095,8704,3072\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=8)
@@ -280,8 +260,7 @@ def test_decode_bucket_16_serves_the_smaller_grid_members(tmp_path):
 
 
 def test_decode_coverage_preserves_row_order_and_q_dtype(tmp_path):
-    """Manifest CSVs arrive weight-ordered and carry a per-row q_dtype_w; the
-    guard must append rather than rebuild, and inherit each group's dtype."""
+    """Manifest CSVs arrive weight-ordered and carry a per-row q_dtype_w; the"""
     csv = tmp_path / "untuned.csv"
     csv.write_text(
         "M,N,K,q_dtype_w\n"
@@ -315,12 +294,7 @@ def test_decode_coverage_does_not_cross_m_between_groups(tmp_path):
     assert 2095 not in groups[("8704", "3072")]
 
 
-# Recorded from aiter's own ``get_padded_m(m, 8704, 3072, gl)`` on MI355X
-# (gfx950). The mirror is load-bearing for decode coverage, and its only guard
-# used to be the comparison below -- which needs aiter installed and therefore
-# never runs in the unit-test lane. Pinning the observed values keeps the
-# mirror's behaviour under test everywhere; comparing against the live aiter
-# stays as the drift detector wherever aiter is present.
+# Recorded from aiter's own ``get_padded_m(m, 8704, 3072, gl)`` on MI355X (gfx950).
 _PADDED_M_OBSERVED: tuple[tuple[int, int, int], ...] = (
     (1, 16, 1),
     (2, 16, 2),
@@ -354,9 +328,7 @@ _PADDED_M_OBSERVED: tuple[tuple[int, int, int], ...] = (
     (2048, 2048, 2048),
     (2095, 2112, 4096),
     (4096, 4096, 4096),
-    # Past the 32->64 step at M=1024 and the 64->128 step at M=4096. The values
-    # above happen to be multiples of both 32 and 64, so they cannot tell a
-    # two-tier mirror from aiter's four tiers; these can.
+    # Past the 32->64 step at M=1024 and the 64->128 step at M=4096.
     (1025, 1088, 2048),
     (1040, 1088, 2048),
     (1056, 1088, 2048),
@@ -403,15 +375,7 @@ def test_padded_m_gl1_mirror_matches_recorded_aiter_behaviour(m, n, gl1):
 
 
 def test_the_recorded_buckets_capture_the_granularity_change():
-    """The table is only a guard if it straddles where the behaviour changes.
-
-    ``gl=0`` steps its granularity three times -- 16 up to 256, then 32, then
-    64 past 1024, then 128 past 4096 -- and the power-of-two bucket diverges
-    from it well before the first of those. A table sampling only round numbers
-    passes against a mirror that got any boundary wrong: 2048, 2095 and 4096 are
-    all multiples of both 32 and 64, so a two-tier mirror matches them exactly
-    while being wrong at 1025 and 4097.
-    """
+    """The table is only a guard if it straddles where the behaviour changes."""
     recorded = {m: (a, b) for m, a, b in _PADDED_M_OBSERVED}
     assert recorded[256] == (256, 256) and recorded[257] == (288, 512)
     assert recorded[240] == (240, 256) and recorded[241] == (256, 256)
@@ -425,8 +389,7 @@ def test_the_recorded_buckets_capture_the_granularity_change():
 
 
 def test_padded_m_mirror_matches_installed_aiter():
-    """The local padded-M mirror must track aiter's own bucketing; drift would
-    silently make the coverage guard judge the wrong lookup keys."""
+    """The local padded-M mirror must track aiter's own bucketing; drift would"""
     gemm_op_common = pytest.importorskip("aiter.ops.gemm_op_common")
     get_padded_m = gemm_op_common.get_padded_m
     n, k = 8704, 3072
@@ -437,9 +400,7 @@ def test_padded_m_mirror_matches_installed_aiter():
 
 
 def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):
-    """A dtype aiter cannot translate must fail here, not silently reach the
-    tuner: the old fallback returned the gfx942 fnuz constant, which is exactly
-    the value that dies with a lookup error on gfx950."""
+    """A dtype aiter cannot translate must fail here, not silently reach the"""
     import types
 
     fake = types.SimpleNamespace(
@@ -463,8 +424,7 @@ def test_aiter_dtype_str_reports_a_missing_alias(monkeypatch):
 
 
 def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):
-    """A manifest is a curated, weight-ordered set: thorough mode must not
-    explode it into the full config-derived M grid, only guarantee decode."""
+    """A manifest is a curated, weight-ordered set: thorough mode must not"""
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}", encoding="utf-8")
 
@@ -478,8 +438,8 @@ def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):
 
     m_values = _group_m(_resolve_input_csv(ctx, tmp_path))[("8704", "3072")]
 
-    # The one decode bucket for conc=8 plus the curated prefill row -- and
-    # nothing from the thorough grid (e.g. the 8192 high-watermark).
+    # The one decode bucket for conc=8 plus the curated prefill row -- and nothing from the thorough grid (e.g. the
+    # 8192 high-watermark).
     assert m_values == {16, 2095}
 
 
@@ -517,8 +477,8 @@ def test_resolve_input_csv_none_when_profile_lacks_dims(tmp_path):
 
 
 def test_validate_allows_config_derivation(tmp_path):
-    # No csv/shapes but a usable profile -> validate passes (script presence is
-    # environment-dependent, so only assert the shape-availability gate here).
+    # No csv/shapes but a usable profile -> validate passes (script presence is environment-dependent, so only assert
+    # the shape-availability gate here).
     ctx = _ctx(tmp_path, profile=_profile())
     err = validate_dense_tuner_inputs(ctx, "a8w8_blockscale", script_label="blockscale")
     assert err is None or "script not found" in err

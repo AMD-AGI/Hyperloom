@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tuning Database — config→performance lookup that grows with every benchmark.
-
-The biggest time sink in SLA kernel development was trial-and-error on
-tile configurations. A tuning DB eliminates repeated exploration:
-
-  "For attention_backward with seq_len=8192, head_dim=128 on gfx950,
-   the best CK config is BLOCK_M=128, BLOCK_N=64, wpe=2 → 80.2 ms"
-
-The DB grows automatically:
-  1. Every bench_wallclock() call logs {operation, shape, backend, config, wall_ms}
-  2. Every successful experiment adds its best config to the "golden configs" table
-  3. When starting a new task, the agent queries: "what config worked for similar shapes?"
-  4. Transfer rules capture cross-operation learnings (e.g., "wpe=2 for ALL sparse kernels")
-
-This is the single highest-leverage learning mechanism. The SLA work took
-~50 iterations across fwd/bwd. With a tuning DB, bwd would have started
-from fwd's best config and saved ~20 iterations.
-"""
+"""Tuning Database — config→performance lookup that grows with every benchmark."""
 
 from __future__ import annotations
 
@@ -28,10 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Persisting tuning results to the on-disk tuning DB (tuning_entries.jsonl,
-# golden_configs.json, transfer_rules.json) is disabled so runs do not mutate
-# the repo's knowledge_base. This will be redesigned as a dedicated feature
-# later; flip to True to re-enable persistence.
+# Persisting tuning results to the on-disk tuning DB (tuning_entries.jsonl, golden_configs.json, transfer_rules.json)
+# is disabled so runs do not mutate the repo's knowledge_base.
 _TUNING_DB_WRITE_ENABLED = False
 
 
@@ -82,12 +63,7 @@ class TuningEntry:
 
 @dataclass
 class TransferRule:
-    """A rule that transfers knowledge across operations/shapes.
-
-    Example:
-      "For ALL sparse attention kernels on gfx950, wpe=2 beats wpe=3.
-       Evidence: SLA fwd (8.86 vs 13.40 ms), SLA bwd (80.2 vs 105 ms)."
-    """
+    """A rule that transfers knowledge across operations/shapes."""
 
     rule_id: str
     description: str
@@ -107,28 +83,7 @@ class TransferRule:
 
 
 class TuningDatabase:
-    """Persistent tuning database — grows with every experiment.
-
-    Usage:
-        db = TuningDatabase("knowledge_base/tuning_db")
-
-        # Log a result (called automatically by bench tool)
-        db.log(operation="attention_bwd", backend="ck", gpu_target="gfx950",
-               dtype="bf16", shape={"seq_len": 8192, "head_dim": 128},
-               config={"BLOCK_M": 128, "wpe": 2}, wall_ms=80.2, snr_db=35.0)
-
-        # Query: what config works best for this shape?
-        best = db.best_config(operation="attention_bwd", backend="ck",
-                              shape={"seq_len": 8192, "head_dim": 128})
-
-        # Query: what worked for SIMILAR shapes?
-        suggestions = db.suggest_configs(operation="attention_bwd", backend="ck",
-                                          shape={"seq_len": 4096, "head_dim": 128})
-
-        # Context for agent prompt
-        context = db.context_for_task(operation="attention_bwd", backend="ck",
-                                       shape={"seq_len": 8192, "head_dim": 128})
-    """
+    """Persistent tuning database — grows with every experiment."""
 
     def __init__(self, db_dir: str | Path):
         self.db_dir = Path(db_dir)
@@ -137,12 +92,7 @@ class TuningDatabase:
         self._rules_path = self.db_dir / "transfer_rules.json"
 
     def _ensure_db_dir(self) -> None:
-        """Materialize the DB directory, but only on the way to an actual write.
-
-        Constructing a ``TuningDatabase`` used to mkdir unconditionally, which
-        created an empty tree under whatever root was handed in even though
-        ``_TUNING_DB_WRITE_ENABLED`` is False and nothing is ever written.
-        """
+        """Materialize the DB directory, but only on the way to an actual write."""
         self.db_dir.mkdir(parents=True, exist_ok=True)
 
     # ─── Logging ───
@@ -217,10 +167,7 @@ class TuningDatabase:
         gpu_target: str = "gfx950",
         dtype: str = "bf16",
     ) -> dict | None:
-        """Get the best-known config for an exact operation+shape+backend.
-
-        Returns dict with config, wall_ms, etc. or None if no data.
-        """
+        """Get the best-known config for an exact operation+shape+backend."""
         golden = self._load_golden()
 
         # Try exact match first
@@ -248,14 +195,7 @@ class TuningDatabase:
         dtype: str = "bf16",
         max_suggestions: int = 5,
     ) -> list[dict]:
-        """Suggest configs based on similar shapes and operations.
-
-        Similarity is based on:
-          1. Exact match (same operation + shape) — highest confidence
-          2. Same operation, similar shape (within 2× on each dimension)
-          3. Same operation class (e.g., attention_fwd → attention_bwd)
-          4. Transfer rules (cross-operation learnings)
-        """
+        """Suggest configs based on similar shapes and operations."""
         suggestions = []
 
         # Level 1: Exact match
@@ -379,19 +319,7 @@ class TuningDatabase:
         anti_value: Any = None,
         evidence: list[str] | None = None,
     ) -> None:
-        """Add a cross-operation transfer rule.
-
-        Example:
-            db.add_transfer_rule(
-                rule_id="sparse_wpe2",
-                description="For ALL sparse attention on gfx950, wpe=2 beats wpe=3",
-                scope="all_sparse",
-                parameter="wpe",
-                recommended_value=2,
-                anti_value=3,
-                evidence=["exp_sla_fwd_001", "exp_sla_bwd_002"],
-            )
-        """
+        """Add a cross-operation transfer rule."""
         rules = self._load_rules()
 
         # Update existing or add new
@@ -422,11 +350,7 @@ class TuningDatabase:
     # ─── Auto-discovery of transfer rules ───
 
     def discover_transfer_rules(self) -> list[TransferRule]:
-        """Analyze the tuning DB to discover cross-operation patterns.
-
-        Finds parameters that consistently have the same optimal value
-        across multiple operations/shapes.
-        """
+        """Analyze the tuning DB to discover cross-operation patterns."""
         entries = [e for e in self.all_entries() if e.passed_correctness]
         if len(entries) < 5:
             return []
@@ -493,11 +417,7 @@ class TuningDatabase:
         gpu_target: str = "gfx950",
         dtype: str = "bf16",
     ) -> str:
-        """Generate tuning context for an agent starting a new task.
-
-        This is the key accelerator — instead of starting from scratch,
-        the agent starts with the best known config and nearby results.
-        """
+        """Generate tuning context for an agent starting a new task."""
         lines = ["## Tuning Database"]
 
         # Best known config for exact match

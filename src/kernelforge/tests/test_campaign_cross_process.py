@@ -26,8 +26,8 @@ class _NoopEvolver:
         return {}
 
 
-# The stand-in for "budget is not what this test is about"; it has to clear the
-# round admission guard, which prices a whole round rather than only the reserve.
+# The stand-in for "budget is not what this test is about"; it has to clear the round admission guard, which prices a
+# whole round rather than only the reserve.
 _AMPLE_BUDGET_SEC = 12 * 3600.0
 
 

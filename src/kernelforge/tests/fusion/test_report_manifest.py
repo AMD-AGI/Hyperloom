@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``build_manifest`` carries the nomination envelope, and the combine path stays
-byte-identical to the pre-multi-patch shape.
-
-The manifest is the wire contract between KernelForge and Hyperloom. The two keys
-added for multi-patch -- top-level ``patches`` (one independent sibling per kept
-recipe) and ``nomination`` (the round's summary counts) -- must be present on the
-multi-patch path and ABSENT-as-null on the combine path so a legacy consumer that
-reads only ``artifacts`` sees no change.
-"""
+"""``build_manifest`` carries the nomination envelope, and the combine path stays"""
 
 from __future__ import annotations
 
@@ -76,11 +68,7 @@ def test_multi_patch_carries_every_sibling_in_order():
 
 
 def test_empty_patches_list_is_carried_as_a_kept_nothing_run():
-    """An empty list is NOT None: the run ran multi-patch and nominated nobody.
-
-    A consumer must be able to tell "multi-patch, zero keepers" (empty list) from
-    "combine path, no nomination contract" (null) -- they enqueue differently.
-    """
+    """An empty list is NOT None: the run ran multi-patch and nominated nobody."""
     manifest = build_manifest(
         **_base_kwargs(),
         patches=[],

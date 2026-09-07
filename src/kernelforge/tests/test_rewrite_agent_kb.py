@@ -60,12 +60,7 @@ def _remote_config_with_token(tmp_path, token: str) -> Config:
 
 
 def _credentialed_store_error(token: str) -> KBStoreError:
-    """A store failure whose text carries the credential and overruns the cap.
-
-    The client authenticates with a bearer token and addresses the store by URL,
-    so a transport error that quotes the request line carries the credential
-    twice over, and an error body is as long as the service decides to make it.
-    """
+    """A store failure whose text carries the credential and overruns the cap."""
     return KBStoreError(
         f"PUT https://forge:{token}@kb.example/knowledge failed "
         f"(sent Bearer {token}); the store said {token} expired" + " and returned an unbounded body" * 20
@@ -109,8 +104,7 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
     tmp_path,
     monkeypatch,
 ):
-    # Remote mode without KB Store credentials: the store layer reports it by
-    # declining to build a backend at all.
+    # Remote mode without KB Store credentials: the store layer reports it by declining to build a backend at all.
     monkeypatch.setattr(agent_kb_module, "create_rewrite_record_store", lambda _: None)
     spec, _driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
@@ -660,16 +654,7 @@ def test_an_unreadable_artifact_fails_the_write_instead_of_recording_half_a_port
     tmp_path,
     monkeypatch,
 ):
-    """Nothing is recorded, and the reason says which artifact was missing.
-
-    The refusal is persisted in the run's result JSON, so it has to name the
-    failure well enough to act on -- the exception type and the artifact that
-    could not be read -- while staying inside the cap that keeps one error out of
-    the rest of the file. Redaction of a reason that does carry a credential is
-    pinned by
-    :func:`test_a_refused_candidate_write_redacts_and_bounds_the_store_error`,
-    which drives the same handler with a store error instead of a missing file.
-    """
+    """Nothing is recorded, and the reason says which artifact was missing."""
     kb, store, _spec_ = _kb(tmp_path, monkeypatch)
 
     outcome = kb.write_candidate({"tag": "x"}, files=[tmp_path / "absent.py"], speedup=2.0)
@@ -688,26 +673,13 @@ def test_the_record_store_is_unused_when_the_facade_is_inactive(tmp_path):
     assert kb.write_candidate({"tag": "x"})["reason"] == "missing_gpu_type"
 
 
-# --------------------------------------------------------------------------- #
-# What a refused write is allowed to say about it. Every reason below is
-# persisted into the run's result JSON, so none of them may carry the bearer
-# token the store client authenticates with, and none of them may grow to
-# whatever length the service made its error body.
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # What a refused write is allowed to say
+# about it.
 def test_a_refused_measured_write_back_redacts_the_error_that_opened_the_store(
     tmp_path,
     monkeypatch,
 ):
-    """Opening the record's address is part of the write-back's error surface.
-
-    ``record_measured_speedup`` sanitizes what the amendment itself raises, but
-    ``_record_measured_speedup`` wraps the whole chain, and building the store
-    client happens first: ``open_canonical_id`` calls
-    ``create_rewrite_record_store``, which lets anything that is not a
-    ``KBStoreError`` out. The reason this handler builds travels through
-    ``measured_writebacks`` and ``measured_writeback_failures`` into the run's
-    result JSON, so it is sanitized and bounded here too.
-    """
+    """Opening the record's address is part of the write-back's error surface."""
     token = "kb-store-secret-9f3c"
 
     def refuse_to_open(_config):
@@ -738,13 +710,7 @@ def test_a_refused_candidate_write_redacts_and_bounds_the_store_error(
     tmp_path,
     monkeypatch,
 ):
-    """A refused ``write_candidate`` reports the store's own words.
-
-    Its reason reaches the run's result JSON through two routes: the rewrite
-    runner files it under ``kb_experience.write``, and ``write_run_experience``
-    passes it straight back to the forge loop. Both persist it, so the store's
-    exception is redacted and capped before it is handed back.
-    """
+    """A refused ``write_candidate`` reports the store's own words."""
     token = "kb-store-secret-9f3c"
     store = _use_in_memory_kb_store(monkeypatch)
     spec, _driver = _spec(tmp_path)
@@ -770,12 +736,7 @@ def test_a_refused_flydsl_solution_write_redacts_and_bounds_the_store_error(
     tmp_path,
     monkeypatch,
 ):
-    """The rewrite-owned publish path reports a refusal into the result JSON too.
-
-    ``write_flydsl_kb_solution`` records a validated port directly rather than
-    through the facade, and the rewrite runner prints its reason and files it
-    under ``kb_experience.write``, so it is sanitized on the same terms.
-    """
+    """The rewrite-owned publish path reports a refusal into the result JSON too."""
     token = "kb-store-secret-9f3c"
     store = _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
@@ -807,15 +768,7 @@ def test_a_failed_run_experience_write_redacts_and_bounds_the_store_error(
     monkeypatch,
     caplog,
 ):
-    """The forge loop's own mirror reports a store failure into the result JSON.
-
-    ``write_run_experience`` guards the whole mirror so a KB write cannot break
-    the loop, and ``write_experience_to_kb`` hands what it returns to the caller
-    that files ``kb_experience.write``. Opening the facade is part of what the
-    guard covers, so a store client that cannot be built raises through it. The
-    warning logged beside the reason lands in the run's log file, so it may not
-    keep what the reason had to give up either.
-    """
+    """The forge loop's own mirror reports a store failure into the result JSON."""
     token = "kb-store-secret-9f3c"
     workspace = tmp_path / "ws"
     workspace.mkdir()

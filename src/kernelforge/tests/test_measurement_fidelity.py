@@ -20,8 +20,7 @@ from kernelforge.mcp_server.tools.bench import (
     measure_wallclock,
 )
 
-# Records the argv it was invoked with so tests can assert on the exact flags
-# bench_wallclock chose to pass.
+# Records the argv it was invoked with so tests can assert on the exact flags bench_wallclock chose to pass.
 _ARGV_DRIVER = """
 import json, pathlib, sys
 pathlib.Path(sys.argv[0] + ".argv").write_text(json.dumps(sys.argv[1:]))
@@ -144,11 +143,7 @@ def _gate(**kwargs) -> InSessionGate:
 
 
 def test_stop_hook_timeout_covers_both_stages():
-    """The hook runs correctness THEN bench; a shorter timeout truncates it.
-
-    Regression: the timeout was stage_timeout + 120, which is under the 240+300
-    worst case, so a slow (e.g. multi-rank) driver lost the verdict entirely.
-    """
+    """The hook runs correctness THEN bench; a shorter timeout truncates it."""
     gate = _gate(stage_timeout_sec=240, bench_timeout_sec=300)
     hook = gate.make_agent_hooks().stop[0]
     assert hook.timeout_sec >= 240 + 3 * 300
@@ -168,12 +163,7 @@ def test_gate_measurement_defaults_are_legacy():
 
 
 def test_warmstart_baseline_uses_the_same_repeat_as_the_loop(tmp_path):
-    """A single-shot baseline vs repeat-and-median candidates is a free win.
-
-    Regression: warm start seeded the keep threshold from its own bench, which
-    ignored bench_repeat. On the TP4 all-reduce suite that offset measured 3.7% --
-    above the 2% gate -- so an unchanged kernel cleared it.
-    """
+    """A single-shot baseline vs repeat-and-median candidates is a free win."""
     from kernelforge.knowledge import experience_integration as ei
 
     drv = tmp_path / "drv.py"
@@ -201,8 +191,8 @@ def _load_driver_module():
     import importlib.util
 
     path = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
-    # The driver imports torch at module scope purely for dtype/element_size; the
-    # suite definitions under test need none of it.
+    # The driver imports torch at module scope purely for dtype/element_size; the suite definitions under test need
+    # none of it.
     stub = types.ModuleType("torch")
     stub.bfloat16 = "bfloat16"
     stub.float16 = "float16"
@@ -216,8 +206,8 @@ def _load_driver_module():
     try:
         spec = importlib.util.spec_from_file_location("_ar_driver_under_test", path)
         mod = importlib.util.module_from_spec(spec)
-        # dataclass resolves field types via sys.modules[cls.__module__], so the
-        # module has to be registered before its body executes.
+        # dataclass resolves field types via sys.modules[cls.__module__], so the module has to be registered before
+        # its body executes.
         sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
         return mod
@@ -229,8 +219,8 @@ def _load_driver_module():
                 sys.modules[k] = v
 
 
-# Measured over 5 runs: excluding these reduced raw-case noise from 0.90% to
-# 0.50% and fused-case noise from 2.00% to 0.44%.
+# Measured over 5 runs: excluding these reduced raw-case noise from 0.90% to 0.50% and fused-case noise from 2.00% to
+# 0.44%.
 _NOISY_CASES = {"raw_bf16_4x8192", "fused_bf16_64x8192"}
 
 
@@ -263,23 +253,14 @@ def _forge_loop_cmd():
 
 
 def test_gate_and_warm_start_are_not_configurable():
-    """Neither is a knob: they are unconditional loop behaviour.
-
-    Both were briefly exposed as CLI switches while debugging a collective
-    task. They are unrelated to collective profiling and turning either off
-    changes campaign semantics, so the loop keeps them fixed on.
-    """
+    """Neither is a knob: they are unconditional loop behaviour."""
     names = {p.name for p in _forge_loop_cmd().params}
     assert "gate" not in names
     assert "warm_start" not in names
 
 
 def test_driver_aggregates_repeats_by_median():
-    """Reduce each sample across ranks before taking either median.
-
-    The driver needs torch+torchrun to execute, so this asserts on the source
-    of the aggregation step rather than running it.
-    """
+    """Reduce each sample across ranks before taking either median."""
     src = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
     text = src.read_text()
     assert "statistics.median(" in text
@@ -325,13 +306,7 @@ def test_driver_aggregates_repeats_by_median():
 
 
 def test_cli_can_actually_call_kb_warmstart():
-    """The CLI's call site must match the function it calls.
-
-    Regression: the CLI passed bench_repeat while kb_warmstart did not accept
-    it, so forge-loop raised TypeError three minutes into a campaign -- after
-    the workspace and caches were already set up, and only on the warm-start
-    path that no test exercised. An 8-hour run produced nothing.
-    """
+    """The CLI's call site must match the function it calls."""
     import inspect
     import re
 

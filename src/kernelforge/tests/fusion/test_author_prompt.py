@@ -58,10 +58,7 @@ def test_integration_candidate_benchmarks_existing_operator_before_authoring():
 
 
 def test_integration_candidate_demands_recorded_parity_evidence():
-    """An integrated operator is third-party code whose numerics were never
-    checked against this model's eager path. The prompt must require recorded
-    parity evidence against the framework's own tolerance, otherwise a kernel
-    can be wired in on a microbenchmark win alone."""
+    """An integrated operator is third-party code whose numerics were never"""
     r = _recipe()
     r["candidate_kind"] = "integration"
     r["existing_operator"] = "gemm_a16w16_gated"

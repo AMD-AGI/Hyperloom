@@ -9,12 +9,9 @@ from kernelforge.learning.postmortem import PostMortem
 from kernelforge.learning.tuning_db import TuningDatabase
 from kernelforge.tracker.schema import Experiment
 
-# These tests assert that the tuning database persists entries, but persistence is
-# intentionally disabled in the source (kernelforge.learning.tuning_db,
-# `_TUNING_DB_WRITE_ENABLED = False`) so runs do not mutate the committed
-# knowledge_base. They are expected to fail until persistence is redesigned.
-# strict=False so the suite stays green and auto-detects (XPASS) if the feature
-# is re-enabled.
+# These tests assert that the tuning database persists entries, but persistence is intentionally disabled in the
+# source (kernelforge.learning.tuning_db, `_TUNING_DB_WRITE_ENABLED = False`) so runs do not mutate the committed
+# knowledge_base.
 _PERSISTENCE_DISABLED = pytest.mark.xfail(
     reason="tuning DB persistence disabled (_TUNING_DB_WRITE_ENABLED=False); re-enable when persistence is redesigned",
     strict=False,

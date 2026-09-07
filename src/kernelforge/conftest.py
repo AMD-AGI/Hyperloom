@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared fixtures and guardrails for every KernelForge test tree.
-
-This sits at the package root, not inside ``tests/``, because a conftest only
-reaches its own directory and below. The guardrails here are the kind that are
-worthless when partially applied -- the site-packages write guard, the isolated
-``KERNELFORGE_PROJECT_ROOT``, the child-process ``PYTHONPATH`` -- and forge has
-a second test tree under ``gemm_tune/tests/`` that a conftest in ``tests/``
-silently skipped, along with any tree added next to it later. Package root is
-the only location that covers all of them without a copy per directory that
-would drift.
-
-It ships in the wheel as a consequence. That is a few KB of a module pytest
-imports during collection and nothing imports at runtime; the packaging lint
-covers it as an ordinary module.
-"""
+"""Shared fixtures and guardrails for every KernelForge test tree."""
 
 from __future__ import annotations
 
@@ -42,20 +28,7 @@ SRC_ROOT = PACKAGE_ROOT.parent
 
 @pytest.fixture(scope="session", autouse=True)
 def _src_root_on_child_pythonpath() -> None:
-    """Extend pytest's in-process ``pythonpath`` to subprocesses.
-
-    Roughly 250 call sites in this tree spawn ``sys.executable`` and expect to
-    import ``kernelforge`` / ``kernelforge.llm`` there. Upstream KernelForge got away
-    with it because its CI always ran against ``pip install -e``; run the suite
-    from a bare checkout instead -- which the ``pythonpath = ["src", "."]`` ini
-    setting makes work for the *parent* -- and every one of those children dies
-    with ModuleNotFoundError. Setting it once here is the same statement pytest
-    already makes in-process, extended to what the tests fork.
-
-    Session-scoped and deliberately not undone: children are spawned from every
-    scope, and under a wheel install this prepends site-packages, which is a
-    no-op.
-    """
+    """Extend pytest's in-process ``pythonpath`` to subprocesses."""
     existing = os.environ.get("PYTHONPATH", "")
     parts = [part for part in existing.split(os.pathsep) if part]
     if str(SRC_ROOT) not in parts:
@@ -115,18 +88,7 @@ def _refuse(target: object, how: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_writes_under_site_packages(monkeypatch):
-    """Fail any test that writes, creates or deletes inside the package.
-
-    The data trees moved *into* ``kernelforge/data`` when KernelForge was
-    vendored into Hyperloom, which put every historical "write next to the
-    knowledge base" code path on a collision course with site-packages. A
-    writable site-packages makes that silently pollute the installation and
-    vanish on upgrade; a read-only one makes it explode halfway through a run.
-    This is the long-lived guard against reintroducing either.
-
-    The hooks sit on the lowest-level primitives so ``pathlib``, ``shutil`` and
-    ``open`` are all covered without patching each of them.
-    """
+    """Fail any test that writes, creates or deletes inside the package."""
     real_open = builtins.open
     real_os_open = os.open
     real_mkdir = os.mkdir
@@ -185,14 +147,7 @@ def _state_root_base(tmp_path_factory) -> Path:
 
 @pytest.fixture(autouse=True)
 def _isolated_state_root(request, _state_root_base, monkeypatch):
-    """Point the writable-state root at a per-test temporary directory.
-
-    Without this, ``default_project_root()`` falls through to
-    ``~/.cache/hyperloom/kernelforge``: the suite would accumulate state in the
-    developer's home directory and read back another test's leftovers. The
-    directory is not created -- callers mkdir on demand, and a test that never
-    touches the state root leaves nothing behind.
-    """
+    """Point the writable-state root at a per-test temporary directory."""
     if os.environ.get("KERNELFORGE_PROJECT_ROOT", "").strip():
         return
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.nodeid)[-120:]

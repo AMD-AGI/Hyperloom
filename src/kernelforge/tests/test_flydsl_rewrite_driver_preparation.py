@@ -70,17 +70,7 @@ def _config(tmp_path: Path) -> Config:
 
 
 def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypatch):
-    """The driver being authored must not also be the guarded measurement surface.
-
-    ``driver_script`` tells the workspace guard which file to defend, so naming
-    the stage driver there made it protected AND the target: the agent wrote a
-    working driver, and verify() ended the session with "protected tracked files
-    changed: <driver>" and rolled it back to the placeholder. Every attempt of
-    every rewrite failed driver_preparation_failed with the untouched stub.
-
-    The tests around this one all replace ``_run_agent``, so nothing exercised
-    the spec it builds -- which is how the contradiction survived.
-    """
+    """The driver being authored must not also be the guarded measurement surface."""
     captured: dict[str, object] = {}
 
     class _Backend:

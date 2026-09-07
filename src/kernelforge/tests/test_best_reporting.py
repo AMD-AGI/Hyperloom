@@ -114,12 +114,7 @@ def test_report_marks_raw_wall_as_non_monotonic_diagnostic(tmp_path):
 
 
 def test_manifest_withholds_improvement_when_slower_than_baseline(tmp_path):
-    """The score can rise while the aggregate wall time regresses.
-
-    Five landed runs shipped a PASS badge that way. The manifest is what
-    downstream reporting reads, so the contradiction has to be named here and
-    not only in the CLI result.
-    """
+    """The score can rise while the aggregate wall time regresses."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("selected candidate\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -141,12 +136,7 @@ def test_manifest_withholds_improvement_when_slower_than_baseline(tmp_path):
 def test_report_names_the_contradiction_the_manifest_withheld_the_badge_for(
     tmp_path,
 ):
-    """optimization_report.md is the artifact a human actually opens.
-
-    Both files are written by the same publish() call two lines apart, but the
-    report listed the score, both wall times and a PASS and said nothing about
-    the manifest having withdrawn the improvement over exactly those numbers.
-    """
+    """optimization_report.md is the artifact a human actually opens."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("selected candidate\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -185,12 +175,7 @@ def test_a_consistent_report_states_the_improvement_without_a_regression(tmp_pat
 
 
 def _downgrade_to_pre_badge_schema(tmp_path) -> None:
-    """Rewrite a published bundle the way the workspace looked before b9825da.
-
-    That release had no ``aggregate_regression`` key and left ``total_improved``
-    derived from the score alone, so an upgraded binary republishing the same
-    iteration meets a manifest whose field set it never wrote.
-    """
+    """Rewrite a published bundle the way the workspace looked before b9825da."""
     root = tmp_path / "forge_experiments"
     for path in (
         root / "best" / "manifest.json",
@@ -205,14 +190,7 @@ def _downgrade_to_pre_badge_schema(tmp_path) -> None:
 
 
 def test_republish_over_a_pre_badge_manifest_supersedes_it(tmp_path):
-    """The stale manifest is the published artifact until it is replaced.
-
-    ``_validate_existing_bundle`` compares whole dicts, so a manifest missing a
-    key the current schema writes reads as a conflicting publication of the same
-    iteration. The raise is swallowed upstream as persistence_degraded, which
-    leaves the pre-upgrade manifest -- and its ``total_improved: true`` over a
-    slower candidate -- as the campaign's published result.
-    """
+    """The stale manifest is the published artifact until it is replaced."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("selected candidate\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -272,13 +250,7 @@ def test_a_conflicting_publication_of_the_same_schema_still_raises(tmp_path):
 
 
 def test_describes_current_best_recognizes_a_complete_matching_bundle(tmp_path):
-    """Reconciliation has nothing to repair when the manifest is already current.
-
-    A resumed session rebuilds the durable best's manifest and republishes it,
-    and fields it recomputes -- session_index and experiment_id among them --
-    legitimately differ from the stored one, so republishing an already-current
-    best raised a conflict that harmed nothing.
-    """
+    """Reconciliation has nothing to repair when the manifest is already current."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("selected candidate\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -399,9 +371,7 @@ def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
 
 
 def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
-    """A crash between os.replace and manifest write can leave version_dir
-    visible but truncated. Retry must quarantine the corrupt bundle and rewrite
-    it (repairable), not wedge the iteration on a hard 'incomplete' error."""
+    """A crash between os.replace and manifest write can leave version_dir"""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("verified\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -445,8 +415,7 @@ def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
 
 
 def test_retry_repairs_inconsistent_orphan_bundle(tmp_path, monkeypatch):
-    """A visible-but-inconsistent orphan bundle (wrong patch bytes) is treated
-    as repairable: quarantine + rewrite, not a hard 'inconsistent' error."""
+    """A visible-but-inconsistent orphan bundle (wrong patch bytes) is treated"""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("verified\n")
     publisher = BestResultPublisher(str(tmp_path))

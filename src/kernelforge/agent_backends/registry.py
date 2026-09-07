@@ -22,12 +22,9 @@ from kernelforge.agent_backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Keeps a package-style prefix even though this module now lives in
-# ``kernelforge.llm``: the group name is the published contract third-party providers
-# register against, and renaming it would drop every existing plugin without a
-# word -- a plugin that fails to load is recorded as one log line, not raised.
-# Which is exactly why the pre-rename group is still read: plugins published
-# against ``kernel_agents.agent_providers`` keep loading, with one warning.
+# Keeps a package-style prefix even though this module now lives in ``kernelforge.llm``: the group name is the
+# published contract third-party providers register against, and renaming it would drop every existing plugin without
+# a word -- a plugin that fails to load is recorded as one log line, not raised.
 PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
 LEGACY_PROVIDER_ENTRY_POINT_GROUP = "kernel_agents.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -183,13 +180,7 @@ def _ordered_provider_candidates(preferred_model: str = "") -> list[AgentProvide
 
 
 def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
-    """Select an available provider, preferring the configured model's owner.
-
-    With ``preferred_model`` set the first available provider that claims that
-    model family wins, so ``auto`` routes a Codex model to Codex instead of
-    the first-registered backend. When no owner is available (or no model is
-    configured) selection falls back to registration order.
-    """
+    """Select an available provider, preferring the configured model's owner."""
     discover_agent_providers()
     failures: list[str] = []
 
@@ -421,9 +412,8 @@ register_agent_provider(
             native_subagents=True,
             mcp=True,
             probe=True,
-            # ClaudeBackend._provider_options folds spec.env into the SDK's env
-            # option, which the SDK applies over the environment it spawns the
-            # CLI with.
+            # ClaudeBackend._provider_options folds spec.env into the SDK's env option, which the SDK applies over the
+            # environment it spawns the CLI with.
             session_env=True,
             workspace_guard=True,
         ),
@@ -445,8 +435,8 @@ register_agent_provider(
             sandbox=True,
             probe=True,
             requires_workspace_cwd=True,
-            # CodexBackend._sdk_config applies spec.env over the child
-            # environment of the app server that parents the session.
+            # CodexBackend._sdk_config applies spec.env over the child environment of the app server that parents the
+            # session.
             session_env=True,
             workspace_guard=True,
         ),

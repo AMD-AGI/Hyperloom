@@ -1,10 +1,4 @@
-"""Tests for _kill_process_group's pgid-direct reap logic.
-
-The child is spawned with start_new_session=True, so its pid IS its process-group
-id. These tests cover the branches added to reap ninja/clang compile children that
-outlive the python driver leader (previously getpgid(pid) no-op'd once the leader
-exited, leaking a cold CK compile burning a core after a preflight timeout).
-"""
+"""Tests for _kill_process_group's pgid-direct reap logic."""
 
 from __future__ import annotations
 
@@ -34,9 +28,7 @@ def test_none_pid_is_noop(monkeypatch):
 
 
 def test_happy_path_signals_pgid_once(monkeypatch):
-    """Under start_new_session pid == pgid, so getpgid returns pid; killpg fires
-    exactly once on that pgid and proc.kill() is skipped (pid-not-in-targets branch
-    is skipped since pid is already the resolved target)."""
+    """Under start_new_session pid == pgid, so getpgid returns pid; killpg fires"""
     calls = []
     monkeypatch.setattr(os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
@@ -47,10 +39,7 @@ def test_happy_path_signals_pgid_once(monkeypatch):
 
 
 def test_never_calls_getpgid(monkeypatch):
-    """Regression for the PID-reuse leak: the original pid (== pgid at creation
-    under start_new_session) must be signalled DIRECTLY. getpgid(pid) must never be
-    consulted at kill time -- after the leader exits and the PID is reused it can
-    resolve an unrelated group and SIGKILL innocents."""
+    """Regression for the PID-reuse leak: the original pid (== pgid at creation"""
     calls = []
 
     def forbidden(pid):

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the CK MoE (fmoe_ck) tuner input generation.
-
-Regression cover for the FP8 dtype lookup failure: the tuner hardcoded the fnuz
-FP8 dtype (CDNA3 / gfx942), which is absent from aiter's ``dtype2str_dict`` on
-CDNA4 (gfx950 / MI355X, OCP ``e4m3fn`` variant), so aiter's MoE tuner aborted
-with a dtype lookup error and tuned 0 shapes. The dtype must be resolved from
-the installed aiter.
-"""
+"""Tests for the CK MoE (fmoe_ck) tuner input generation."""
 
 from __future__ import annotations
 
@@ -89,8 +82,8 @@ def test_fmoe_fp8_uses_resolved_aiter_dtype(tmp_path, monkeypatch):
     tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path))
     csv = tuner._generate_untuned_csv()
     dtypes = _q_dtype_columns(csv)
-    # Activation and weight are resolved independently, so a same-dtype precision
-    # resolves the one alias twice rather than sharing a single lookup.
+    # Activation and weight are resolved independently, so a same-dtype precision resolves the one alias twice rather
+    # than sharing a single lookup.
     assert resolved == ["fp8", "fp8"]
     assert dtypes == {"torch.float8_e4m3fn"}  # arch-correct, matches dtype2str_dict
     assert "torch.float8_e4m3fnuz" not in dtypes  # the hardcoded value is gone
@@ -111,8 +104,7 @@ def test_fmoe_bf16_dtype_unchanged(tmp_path):
 
 @pytest.mark.parametrize("precision", ["fp4", "mxfp4"])
 def test_fmoe_fp4_resolves_the_fp4_alias_not_fp8(tmp_path, monkeypatch, precision):
-    # per_1x32 (FP4 / MXFP4) quantizes through aiter's fp4x2 alias. Reusing the
-    # FP8 helper here would emit an FP8 dtype the FP4 tuner contract rejects.
+    # per_1x32 (FP4 / MXFP4) quantizes through aiter's fp4x2 alias.
     resolved = _stub_dtype_resolution(monkeypatch)
     ctx = _moe_ctx(tmp_path, precision=precision, quant_type="")
     csv = fm.FmoeCKTuner(ctx)._generate_untuned_csv()
@@ -122,12 +114,7 @@ def test_fmoe_fp4_resolves_the_fp4_alias_not_fp8(tmp_path, monkeypatch, precisio
 
 
 def test_fmoe_a8w4_emits_a_mixed_dtype_pair(tmp_path, monkeypatch):
-    """FP8 activations against FP4 weights is a distinct aiter kernel family.
-
-    aiter's CK MoE codegen selects ``tag = "a8w4"`` on ``Adtype in bit8_list and
-    Bdtype in bit4_list``; emitting the same dtype on both sides produces an a4w4
-    key that an a8w4 runtime never looks up.
-    """
+    """FP8 activations against FP4 weights is a distinct aiter kernel family."""
     _stub_dtype_resolution(monkeypatch)
     ctx = _moe_ctx(tmp_path, precision="mxfp4", quant_type="a8w4")
     csv = fm.FmoeCKTuner(ctx)._generate_untuned_csv()
@@ -219,12 +206,7 @@ def _write_runtime_csv(tmp_path, *, inter_dim="512", q_a="torch.float8_e4m3fn", 
 
 
 def test_caller_supplied_csv_wins_over_config_derivation(tmp_path, monkeypatch):
-    """The observed dispatch key is authoritative; nothing here may override it.
-
-    The context deliberately says bf16/unquantized with a different expert count,
-    which is exactly the mismatch that made a tuned table unreachable in
-    production. The supplied key must survive untouched.
-    """
+    """The observed dispatch key is authoritative; nothing here may override it."""
     _stub_dtype_resolution(monkeypatch)
     external = _write_runtime_csv(tmp_path)
     ctx = _moe_ctx(tmp_path, precision="bf16", quant_type="", moe_untuned_csv=external)
@@ -247,11 +229,7 @@ def test_no_caller_csv_falls_back_to_derivation(tmp_path, monkeypatch):
 
 
 def test_dense_untuned_csv_is_not_consumed_as_moe_shapes(tmp_path, monkeypatch):
-    """The dense field carries an M,N,K table and is already set in production.
-
-    Reading it here would reject a valid dense table as a malformed MoE one, so
-    the two shape sources must stay in separate fields.
-    """
+    """The dense field carries an M,N,K table and is already set in production."""
     _stub_dtype_resolution(monkeypatch)
     dense = tmp_path / "a8w8_blockscale_untuned_gemm.csv"
     dense.write_text("M,N,K\n256,1536,4096\n", encoding="utf-8")
@@ -295,8 +273,9 @@ def test_malformed_caller_csv_raises_rather_than_deriving(tmp_path, monkeypatch,
     [("fp8", "blockscale", "fp8"), ("fp8", "per_token", "fp8"), ("fp4", "", "fp4x2")],
 )
 def test_fmoe_quantized_dtypes_exist_in_installed_aiter(tmp_path, precision, quant_type, alias):
-    """The emitted dtype must be a key of the installed aiter's dtype2str_dict;
-    otherwise the MoE tuner aborts with a lookup error and tunes 0 shapes."""
+    """The emitted dtype must be a key of the installed aiter's dtype2str_dict; otherwise the MoE tuner aborts with a
+    lookup error and tunes 0 shapes.
+    """
     aiter = pytest.importorskip("aiter")
     ctx = _moe_ctx(tmp_path, precision=precision, quant_type=quant_type)
 
