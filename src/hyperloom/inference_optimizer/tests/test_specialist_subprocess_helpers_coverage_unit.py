@@ -151,8 +151,7 @@ def test_build_claude_cmd_full(tmp_path: Path) -> None:
     deny_idx = cmd.index("--disallowedTools") + 1
     denied = set(cmd[deny_idx].split(","))
     assert "KillShell" in denied and "SlashCommand" in denied
-    # --add-dir grants writes; the framework tree is read-only for the
-    # specialist because integrate_patch is the only writer of source.
+    # --add-dir grants writes; integrate_patch is the only writer of source.
     assert str(wt) in cmd and str(ws) in cmd
     assert str(fw) not in cmd
     assert cmd[-2:] == ["--foo", "bar"]

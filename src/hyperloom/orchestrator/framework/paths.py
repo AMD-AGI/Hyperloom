@@ -9,12 +9,13 @@ AST discovery, install.sh, and ``apply_kernel_patch`` all agree. First-class
 frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is discovered
 as a shared kernel library.
 
-Two questions, two functions, and they are not interchangeable.
-:func:`resolve_framework_tree` names *the* tree a session is optimising, keyed
-by the framework's own name. :func:`resolve_kernel_search_roots` lists every
-tree worth searching, filtered to what exists on this host. Neither is a
-permission set: specialists run unsandboxed, and what may be written is decided
-by the integration step that applies the patch, not by a list of prefixes.
+Three resolvers, three questions, not interchangeable.
+:func:`resolve_framework_tree` names *the* tree a session is optimising, keyed by
+the framework's own name. :func:`resolve_kernel_search_roots` lists the trees
+worth searching, filtered to what exists here. :func:`resolve_known_source_prefixes`
+matches a path string against every layout that could hold source, including
+those absent from this host. None is a permission set: what may be written is
+decided by the integration step that applies the patch.
 """
 
 from __future__ import annotations
@@ -340,8 +341,8 @@ def _discover_scriptable_repo_roots() -> tuple[str, ...]:
     instead of a pip-installed package, so importlib spec origins and the
     site-packages globs never see them. Materialization exports the resolved
     checkout as ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``; without those
-    roots PolicyGate rejects every patch against the framework's own source and
-    framework-agent cannot touch the code it is meant to optimize.
+    roots the framework's own source is invisible to search and to patch
+    grounding, and framework-agent cannot touch the code it is meant to optimize.
 
     Returns:
         tuple[str, ...]: Normalised, de-duplicated checkout roots that exist.
@@ -476,10 +477,8 @@ def resolve_framework_tree(framework: str) -> str:
     return ""
 
 
-#: Wheel layouts that exist on the serving images but are not importable from
-#: the orchestrator process, so discovery cannot find them. Only
-#: :func:`resolve_known_source_prefixes` uses them: they are string prefixes for
-#: classification, never directories anyone reads.
+#: Wheel layouts on the serving images that the orchestrator process cannot
+#: import, so discovery never finds them. String prefixes, not directories.
 _STATIC_SOURCE_LAYOUTS: tuple[str, ...] = (
     "/opt/venv/lib/python3.10/site-packages/aiter/",
     "/opt/venv/lib/python3.10/site-packages/sglang/",
@@ -507,14 +506,12 @@ _STATIC_SOURCE_LAYOUTS: tuple[str, ...] = (
 def resolve_known_source_prefixes() -> tuple[str, ...]:
     """Root prefixes for recognising a path *string* as framework source.
 
-    Deliberately not existence-filtered, unlike :func:`resolve_kernel_search_roots`:
-    a kernel path reaches the classifier from a trace or a patch manifest
-    produced on a serving pod, so a root absent from the host doing the
-    classifying still names real source on the host that emitted it. Filtering
-    them away turned every FlyDSL and multi-node path into "unknown source".
+    Not existence-filtered, unlike :func:`resolve_kernel_search_roots`: the paths
+    classified here come from traces and patch manifests produced on a serving
+    pod, so a root absent from this host still names real source on that one.
 
-    Membership permits nothing. A path that matches is reported as belonging to
-    a known tree; one that does not is reported as unrecognised.
+    Membership permits nothing; a path that matches no prefix is reported as
+    unrecognised.
 
     Returns:
         tuple[str, ...]: Discovered roots, image defaults, static wheel layouts
@@ -534,10 +531,8 @@ def resolve_known_source_prefixes() -> tuple[str, ...]:
 def resolve_kernel_search_roots() -> tuple[str, ...]:
     """Roots to grep when locating the source that defines a GPU kernel.
 
-    Named framework trees only. The bare site/dist-packages parents are
-    deliberately absent: they pull in every installed package (torch included),
-    which costs seconds per keyword, matches unrelated code, and tells a reader
-    nothing about where this session's code lives.
+    Named framework trees only: the bare site/dist-packages parents would pull
+    in every installed package, torch included, on each keyword.
 
     Only roots that exist on this host are returned. An empty result therefore
     means "there is nothing here to search", which a caller must surface as a
@@ -545,8 +540,8 @@ def resolve_kernel_search_roots() -> tuple[str, ...]:
     indistinguishable from a kernel whose source genuinely is not present.
 
     Returns:
-        tuple[str, ...]: Existing framework package dirs, editable checkouts and
-            FlyDSL roots, de-duplicated in discovery order.
+        tuple[str, ...]: Existing framework package dirs, editable checkouts,
+            env-supplied and FlyDSL roots, de-duplicated in discovery order.
     """
     merged = _merge_roots(
         _discover_installed_framework_roots(),

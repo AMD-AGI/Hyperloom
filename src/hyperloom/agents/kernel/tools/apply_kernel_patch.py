@@ -1556,11 +1556,9 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     elif installed_kernel:
         root = installed_kernel[0]
         deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
-    # A layout no pattern recognises leaves ``root`` unset on purpose. Guessing
-    # ``target_file.parent`` reads as a real root downstream: snapshot mode
-    # would resolve repo-relative descriptors against it and write the optimized
-    # bytes to a fabricated path beside the target, reporting success while the
-    # target keeps its original content.
+    # An unrecognised layout leaves ``root`` unset: snapshot mode resolves
+    # repo-relative descriptors against it, so a guessed parent writes the
+    # optimized bytes beside the target instead of into it.
 
     if suffix in PYTHON_SOURCE_SUFFIXES and installed_aiter_root is not None and _target_is_in_aiter_csrc(target_file):
         compiled = True
@@ -2412,9 +2410,7 @@ def _apply_kernel_patch_snapshot(
     repo_root = Path(resolved_root)
     deploy_roots = [Path(path) for path in primary_strategy.get("deploy_roots") or []]
     if not deploy_roots:
-        # An unrecognised layout yields no deploy root. The caller naming the
-        # repo is a declaration, not the parent-directory guess the check above
-        # rejects, so it stands in.
+        # A caller-named repo is a declaration, not the guess rejected above.
         deploy_roots = [repo_root]
     backup_dir = _claim_backup_dir(Path(backup_root), kernel_id, target)
     backup_dir.mkdir(parents=True, exist_ok=True)

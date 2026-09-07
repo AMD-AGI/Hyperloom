@@ -660,14 +660,11 @@ def _pick_worktree_base(
     """Return the checkout to branch the specialist's worktree off.
 
     ``preferred`` wins whenever it is a checkout. It names the framework the
-    session is actually optimising, which ``roots`` cannot express: that is the
-    source-file *allowlist*, a permission set whose order says nothing about the
-    session. Selecting by position worked only while exactly one trusted root
-    happened to be a git checkout. When a pod started shipping aiter as one it
-    sorted first, so WorldPlay specialists were handed an aiter worktree; the
-    patches they wrote against ``hyvideo/`` paths could not be grounded against
-    it and patch-safety dropped every one as ``missing_target``, leaving the
-    session to bench switches with no code behind them.
+    session is actually optimising, which ``roots`` cannot express: their order
+    records only how they were discovered. Selecting by position worked while
+    exactly one root happened to be a git checkout; when a pod started shipping
+    aiter as one it sorted first, so WorldPlay specialists were handed an aiter
+    worktree and the ``hyvideo/`` patches they wrote grounded against nothing.
 
     Falls back to None when nothing qualifies — the runner then runs the
     specialist without an isolated worktree.
@@ -1205,10 +1202,8 @@ class SpecialistSubprocessDispatcher:
         """Return the dirs an agent CLI may write, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands). The framework source trees are not
-        here: ``integrate_patch`` is the only writer of those, so handing them
-        to the agent as writable contradicted the rule the prompt states.
-        Reading them is unaffected.
+        ``specialist_done.json`` lands). The framework source trees are absent:
+        ``integrate_patch`` is their only writer. Reads are unaffected.
 
         Args:
             workspace (Path): Task workspace.

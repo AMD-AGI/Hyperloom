@@ -434,9 +434,8 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# `source_file` and `framework_source_root` name framework source, which lives
-# outside the session directory by construction. They carry no scope test: where
-# a patch may land is decided by the integration step that applies it.
+# Exempt from path validation: where a patch may land is decided by the
+# integration step that applies it.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
 # Coordinator-owned warm replay may deploy a KB patch into the active framework

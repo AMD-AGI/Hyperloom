@@ -885,10 +885,8 @@ class SpecialistPromptInputs:
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
-    # Local source navigation hint. ``session_framework_tree`` is the tree this
-    # session optimises; ``framework_source_roots`` are the other trees worth
-    # searching. ``worktree_base`` is the git checkout the worktree was cut from,
-    # empty when the framework is pip-installed.
+    # Local source navigation hint. ``worktree_base`` is empty when the
+    # framework is pip-installed rather than a checkout.
     session_framework_tree: str = ""
     framework_source_roots: tuple[str, ...] = ()
     worktree_base: str = ""
@@ -1954,12 +1952,10 @@ def _source_root_row(root: str, *, worktree_base: str) -> str:
 def _resolve_focus_dir(hint: str, session_tree: str) -> str:
     """Return ``hint`` as an absolute path under the session tree.
 
-    The checklist's directories are repo-relative (``vllm/model_executor/...``)
-    while a pip-installed tree is the package directory itself
-    (``.../dist-packages/vllm/``), so a naive join repeats the package name.
-    Whichever of the tree and its parent actually holds the directory wins; with
-    neither present, a leading segment matching the tree's own name is what
-    decides, so the rendered path is the same on a host that lacks the tree.
+    Checklist directories are repo-relative (``vllm/model_executor/...``) while a
+    pip-installed tree is the package directory itself
+    (``.../dist-packages/vllm/``), so a hint repeating the tree's own name joins
+    onto its parent.
 
     Args:
         hint (str): The focus directory, repo-relative or absolute.
@@ -1973,9 +1969,6 @@ def _resolve_focus_dir(hint: str, session_tree: str) -> str:
         return hint
     tree = Path(session_tree.rstrip("/"))
     rel = hint.lstrip("/")
-    for base in (tree, tree.parent):
-        if (base / rel).is_dir():
-            return f"{base / rel}/" if hint.endswith("/") else str(base / rel)
     base = tree.parent if Path(rel).parts[:1] == (tree.name,) else tree
     return f"{base / rel}/" if hint.endswith("/") else str(base / rel)
 
@@ -1983,10 +1976,8 @@ def _resolve_focus_dir(hint: str, session_tree: str) -> str:
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 7 (local source navigation hint) of the prompt.
 
-    Leads with the tree this session optimises, because that is the one fact the
-    root list cannot express: its order records how roots were discovered, not
-    what is being optimised. Focus directories resolve against that tree so the
-    specialist is not left joining a relative path onto a list of candidates.
+    Leads with the tree this session optimises: the root list cannot express it,
+    since its order records only how roots were discovered.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.

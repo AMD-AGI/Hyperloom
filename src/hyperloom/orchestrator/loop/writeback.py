@@ -2444,9 +2444,8 @@ class WritebackCollaborator:
             source=source,
             run_error=run_error,
         )
-        # A patch nobody could ground is a result the next round has to act on,
-        # and the specialist's own notes reach the prompt only through the
-        # single inbox line for this task. Record it where SEED renders it.
+        # Specialist notes reach the prompt only through this task's one inbox
+        # line; ``last_action_failures`` is rendered every SEED turn.
         ungrounded = done_payload.get("patches_ungrounded")
         if isinstance(ungrounded, list) and ungrounded:
             self.shared_state.record_action_failure(
@@ -3099,11 +3098,8 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
-        # A promoted result can still carry a failure the Orchestration LLM has
-        # to see: integrate_patch settles "apply_failed" / "reverted", both of
-        # which promote, so the rolling failure log never learned why a patch
-        # did not land. ``last_action_failures`` is the only surface rendered
-        # every SEED turn; the inbox line for this task is shown once.
+        # ``integrate_patch`` settles "apply_failed" / "reverted", which promote,
+        # so a promoted result is still the only record of why a patch failed.
         error_class = str(result.get("error_class") or "").strip()
         if error_class and task is not None:
             self.shared_state.record_action_failure(

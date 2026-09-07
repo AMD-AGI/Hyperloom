@@ -214,25 +214,19 @@ def _resolve_package_version(package: str) -> str:
 def _resolve_actual_root_hints(framework: str) -> list[str]:
     """Return concrete source-root strings for the mandate (never empty).
 
-    Calls probe_framework_source_roots_for_env() and falls back to the generic
-    prose hints when discovery yields nothing.  Also appends version info for the
-    target framework package.
+    Falls back to the generic prose hints when discovery yields nothing. Also
+    appends version info for the target framework package.
     """
     try:
         from hyperloom.orchestrator.framework.paths import (
-            probe_framework_source_roots_for_env,
+            resolve_kernel_search_roots,
             summarise_framework_root_discovery,
         )
 
-        roots_str = probe_framework_source_roots_for_env()
-        if roots_str:
-            hints: list[str] = []
-            summary = summarise_framework_root_discovery(roots_str)
-            for root in roots_str.split(":"):
-                root = root.strip()
-                if root:
-                    hints.append(root)
-            hints.append(f"(discovery summary: {summary})")
+        roots = resolve_kernel_search_roots()
+        if roots:
+            hints: list[str] = list(roots)
+            hints.append(f"(discovery summary: {summarise_framework_root_discovery(':'.join(roots))})")
             pkg_map = {"sglang": "sglang", "vllm": "vllm", "xdit": "xfuser", "atom": "atom"}
             pkg_name = pkg_map.get(framework, framework)
             ver = _resolve_package_version(pkg_name)
@@ -570,10 +564,8 @@ def build_mandate(
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
-        source_root_hints: Explicit source-root hints; when ``None`` (default) they
-            are resolved via :func:`_resolve_actual_root_hints` (which calls
-            ``probe_framework_source_roots_for_env()`` and falls back to the
-            generic prose constants on failure).
+        source_root_hints: Explicit source-root hints; when ``None`` (default)
+            they are resolved via :func:`_resolve_actual_root_hints`.
 
     Returns:
         EnablementMandate: The authoring contract, ready to hand to the

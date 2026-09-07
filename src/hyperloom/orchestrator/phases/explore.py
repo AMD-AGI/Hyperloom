@@ -926,9 +926,7 @@ class ExplorePhase(CoordinatorCollaborator):
                     if v and v != "unknown":
                         params["framework_version"] = v
 
-        # Local-source navigation hint. The session tree is named separately
-        # from the search roots: their order records discovery, not what this
-        # session optimises.
+        # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
                 from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
@@ -976,21 +974,17 @@ class ExplorePhase(CoordinatorCollaborator):
             if isinstance(_minfo, dict) and _minfo:
                 params["model_info"] = dict(_minfo)
 
-        # Checklist-derived focus directories. Every domain gets them; a caller
-        # that named its own keeps it.
+        # Checklist-derived focus directories; a caller that named its own keeps it.
         if "source_hint_directories" not in params:
-            try:
-                from ..knowledge import static_recon_checklist as _src_recon
+            from ..knowledge import static_recon_checklist as _src_recon
 
-                _dirs = _src_recon.source_hint_directories_for(
-                    model_class=str(getattr(state, "model_class", "") or ""),
-                    gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                    precision=_src_recon.workload_precision(state),
-                )
-                if _dirs:
-                    params["source_hint_directories"] = list(_dirs)
-            except Exception:  # noqa: BLE001 — advisory; never block dispatch
-                log.exception("specialist warmup: source_hint_directories lookup failed")
+            _dirs = _src_recon.source_hint_directories_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=_src_recon.workload_precision(state),
+            )
+            if _dirs:
+                params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
             try:

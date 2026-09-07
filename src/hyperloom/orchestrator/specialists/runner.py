@@ -145,7 +145,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 
 
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the allowlisted source trees other than ``base``.
+    """Return the configured source trees other than ``base``.
 
     Grounding falls back to these when the worktree base does not hold a
     patch's targets, which is the normal case for a specialist that patches a
@@ -162,7 +162,7 @@ def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path,
         base: The checkout the specialist worktree branched off, if any.
 
     Returns:
-        The remaining roots that exist, in allowlist order.
+        The remaining roots that exist, in discovery order.
     """
     base_resolved = base.resolve() if base else None
     out: list[Path] = []

@@ -654,12 +654,9 @@ class PatchGroundingResult:
     def is_garbage(self) -> bool:
         """True when the file is not a usable patch at all.
 
-        Only the structural verdicts drop: a file with no hunk header is not a
-        diff, and one whose paths escape the tree cannot be applied anywhere.
-        A patch that resolves to no root, or to several, is reported rather than
-        dropped -- the root set is a discovery order, and letting
-        ``integrate_patch`` fail on the real ``git apply`` says which tree was
-        tried and why it did not take.
+        Only structural verdicts drop: a file with no hunk header is not a diff,
+        and one whose paths escape the tree applies nowhere. An unresolved or
+        ambiguous root is a verdict about the root set, not the patch.
 
         Returns:
             True for structural-failure verdicts that should drop the patch.
@@ -746,9 +743,8 @@ def ground_patch_text(
 class PatchSafetyReport:
     """Aggregate patch-safety findings for one specialist_done payload.
 
-    ``ungrounded`` holds every patch that failed vetting, whether or not it
-    survived: a structural reject is also absent from ``kept_patches``, while a
-    patch that merely resolved to no root (or to several) appears in both.
+    ``ungrounded`` holds every patch that failed vetting; a structural reject is
+    also absent from ``kept_patches``, an unresolved root appears in both.
     """
 
     kept_patches: list[str] = field(default_factory=list)
@@ -870,12 +866,11 @@ def vet_patches(
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
     """Ground each patch against the candidate checkouts, one root per patch.
 
-    Structural rejects (unreadable / non-diff / path escape) are the only
-    drops. Each survivor then resolves its own root, so a cross-repo set
-    survives even though no single root holds every target. A patch whose
-    targets match no root, or several, is kept with that verdict recorded:
-    integrate_patch and the Critic adjudicate, and a real ``git apply`` failure
-    names the tree it tried.
+    Structural rejects (unreadable / non-diff / path escape) are the only drops.
+    Each survivor resolves its own root, so a cross-repo set survives even though
+    no single root holds every target. A patch whose targets match no root, or
+    several, is kept with that verdict recorded for integrate_patch and the
+    Critic to adjudicate.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.

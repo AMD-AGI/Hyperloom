@@ -345,8 +345,7 @@ def test_openai_only_deployment_builds_a_codex_exec_argv(
     assert "SYSTEM_INSTRUCTION_SENTINEL" not in rendered_argv
 
     workspace = tmp_path / "workspace"
-    # ``-C`` is the write-isolated worktree; only the workspace joins it. The
-    # framework trees stay out: integrate_patch is the only writer of source.
+    # ``-C`` is the write-isolated worktree; only the workspace joins it.
     assert cmd[cmd.index("-C") + 1] == str(workspace / "worktree")
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     assert add_dirs == [str(workspace)]

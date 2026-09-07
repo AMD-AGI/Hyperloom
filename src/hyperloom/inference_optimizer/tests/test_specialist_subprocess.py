@@ -1172,8 +1172,7 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     assert cmd[-1] == "--debug"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     # Worktree first, workspace second, then each distinct framework root.
-    # integrate_patch is the only writer of the framework tree, so the
-    # specialist is handed its worktree and workspace and nothing else.
+    # integrate_patch is the only writer of source; the specialist gets neither.
     assert add_dirs == [str(worktree), str(workspace)]
 
 

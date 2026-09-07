@@ -100,7 +100,6 @@ def _build_specialist_executor(
     per_turn_max_seconds = float(getattr(args, "specialist_per_turn_max_seconds", 600.0) or 600.0)
     dispatch_mode = str(getattr(args, "specialist_dispatch_mode", "subprocess") or "subprocess").strip().lower()
 
-    # Candidate checkouts for the specialist worktree base.
     framework_source_roots = tuple(resolve_kernel_search_roots())
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.

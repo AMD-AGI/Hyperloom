@@ -1285,14 +1285,12 @@ class _ArtifactSpec:
     Attributes:
         source: Absolute path to the artifact file inside the specialist
             workspace / worktree (sandbox-validated).
-        target: Absolute install path inside an allowlisted framework root
-            (sandbox-validated; no escape).
+        target: Absolute install path inside a framework root (no escape).
         rel_target: The framework-relative target, normalized to the matched
-            allowlisted root via ``_resolve_artifact_target`` (an author's
-            absolute target is converted to this relative form). Used for
-            reporting AND as the framework-relative key for the durable KEEP
-            source snapshot.
-        root: The allowlisted root ``rel_target`` is relative to. The KEEP
+            root via ``_resolve_artifact_target`` (an author's absolute target
+            is converted to this relative form). Used for reporting AND as the
+            framework-relative key for the durable KEEP source snapshot.
+        root: The root ``rel_target`` is relative to. The KEEP
             source snapshot is keyed on one root, so an artifact installed into
             a different tree than the patches must be recognisable as such.
         kind: Free-form artifact kind label (e.g. ``config_json``).
@@ -1361,8 +1359,8 @@ def _resolve_artifact_specs(
     Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
     inside the specialist workspace/worktree (sandbox) and ``target`` is
-    resolved inside an allowlisted framework root. Malformed / out-of-sandbox
-    entries are dropped and reported.
+    resolved inside a framework root. Malformed / out-of-sandbox entries are
+    dropped and reported.
 
     Args:
         specialist_workspace: The specialist task workspace.
@@ -4234,7 +4232,7 @@ class IntegratePatchExecutor:
         stable base and must not be reverted when this round's candidate is rolled back.
 
         Each entry is validated before installation:
-        - ``target`` must resolve inside an allowlisted framework root
+        - ``target`` must resolve inside a framework root
           (via :func:`_resolve_artifact_target`).
         - ``source`` must resolve inside the session directory.
 
@@ -4273,7 +4271,7 @@ class IntegratePatchExecutor:
             resolved = _resolve_artifact_target(target_str)
             if resolved is None:
                 log.warning(
-                    "integrate_patch: base artifact target %r not in allowlisted root; skipping",
+                    "integrate_patch: base artifact target %r not in a framework root; skipping",
                     target_str,
                 )
                 continue

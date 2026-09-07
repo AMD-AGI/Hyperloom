@@ -2046,9 +2046,8 @@ def test_env_spec_refuses_an_incomplete_snapshot(session_dir, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# A promoted result can still carry a failure. ``integrate_patch`` settles
-# "apply_failed" / "reverted", both of which promote, so without this the
-# rolling failure log never learned why a patch did not land.
+# A promoted result can still carry a failure: "apply_failed" / "reverted" both
+# promote, so the failure log is the only record of why a patch did not land.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_promote_records_a_failure_carried_by_a_promoted_result(session_dir):

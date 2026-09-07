@@ -310,7 +310,7 @@ def test_section_seven_states_the_hint_is_not_a_boundary(tmp_path):
 def test_section_seven_resolves_focus_dirs_against_the_session_tree(tmp_path):
     """A repo-relative hint must not repeat the package name of a pip-installed tree."""
     tree = tmp_path / "dist-packages" / "vllm"
-    (tree / "model_executor" / "layers" / "fused_moe").mkdir(parents=True)
+    tree.mkdir(parents=True)
     _, user_p = build_specialist_prompts(
         _rich_inputs(
             session_framework_tree=f"{tree}/",
@@ -322,20 +322,6 @@ def test_section_seven_resolves_focus_dirs_against_the_session_tree(tmp_path):
     assert f"- {tree}/model_executor/layers/fused_moe/" in section
     assert "vllm/vllm/" not in section
     assert "- /abs/elsewhere/" in section
-
-
-def test_section_seven_focus_dir_join_survives_an_absent_tree(tmp_path):
-    """The rendered path must not depend on the tree existing on this host."""
-    tree = tmp_path / "dist-packages" / "vllm"
-    tree.mkdir(parents=True)
-    _, user_p = build_specialist_prompts(
-        _rich_inputs(
-            session_framework_tree=f"{tree}/",
-            framework_source_roots=(f"{tree}/",),
-            source_hint_directories=("vllm/model_executor/kernels/linear/mxfp8/",),
-        )
-    )
-    assert f"- {tree}/model_executor/kernels/linear/mxfp8/" in _section_seven(user_p)
 
 
 def test_section_seven_is_none_without_any_root():

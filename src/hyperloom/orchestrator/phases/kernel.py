@@ -4134,9 +4134,7 @@ class KernelPhase(PhaseHandler):
                 }
         self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
-        # The integration summary rides a ``response`` message, which the inbox
-        # renders once as a raw payload dump; nothing else surfaces a Controller
-        # round that admitted no patch.
+        # The summary rides a ``response`` message the inbox dumps raw once.
         _integration = result.get("integration")
         if isinstance(_integration, dict):
             _skipped = [
