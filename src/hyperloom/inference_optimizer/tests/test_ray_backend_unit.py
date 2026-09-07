@@ -168,8 +168,7 @@ def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
         [
             sys.executable,
             "-c",
-            "import ctypes; v = ctypes.c_int(0); "
-            "ctypes.CDLL('libc.so.6').prctl(2, ctypes.byref(v)); print(v.value)",
+            "import ctypes; v = ctypes.c_int(0); ctypes.CDLL('libc.so.6').prctl(2, ctypes.byref(v)); print(v.value)",
         ],
         log_path=str(log_path),
     )
@@ -197,7 +196,7 @@ def test_owner_death_still_reaps_the_wrappers_setsid_server(tmp_path: Path):
         "trap cleanup EXIT INT TERM\n"
         f"setsid bash -c 'echo $$ > {pgid_file}; while true; do sleep 0.2; done' &\n"
         "sleep 0.5\n"
-        f'SERVER_PGID=$(cat {pgid_file})\n'
+        f"SERVER_PGID=$(cat {pgid_file})\n"
         "while true; do sleep 0.2; done\n",
         encoding="utf-8",
     )
