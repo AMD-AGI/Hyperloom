@@ -283,10 +283,7 @@ def ensure_vllm_patched_for_tracelens(
     install = _discover_vllm_install()
     if install is None:
         return False
-    plan = _discover_vllm_plan(tracelens_root, install=install)
-    if plan is None:
-        return False
-    return _ensure_patched(plan)
+    return _ensure_patched_from(_discover_vllm_plan(tracelens_root, install=install))
 
 
 def ensure_sglang_patched_for_tracelens(
@@ -305,10 +302,7 @@ def ensure_sglang_patched_for_tracelens(
     Returns:
         bool: ``True`` if the SGLang install is in patched state at exit.
     """
-    plan = _discover_sglang_plan(tracelens_root)
-    if plan is None:
-        return False
-    return _ensure_patched(plan)
+    return _ensure_patched_from(_discover_sglang_plan(tracelens_root))
 
 
 def ensure_sglang_patched_for_ck_blockscale(
@@ -337,10 +331,12 @@ def ensure_sglang_patched_for_ck_blockscale(
         True if the SGLang install carries the CK-routing patch at exit, False
         on any fail-soft outcome.
     """
-    plan = _discover_sglang_ck_plan(kernelforge_root)
-    if plan is None:
-        return False
-    return _ensure_patched(plan)
+    return _ensure_patched_from(_discover_sglang_ck_plan(kernelforge_root))
+
+
+def _ensure_patched_from(plan: _PatchPlan | None) -> bool:
+    """Shared ``ensure_*`` tail: ``False`` when discovery fail-softed (``plan is None``), else :func:`_ensure_patched`."""
+    return plan is not None and _ensure_patched(plan)
 
 
 # ---------------------------------------------------------------------
