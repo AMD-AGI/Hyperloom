@@ -1573,8 +1573,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
     def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
         # What an install into the framework checkout does to its HEAD.
         (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
-        for argv in (["add", "-A"], ["commit", "-qm", "install"]):
-            subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, check=True)
+        git_commit_all(repo, "install")
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
 
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _installing_commits)
