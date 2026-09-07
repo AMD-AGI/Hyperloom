@@ -46,12 +46,19 @@ _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 OUTCOMES: tuple[str, ...] = ("applied", "failed", "skipped")
 
 
-def _file_identity(path: Path) -> dict[str, str] | None:
+def _file_identity(path: Path, *, root: Path) -> dict[str, str] | None:
+    """Digest one input file, named by where the delivery would carry it."""
     try:
         payload = path.read_bytes()
     except OSError:
         return None
-    return {"rel": path.name, "sha256": hashlib.sha256(payload).hexdigest()}
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        # Outside the session, so no bundle can carry it; the name is all a
+        # consumer gets, and the delivery rule refuses on the absence.
+        rel = path.name
+    return {"rel": rel, "sha256": hashlib.sha256(payload).hexdigest()}
 
 
 def _vcs_identity(operand: str) -> tuple[dict[str, Any] | None, str]:
@@ -94,7 +101,7 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
         if not operand:
             continue
         if option in requirement_options:
-            identity = _file_identity(root / operand)
+            identity = _file_identity(root / operand, root=root)
             if identity is None:
                 unresolved.append("requirements_file")
             else:
@@ -108,7 +115,7 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
         elif "://" in operand:
             unresolved.append("remote_artifact")
         elif _looks_local(operand):
-            identity = _file_identity(root / operand)
+            identity = _file_identity(root / operand, root=root)
             if identity is None:
                 unresolved.append("local_file")
             else:

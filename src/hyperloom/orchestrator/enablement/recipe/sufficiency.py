@@ -265,6 +265,11 @@ def _root_reasons(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]
         record = roots.get(str(step.get("root_id") or ""))
         if record is None or not record.get("contributions"):
             reasons.append(_reason("root_unidentified", f"step[{index}]"))
+    for root_id, record in roots.items():
+        # A read that failed leaves is_git standing over no commit, which names
+        # no tree a consumer can check out.
+        if record.get("is_git") and not record.get("base_sha"):
+            reasons.append(_reason("root_unidentified", root_id))
     anchors: dict[tuple[str, str], str] = {}
     for root_id, record in roots.items():
         target = record.get("replay_target") or {}
@@ -463,7 +468,11 @@ def _credential_reasons(
     return reasons
 
 
-def _delivery_reasons(section: Mapping[str, Any], delivered: Iterable[str]) -> list[dict[str, Any]]:
+def _delivery_reasons(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+    delivered: Iterable[str],
+) -> list[dict[str, Any]]:
     """Refuse a bundle whose referenced bytes it does not actually carry.
 
     A reference the delivery omits is not a thinner recipe -- it is one an
@@ -494,6 +503,14 @@ def _delivery_reasons(section: Mapping[str, Any], delivered: Iterable[str]) -> l
     config_path = str((section.get("accepted_config") or {}).get("config_path") or "").strip("/")
     if config_path and config_path not in packaged:
         reasons.append(_reason("artifact_not_self_contained", "config_path"))
+    for index, step in enumerate(steps):
+        # A digest names the bytes an install consumed; only the delivery makes
+        # them obtainable, and a wheel the bundle omits is one the consumer must
+        # be told to supply.
+        for identity in step.get("input_identity") or ():
+            rel = str(identity.get("rel") or "").strip("/") if isinstance(identity, Mapping) else ""
+            if rel and rel not in packaged:
+                reasons.append(_reason("artifact_not_self_contained", f"step[{index}]"))
     return reasons
 
 
@@ -537,7 +554,7 @@ def evaluate_replay_sufficiency(
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
     if delivered_paths is not None:
-        reasons.extend(_delivery_reasons(section, delivered_paths))
+        reasons.extend(_delivery_reasons(section, steps, delivered_paths))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:

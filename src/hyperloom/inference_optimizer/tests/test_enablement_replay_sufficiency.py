@@ -775,6 +775,12 @@ def test_contributing_root_bound_by_neither_resolver_raises_root_unidentified():
     assert "root_unidentified" in _codes(_decide(state, section))
 
 
+def test_a_git_root_naming_no_commit_is_an_unidentified_tree():
+    """is_git standing over no base_sha names no tree a consumer can check out."""
+    section = {"roots": project_roots([{**_root(), "path": "/fr", "base_sha": ""}])}
+    assert "root_unidentified" in _codes(_decide({}, section))
+
+
 def test_unmappable_anchor_and_colliding_anchors_raise_root_unmappable():
     unmappable = {"roots": project_roots([{**_root(anchor="unmappable"), "path": "/x"}])}
     assert "root_unmappable" in _codes(_decide({}, unmappable))
@@ -1075,6 +1081,18 @@ def test_an_undelivered_config_is_not_self_contained():
     assert codes.count("artifact_not_self_contained") == 1
 
 
+def test_an_installs_local_payload_must_reach_the_consumer_too(tmp_path):
+    """A digest names the bytes; only the delivery makes them obtainable."""
+    (tmp_path / "private.whl").write_bytes(b"wheel-bytes")
+    cmd = "pip install ./private.whl"
+    rows = _accepted([_row(cmd, cwd=tmp_path)])
+    state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": rows}
+    undelivered = _decide(state, _delivery_section(), delivered=_delivered_everything())
+    assert "artifact_not_self_contained" in _codes(undelivered)
+    delivered = _decide(state, _delivery_section(), delivered=[*_delivered_everything(), "private.whl"])
+    assert "artifact_not_self_contained" not in _codes(delivered)
+
+
 def test_no_delivery_assembled_leaves_the_contract_unapplied():
     assert _decide(_sufficient_state(), _delivery_section())["status"] == "sufficient"
 
@@ -1292,6 +1310,21 @@ def test_closure_status_is_verified_when_only_unrelated_reasons_stand():
     codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
     assert "root_unidentified" in codes
     assert out["dependency_closure_status"] == "verified"
+
+
+def test_a_session_with_no_ledger_certifies_no_closure():
+    """The scope verdict is read off the ledger; without one nothing enumerated
+    which installers ran."""
+    out = _collect(
+        {
+            "setup_commands": ["apt-get install -y libfoo"],
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
+    assert "setup_occurrences_unknown" in codes and "closure_scope_incomplete" not in codes
+    assert out["dependency_closure_status"] == "unverified"
 
 
 def test_closure_status_is_unverified_for_a_non_python_installer():

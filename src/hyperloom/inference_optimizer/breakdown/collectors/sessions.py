@@ -1556,7 +1556,15 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
 #: and a closure captured over the Python layer alone does not cover a build or
 #: an installer outside it.
 _CLOSURE_DENYING_CODES: frozenset[str] = frozenset(
-    {"build_inputs_incomplete", "environment_closure_absent", "closure_scope_incomplete"}
+    {
+        "build_inputs_incomplete",
+        "environment_closure_absent",
+        "closure_scope_incomplete",
+        # The scope verdict is read off the ledger, so a session with no ledger
+        # or a capped one has an installer set nothing enumerated.
+        "setup_occurrences_unknown",
+        "setup_ledger_truncated",
+    }
 )
 
 
