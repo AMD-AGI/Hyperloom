@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging as _logging
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -985,7 +986,7 @@ class KernelPhase(PhaseHandler):
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
         accepted_flags = str(spec_config.get("extra_server_args") or cb.get("extra_server_args") or "")
         extra_envs = spec_config.get("extra_envs") or cb.get("extra_envs") or {}
-        accepted_env = " ".join(f"{k}={v}" for k, v in dict(extra_envs).items())
+        accepted_env = shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items())
         state_measurement = getattr(state, "current_best_measurement", None)
         measurement = (
             state_measurement
