@@ -1662,9 +1662,17 @@ def _resolve_inner_hip_mask(
         return {}
     for hip_var in HIP_LEVEL_VARS:
         for source, table in (("process_env", env), ("baseline_recipe", recipe)):
-            value = _mask_value(table.get(hip_var))
-            if not value:
+            raw = table.get(hip_var)
+            if raw is None:
                 continue
+            value = _mask_value(raw)
+            if not value:
+                # Set but empty is terminal here too, for the same reason it is
+                # in :func:`_resolve_gpu_pin`: ``HIP="" + CUDA=4,5`` exposes
+                # zero devices, so the CUDA mask must not be picked up as the
+                # inner one. Reported as a zero-device inner mask, which drives
+                # the whole pin to ``count == 0``.
+                return {"var": hip_var, "value": "", "ids": [], "count": 0, "source": source}
             return {
                 "var": hip_var,
                 "value": value,
@@ -1695,6 +1703,12 @@ def _resolve_gpu_pin(
     real process ROCR pin, and the recipe's autofilled ROCR (see
     :func:`_is_autofilled_rocr`) would outrank everything.
 
+    A mask that is SET BUT EMPTY ends the walk where it stands. It is not a
+    weaker pin that a real mask further down can beat: it hides every device,
+    and a HIP-level mask indexes into what ROCr left visible rather than
+    restoring it. Treating it as a fallback is what let ``ROCR="" +
+    HIP=4,5`` report two cards for a run that ROCm refuses to start at all.
+
     Args:
         recipe_envs: The baseline recipe's ``benchmark.envs`` mapping (may be
             ``None`` when no recipe is materialized yet).
@@ -1709,15 +1723,17 @@ def _resolve_gpu_pin(
         gives ``ids == []`` with a non-zero ``count``. ``source`` is
         ``"process_env"`` or ``"baseline_recipe"``.
         A mask that is SET BUT EMPTY yields ``count == 0`` (zero devices
-        visible) rather than ``{}``; when the winner is a ROCr-level mask and a
-        HIP-level mask is also in force, the latter travels under ``"inner"``
-        because it selects a subset *within* the ROCr-visible set.
+        visible) rather than ``{}``, and wins outright over anything below it
+        in the chain; when the winner is a ROCr-level mask and a HIP-level mask
+        is also in force, the latter travels under ``"inner"`` because it
+        selects a subset *within* the ROCr-visible set — and an EMPTY inner
+        mask drives the pin's own ``count`` to 0, since it leaves nothing
+        usable however many cards the ROCr mask exposes.
         ``{}`` only when no mask is set anywhere — meaning "whole machine
         visible", not "pinned to 0".
     """
     env = os.environ if environ is None else environ
     recipe = dict(recipe_envs or {})
-    blank: dict[str, Any] = {}
     for var in _VISIBLE_DEVICE_VARS:
         for source, table in (("process_env", env), ("baseline_recipe", recipe)):
             raw = table.get(var)
@@ -1725,14 +1741,26 @@ def _resolve_gpu_pin(
                 continue
             value = _mask_value(raw)
             if not value:
-                # Present but empty: a real "zero devices visible" state, not an
-                # absent mask. Remember the first one and keep looking — a real
-                # pin further down the chain still outranks it — but if nothing
-                # else is set, report it as a zero-device pin rather than as
-                # "unpinned", which reads as "whole machine".
-                if not blank:
-                    blank = {"var": var, "value": "", "ids": [], "count": 0, "source": source}
-                continue
+                # Present but empty: TERMINAL, not a fallback. An empty mask
+                # hides every device, and nothing further down the chain can
+                # re-expose one — a HIP-level mask can only index INTO what
+                # ROCr left visible. Measured on ROCm 7.2 / MI350X, reading the
+                # ROCr agent count out of ``rocminfo`` rather than
+                # ``torch.cuda.device_count()`` (which reports a lazy ``1``
+                # here and only raises on first use):
+                #
+                #   ROCR=""                -> 0 agents
+                #   ROCR="" + HIP=0        -> 0 agents
+                #   ROCR="" + CUDA=4,5     -> 0 agents
+                #   ROCR="" + HSA=4,5      -> 0 agents
+                #   HIP=""  + CUDA=4,5     -> 0 usable devices
+                #
+                # ``ROCR="" + HIP=4,5`` does not even reach a device count: HIP
+                # aborts with "HIP_VISIBLE_DEVICES contains more devices than
+                # ROCR_VISIBLE_DEVICES". Letting the HIP mask win here put two
+                # cards that cannot exist into the handoff, and the consumer
+                # died on that abort at server start.
+                return {"var": var, "value": "", "ids": [], "count": 0, "source": source}
             if (
                 source == "baseline_recipe"
                 and is_rocr_level(var)
@@ -1749,8 +1777,17 @@ def _resolve_gpu_pin(
             inner = _resolve_inner_hip_mask(var=var, env=env, recipe=recipe)
             if inner:
                 pin["inner"] = inner
+                if int(inner.get("count") or 0) <= 0:
+                    # An empty HIP mask nested in a ROCr pin still leaves the
+                    # run with nothing usable: ``ROCR=4,5 + HIP=""`` keeps two
+                    # ROCr agents but exposes zero devices to HIP (measured, as
+                    # above). The pin keeps the ROCr mask as its ``value`` for
+                    # diagnostics, but its device count is the effective one, so
+                    # the handoff reports the coordinate space as ``"none"``
+                    # instead of advertising the two cards ROCr still shows.
+                    pin["count"] = 0
             return pin
-    return blank
+    return {}
 
 
 def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> str:
@@ -1806,8 +1843,11 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     # servers see a renumbered set, so absolute ids would index out of it.
     if _pin_renumbers_devices(pin):
         # Token count, not len(ids): a UUID mask parses to zero numeric ids but
-        # still exposes that many cards to the child.
-        visible = int(pin.get("count") or len(ids) or 0)
+        # still exposes that many cards to the child. Defaulted rather than
+        # ``or``-chained, so an explicit ``count == 0`` (an empty mask, or an
+        # empty HIP mask nested in this pin) stays zero instead of falling back
+        # to the ids of a mask that exposes nothing.
+        visible = int(pin.get("count", len(ids)))
         if visible > 0:
             # A HIP-level mask nested inside the ROCr pin is ALREADY expressed
             # in the child's logical coordinates, so it is forwarded as-is

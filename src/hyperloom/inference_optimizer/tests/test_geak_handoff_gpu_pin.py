@@ -121,22 +121,28 @@ def test_pin_uses_recipe_when_the_process_is_unmasked() -> None:
     assert out["ids"] == [6, 7]
 
 
-def test_a_blank_value_does_not_shadow_a_real_pin_further_down_the_chain() -> None:
-    """A blank ROCR must not hide a HIP pin — but it is still reported, see below.
+def test_a_blank_value_shadows_a_real_pin_further_down_the_chain() -> None:
+    """A blank ROCR HIDES a later HIP pin, because ROCm hides every device.
 
     ``gpu_pool._visible_device_mask`` and ``gate.detect_gpu_count`` read
-    ``VAR=""`` as "zero devices visible"; this resolver used to skip it
-    entirely, so with a blank ROCR and a stale ``HIP=2,3`` those layers saw
-    zero GPUs while the handoff advertised two. The blank is now recorded (see
-    :func:`test_an_empty_mask_reports_zero_devices_rather_than_unpinned`) but
-    only as the fallback, so a real pin still wins.
+    ``VAR=""`` as "zero devices visible"; this resolver first skipped it
+    entirely, then recorded it only as a fallback that a real pin outranked.
+    Both were wrong in the same direction — with a blank ROCR and a stale
+    ``HIP=2,3`` the handoff advertised two cards while those layers saw zero.
+
+    Measured on ROCm 7.2 / MI350X (``rocminfo`` agent count): ``ROCR=""``
+    leaves 0 agents no matter what HIP, CUDA or HSA say, and ``ROCR="" +
+    HIP=4,5`` aborts outright with "HIP_VISIBLE_DEVICES contains more devices
+    than ROCR_VISIBLE_DEVICES". The blank is the answer, not a fallback.
     """
     out = _resolve_gpu_pin(
         recipe_envs={"ROCR_VISIBLE_DEVICES": "  "},
         environ={"HIP_VISIBLE_DEVICES": "2,3"},
     )
-    assert out["var"] == "HIP_VISIBLE_DEVICES"
-    assert out["ids"] == [2, 3]
+    assert out["var"] == "ROCR_VISIBLE_DEVICES"
+    assert out["count"] == 0
+    assert out["ids"] == []
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=out) == "none"
 
 
 # --------------------------------------------------------------------------- #
@@ -388,14 +394,54 @@ def test_a_uuid_mask_is_not_mistaken_for_zero_devices() -> None:
     assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "logical"
 
 
-def test_a_real_pin_outranks_an_earlier_empty_mask() -> None:
-    """An empty ROCR must not shadow a real HIP pin further down the chain."""
+def test_an_empty_rocr_mask_outranks_a_later_hip_pin() -> None:
+    """The config ROCm refuses to start must not be reported as two cards.
+
+    ``ROCR="" + HIP=4,5`` is not "cards 4 and 5": HIP indexes into an empty
+    ROCr set, and the runtime aborts with "HIP_VISIBLE_DEVICES contains more
+    devices than ROCR_VISIBLE_DEVICES" before a device count exists. Forwarding
+    ``4,5`` handed GEAK two cards that cannot exist and moved the abort into
+    server start, where it reads as an unrelated ROCm failure.
+    """
     pin = _resolve_gpu_pin(
         recipe_envs={},
         environ={"ROCR_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "4,5"},
     )
+    assert pin["var"] == "ROCR_VISIBLE_DEVICES"
+    assert pin["count"] == 0
+    assert pin["ids"] == []
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none"
+
+
+def test_an_empty_hip_mask_nested_in_a_rocr_pin_is_zero_devices() -> None:
+    """``ROCR=4,5 + HIP=""`` keeps two ROCr agents but exposes no device.
+
+    Measured: ``rocminfo`` still reports 2 agents, while HIP reports 0 and any
+    allocation raises "No HIP GPUs are available". The pin keeps the ROCr mask
+    for diagnostics, but its device count — and therefore the advertised
+    coordinate space — must be the effective zero.
+    """
+    pin = _resolve_gpu_pin(
+        recipe_envs={},
+        environ={"ROCR_VISIBLE_DEVICES": "4,5", "HIP_VISIBLE_DEVICES": ""},
+    )
+    assert pin["var"] == "ROCR_VISIBLE_DEVICES"
+    assert pin["value"] == "4,5"
+    assert pin["count"] == 0
+    assert pin["inner"]["var"] == "HIP_VISIBLE_DEVICES"
+    assert pin["inner"]["count"] == 0
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none"
+
+
+def test_an_empty_hip_mask_outranks_a_later_cuda_mask() -> None:
+    """``HIP="" + CUDA=4,5`` exposes zero devices, not cards 4 and 5."""
+    pin = _resolve_gpu_pin(
+        recipe_envs={},
+        environ={"HIP_VISIBLE_DEVICES": "", "CUDA_VISIBLE_DEVICES": "4,5"},
+    )
     assert pin["var"] == "HIP_VISIBLE_DEVICES"
-    assert pin["ids"] == [4, 5]
+    assert pin["count"] == 0
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none"
 
 
 def test_a_hip_mask_nested_in_a_rocr_pin_is_forwarded_not_overwritten() -> None:
