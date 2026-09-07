@@ -85,7 +85,10 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     # ── coordinator DB ────────────────────────────────────────────────
     "storage/coordinator.db",
     # ── enablement replay payloads the recipe references ──────────────
-    "optimization_stack/enablement/**",
+    # The captured bytes only: each snapshot's own manifest records the absolute
+    # framework root it was taken under, and the portable projection of it
+    # travels in the breakdown instead.
+    "optimization_stack/enablement/**/files/**",
     # ── TraceLens analysis/report family (dynamic <ts>/<tl-id> subdirs) ─
     "kernel-agent/runs/**/tracelens/analysis.md",
     "kernel-agent/runs/**/tracelens/tracelens_report.json",

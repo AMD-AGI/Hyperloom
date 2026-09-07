@@ -11,6 +11,7 @@ captured byte-exact by the shipped snapshot mechanism.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -150,6 +151,11 @@ def capture_root_snapshots(
         if not declared:
             continue
         dest = dest_root / str(record.get("id") or "")
+        # The id is a digest of the root path, so every KEEP round of a session
+        # captures into one directory; the mechanism overwrites its manifest but
+        # never clears ``files/``, which would leave a consumer overlaying a
+        # target no longer in the accepted stack.
+        shutil.rmtree(dest, ignore_errors=True)
         manifest = snapshot_source_layer(
             framework_root=root,
             base_sha=str(record.get("base_sha") or ""),

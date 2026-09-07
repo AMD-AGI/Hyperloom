@@ -211,6 +211,31 @@ def test_snapshot_capture_is_portable_and_records_declared_ops(repo: Path, tmp_p
     assert (session_dir / manifest["snapshot_ref"] / "files" / TARGET).read_text() == PATCHED_TEXT
 
 
+def test_a_later_capture_of_one_root_leaves_no_earlier_target_behind(repo: Path, tmp_path: Path):
+    """The overlay is the declared set, and one root captures into one directory."""
+    (repo / "srt" / "b.py").write_text("value = 3\n", encoding="utf-8")
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={str(repo): "a" * 40},
+        git_roots=[str(repo)],
+        session_framework_root=str(repo),
+    )
+    session_dir = tmp_path / "session"
+    dest_root = session_dir / "optimization_stack" / "enablement"
+    capture_root_snapshots(
+        records=records, targets={str(repo): {TARGET: "upsert"}}, dest_root=dest_root, session_dir=session_dir
+    )
+    manifests = capture_root_snapshots(
+        records=records,
+        targets={str(repo): {"srt/b.py": "upsert"}},
+        dest_root=dest_root,
+        session_dir=session_dir,
+    )
+    overlay = session_dir / manifests[0]["snapshot_ref"] / "files"
+    assert (overlay / "srt/b.py").is_file()
+    assert not (overlay / TARGET).exists()
+
+
 def test_undeclared_absent_target_is_recorded_missing_and_incomplete(repo: Path, tmp_path: Path):
     records = build_root_records(
         contributions={str(repo): {"patch_apply"}},

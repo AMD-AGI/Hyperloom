@@ -3386,9 +3386,7 @@ class IntegratePatchExecutor:
         # The apply root's HEAD was read before the stash; every other tree is
         # read here, which names the same commit because enablement commits into
         # none of them.
-        base_sha_by_root = {r: _git_head_sha(Path(r)) for r in git_roots}
-        if root and base_sha:
-            base_sha_by_root[root] = base_sha
+        base_sha_by_root = {r: (base_sha if r == root and base_sha else _git_head_sha(Path(r))) for r in git_roots}
         records = build_root_records(
             contributions=contributions,
             base_sha_by_root=base_sha_by_root,

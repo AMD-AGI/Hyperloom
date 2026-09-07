@@ -1584,11 +1584,16 @@ def _delivered_payload_paths(out: dict[str, Any], session_dir: Path) -> set[str]
 
     Read from the packager itself rather than restated here, so a payload the
     curated selection never matches, one the session no longer holds, and one a
-    size cap dropped are all the same answer: absent. ``None`` when the recipe
-    references no payload at all, which is the one case with nothing to deliver.
+    size cap dropped are all the same answer: absent. That answer costs one walk
+    of the session tree, which is why it is taken only for a recipe that
+    references a payload. ``None`` when none does, or when the tree cannot be
+    read at all.
     """
     references = bool(out.get("source_snapshots")) or bool((out.get("accepted_config") or {}).get("config_path"))
-    if not references:
+    # A session tree the scan cannot read would report every payload absent,
+    # which asserts something about the recipe's content rather than about the
+    # delivery, so no delivery is judged at all.
+    if not references or not session_dir.is_dir():
         return None
     return deliverable_relpaths(session_dir)
 

@@ -1119,6 +1119,17 @@ def test_a_session_bundle_carrying_every_payload_is_sufficient(tmp_path):
     assert _bundle_decision(_session_bundle(tmp_path))["status"] == "sufficient"
 
 
+def test_the_bundle_carries_the_captured_bytes_and_not_the_capture_manifest(tmp_path):
+    """The on-disk manifest names the absolute root it was taken under."""
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable_relpaths
+
+    session = _session_bundle(tmp_path)
+    (session / "optimization_stack" / "enablement" / "r1" / "manifest.json").write_text("{}", encoding="utf-8")
+    delivered = deliverable_relpaths(session)
+    assert SNAPSHOT_PAYLOAD in delivered
+    assert "optimization_stack/enablement/r1/manifest.json" not in delivered
+
+
 def test_a_session_bundle_missing_the_referenced_config_fails_closed(tmp_path):
     codes = _codes(_bundle_decision(_session_bundle(tmp_path, config=False)))
     assert "artifact_not_self_contained" in codes
