@@ -207,6 +207,9 @@ Common keys:
   `<workspace>/src/hyperloom/inference_optimizer/SKILL.md` for a source checkout).
   Write it in both modes so the demo skill can resolve it even when `docker`
   mode skips the host setup backend.
+- `KERNEL_OPT_BACKEND_ORDER` (only when the user picks the `forge` kernel
+  backend in the Step 7 follow-up; write `forge`). Leave the key out otherwise —
+  anything other than an exact `forge` already means GEAK.
 
 ### AMD APIM subscription header
 
@@ -332,6 +335,42 @@ which option:
 - `custom advanced` — user-selected model, framework, workload, budget, phase
   toggles, and advanced CLI flags.
 
+### Kernel backend follow-up (only for `12h`)
+
+When — and only when — the user picks `12h`, ask one follow-up question with the
+structured UI: which kernel optimization backend the KERNEL_AGENT phase should
+use. Do not ask this for `3h` (it runs `--no-kernel`, so there is no kernel
+phase to route) or for `custom advanced` (that skill collects its own flags).
+
+Present exactly these two option labels in this order:
+
+1. `geak (Recommended)` — the default backend, which owns the whole kernel
+   phase.
+2. `forge` — the per-kernel KernelForge backend.
+
+Both options run the identical Qwen3-14B-FP8 workload and budget; only the
+kernel backend differs, so the two runs stay directly comparable.
+
+The choice selects which demo skill to load and sets
+`KERNEL_OPT_BACKEND_ORDER`:
+
+- `geak (Recommended)` → load `hyperloom-qwen3-14b-fp8-12h`. Leave
+  `KERNEL_OPT_BACKEND_ORDER` unset, or write `geak`; anything other than an
+  exact `forge` already means GEAK.
+- `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge` and write
+  `KERNEL_OPT_BACKEND_ORDER=forge` to `.env` so a `--resume-from` relaunch keeps
+  the same backend.
+
+`KERNEL_OPT_BACKEND_ORDER` is the only switch, and the opt-in is an **exact**
+match on `forge`. There is no CLI flag for it; do not invent one. Nothing else
+needs installing for `forge` — KernelForge is vendored into Hyperloom, the
+runtime installer already installs the `claude` CLI it drives, and it reuses the
+LLM credentials written above. Do not ask the user for any other `FORGE_*`
+value.
+
+If `.env` was already written before this question, update it with the selected
+value rather than re-running the whole setup backend.
+
 If the user wants to run a custom model with a preset workload, keep using one
 of the fixed demo presets. Ask the user for a local model path, confirm that the
 directory exists and contains `config.json`, then export `MODEL_PATH=<that path>`
@@ -352,7 +391,8 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `12h` → `hyperloom-qwen3-14b-fp8-12h`
+- `12h` + `geak (Recommended)` → `hyperloom-qwen3-14b-fp8-12h`
+- `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge`
 - `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,
