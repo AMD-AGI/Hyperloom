@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+import pytest
 from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import _build_attempt_summary
@@ -121,6 +123,36 @@ def test_command_reapplied_by_the_accepted_round_is_present_at_final_launch():
     assert "setup_effect_outside_verified_launch" not in _codes(
         _decide({"setup_commands": [cmd], "setup_executions": rows})
     )
+
+
+def test_a_later_keep_takes_presence_from_the_earlier_one():
+    """Only one round terminates the lane, so only its rows may claim presence."""
+    cmd = "pip install foo"
+    first = _accepted([_row(cmd, seq=1, task="t1")], task="t1")
+    assert first[0]["present_at_final_launch"] is True
+
+    second = mark_round_disposition(
+        [*first, _row("pip install bar", seq=2, task="t2")],
+        round_task_id="t2",
+        disposition="kept",
+        accepted=True,
+    )
+    by_seq = {row["seq"]: row for row in second}
+    assert by_seq[1]["present_at_final_launch"] is False
+    assert by_seq[2]["present_at_final_launch"] is True
+
+
+def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
+    """The stale flag used to answer for it, so truncation could never fire."""
+    first = _accepted([_row("pip install foo", seq=1, task="t1")], task="t1")
+    rows = mark_round_disposition(
+        [*first, _row("pip install bar", seq=2, task="t2")],
+        round_task_id="t2",
+        disposition="kept",
+        accepted=True,
+    )
+    codes = _codes(_decide({"setup_commands": ["pip install foo", "pip install bar"], "setup_executions": rows}))
+    assert "setup_ledger_truncated" in codes
 
 
 def test_command_from_a_discarded_round_raises_effect_outside_verified_launch():
@@ -890,8 +922,11 @@ def _sufficient_section():
     }
 
 
+PINNED_INSTALL = f"pip install git+https://host/repo@{'a' * 40}"
+
+
 def _sufficient_state():
-    cmd = "pip install foo"
+    cmd = PINNED_INSTALL
     rows = _accepted([_row(cmd, seq=1, task="kept")], task="kept")
     return {
         "setup_commands": [cmd],
@@ -906,6 +941,73 @@ def test_a_fully_recorded_enablement_is_sufficient():
     decision = _decide(_sufficient_state(), _sufficient_section())
     assert decision["status"] == "sufficient", decision["reasons"]
     assert decision["reasons"] == []
+
+
+def _perturbations():
+    """One well-formed recipe, broken one way at a time."""
+    snapshot_only_delete = _snapshot(files=(("srt/a.py", "delete"),))
+    return {
+        "activation_incomplete": ({}, {"accepted_config_source": "advanced_merge"}),
+        "launch_evidence_mismatch": ({}, {"launch_evidence": _mismatched_evidence()}),
+        "root_unidentified": ({}, {"roots": project_roots([{**_root(), "path": "/fr", "base_sha": ""}])}),
+        "root_unmappable": ({}, {"roots": project_roots([{**_root(anchor="unmappable"), "path": "/fr"}])}),
+        "source_snapshot_incomplete": ({}, {"source_snapshots": [_snapshot(complete=False)]}),
+        "source_snapshot_missing": (
+            {},
+            # A second contributing root whose capture returned no manifest; the
+            # first root's stack is captured exactly as it was declared.
+            {"roots": project_roots([{**_root(), "path": "/fr"}, _unsnapshotted_root()])},
+        ),
+        "accepted_stack_not_launched": ({}, {"source_snapshots": [snapshot_only_delete]}),
+        "environment_closure_absent": ({}, {"environment_closure": None}),
+        "assertions_not_at_keep": ({}, {"installed_versions_at_keep": {}}),
+        "setup_occurrences_unknown": ({"setup_executions": []}, {}),
+        "setup_inputs_incomplete": (
+            {
+                "setup_commands": ["pip install foo"],
+                "setup_executions": _accepted([_row("pip install foo", task="kept")], task="kept"),
+            },
+            {},
+        ),
+        "credential_required": (
+            {
+                "setup_commands": [CREDENTIALED_INSTALL],
+                "setup_executions": _accepted([_row(CREDENTIALED_INSTALL, task="kept")], task="kept"),
+            },
+            {},
+        ),
+    }
+
+
+CREDENTIALED_INSTALL = f"pip install git+https://user:token@host/repo@{'a' * 40}"
+
+
+def _unsnapshotted_root():
+    return {
+        "id": "r2",
+        "path": "/pkg",
+        "kind": "site_packages",
+        "contributions": ["artifact_install"],
+        "is_git": False,
+        "base_sha": "",
+        "replay_target": {"anchor": "site_packages", "rel": "pkg"},
+    }
+
+
+def _mismatched_evidence():
+    evidence = project_launch_evidence(_evidence())[0]
+    binding = dict(evidence["observed_model_binding"])
+    binding["model_digest"] = "0" * 64
+    return {**evidence, "observed_model_binding": binding}
+
+
+@pytest.mark.parametrize("code", sorted(_perturbations()))
+def test_each_fail_closed_case_carries_exactly_its_own_code(code):
+    """A reason set wider than the defect makes the verdict unreadable."""
+    state_delta, section_delta = _perturbations()[code]
+    decision = _decide({**_sufficient_state(), **state_delta}, {**_sufficient_section(), **section_delta})
+    assert _codes(decision) == [code], decision["reasons"]
+    assert decision["status"] == "insufficient"
 
 
 def test_absent_closure_and_assertions_fail_closed():
@@ -941,7 +1043,7 @@ def test_unrecognized_code_is_itself_insufficient():
     assert read_status(forged)["status"] == "insufficient"
 
 
-# ---- B45: setup input identity for mutable and local inputs ----------------
+# ---- Setup input identity for mutable, local and VCS inputs ----------------
 
 
 def test_local_file_install_without_identity_blocks_replay(tmp_path):
@@ -970,16 +1072,18 @@ def test_pips_short_constraint_spelling_is_a_requirements_file(tmp_path):
     """``-c`` is ``--constraint`` to pip and a channel to conda, so the family
     decides which one the operand is."""
     row = _row("pip install -c constraints.txt foo", cwd=tmp_path)
-    assert row["unresolved_inputs"] == ["requirements_file"]
+    assert row["unresolved_inputs"] == ["mutable_package", "requirements_file"]
     assert "setup_inputs_incomplete" in _codes(_decide({"setup_executions": [row]}))
 
     (tmp_path / "constraints.txt").write_text("foo==1.0\n", encoding="utf-8")
     identities, unresolved = setup_input_identity("pip install -c constraints.txt foo", cwd=tmp_path)
-    assert unresolved == [] and identities[0]["kind"] == "requirements_file"
+    assert unresolved == ["mutable_package"] and identities[0]["kind"] == "requirements_file"
 
 
 def test_a_conda_channel_is_not_read_as_a_constraints_file(tmp_path):
-    assert setup_input_identity("conda install -c conda-forge foo", cwd=tmp_path) == ([], [])
+    """``-c`` names a channel here, so nothing is looked for on disk."""
+    identities, unresolved = setup_input_identity("conda install -c conda-forge foo", cwd=tmp_path)
+    assert identities == [] and "requirements_file" not in unresolved
 
 
 def test_moving_vcs_ref_install_blocks_replay(tmp_path):
@@ -993,8 +1097,23 @@ def test_commit_pinned_vcs_ref_is_identified(tmp_path):
     assert unresolved == [] and identities[0]["resolved_ref"] == "a" * 40
 
 
-def test_plain_package_spec_needs_no_input_identity(tmp_path):
-    assert setup_input_identity("pip install foo==1.0", cwd=tmp_path) == ([], [])
+def test_a_version_pin_is_not_an_identity(tmp_path):
+    """The same name==version against the same index is different bytes later."""
+    identities, unresolved = setup_input_identity("pip install foo==1.0", cwd=tmp_path)
+    assert identities == [] and unresolved == ["mutable_package"]
+    rows = _accepted([_row("pip install foo==1.0", cwd=tmp_path)])
+    assert "setup_inputs_incomplete" in _codes(_decide({"setup_executions": rows}))
+
+
+def test_a_hash_checked_install_names_the_bytes(tmp_path):
+    """pip's hash-checking mode is the one spelling that pins a bare requirement."""
+    identities, unresolved = setup_input_identity("pip install foo==1.0 --hash=sha256:" + "b" * 64, cwd=tmp_path)
+    assert unresolved == []
+    assert identities[0]["kind"] == "pinned_package" and identities[0]["digests"] == ["b" * 64]
+
+
+def test_a_system_package_install_is_mutable_too(tmp_path):
+    assert setup_input_identity("apt-get install -y libfoo", cwd=tmp_path) == ([], ["mutable_package"])
 
 
 def _projected_setup_steps(rows, commands):
@@ -1040,7 +1159,7 @@ def test_a_commit_pinned_vcs_ref_reaches_the_step_pinned(tmp_path):
     assert "setup_inputs_incomplete" not in _codes(_decide({"setup_commands": [cmd], "setup_executions": rows}))
 
 
-# ---- B43: portable delivery contract ---------------------------------------
+# ---- The delivery contract over referenced payloads -------------------------
 
 
 SNAPSHOT_PAYLOAD = "optimization_stack/enablement/r1/files/srt/a.py"
@@ -1109,12 +1228,12 @@ def _session_bundle(tmp_path, *, config=True, snapshot_bytes=b"x"):
     return session
 
 
-def _bundle_decision(session):
+def _bundle_decision(session, state=None):
     from hyperloom.inference_optimizer.breakdown.session_package import deliverable
     from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
 
     section = _delivery_section()
-    state = _sufficient_state()
+    state = _sufficient_state() if state is None else state
     steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
     referenced = referenced_payloads(section, steps)
     return _decide(state, section, delivered=deliverable(session, referenced))
@@ -1131,7 +1250,7 @@ def test_the_bundle_carries_the_captured_bytes_and_not_the_capture_manifest(tmp_
     session = _session_bundle(tmp_path)
     manifest_rel = "optimization_stack/enablement/r1/manifest.json"
     (session / manifest_rel).write_text("{}", encoding="utf-8")
-    delivered = deliverable(session, [SNAPSHOT_PAYLOAD, manifest_rel])
+    delivered = deliverable(session, {SNAPSHOT_PAYLOAD: "", manifest_rel: ""})
     assert delivered == {SNAPSHOT_PAYLOAD}
 
 
@@ -1180,6 +1299,83 @@ def test_a_payload_no_bundle_could_carry_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 64)
     codes = _codes(_bundle_decision(session))
     assert "source_snapshot_missing" in codes
+
+
+def _really_packaged(session, tmp_path):
+    """Run the packager and return what its own manifest says it carried."""
+    import json
+    import zipfile
+
+    from hyperloom.inference_optimizer.breakdown.session_package import (
+        MANIFEST_JSON_NAME,
+        package_session_artifacts,
+    )
+
+    out = package_session_artifacts(session, session_id="sid", dest_root=tmp_path / "dest")
+    assert out is not None
+    with zipfile.ZipFile(out) as zf:
+        manifest = json.loads(zf.read(MANIFEST_JSON_NAME))
+    return {str(row["path"]) for row in manifest["included_files"]}, manifest
+
+
+def test_the_verdict_and_the_real_packaging_agree_under_a_cumulative_cap(tmp_path, monkeypatch):
+    """The cap is spent in selection order, so an earlier file can drop a later one.
+
+    A per-payload size test calls a small snapshot deliverable while the run that
+    actually bundles it has already spent the budget on the files before it.
+    """
+    from hyperloom.inference_optimizer.breakdown import session_package
+
+    session = _session_bundle(tmp_path, snapshot_bytes=b"y" * 10)
+    # Sorts before optimization_stack/, so the cap is gone by the time the
+    # referenced overlay is reached.
+    (session / "manifest.json").write_bytes(b"z" * 60)
+    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 64)
+
+    decision = _bundle_decision(session)
+    packaged, real = _really_packaged(session, tmp_path)
+
+    assert SNAPSHOT_PAYLOAD not in packaged and real["truncated"] is True
+    assert decision["status"] == "insufficient"
+    assert "source_snapshot_missing" in _codes(decision)
+
+
+def test_the_verdict_and_the_real_packaging_agree_when_everything_fits(tmp_path):
+    session = _session_bundle(tmp_path)
+    decision = _bundle_decision(session)
+    packaged, real = _really_packaged(session, tmp_path)
+
+    assert SNAPSHOT_PAYLOAD in packaged and CONFIG_PAYLOAD in packaged
+    assert real["truncated"] is False
+    assert decision["status"] == "sufficient", decision["reasons"]
+
+
+def test_a_delivered_payload_whose_bytes_changed_is_not_the_recorded_one(tmp_path):
+    """A digest recorded at capture is only worth what the delivered bytes hash to."""
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable
+
+    session = _session_bundle(tmp_path)
+    requirements = session / "reports" / "enablement" / "spec-1" / "requirements.txt"
+    requirements.write_text("foo==1.0\n", encoding="utf-8")
+    rel = "reports/enablement/spec-1/requirements.txt"
+    recorded = hashlib.sha256(requirements.read_bytes()).hexdigest()
+    assert deliverable(session, {rel: recorded}) == {rel}
+
+    requirements.write_text("foo==2.0\n", encoding="utf-8")
+    assert deliverable(session, {rel: recorded}) == set()
+
+
+def test_a_mutated_requirements_file_makes_the_recipe_insufficient(tmp_path):
+    session = _session_bundle(tmp_path)
+    requirements = session / "reports" / "enablement" / "spec-1" / "requirements.txt"
+    requirements.write_text("foo==1.0\n", encoding="utf-8")
+    cmd = "pip install -r reports/enablement/spec-1/requirements.txt"
+    rows = _accepted([_row(cmd, cwd=session)])
+    state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": rows}
+
+    requirements.write_text("foo==2.0\n", encoding="utf-8")
+    codes = _codes(_bundle_decision(session, state=state))
+    assert "artifact_not_self_contained" in codes
 
 
 # ---- 16. Existing R1a assertions stay green --------------------------------
@@ -1340,6 +1536,22 @@ def test_a_session_with_no_ledger_certifies_no_closure():
     )
     codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
     assert "setup_occurrences_unknown" in codes and "closure_scope_incomplete" not in codes
+    assert out["dependency_closure_status"] == "unverified"
+
+
+def test_a_capped_command_withholds_a_verified_closure():
+    """A command the validated round never ran is an installer set nothing saw."""
+    rows = _accepted([_row("pip install foo", seq=1, task="kept")], task="kept")
+    out = _collect(
+        {
+            "setup_commands": ["pip install foo", "pip install capped"],
+            "setup_executions": rows,
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
+    assert "setup_ledger_truncated" in codes
     assert out["dependency_closure_status"] == "unverified"
 
 

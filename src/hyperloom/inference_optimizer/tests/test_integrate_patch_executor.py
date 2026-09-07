@@ -1424,10 +1424,12 @@ def test_run_setup_commands_records_one_row_per_attempted_command(tmp_path: Path
     assert {row["round_task_id"] for row in rows} == {"r1"}
 
 
-@pytest.mark.asyncio
-async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Path, monkeypatch):
-    """Setup mutates the shared venv before the apply, so its rows have to be
-    durable at the run site: this exit reports no outcome lists at all."""
+async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, patch_contents=None):
+    """Drive one enablement round to an exit that reports no outcome lists.
+
+    Every such exit happens after the setup commands have already installed into
+    the shared venv, which is why the ledger is written where they run.
+    """
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
@@ -1438,7 +1440,7 @@ async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Pa
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    _write_specialist_workspace(session_dir, "t-spec-ledger", patch_contents=[_BAD_PATCH])
+    _write_specialist_workspace(session_dir, "t-spec-ledger", patch_contents=patch_contents or [_VALID_PATCH])
 
     def _installed(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
         row = build_execution_row(
@@ -1454,6 +1456,7 @@ async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Pa
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": [row]}
 
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _installed)
+    arrange(ip_mod, monkeypatch)
 
     shared_state = SimpleNamespace(
         enablement=EnablementRound(),
@@ -1474,16 +1477,151 @@ async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Pa
         requires_lanes=tuple(),
     )
     ctx = RunnerContext(task=task, lease=None, extra={"shared_state": shared_state})
-
     result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+    return result, shared_state.enablement.setup_executions
 
-    assert result["status"] == "apply_failed"
-    ledger = shared_state.enablement.setup_executions
+
+def _assert_ledger_survived(ledger):
     assert [row["outcome"] for row in ledger] == ["applied"]
     assert ledger[0]["round_task_id"] == "t-spec-ledger"
     # Nothing has judged the round yet, so no row claims the graded launch.
     assert ledger[0]["round_disposition"] == "unreported"
     assert ledger[0]["present_at_final_launch"] is False
+
+
+def _fake_spec(repo: Path):
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _ArtifactSpec
+
+    return _ArtifactSpec(
+        source=repo / "src.py",
+        target=repo / "cfg.csv",
+        rel_target="cfg.csv",
+        root=repo,
+        kind="gemm_config",
+        description="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Path, monkeypatch):
+    result, ledger = await _round_exiting_after_setup(
+        tmp_path, monkeypatch, arrange=lambda _m, _mp: None, patch_contents=[_BAD_PATCH]
+    )
+    assert result["status"] == "apply_failed"
+    _assert_ledger_survived(ledger)
+
+
+@pytest.mark.asyncio
+async def test_setup_ledger_is_durable_before_a_refused_stash(tmp_path: Path, monkeypatch):
+    def _refuse(mod, mp):
+        mp.setattr(mod, "_git_stash_if_dirty", lambda _root: ("failed", "user changes present"))
+
+    result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_refuse)
+    assert result["error_class"] == "stash_failed"
+    _assert_ledger_survived(ledger)
+
+
+@pytest.mark.asyncio
+async def test_setup_ledger_is_durable_before_a_failed_artifact_validation(tmp_path: Path, monkeypatch):
+    def _reject(mod, mp):
+        mp.setattr(mod, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], []))
+        mp.setattr(mod, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [{"artifact": "cfg.csv", "error": "arch"}])
+
+    result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_reject)
+    assert result["status"] == "apply_failed"
+    _assert_ledger_survived(ledger)
+
+
+@pytest.mark.asyncio
+async def test_setup_ledger_is_durable_before_an_artifact_install_failure(tmp_path: Path, monkeypatch):
+    def _fail_install(mod, mp):
+        mp.setattr(mod, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], []))
+        mp.setattr(mod, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [])
+        mp.setattr(
+            mod.IntegratePatchExecutor,
+            "_apply_artifacts",
+            lambda _self, _specs, *, backup_root: ([], [{"artifact": "cfg.csv", "error": "install_failed"}]),
+        )
+
+    result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_fail_install)
+    assert result["status"] == "apply_failed"
+    _assert_ledger_survived(ledger)
+
+
+@pytest.mark.asyncio
+async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path, monkeypatch):
+    """The capture point, not the stored value, is what the recipe rests on.
+
+    A setup command installs into the same tree the patches land in, so a HEAD
+    read after it -- or at the KEEP -- can name a commit the round itself
+    produced, and every recorded patch would then replay onto its own result.
+    """
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-order", patch_contents=[_BAD_PATCH])
+    pre_setup = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+        # What an install into the framework checkout does to its HEAD.
+        (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
+        for argv in (["add", "-A"], ["commit", "-qm", "install"]):
+            subprocess.run(["git", "-C", str(repo), *argv], capture_output=True, check=True)
+        return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
+
+    monkeypatch.setattr(ip_mod, "_run_setup_commands", _installing_commits)
+    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
+
+    shared_state = SimpleNamespace(
+        enablement=EnablementRound(),
+        save=lambda _dir: None,
+        get_specialist_patch_verdict=lambda _subject: "approve",
+    )
+    task = Task(
+        task_id="t-int-order",
+        kind="integrate_patch",
+        state="queued",
+        params={
+            "specialist_task_id": "t-spec-order",
+            "framework_source_root": str(repo),
+            "enablement": True,
+            "enablement_setup_commands": ["pip install -U transformers"],
+        },
+        idempotency_key="t-int-order",
+        requires_lanes=tuple(),
+    )
+    ctx = RunnerContext(task=task, lease=None, extra={"shared_state": shared_state})
+    await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    after_setup = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert after_setup != pre_setup
+    assert ctx._ip_base_sha_by_root[str(repo)] == pre_setup
+
+
+def test_candidate_roots_cover_the_patch_and_artifact_bindings(tmp_path: Path, monkeypatch):
+    """Every tree the round could touch is named before any of them is touched."""
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    other = tmp_path / "second"
+    other.mkdir()
+    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(tmp_path / "primary"))
+    monkeypatch.setattr(ip_mod, "_resolve_artifact_target", lambda _t: (other / "a.csv", "a.csv", other))
+
+    roots = ip_mod._candidate_mutation_roots(
+        params={"artifacts": [{"source": "s", "target": "a.csv"}]},
+        done_payload={"patch_roots": {"/p/1.patch": str(tmp_path / "third")}},
+    )
+    assert roots == [str(tmp_path / "primary"), str(tmp_path / "third"), str(other)]
 
 
 def test_integrate_patch_executor_imports_clean():

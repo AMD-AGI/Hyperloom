@@ -445,7 +445,10 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
     _git(second, "commit", "-qm", "artifact base")
 
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    ctx = SimpleNamespace(_ip_base_sha=_git_head_sha(repo), _ip_shared_state=SimpleNamespace(enablement=None))
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo), str(second): _git_head_sha(second)},
+        _ip_shared_state=SimpleNamespace(enablement=None),
+    )
     out = executor._enablement_keep_records(
         ctx,
         params={},
@@ -472,7 +475,10 @@ def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path
     (plain / "lib" / "a.so").write_bytes(b"\x00artifact")
 
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    ctx = SimpleNamespace(_ip_base_sha=_git_head_sha(repo), _ip_shared_state=SimpleNamespace(enablement=None))
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        _ip_shared_state=SimpleNamespace(enablement=None),
+    )
     out = executor._enablement_keep_records(
         ctx,
         params={},
