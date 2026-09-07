@@ -509,8 +509,14 @@ DOCKER_DRIVERS="${DOCKER_DRIVERS:-overlay2 fuse-overlayfs}"
 # they time out (observed 2026-09-07 on every docker leg; the baremetal legs, which
 # use the pod netns directly, saw zero timeouts). Derive it from the uplink rather
 # than pinning a constant, so a cluster on a different overlay stays correct.
-_docker_uplink="$(ip -o route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}')"
-DOCKER_MTU="${DOCKER_MTU:-$(ip -o link show "${_docker_uplink:-eth0}" 2>/dev/null | grep -oE 'mtu [0-9]+' | awk '{print $2}')}"
+# Every probe here is `|| true`: this runs at module scope under `set -euo
+# pipefail`, so a missing `ip` or an unroutable probe address would abort the
+# whole bootstrap before a leg starts.
+if [ -z "${DOCKER_MTU:-}" ]; then
+  _docker_uplink="$(ip -o route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}' || true)"
+  DOCKER_MTU="$(ip -o link show "${_docker_uplink:-eth0}" 2>/dev/null \
+    | awk '{for (i = 1; i < NF; i++) if ($i == "mtu") print $(i + 1)}' || true)"
+fi
 DOCKER_MTU="${DOCKER_MTU:-1450}"
 
 # Start a detached dockerd on one driver; 0 when the socket answers. Cleans up the

@@ -465,12 +465,41 @@ def test_a_stale_session_pin_cannot_pass_the_gate(poll_script: str, tmp_path: Pa
     assert _leg_session_dir(poll_script, tmp_path, leg, "this-run") == str(finished)
 
 
+def _mtu_block(bootstrap_script: str) -> str:
+    """The real DOCKER_MTU derivation, lifted out of the bootstrap."""
+    lines = bootstrap_script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("# Every probe here is"))
+    end = next(i for i in range(start, len(lines)) if lines[i] == 'DOCKER_MTU="${DOCKER_MTU:-1450}"')
+    return "\n".join(lines[start : end + 1])
+
+
 def test_nested_dockerd_matches_the_pod_uplink_mtu(bootstrap_script: str) -> None:
     """docker0 defaults to 1500 while the pod overlay is 1450; the gap blackholes bulk TLS."""
     assert "--mtu='$DOCKER_MTU'" in bootstrap_script
-    # Derived from the uplink rather than pinned, so another overlay stays correct.
-    assert 'DOCKER_MTU="${DOCKER_MTU:-$(ip -o link show' in bootstrap_script
-    assert 'DOCKER_MTU="${DOCKER_MTU:-1450}"' in bootstrap_script
+
+
+@pytest.mark.parametrize(
+    ("prelude", "expected"),
+    [
+        ("", None),  # derived from this host's uplink; any value, just not a crash
+        ("PATH=/nonexistent", "1450"),  # no `ip` at all -> documented fallback
+        ("PATH=/nonexistent; DOCKER_MTU=9000", "9000"),  # operator override wins
+    ],
+)
+def test_the_mtu_probe_cannot_abort_the_bootstrap(
+    bootstrap_script: str, prelude: str, expected: str | None
+) -> None:
+    """The probe runs at module scope under `set -euo pipefail`.
+
+    An `ip` that is missing, or a probe address with no route, must not take the
+    whole bootstrap down before a single leg starts.
+    """
+    script = f'set -euo pipefail\n{prelude}\n{_mtu_block(bootstrap_script)}\nprintf "%s" "$DOCKER_MTU"'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, f"MTU probe aborted the shell: {proc.stderr[-300:]}"
+    assert proc.stdout.strip(), "DOCKER_MTU resolved empty; dockerd would get --mtu=''"
+    if expected is not None:
+        assert proc.stdout.strip() == expected
 
 
 def _judge_leg(poll_script: str, runs_dir: Path, leg: str, run_tag: str, wphase: str = "Running") -> str:
