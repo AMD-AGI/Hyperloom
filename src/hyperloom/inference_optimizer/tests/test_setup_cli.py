@@ -326,9 +326,7 @@ def _resolve_backend_order(tmp_path: Path, *, in_dotenv: str | None, in_env: str
     start = next(i for i, line in enumerate(lines) if line.startswith("read_dotenv_var() {"))
     end = next(i for i in range(start, len(lines)) if lines[i] == "}")
     reader = "\n".join(lines[start : end + 1])
-    resolution = "\n".join(
-        line.strip() for line in lines if "export" in line and "KERNEL_OPT_BACKEND_ORDER=" in line
-    )
+    resolution = "\n".join(line.strip() for line in lines if "export" in line and "KERNEL_OPT_BACKEND_ORDER=" in line)
     assert resolution, "no KERNEL_OPT_BACKEND_ORDER resolution found in install_baremetal.sh"
     dotenv = tmp_path / ".env"
     body = "HYPERLOOM_RUN_MODE=baremetal\n"
@@ -338,9 +336,7 @@ def _resolve_backend_order(tmp_path: Path, *, in_dotenv: str | None, in_env: str
     env = {k: v for k, v in os.environ.items() if k != "KERNEL_OPT_BACKEND_ORDER"}
     if in_env is not None:
         env["KERNEL_OPT_BACKEND_ORDER"] = in_env
-    script = (
-        f'set -euo pipefail\nDOTENV="{dotenv}"\n{reader}\n{resolution}\nprintf "%s" "$KERNEL_OPT_BACKEND_ORDER"'
-    )
+    script = f'set -euo pipefail\nDOTENV="{dotenv}"\n{reader}\n{resolution}\nprintf "%s" "$KERNEL_OPT_BACKEND_ORDER"'
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=True)
     return proc.stdout.strip()
 

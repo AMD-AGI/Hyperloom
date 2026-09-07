@@ -486,9 +486,7 @@ def test_nested_dockerd_matches_the_pod_uplink_mtu(bootstrap_script: str) -> Non
         ("PATH=/nonexistent; DOCKER_MTU=9000", "9000"),  # operator override wins
     ],
 )
-def test_the_mtu_probe_cannot_abort_the_bootstrap(
-    bootstrap_script: str, prelude: str, expected: str | None
-) -> None:
+def test_the_mtu_probe_cannot_abort_the_bootstrap(bootstrap_script: str, prelude: str, expected: str | None) -> None:
     """The probe runs at module scope under `set -euo pipefail`.
 
     An `ip` that is missing, or a probe address with no route, must not take the
@@ -548,9 +546,7 @@ def test_a_leg_that_stalled_mid_close_does_not_pass(poll_script: str, tmp_path: 
         {"stop_reason": "time_exhausted", "crash_count": 0, "close_sequence_done": False},
     )
     verdict = _judge_leg(poll_script, tmp_path, "baremetal-vllm-3h", tag)
-    assert verdict == (
-        "PENDING|stop=time_exhausted but close_sequence_done=false (CLOSE still running or stalled)"
-    )
+    assert verdict == ("PENDING|stop=time_exhausted but close_sequence_done=false (CLOSE still running or stalled)")
 
 
 def test_a_leg_that_finished_closing_passes(poll_script: str, tmp_path: Path) -> None:

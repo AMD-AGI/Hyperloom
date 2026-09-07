@@ -50,9 +50,7 @@ def test_baremetal_defaults_match_compat_doc():
         "SGLANG_REF is expected to pin a commit; a tag reintroduces the patch "
         "mismatch this pin exists to avoid (see docs/compatibility.rst)"
     )
-    assert sglang_ref[:12] in doc, (
-        "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
-    )
+    assert sglang_ref[:12] in doc, "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
     assert "0.5.18 (%s)" % sglang_rocm_extra in doc, (
         "docs/compatibility.rst must document SGLang '0.5.18 (%s)' to match "
         "install_baremetal.sh defaults" % sglang_rocm_extra

@@ -150,9 +150,7 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
     assert out["SWEEP"] == pytest.approx(0.0198, abs=1e-4)
     # The redistributed value must survive the downstream re-normalize instead
     # of being dropped back to the default.
-    assert normalize_budget_pct(out)[PHASE_FRAMEWORK_AGENT] == pytest.approx(
-        out[PHASE_FRAMEWORK_AGENT]
-    )
+    assert normalize_budget_pct(out)[PHASE_FRAMEWORK_AGENT] == pytest.approx(out[PHASE_FRAMEWORK_AGENT])
 
 
 def test_redistribute_caps_absorber_at_full_wall_clock() -> None:
