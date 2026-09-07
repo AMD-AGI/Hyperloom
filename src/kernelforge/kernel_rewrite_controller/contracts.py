@@ -11,7 +11,6 @@ from typing import Any
 
 from kernelforge.knowledge.kernel_identity import KernelRecipeIdentity
 
-TASK_SCHEMA_VERSION = 1
 TASK_STATE_SCHEMA_VERSION = 1
 
 TASK_FILENAME = "task.json"
@@ -81,10 +80,11 @@ class KernelRewriteTask:
     priority: int
     source_files: tuple[str, ...] = ()
     target_functions: tuple[str, ...] = ()
-    shape_cases: tuple[dict[str, Any], ...] = ()
+    #: Untyped on purpose: nothing reads these, they exist so the driver author
+    #: and a later reader can see which shapes the operator was chosen for.
+    shape_cases: tuple[Any, ...] = ()
     reason: str = ""
     evidence: tuple[Any, ...] = ()
-    schema_version: int = TASK_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -162,7 +162,6 @@ __all__ = [
     "SERVING_CONTEXT_FILENAME",
     "STATE_FILENAME",
     "TASK_FILENAME",
-    "TASK_SCHEMA_VERSION",
     "TASK_STATE_SCHEMA_VERSION",
     "TASK_STATUSES",
     "TASK_STATUS_FAILED",

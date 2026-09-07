@@ -52,7 +52,6 @@ def _staged(layout: ControllerLayout, repo: Path, name: str = "draft") -> Path:
     (staged / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": {
                     "producer": "forge-loop",
                     "framework": "standalone",
@@ -297,7 +296,7 @@ def test_a_refusal_is_written_beside_the_draft_that_earned_it(tmp_path: Path) ->
     layout = ControllerLayout(tmp_path / "output")
     staged = _staged(layout, repo)
     payload = json.loads((staged / "task.json").read_text(encoding="utf-8"))
-    payload["identity"]["backend"] = "rocm"
+    payload["identity"].pop("gpu")
     (staged / "task.json").write_text(json.dumps(payload), encoding="utf-8")
 
     publish_complete_staged_tasks(
@@ -307,8 +306,7 @@ def test_a_refusal_is_written_beside_the_draft_that_earned_it(tmp_path: Path) ->
     )
 
     assert pending_rejections(layout.agent_staging_root) == {
-        "draft": "invalid staged task: identity.backend must be one of the registered "
-        "kernel backends: ck, flydsl, triton, gluon, aiter, hip, hipblaslt, fusion"
+        "draft": "invalid staged task: identity is missing fields: gpu"
     }
 
 

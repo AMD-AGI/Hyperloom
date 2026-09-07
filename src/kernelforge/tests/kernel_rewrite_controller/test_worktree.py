@@ -67,7 +67,6 @@ def _task_payload(tmp_path: Path, repo: Path, base_commit: str):
     task_dir.mkdir(parents=True)
     (task_dir / "driver.py").write_text("print('SNR: 100 dB')\n", encoding="utf-8")
     payload = {
-        "schema_version": 1,
         "identity": identity_mapping,
         "base_commit": base_commit,
         "repo_root": str(repo),

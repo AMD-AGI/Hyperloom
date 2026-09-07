@@ -71,7 +71,6 @@ def _prepared_workspace(tmp_path: Path):
     (task_dir / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": identity_mapping,
                 "base_commit": base_commit,
                 "repo_root": str(repo),

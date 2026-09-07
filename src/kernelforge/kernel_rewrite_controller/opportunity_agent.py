@@ -288,7 +288,6 @@ subdirectory containing exactly:
 
 task.json must use this exact top-level structure:
 {
-  "schema_version": 1,
   "identity": {
     "producer": "forge-loop",
     "framework": "<framework>",

@@ -90,7 +90,6 @@ def _write_staged_task(staging_root: Path, repo: Path) -> str:
     (task / "task.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "identity": identity,
                 "base_commit": "",
                 "repo_root": str(repo),

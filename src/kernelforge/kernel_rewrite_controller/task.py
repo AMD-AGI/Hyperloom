@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from kernelforge.kernel_rewrite_controller.contracts import (
-    TASK_SCHEMA_VERSION,
     KernelRewriteTask,
     TaskContractError,
     TaskParseResult,
@@ -23,7 +23,6 @@ from kernelforge.kernel_rewrite_controller.paths import (
     operator_directory_name,
     safe_relative_path,
 )
-from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.implementation_identity import normalize_operator_name
 from kernelforge.knowledge.kernel_identity import (
     KERNEL_CANONICAL_DIMENSIONS,
@@ -32,10 +31,11 @@ from kernelforge.knowledge.kernel_identity import (
 )
 from kernelforge.knowledge.loop_identity import LOOP_PRODUCER
 
+log = logging.getLogger(__name__)
+
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _REQUIRED_TASK_FIELDS = frozenset(
     {
-        "schema_version",
         "identity",
         "base_commit",
         "repo_root",
@@ -85,6 +85,17 @@ def _string_list(payload: dict[str, Any], field_name: str, *, paths: bool = Fals
     return tuple(item.strip() for item in value)
 
 
+def _log_ignored(unknown: set[str], where: str) -> None:
+    """Note the fields this contract does not read, without refusing the task.
+
+    An extra key decides nothing: every field the run acts on is required, and
+    the optional ones are read by name. Refusing over one would cost the whole
+    operator, so it is dropped and recorded instead.
+    """
+    if unknown:
+        log.info("ignoring unknown %s field(s): %s", where, ", ".join(sorted(unknown)))
+
+
 def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity, str]:
     """Build the six-tuple, deriving ``kernel_name`` from ``operator_name``.
 
@@ -98,11 +109,9 @@ def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity
     if not isinstance(payload, dict):
         raise TaskContractError("identity must be a JSON object")
     missing = _AGENT_IDENTITY_FIELDS - set(payload)
-    unknown = set(payload) - _IDENTITY_FIELDS
     if missing:
         raise TaskContractError(f"identity is missing fields: {', '.join(sorted(missing))}")
-    if unknown:
-        raise TaskContractError(f"identity has unknown fields: {', '.join(sorted(unknown))}")
+    _log_ignored(set(payload) - _IDENTITY_FIELDS, "identity")
     kernel_name = normalize_operator_name(operator_name)
     if kernel_name == _UNNAMEABLE_OPERATOR:
         raise TaskContractError(f"operator_name normalizes to no usable kernel name: {operator_name!r}")
@@ -113,10 +122,10 @@ def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity
         raise TaskContractError(str(error)) from error
     if identity.producer != LOOP_PRODUCER:
         raise TaskContractError(f"identity.producer must be {LOOP_PRODUCER!r}")
-    if identity.backend not in KERNEL_BACKENDS:
-        raise TaskContractError(
-            f"identity.backend must be one of the registered kernel backends: {', '.join(KERNEL_BACKENDS)}"
-        )
+    # ``backend`` is not checked against the registered set. It selects a prompt
+    # layer, and forge-loop already answers an unregistered one with no layer
+    # rather than an error, so refusing here would cost a whole operator over a
+    # naming choice the loop is willing to live with.
     return identity, operator_id
 
 
@@ -131,15 +140,9 @@ def parse_task_payload(
     if not isinstance(payload, dict):
         raise TaskContractError("task.json must contain a JSON object")
     missing = _REQUIRED_TASK_FIELDS - set(payload)
-    unknown = set(payload) - _TASK_FIELDS
     if missing:
         raise TaskContractError(f"task.json is missing fields: {', '.join(sorted(missing))}")
-    if unknown:
-        raise TaskContractError(f"task.json has unknown fields: {', '.join(sorted(unknown))}")
-
-    version = payload.get("schema_version")
-    if isinstance(version, bool) or version != TASK_SCHEMA_VERSION:
-        raise TaskContractError(f"unsupported task schema {version!r}; expected {TASK_SCHEMA_VERSION}")
+    _log_ignored(set(payload) - _TASK_FIELDS, "task.json")
 
     # Read ahead of the identity: ``identity.kernel_name`` is this name's
     # address form, so the six-tuple cannot be built before it.
@@ -181,9 +184,12 @@ def parse_task_payload(
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
         raise TaskContractError("priority must be a non-negative integer")
 
+    # Carried verbatim rather than validated: no code reads a case, so a shape
+    # the contract disagrees with is still worth more to the driver author than
+    # a refused task. A lone object is wrapped so the field stays a sequence.
     shape_cases = payload.get("shape_cases", [])
-    if not isinstance(shape_cases, list) or any(not isinstance(case, dict) for case in shape_cases):
-        raise TaskContractError("shape_cases must be a list of JSON objects")
+    if not isinstance(shape_cases, list):
+        shape_cases = [shape_cases]
     evidence = payload.get("evidence", [])
     if not isinstance(evidence, list):
         raise TaskContractError("evidence must be a JSON list")
