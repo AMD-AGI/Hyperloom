@@ -25,9 +25,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.collectors.attribution import (
-    _geak_kernel_names,
-)
 from hyperloom.inference_optimizer.breakdown.collectors.geak import (
     _collapse_journey_aliases,
     _kind_source_counts,
@@ -46,51 +43,6 @@ def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
     return {"short_name": name, "e2e_delta_pct": delta, **extra}
 
 
-# --------------------------------------------------------------------------
-# B1 — attribution must read both acceptance lanes
-# --------------------------------------------------------------------------
-
-
-def test_geak_kernel_names_reads_the_heads_lane() -> None:
-    # Kimi-K3/20260816T122327Z: the acceptance is in accepted_heads alone.
-    entry: dict[str, Any] = {
-        "accepted_kernels": [],
-        "accepted_heads": [{"short_name": "_fwd_grouped_kernel_stage1", "kind": "authored"}],
-    }
-    assert _geak_kernel_names(entry) == ["_fwd_grouped_kernel_stage1"]
-
-
-def test_geak_kernel_names_merges_both_lanes_without_duplicates() -> None:
-    entry: dict[str, Any] = {
-        "accepted_kernels": [{"short_name": "a_kernel", "kind": "authored"}],
-        "accepted_heads": [
-            {"short_name": "a_kernel", "kind": "authored"},
-            {"short_name": "b_kernel", "kind": "authored"},
-        ],
-    }
-    assert _geak_kernel_names(entry) == ["a_kernel", "b_kernel"]
-
-
-def test_geak_kernel_names_drops_env_selections() -> None:
-    # Qwen3-14B-FP8/20260814T163051Z: c1_ck is a ck library pick, not a kernel.
-    entry: dict[str, Any] = {
-        "accepted_kernels": [],
-        "accepted_heads": [
-            {"short_name": "ck_gemm_a8w8_blockscale_bpreshuffle", "kind": "env"},
-            {"short_name": "real_kernel", "kind": "authored"},
-        ],
-    }
-    assert _geak_kernel_names(entry) == ["real_kernel"]
-
-
-def test_geak_kernel_names_accepts_bare_string_specs() -> None:
-    # A lane may hold plain strings; those declare no kind and are not env.
-    entry: dict[str, Any] = {"accepted_kernels": ["plain_kernel"], "accepted_heads": []}
-    assert _geak_kernel_names(entry) == ["plain_kernel"]
-
-
-def test_geak_kernel_names_empty_when_no_lane_has_content() -> None:
-    assert _geak_kernel_names({"accepted_kernels": [], "accepted_heads": []}) == []
 
 
 # --------------------------------------------------------------------------

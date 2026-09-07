@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the data-provenance and kernel-lifecycle breakdown
-renderers."""
+"""Unit tests for the optimizations and kernel-lifecycle breakdown renderers."""
 
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-    data_provenance as dp,
     kernel_lifecycle as kl,
     optimizations as opt,
 )
@@ -149,53 +147,6 @@ def test_a_ledger_that_disagrees_with_the_run_is_reported():
     joined = " ".join(out.warnings)
     assert "adopted steps add up to" in joined
     assert "no accuracy gate having ruled on them" in joined
-
-
-# ---- data_provenance ------------------------------------------------------
-def test_data_provenance_skipped_when_empty():
-    out = dp.render({})
-    assert out.skipped is True
-
-
-def test_sources_summary_variants():
-    assert dp._sources_summary([]) == "—"
-    summ = dp._sources_summary(
-        [
-            {"found": True, "required": True},
-            {"found": False, "required": True},
-            {"found": True, "required": False},
-        ]
-    )
-    assert "found" in summ and "required" in summ
-
-
-def test_data_provenance_full_table():
-    out = dp.render(
-        {
-            "data_provenance": [
-                {
-                    "section": "roofline",
-                    "status": "empty",
-                    "populated": False,
-                    "sources": [{"found": False, "required": True}],
-                    "missing_required": ["trace.json"],
-                },
-                {
-                    "section": "sweep",
-                    "status": "partial",
-                    "populated": True,
-                    "sources": [{"found": True, "required": True}],
-                    "missing_required": [],
-                },
-                {"section": "kernels", "status": "ok", "populated": True, "sources": []},
-                "not-a-dict",
-            ]
-        }
-    )
-    assert out.skipped is False
-    assert "roofline" in out.markdown_block
-    assert any("empty" in f for f in out.key_facts)
-    assert any("partial" in f for f in out.key_facts)
 
 
 # ---- kernel_lifecycle -----------------------------------------------------

@@ -1071,13 +1071,11 @@ def test_specialist_recorder_preserves_runtime_phase_when_entry_has_no_source_ph
             captured["ledger"] = {"stream": stream, "item": item, "key": key}
 
     monkeypatch.setattr(instrument, "_recorder", lambda *_args, **_kwargs: Recorder())
-    monkeypatch.setattr(instrument, "record_subject", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         instrument,
         "record_operation",
         lambda *_args, **kwargs: captured.setdefault("operation", kwargs),
     )
-    monkeypatch.setattr(instrument, "record_trace_event", lambda *_args, **_kwargs: None)
 
     instrument.record_specialist_round(
         tmp_path,

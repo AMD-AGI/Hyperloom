@@ -285,15 +285,6 @@ async def write_framework_record(
                 measurement_refs=[measurement_id],
                 artifact_refs=[artifact_id],
             )
-            instrument.record_trace_event(
-                session_dir,
-                trace_event_id=f"trace:{operation_id}:finalized",
-                operation_id=operation_id,
-                kind="kb_write_finalized",
-                status="succeeded",
-                outcome=outcome,
-                producer="framework-kb",
-            )
         except Exception:  # noqa: BLE001 -- KB persistence must not depend on telemetry
             pass
     return path

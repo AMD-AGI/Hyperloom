@@ -8,11 +8,7 @@ import json
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import exporter
-from hyperloom.inference_optimizer.breakdown.collectors import (
-    collect_attribution,
-    collect_optimization_stack,
-    collect_recorded_optimizations,
-)
+from hyperloom.inference_optimizer.breakdown.collectors import collect_recorded_optimizations
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 
 
@@ -62,68 +58,6 @@ def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
     assert result["validation"]["attributed_total_gain_pct"] == 30.0
     assert result["validation"]["unattributed_gain_pct"] == 0.0
     assert warnings == []
-
-
-def test_collective_stack_entry_keeps_campaign_evidence():
-    state = {
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "collective",
-                "variant_name": "forge_collective",
-                "engine": "forge_collective",
-                "kernel_id": "k007",
-                "tput": 130.0,
-                "ts": "1970-01-01T00:00:20+00:00",
-                "collective_op": "all_reduce",
-                "world_size": 8,
-                "collective_attempt_id": "attempt-1",
-                "integration_id": "integration-1",
-            },
-        ],
-    }
-
-    entry = collect_optimization_stack(state)[0]
-
-    assert entry["collective_op"] == "all_reduce"
-    assert entry["world_size"] == 8
-    assert entry["collective_attempt_id"] == "attempt-1"
-    assert entry["integration_id"] == "integration-1"
-    assert entry["validated"] is True
-
-
-def test_phase_breakdown_schema_declares_every_emitted_bucket():
-    """The declared shape must cover the keys the collector actually writes.
-
-    ``session_breakdown.json`` is a published contract, and the TypedDict is
-    what downstream code reads it through, so a bucket the producer emits but
-    the schema omits shows up as an empty section rather than an error. The
-    KERNEL_AGENT bucket sat in exactly that state.
-    """
-    from hyperloom.inference_optimizer.breakdown.schema import PhaseBreakdown
-
-    state = {
-        "session_id": "phase-bucket-contract",
-        "baseline_tput": 100.0,
-        "cumulative_gain_validated": 10.0,
-        "cumulative_gain_validated_stack_len": 1,
-        "optimization_stack": [
-            {
-                "action": "kernel_opt",
-                "source_phase": "KERNEL_AGENT",
-                "variant_name": "k1",
-                "kernel_id": "fused_moe",
-                "tput": 110.0,
-                "ts": "1970-01-01T00:00:10+00:00",
-            },
-        ],
-        "gain_per_stack_entry": [10.0],
-    }
-
-    emitted = set(collect_attribution(state, [], [], [])["phase_breakdown"])
-    undeclared = sorted(emitted - set(PhaseBreakdown.__annotations__))
-
-    assert not undeclared, f"phase_breakdown buckets missing from the schema: {undeclared}"
 
 
 def test_a_session_whose_records_never_arrived_says_so(tmp_path):
@@ -980,9 +914,10 @@ def test_one_producers_singleton_is_not_dropped_for_anothers_without_a_word(tmp_
     payload goes. Nothing downstream can see that it was ever written.
     """
     for producer, ts in (("coordinator", "2026-01-01T01:00:00+00:00"), ("kernel-agent", "2026-01-01T02:00:00+00:00")):
-        instrument.record_run_snapshot(
+        instrument.record_singleton_section(
             tmp_path,
-            payload={"run_id": "r1", "recorded_by": producer, "ts": ts},
+            "kernel_optimization_summary",
+            {"run_id": "r1", "recorded_by": producer, "ts": ts},
             producer=producer,
         )
     warnings: list[str] = []

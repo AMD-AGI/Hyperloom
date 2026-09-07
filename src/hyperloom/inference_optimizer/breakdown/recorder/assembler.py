@@ -33,13 +33,10 @@ _UNREADABLE = object()
 #: Streams whose records are entities rather than append-only events: several
 #: fragments can describe the same entity and are merged by its id.
 _V4_ENTITY_IDS: dict[str, tuple[str, ...]] = {
-    "phase_transitions": ("transition_id", "event_id"),
-    "subjects": ("subject_id",),
     "operations": ("operation_id",),
     "measurements": ("measurement_id",),
     "adoptions": ("adoption_id",),
     "artifacts": ("artifact_id",),
-    "trace_events": ("trace_event_id", "event_id", "span_id"),
 }
 _NESTED_ENTITY_IDS: tuple[str, ...] = (
     "attempt_id",

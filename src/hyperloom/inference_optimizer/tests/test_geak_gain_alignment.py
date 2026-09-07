@@ -23,7 +23,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.collectors.attribution import _geak_contribution
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render as render_final
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -559,8 +558,8 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.resume_pending_revalidation is False
     geak_entry = next(e for e in ss.optimization_stack if e.get("action") == "geak_e2e")
     # A flags/env win with no proven overlay moved the CONFIG lever. Stamping
-    # ``kernel`` from the task kind alone would put ``lever_buckets`` in direct
-    # conflict with ``_geak_contribution``, which reads the same entry.
+    # ``kernel`` from the task kind alone would credit a lever the measurement
+    # never proved.
     assert geak_entry["lever_kind"] == "config"
     assert not ss.geak_pending
 
@@ -1093,11 +1092,9 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     """A promote whose overlay was proven NOT loaded is a config gain.
 
     GEAK self-reports ``accepted_kernels`` / ``accepted_heads`` whether or not the
-    overlay carrying them survived to the measurement. The per-kernel ledger already
-    refuses to credit them without proof; the stack entry is the other reader, and
-    ``_geak_contribution`` classifies the dashboard row from those lanes alone. Both
-    must make the same call, or a rebench that stripped a dead overlay gets filed
-    under ``kernel``.
+    overlay carrying them survived to the measurement. The per-kernel ledger
+    refuses to credit them without proof, and the stack entry must agree: a
+    rebench that stripped a dead overlay cannot be filed under ``kernel``.
     """
     base = 2844.209
     measured = 3270.0
@@ -1114,8 +1111,6 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     assert not entry.get("accepted_kernels")
     assert not entry.get("accepted_heads")
     assert entry["overlay_loaded"] is False
-    # The config lane is untouched, so the row is still a real gain — just not a kernel one.
-    assert _geak_contribution(entry) == "config"
 
 
 def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path: Path) -> None:
@@ -1129,5 +1124,3 @@ def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path:
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["accepted_kernels"] == ["c0_triton"]
     assert entry["overlay_loaded"] is True
-    # Config gain rode along in the same measurement, so it cannot be decomposed.
-    assert _geak_contribution(entry) == "joint"

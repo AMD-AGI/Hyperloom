@@ -121,18 +121,11 @@ def test_all_renderers_register_in_stable_order() -> None:
         "capability_summary",
         "phase_timeline",
         "kernel_lifecycle",
-        "kernel_profiling",
-        "kernel_decision_path",
         "roofline",
-        "geak_invocations",
-        "forge_invocations",
         "param_search",
-        "decision_journal",
-        "critic_robustness",
         "attribution",
         "optimizations",
         "source_files",
-        "data_provenance",
     ]
     assert [sid for sid, _ in REGISTRY] == expected
 
@@ -149,9 +142,8 @@ def test_deterministic_only_path_produces_complete_report() -> None:
     assert "## Executive Summary" in md
     assert "10.99%" in md
     assert "MI300X" in md
-    geak = next(s for s in r.sections if s.section_id == "geak_invocations")
-    assert geak.skipped
-    assert any(d.kind == "not_attempted" for d in geak.decisions)
+    lifecycle = next(s for s in r.sections if s.section_id == "kernel_lifecycle")
+    assert any(d.kind == "not_attempted" for d in lifecycle.decisions)
 
 
 def test_skipped_sections_do_not_emit_placeholders() -> None:

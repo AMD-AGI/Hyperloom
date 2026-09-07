@@ -298,28 +298,12 @@ def build(
         "baseline", _safe_collect("baseline", lambda: collectors.collect_baseline(sd, state, warnings), warnings)
     )
     final = _safe_collect("final", lambda: collectors.collect_final(sd, state, warnings), warnings)
-    # Enablement attempt-runtime observability; {} → dashboard hides the block.
-    enablement = _pick(
-        "enablement",
-        _safe_collect("enablement", lambda: collectors.collect_enablement(sd, state, warnings), warnings, default={}),
-    )
     # Merge (not _pick replace): the recorder fragment only carries audit-action
     # attempts, while the collector also folds in optimization_journal KEEP/REVERT
     # and the kernel lanes; union + dedupe instead of fragment-wins.
     phase_timeline = _merge_phase_timeline(
         assembled.get("phase_timeline"),
         _safe_collect("phase_timeline", lambda: collectors.collect_phase_timeline(sd, state, warnings), warnings),
-    )
-    # Derived from the resolved (fragment-or-collector) phase_timeline.
-    phase_segments = _safe_collect(
-        "phase_segments",
-        lambda: collectors.collect_phase_segments(
-            state,
-            phase_timeline,
-            warnings,
-        ),
-        warnings,
-        default=[],
     )
     geak_c, forge_c = _safe_collect(
         "invocations",
@@ -438,21 +422,6 @@ def build(
                 "geak consistency: a promoted geak_e2e stack entry has no positive gain in "
                 "optimizations.summary_by_source.kernel_agent.by_backend.geak"
             )
-    # Specialist sub-agent dispatch records (state + on-disk transcripts).
-    specialist_runs = _pick(
-        "specialist_runs",
-        _safe_collect(
-            "specialist_runs",
-            lambda: collectors.collect_specialist_runs(
-                sd,
-                state,
-                warnings,
-                include_transcripts=include_transcripts,
-            ),
-            warnings,
-            default=[],
-        ),
-    )
     # Hot-kernel roofline table from ``<sd>/reports/kernel_roofline.json``.
     kernel_roofline = _pick(
         "kernel_roofline",
@@ -462,17 +431,6 @@ def build(
                 sd,
                 warnings,
             ),
-            warnings,
-            default={},
-        ),
-    )
-    # Kernel-agent attempt outcome summary; mirrors
-    # ``reports/kernel_optimization_summary.json``, empty → hides Block 1.
-    kernel_optimization_summary = _pick(
-        "kernel_optimization_summary",
-        _safe_collect(
-            "kernel_optimization_summary",
-            lambda: collectors.collect_kernel_optimization_summary(sd, warnings),
             warnings,
             default={},
         ),
@@ -498,21 +456,6 @@ def build(
             default=[],
         ),
     )
-    # Optimization-progress curve: stack ledger + ceiling/target lines from state.json.
-    roofline_progress = _pick(
-        "roofline_progress",
-        _safe_collect(
-            "roofline_progress",
-            lambda: collectors.collect_roofline_progress(
-                sd,
-                state,
-                manifest,
-                warnings,
-            ),
-            warnings,
-            default={},
-        ),
-    )
     # Full-trace: unified token + decision timeline. Joins the per-call token
     # ledger with the KEEP/REVERT journal + dynamic_action dispatch history.
     # Also writes reports/trace/decision_trace.jsonl as a side effect.
@@ -521,18 +464,6 @@ def build(
         lambda: collectors.collect_decision_trace(
             sd,
             state,
-            warnings,
-        ),
-        warnings,
-        default={},
-    )
-    # Promoted token-spend rollup, derived from decision_trace's token_rollup
-    # plus an action_timeline correlation on task_id.
-    token_usage = _safe_collect(
-        "token_usage",
-        lambda: collectors.collect_token_usage(
-            decision_trace,
-            phase_timeline,
             warnings,
         ),
         warnings,
@@ -553,11 +484,6 @@ def build(
     # Authoritative external-tool versions, folded into a {tool: meta} map by
     # the recorder assembler. Pure recorder section (no collector fallback).
     versions = _pick("versions", {})
-    kernel_journey = _pick("kernel_journey", {})
-    # Attach per-kernel roofline metrics onto each journey entry and backfill
-    # discovery numeric fields discovery couldn't surface. Best-effort.
-    _attach_kernel_roofline(kernel_journey, kernel_roofline)
-
     source_files = _safe_collect(
         "source_files",
         lambda: collectors.collect_source_files(
@@ -637,8 +563,6 @@ def build(
         "baseline": baseline,
         "final": final,
         "phase_timeline": phase_timeline,
-        # v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
-        "phase_segments": phase_segments,
         "capability_summary": capability_summary,
         # GEAK route diagnostics and accepted artifacts. This is independent
         # from the canonical optimization ledger and remains useful on failed
@@ -653,30 +577,16 @@ def build(
         "telemetry": telemetry,
         # Canonical downstream optimization API.
         "optimizations": optimizations,
-        "specialist_runs": specialist_runs,
         # Hot-kernel roofline table; empty → hidden.
         "kernel_roofline": kernel_roofline,
-        # Kernel-agent attempt outcome summary; empty → hides Block 1.
-        "kernel_optimization_summary": kernel_optimization_summary,
         # Post-optimization concurrency sweep; empty → hides Block 2.
         "conc_sweep_summary": conc_sweep_summary,
         # Per-snapshot roofline comparison list (markdown source).
         "roofline": roofline,
-        # Optimization-progress curve; ``ceiling_available`` False when the
-        # watermark roofline pipeline never ran.
-        "roofline_progress": roofline_progress,
         # Full-trace token + decision timeline. ``decision_trace`` is the
         # per-decision join; ``token_rollup`` is the by_phase / by_component /
         # session_total summary.
         "decision_trace": decision_trace,
-        # Promoted token-spend summary, derived from decision_trace.token_rollup.
-        "token_usage": token_usage,
-        # Kernel-major lifecycle view (discovery -> dispatch -> backend
-        # attempts -> e2e), composed from the recorder substreams. Empty {} on
-        # sessions that predate the substreams.
-        "kernel_journey": kernel_journey,
-        # Enablement attempt-runtime observability; {} → hidden.
-        "enablement": enablement,
         "metadata": metadata,
         "outcome": outcome,
         "timeline": timeline,

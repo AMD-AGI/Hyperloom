@@ -102,10 +102,6 @@ from .kernels import (
     collect_kernel_optimization_summary as collect_kernel_optimization_summary,
     _CONC_SWEEP_SUMMARY_REL_PATH as _CONC_SWEEP_SUMMARY_REL_PATH,
     collect_conc_sweep_summary as collect_conc_sweep_summary,
-    collect_optimization_stack as collect_optimization_stack,
-    _normalize_optimization_stack_entry as _normalize_optimization_stack_entry,
-    _resolve_gemm_engine as _resolve_gemm_engine,
-    collect_gemm_tuning as collect_gemm_tuning,
     collect_collective as collect_collective,
     collect_source_files as collect_source_files,
 )
@@ -122,14 +118,6 @@ from .explore import (
     _shape_ledger as _shape_ledger,
     _shape_winners_history as _shape_winners_history,
     collect_explore_search as collect_explore_search,
-)
-from .attribution import (
-    _normalize_specialist_key as _normalize_specialist_key,
-    _action_family as _action_family,
-    _promote_legacy_gain_entries as _promote_legacy_gain_entries,
-    collect_attribution as collect_attribution,
-    _collect_phase_breakdown as _collect_phase_breakdown,
-    _reconstruct_gain_ledger as _reconstruct_gain_ledger,
 )
 from .optimizations import (
     OPTIMIZATIONS_SCHEMA_VERSION as OPTIMIZATIONS_SCHEMA_VERSION,
@@ -188,7 +176,6 @@ from .v6_close import collect_v6_close as collect_v6_close
 from .v6_stages import project_conc_sweep_event as project_conc_sweep_event
 
 __all__ = [
-    "collect_attribution",
     "collect_baseline",
     "collect_capability_summary",
     "collect_critic_robustness",

@@ -477,20 +477,6 @@ def test_skipped_section_without_warnings_still_reports_absence() -> None:
     assert any("roofline" in f for f in flags)
 
 
-def test_section_without_producer_is_not_a_data_quality_flag() -> None:
-    """A section nothing produces says nothing about this session."""
-    sec = RenderedSection(
-        section_id="data_provenance",
-        title="Data Provenance",
-        key_facts=["No provenance recorded."],
-        skipped=True,
-    )
-
-    flags = cross_section._data_quality_flags({}, [sec])
-
-    assert not any("data_provenance" in f for f in flags)
-
-
 def test_every_registered_section_reaches_the_report() -> None:
     """A section that renders but is never grouped is invisible work.
 
@@ -508,13 +494,15 @@ def test_every_registered_section_reaches_the_report() -> None:
     assert not (grouped - registered), "SECTION_GROUPS references sections nothing renders"
 
 
-def test_sections_without_producer_list_matches_reality(tmp_path: Path) -> None:
-    """Recompute the dead-section list; the constant must still match.
+def test_no_renderer_reads_a_key_nothing_produces(tmp_path: Path) -> None:
+    """Every renderer's key must be one the exporter or recorder can fill.
 
-    Wiring up a producer, or registering another section nothing fills, has to
-    fail here rather than silently drift. The scan reads ``breakdown.get("x")``
-    literals, so a renderer that computes its key at runtime would be missed --
-    none do today.
+    Renderers used to be allowed to read keys nothing ever wrote: they were
+    skipped on every report and a suppression list kept them from being
+    flagged. Registering another such section has to fail here rather than
+    ship a section that can only ever be empty. The scan reads
+    ``breakdown.get("x")`` literals, so a renderer that computes its key at
+    runtime would be missed -- none do today.
     """
     import re
 
@@ -534,7 +522,7 @@ def test_sections_without_producer_list_matches_reality(tmp_path: Path) -> None:
         if keys - available:
             without_producer.add(path.stem)
 
-    assert without_producer == set(cross_section._SECTIONS_WITHOUT_PRODUCER)
+    assert without_producer == set()
 
 
 def test_live_section_warnings_are_unchanged() -> None:

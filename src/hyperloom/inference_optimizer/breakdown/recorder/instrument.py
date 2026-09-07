@@ -522,36 +522,6 @@ def _mirror_action_v4(
         "sweep": "sweep",
         "conc_sweep": "concurrency_sweep",
     }.get(action, action)
-    subject_attributes: dict[str, Any] = {}
-    if isinstance(result.get("candidate"), Mapping):
-        subject_attributes["candidate"] = dict(result["candidate"])
-    if isinstance(result.get("best_variant"), Mapping):
-        subject_attributes["variant"] = dict(result["best_variant"])
-    elif isinstance(result.get("best_winner"), Mapping):
-        subject_attributes["variant"] = dict(result["best_winner"])
-    if action in {"profile", "roofline"}:
-        subject_attributes.update(
-            {
-                key: result.get(key)
-                for key in (
-                    "snapshot_id",
-                    "roofline_arm",
-                    "trace_health",
-                    "hot_kernels",
-                    "top_bottleneck",
-                )
-                if result.get(key) is not None
-            }
-        )
-    record_subject(
-        session_dir,
-        subject_id=subject_id,
-        subject_type=subject_type,
-        role="target",
-        name=str(extras.get("candidate_id") or extras.get("variant_name") or extras.get("best_variant_name") or action),
-        attributes=subject_attributes,
-        producer=producer,
-    )
     measurement_ids = _record_action_measurements(
         session_dir,
         action=action,
@@ -778,37 +748,6 @@ def _mirror_action_v4(
         extensions={"task_id": task_id, "tick": tick},
         metadata={"extras": extras},
     )
-    transition_id = _stable_id(
-        "transition",
-        operation_id,
-        f"macro_cycle:{int(macro_cycle or 0)}",
-        f"tick:{int(tick or 0)}",
-        status,
-        decision,
-        ended_at,
-    )
-    record_phase_transition(
-        session_dir,
-        transition_id=transition_id,
-        operation_id=operation_id,
-        phase=phase,
-        action=action,
-        status=status,
-        decision=decision,
-        ts=ended_at,
-        producer=producer,
-    )
-    record_trace_event(
-        session_dir,
-        trace_event_id=_stable_id("trace", operation_id, status),
-        operation_id=operation_id,
-        kind="operation_finalized",
-        phase=phase,
-        status=status,
-        decision=decision,
-        ts=ended_at,
-        producer=producer,
-    )
 
 
 def record_phase_event(
@@ -950,21 +889,20 @@ def snapshot_state_sections(
             Coordinator).
     """
     if not session_dir or state is None:
-        trace_skip(reason="no session_dir" if not session_dir else "no state", section="run_snapshot")
+        trace_skip(reason="no session_dir" if not session_dir else "no state", section="session")
         return
     rec = None
     try:
         rec = _recorder(session_dir, producer)
     except Exception as exc:  # noqa: BLE001
         log.debug("recorder unavailable", exc_info=True)
-        trace_skip(reason="writer raised", section="run_snapshot", error=exc)
+        trace_skip(reason="writer raised", section="session", error=exc)
         return
 
     for name, fn in (
         ("session", _snapshot_session),
         ("metadata", snapshot_metadata),
         ("explore_search", _snapshot_explore_search),
-        ("optimization_stack", _snapshot_optimization_stack),
         ("roofline", _snapshot_roofline),
     ):
         try:
@@ -972,81 +910,6 @@ def snapshot_state_sections(
         except Exception as exc:  # noqa: BLE001
             log.debug("snapshot section %s failed", name, exc_info=True)
             trace_skip(reason="writer raised", section=name, error=exc)
-    try:
-        _snapshot_v4_run(rec, state)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("snapshot v4 run failed", exc_info=True)
-        trace_skip(reason="writer raised", section="run_snapshot", error=exc)
-
-
-def _snapshot_v4_run(rec, st: Any) -> None:
-    """Write the complete currently available v4 run snapshot from memory."""
-    current_best = dict(getattr(st, "current_best", None) or {})
-    stack = list(getattr(st, "optimization_stack", None) or [])
-    model_info = dict(getattr(st, "model_info", None) or {})
-    model_arch = dict(getattr(st, "model_arch", None) or {})
-    model = {
-        **model_arch,
-        **model_info,
-        "name": str(getattr(st, "model_name", "") or ""),
-        "path": str(getattr(st, "model_path", "") or ""),
-        "class": str(getattr(st, "model_class", "") or ""),
-        "type": str(getattr(st, "model_type", "") or model_info.get("model_type") or ""),
-        "architectures": list(getattr(st, "model_architectures", None) or model_info.get("architectures") or []),
-    }
-    workload = {
-        "framework": str(getattr(st, "framework", "") or ""),
-        "model_name": str(getattr(st, "model_name", "") or ""),
-        "model_path": str(getattr(st, "model_path", "") or ""),
-        "gpu_type": str(getattr(st, "gpu_type", "") or ""),
-        "precision": str(getattr(st, "precision", "") or ""),
-        "tp": int(getattr(st, "tp", 0) or 0),
-        "ep": int(getattr(st, "ep", 0) or 0),
-        "conc": int(getattr(st, "conc", 0) or 0),
-        "isl": int(getattr(st, "isl", 0) or 0),
-        "osl": int(getattr(st, "osl", 0) or 0),
-        "max_model_len": int(getattr(st, "max_model_len", 0) or 0),
-        "objective": {
-            "target_gain_pct": getattr(st, "target_gain_pct", None),
-            "target_tput": getattr(st, "target_tput", None),
-        },
-    }
-    stop_reason = str(getattr(st, "stop_reason", "") or "")
-    outcome_status = "running"
-    if stop_reason:
-        outcome_status = (
-            "failed"
-            if any(marker in stop_reason.lower() for marker in ("failed", "error", "crash", "abort"))
-            else "completed"
-        )
-    rec.record_upsert_singleton(
-        "run_snapshot",
-        {
-            "run": {
-                "session_id": str(getattr(st, "session_id", "") or ""),
-                "claw_session_id": str(getattr(st, "claw_session_id", "") or ""),
-                "sandbox_user_id": str(getattr(st, "sandbox_user_id", "") or ""),
-                "started_at": str(getattr(st, "start_ts", "") or ""),
-                "phase": str(getattr(st, "phase", "") or ""),
-                "macro_cycle": int(getattr(st, "macro_cycle", 0) or 0),
-                "tick": int(getattr(st, "tick", 0) or 0),
-                "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
-                "stop_reason": stop_reason,
-            },
-            "workload": workload,
-            "model": model,
-            "versions": dict(getattr(st, "versions", None) or getattr(st, "tool_versions", None) or {}),
-            "outcome": {
-                "status": outcome_status,
-                "stop_reason": stop_reason,
-                "baseline_throughput": to_float(getattr(st, "baseline_tput", None)),
-                "baseline_accuracy": to_float(getattr(st, "baseline_accuracy", None)),
-                "current_best": current_best,
-                "cumulative_gain_validated_pct": to_float(getattr(st, "cumulative_gain_validated", None)),
-                "optimization_stack_size": len(stack),
-            },
-        },
-    )
 
 
 def _snapshot_session(rec, st: Any) -> None:
@@ -1104,27 +967,6 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
     rec.record_singleton("explore_search", search)
-
-
-def _snapshot_optimization_stack(rec, st: Any) -> None:
-    """Snapshot each ``optimization_stack`` entry from ``st`` as a keyed item.
-
-    Backfills a missing per-entry ``gain_pct`` from ``st.gain_per_stack_entry``
-    when available; each item is keyed by its stack index for idempotency.
-
-    Args:
-        rec: the recorder used to write the items.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
-    stack = getattr(st, "optimization_stack", None) or []
-    gains = getattr(st, "gain_per_stack_entry", None) or []
-    for i, entry in enumerate(stack):
-        if not isinstance(entry, dict):
-            continue
-        payload = dict(entry)
-        if payload.get("gain_pct") is None and i < len(gains):
-            payload["gain_pct"] = to_float(gains[i])
-        rec.record_item("optimization_stack", payload, key=str(i))
 
 
 def _snapshot_roofline(rec, st: Any) -> None:
@@ -1473,7 +1315,6 @@ def record_kernel_strategy_selection(
         "name": selected,
         "attributes": {"strategy_group": "kernel_optimizer"},
     }
-    record_subject(session_dir, subject, producer=producer, subject_id=subject_id)
     record_operation(
         session_dir,
         operation_id=route_id,
@@ -3088,7 +2929,6 @@ def record_kernel_dispatch(
             "name": str(kernel_id),
             "attributes": {"task_group": task_group},
         }
-        record_subject(session_dir, subject, subject_id=subject_id, producer=producer)
         record_operation(
             session_dir,
             operation_id=operation_id,
@@ -3357,7 +3197,6 @@ def record_kernel_backend_result(
                 "role": "optimization_target",
                 "name": kid,
             }
-            record_subject(session_dir, subject, subject_id=subject_id, producer=producer)
         operation_id = _kernel_operation_id(session_dir, kid) if kid and not geak_internal and not legacy_only else ""
         canonical_attempts: list[dict[str, Any]] = []
         canonical_gates: list[dict[str, Any]] = []
@@ -4064,30 +3903,9 @@ def record_specialist_round(
             domains.append(str(recorded_entry.get("domain")))
         domains.extend(str(tag) for tag in (recorded_entry.get("tags") or []) if str(tag))
         domains = list(dict.fromkeys(domain for domain in domains if domain))
-        record_subject(
-            session_dir,
-            subject_id=round_subject_id,
-            subject_type="specialist_round",
-            role="proposal_source",
-            name=round_id,
-            attributes={
-                "domains": domains,
-                "proposals_total": recorded_entry.get("proposals_total"),
-            },
-            producer=producer,
-        )
         domain_subjects: list[dict[str, Any]] = []
         for domain in domains:
             domain_id = _stable_id("subject", "specialist-domain", round_id, domain)
-            record_subject(
-                session_dir,
-                subject_id=domain_id,
-                subject_type="specialist_domain",
-                role="proposal_domain",
-                name=str(domain),
-                attributes={"round_id": round_id},
-                producer=producer,
-            )
             domain_subjects.append({"subject_id": domain_id, "subject_type": "specialist_domain"})
         proposal_subjects: list[dict[str, Any]] = []
         proposals = recorded_entry.get("proposal_set")
@@ -4099,15 +3917,6 @@ def record_specialist_round(
                     proposal.get("proposal_id") or proposal.get("fingerprint") or proposal.get("name") or index
                 )
                 proposal_id = _stable_id("subject", "specialist-proposal", round_id, proposal_key)
-                record_subject(
-                    session_dir,
-                    subject_id=proposal_id,
-                    subject_type="variant",
-                    role="proposal",
-                    name=str(proposal.get("name") or proposal_key),
-                    attributes=dict(proposal),
-                    producer=producer,
-                )
                 proposal_subjects.append({"subject_id": proposal_id, "subject_type": "variant", "role": "proposal"})
         record_operation(
             session_dir,
@@ -4130,15 +3939,6 @@ def record_specialist_round(
             outputs=recorded_entry,
             adoption_refs=[],
             extensions={"downstream_relation": "proposal_only"},
-        )
-        record_trace_event(
-            session_dir,
-            trace_event_id=_stable_id("trace", operation_id, "completed"),
-            operation_id=operation_id,
-            kind="specialist_proposals_recorded",
-            status="succeeded" if entry.get("completed_at") else "partial",
-            ts=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
-            producer=producer,
         )
     except Exception as exc:  # noqa: BLE001
         log.debug("record_specialist_round failed", exc_info=True)
@@ -4292,15 +4092,6 @@ def record_critic_iteration(
             artifact_refs=artifact_refs,
             outputs=payload,
         )
-        record_trace_event(
-            session_dir,
-            trace_event_id=_stable_id("trace", operation_id, "reviewed"),
-            operation_id=operation_id,
-            kind="critic_reviewed",
-            verdict=str(payload.get("verdict") or ""),
-            ts=str(payload.get("ts") or ""),
-            producer=producer,
-        )
         for index, write in enumerate(payload.get("kb_writes") or []):
             if not isinstance(write, Mapping):
                 continue
@@ -4325,16 +4116,6 @@ def record_critic_iteration(
                 ended_at=str(payload.get("ts") or ""),
                 inputs=dict(write),
                 outputs=dict(result_payload),
-            )
-            record_trace_event(
-                session_dir,
-                trace_event_id=_stable_id("trace", write_operation_id, write_status),
-                operation_id=write_operation_id,
-                parent_operation_id=operation_id,
-                kind="kb_write_finalized",
-                status=write_status,
-                ts=str(payload.get("ts") or ""),
-                producer=producer,
             )
     except Exception as exc:  # noqa: BLE001
         log.debug("record_critic_iteration failed", exc_info=True)
@@ -4396,16 +4177,6 @@ def record_robustness_signal(
             outputs=payload,
             extensions={"metadata_completeness": "partial" if not payload.get("signal") else "available"},
         )
-        record_trace_event(
-            session_dir,
-            trace_event_id=_stable_id("trace", operation_id, "handled"),
-            operation_id=operation_id,
-            kind="robustness_signal_handled",
-            signal=payload.get("signal"),
-            action=payload.get("action"),
-            ts=str(payload.get("ts") or ""),
-            producer=producer,
-        )
     except Exception as exc:  # noqa: BLE001
         log.debug("record_robustness_signal failed", exc_info=True)
         trace_skip(reason="writer raised", section="robustness_signals", error=exc)
@@ -4452,15 +4223,6 @@ def record_singleton_section(
                 producer=producer,
                 ended_at=str(payload.get("ts") or ""),
                 outputs=payload,
-            )
-            record_trace_event(
-                session_dir,
-                trace_event_id=_stable_id("trace", operation_id, "recorded"),
-                operation_id=operation_id,
-                kind=f"{section}_recorded",
-                status=_operation_status(payload.get("status") or "succeeded"),
-                ts=str(payload.get("ts") or ""),
-                producer=producer,
             )
     except Exception as exc:  # noqa: BLE001
         log.debug("record_singleton_section %s failed", section, exc_info=True)
@@ -4570,79 +4332,6 @@ def _record_v4_event(
             entity=key,
             error=exc,
         )
-
-
-def record_run_snapshot(
-    session_dir: Path | str | None,
-    snapshot: Mapping[str, Any] | None = None,
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-    **fields: Any,
-) -> None:
-    """Record a partial v4 run snapshot using author-time facts only."""
-    value = _v4_payload(snapshot, fields)
-    if not _valid_v4_call(session_dir, producer, value, section="run_snapshot"):
-        return
-    try:
-        _recorder(session_dir, producer).record_upsert_singleton("run_snapshot", value)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record_run_snapshot failed", exc_info=True)
-        trace_skip(
-            reason="writer raised",
-            section="run_snapshot",
-            producer=producer,
-            error=exc,
-        )
-
-
-def record_phase_transition(
-    session_dir: Path | str | None,
-    transition: Mapping[str, Any] | None = None,
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-    **fields: Any,
-) -> None:
-    """Record one v4 phase transition."""
-    value = _v4_payload(transition, fields)
-    if not value.get("transition_id") and not value.get("event_id"):
-        value["transition_id"] = _stable_id(
-            "transition",
-            value.get("operation_id") or "",
-            f"macro_cycle:{value.get('macro_cycle')}",
-            f"tick:{value.get('tick')}",
-            f"event:{value.get('event_sequence')}",
-            value.get("from_phase") or "",
-            value.get("phase") or value.get("to_phase") or "",
-            value.get("ts") or _now_iso_safe(),
-        )
-    _record_v4_event(
-        session_dir,
-        section="phase_transitions",
-        payload=value,
-        fields={},
-        key_fields=("transition_id", "event_id"),
-        producer=producer,
-    )
-
-
-def record_subject(
-    session_dir: Path | str | None,
-    subject: Mapping[str, Any] | None = None,
-    *,
-    subject_id: str | None = None,
-    producer: str = PRODUCER_COORDINATOR,
-    **fields: Any,
-) -> None:
-    """Upsert one v4 subject by stable ``subject_id``."""
-    _record_v4_entity(
-        session_dir,
-        section="subjects",
-        payload=subject,
-        fields=fields,
-        id_field="subject_id",
-        entity_id=subject_id,
-        producer=producer,
-    )
 
 
 _AGENT_BY_PRODUCER = {
@@ -4883,24 +4572,6 @@ def record_session_validation(
     return operation_id
 
 
-def record_trace_event(
-    session_dir: Path | str | None,
-    event: Mapping[str, Any] | None = None,
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-    **fields: Any,
-) -> None:
-    """Record one v4 trace event, idempotent when an event id is supplied."""
-    _record_v4_event(
-        session_dir,
-        section="trace_events",
-        payload=event,
-        fields=fields,
-        key_fields=("trace_event_id", "event_id", "span_id"),
-        producer=producer,
-    )
-
-
 __all__ = [
     "PRODUCER_COORDINATOR",
     "PRODUCER_KERNEL_AGENT",
@@ -4920,16 +4591,12 @@ __all__ = [
     "record_geak_operation",
     "record_gemm_tuning_operation",
     "record_phase_event",
-    "record_phase_transition",
     "record_measurement",
     "record_operation",
     "record_robustness_signal",
     "record_session_validation",
     "record_singleton_section",
     "record_specialist_round",
-    "record_subject",
     "record_tool_version",
-    "record_trace_event",
-    "record_run_snapshot",
     "snapshot_state_sections",
 ]

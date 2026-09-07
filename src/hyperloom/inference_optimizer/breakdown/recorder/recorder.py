@@ -89,25 +89,18 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # exporter never has to re-derive any of it. ``versions.tools`` is folded
     # in from the ``versions`` item stream at assembly.
     "metadata": "singleton",
-    "workload": "singleton",
-    "baseline": "singleton",
-    "final": "singleton",
     "phase_timeline": "item",
     "geak_invocations": "item",
     "forge_invocations": "item",
-    "kernel_lifecycle": "singleton",
     "explore_search": "singleton",
-    "sweep": "singleton",
     "critic_robustness": "singleton",
     # Author-time item substreams composed into the ``critic_robustness``
     # singleton at assembly (recorded per-iteration so the backend's workdir
     # pruning never erases history).
     "critic_iterations": "item",
     "robustness_signals": "item",
-    "telemetry": "singleton",
     "specialist_runs": "item",
     "optimization_stack": "item",
-    "kernel_roofline": "singleton",
     "kernel_optimization_summary": "singleton",
     "conc_sweep_summary": "singleton",
     "roofline": "item",
