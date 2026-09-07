@@ -1197,6 +1197,12 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
         "OPENAI_API_KEY",
         "LLM_GATEWAY_KEY",
         "HYPERLOOM_CODEX_HTTP_HEADER_0",
+        # Every mask spelling, not just the canonical three: an MCP server env
+        # that re-pins the specialist's cards does so just as well through the
+        # legacy names, which ROCm honours whenever the modern one is absent.
+        "ROCR_VISIBLE_DEVICES",
+        "HSA_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
     ],
 )
 @pytest.mark.asyncio

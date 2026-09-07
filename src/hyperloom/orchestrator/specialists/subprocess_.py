@@ -51,6 +51,7 @@ from hyperloom.common.env_safety import (
     scrub_child_process_env,
     valid_env_key,
 )
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from ..trace.parse_usage import (
     parse_claude_stream_json_response,
@@ -194,15 +195,17 @@ _CODEX_MCP_RESERVED_ENV_NAMES: frozenset[str] = frozenset(
     {
         *_SPECIALIST_ENV_ALLOWLIST,
         *_SPECIALIST_SECRET_ENV_ALLOWLIST,
+        # Every mask spelling, not the three canonical ones: the reason a mask
+        # is reserved is that setting it re-pins the specialist's cards, and a
+        # guard that names only the modern spellings is bypassed by the legacy
+        # ones it honours just as well.
+        *GPU_MASK_ENV_NAMES,
         "API_TIMEOUT_MS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         "CODEX_HOME",
-        "CUDA_VISIBLE_DEVICES",
         "DISABLE_AUTOUPDATER",
-        "HIP_VISIBLE_DEVICES",
         "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS",
         "IS_SANDBOX",
-        "ROCR_VISIBLE_DEVICES",
     }
 )
 
@@ -967,7 +970,7 @@ class SpecialistSubprocessDispatcher:
             # override Ray's card assignment). ``gpu_ids`` here is the logical
             # 0..N-1 view the specialist sees under Ray's mask — kept only as the
             # informational count env for specialist tooling.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
             if gpu_ids:
                 env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in gpu_ids)
@@ -979,7 +982,7 @@ class SpecialistSubprocessDispatcher:
             env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
         else:
             # CPU specialists must not inherit serving GPU visibility.
-            for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+            for var in GPU_MASK_ENV_NAMES:
                 env.pop(var, None)
 
         log_fh: Any = None

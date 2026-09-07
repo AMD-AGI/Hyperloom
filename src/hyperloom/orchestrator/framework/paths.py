@@ -23,7 +23,6 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
-import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -594,11 +593,6 @@ def summarise_framework_root_discovery(roots: str) -> str:
     return " ".join(parts)
 
 
-# A profile trace names a frame as ``<path>(<line>): <function>``. The suffix is
-# not part of the path and the path is relative to the tree being profiled.
-_TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
-
-
 def resolved_within(value: str, root: str) -> bool:
     """Return whether ``value`` resolves to or under ``root`` (symlinks resolved).
 
@@ -622,50 +616,6 @@ def resolved_within(value: str, root: str) -> bool:
     return v == r or v.is_relative_to(r)
 
 
-def source_file_candidates(value: str) -> tuple[str, ...]:
-    """Return the path forms a ``source_file`` value may legitimately take.
-
-    Roofline evidence reaches the orchestration prompt as trace frames and the
-    model cites them verbatim, so a relative frame must be resolved against the
-    session's framework tree rather than the process CWD.
-
-    A pip-installed framework names no checkout, so
-    :func:`resolve_session_framework_root` is empty and that join never fires --
-    while the frame's file does sit under a search root. Those roots are tried
-    too, but only where the join names a file that exists: a root is a discovery
-    order, not evidence that the frame belongs to it, and admitting every root
-    would turn one unresolvable frame into a path in each of them.
-
-    Args:
-        value (str): The raw field value.
-
-    Returns:
-        tuple[str, ...]: ``value`` first, then the de-annotated form, then that
-            form resolved against the tree this session is optimizing, then
-            against each search root that holds the named file.
-    """
-    raw = str(value).strip()
-    out: list[str] = [raw]
-    bare = _TRACE_FRAME_SUFFIX.sub("", raw).strip()
-    if bare and bare != raw:
-        out.append(bare)
-    if bare and not Path(bare).is_absolute():
-        root = resolve_session_framework_root()
-        if root:
-            out.append(str(Path(root) / bare))
-        for search_root in resolve_kernel_search_roots():
-            joined = Path(search_root) / bare
-            try:
-                exists = joined.is_file()
-            except OSError:
-                continue
-            if exists:
-                candidate = str(joined)
-                if candidate not in out:
-                    out.append(candidate)
-    return tuple(out)
-
-
 __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
     "probe_framework_source_roots_for_env",
@@ -674,6 +624,5 @@ __all__ = [
     "resolve_known_source_prefixes",
     "resolve_session_framework_root",
     "resolved_within",
-    "source_file_candidates",
     "summarise_framework_root_discovery",
 ]
