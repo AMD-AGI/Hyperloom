@@ -307,21 +307,52 @@ def test_section_seven_states_the_hint_is_not_a_boundary(tmp_path):
     assert "read-only" not in section
 
 
-def test_section_seven_resolves_focus_dirs_against_the_session_tree(tmp_path):
-    """A repo-relative hint must not repeat the package name of a pip-installed tree."""
-    tree = tmp_path / "dist-packages" / "vllm"
-    tree.mkdir(parents=True)
+def _focus_section(tree, hints):
+    """Render Section 7 for one session tree and its focus directories."""
     _, user_p = build_specialist_prompts(
         _rich_inputs(
             session_framework_tree=f"{tree}/",
             framework_source_roots=(f"{tree}/",),
-            source_hint_directories=("vllm/model_executor/layers/fused_moe/", "/abs/elsewhere/"),
+            source_hint_directories=hints,
         )
     )
-    section = _section_seven(user_p)
+    return _section_seven(user_p)
+
+
+def test_focus_dirs_join_onto_the_parent_of_a_pip_installed_tree(tmp_path):
+    """A pip-installed tree IS the package, so a hint naming it would repeat it."""
+    tree = tmp_path / "dist-packages" / "vllm"
+    tree.mkdir(parents=True)
+    (tree / "__init__.py").touch()
+    section = _focus_section(tree, ("vllm/model_executor/layers/fused_moe/", "/abs/elsewhere/"))
     assert f"- {tree}/model_executor/layers/fused_moe/" in section
     assert "vllm/vllm/" not in section
     assert "- /abs/elsewhere/" in section
+
+
+def test_focus_dirs_join_directly_onto_a_checkout(tmp_path):
+    """A checkout holds the package one level down, and shares its name.
+
+    Deciding from the hint's leading segment instead of the tree drops that
+    level for every root in ``_DEFAULT_SOURCE_ROOTS``.
+    """
+    tree = tmp_path / "sgl-workspace" / "vllm"
+    (tree / "vllm").mkdir(parents=True)
+    (tree / "vllm" / "__init__.py").touch()
+    section = _focus_section(tree, ("vllm/model_executor/layers/fused_moe/",))
+    assert f"- {tree}/vllm/model_executor/layers/fused_moe/" in section
+
+
+@pytest.mark.parametrize("package_dir", [True, False])
+def test_focus_dir_join_does_not_depend_on_the_hint_existing(tmp_path, package_dir):
+    """Checklist hints are selected per (gpu, precision); some name absent dirs."""
+    tree = tmp_path / ("dist-packages" if package_dir else "sgl-workspace") / "vllm"
+    tree.mkdir(parents=True)
+    if package_dir:
+        (tree / "__init__.py").touch()
+    section = _focus_section(tree, ("vllm/model_executor/kernels/linear/mxfp8/",))
+    expected = "model_executor/kernels/linear/mxfp8/" if package_dir else "vllm/model_executor/kernels/linear/mxfp8/"
+    assert f"- {tree}/{expected}" in section
 
 
 def test_section_seven_is_none_without_any_root():

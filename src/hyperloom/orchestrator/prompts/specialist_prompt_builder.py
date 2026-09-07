@@ -1952,10 +1952,13 @@ def _source_root_row(root: str, *, worktree_base: str) -> str:
 def _resolve_focus_dir(hint: str, session_tree: str) -> str:
     """Return ``hint`` as an absolute path under the session tree.
 
-    Checklist directories are repo-relative (``vllm/model_executor/...``) while a
-    pip-installed tree is the package directory itself
-    (``.../dist-packages/vllm/``), so a hint repeating the tree's own name joins
-    onto its parent.
+    Checklist directories are repo-relative (``vllm/model_executor/...``), and
+    what that is relative to depends on the tree's shape: a pip-installed tree is
+    the package directory itself (``.../dist-packages/vllm/``) and joins onto its
+    parent, while a checkout (``/sgl-workspace/vllm/``) holds the package one
+    level down and joins directly. The tree decides, not the hint -- matching on
+    the hint's leading segment reads a checkout as a package tree whenever the
+    two share a name, which is every entry in :data:`_DEFAULT_SOURCE_ROOTS`.
 
     Args:
         hint (str): The focus directory, repo-relative or absolute.
@@ -1968,9 +1971,9 @@ def _resolve_focus_dir(hint: str, session_tree: str) -> str:
     if not session_tree or Path(hint).is_absolute():
         return hint
     tree = Path(session_tree.rstrip("/"))
-    rel = hint.lstrip("/")
-    base = tree.parent if Path(rel).parts[:1] == (tree.name,) else tree
-    return f"{base / rel}/" if hint.endswith("/") else str(base / rel)
+    base = tree.parent if (tree / "__init__.py").is_file() else tree
+    joined = base / hint.lstrip("/")
+    return f"{joined}/" if hint.endswith("/") else str(joined)
 
 
 def _section_source_hint(inp: SpecialistPromptInputs) -> list[str]:
