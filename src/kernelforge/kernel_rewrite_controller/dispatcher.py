@@ -28,6 +28,8 @@ from kernelforge.kernel_rewrite_controller.task import load_task
 from kernelforge.kernel_rewrite_controller.worktree import (
     OperatorWorktree,
     create_operator_worktree,
+    operator_workspace,
+    release_operator_worktree,
 )
 
 
@@ -84,7 +86,7 @@ def dispatch_single_task(
     state_store = TaskStateStore(task_path)
     state_store.transition(
         TASK_STATUS_RUNNING,
-        workspace_dir=str(layout.workspace_dir(task.operator_id)),
+        workspace_dir=str(operator_workspace(task, layout)),
     )
     worktree: OperatorWorktree | None = None
     outcome: ForgeLoopOutcome | None = None
@@ -153,6 +155,12 @@ def dispatch_single_task(
             status=TASK_STATUS_FAILED,
             reason=reason,
         )
+    finally:
+        # After the recovery above, never before it: the patch is what the
+        # campaign was for, and this returns the tree the patch was built in.
+        # A private checkout is left standing instead, because the controller's
+        # closing sweep still reads results out of it.
+        release_operator_worktree(worktree)
 
 
 __all__ = [

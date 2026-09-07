@@ -11,10 +11,13 @@ import pytest
 
 from kernelforge.kernel_rewrite_controller import ControllerLayout, parse_task_payload
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+import kernelforge.kernel_rewrite_controller.worktree as worktree_module
 from kernelforge.kernel_rewrite_controller.worktree import (
+    CAMPAIGN_BRANCH_PREFIX,
     WorktreeError,
     create_operator_worktree,
     export_patch_from_base,
+    release_operator_worktree,
 )
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
@@ -237,3 +240,123 @@ def test_a_source_file_absent_from_the_base_commit_is_refused(tmp_path: Path) ->
     with pytest.raises(WorktreeError, match="source file is not a file in the base commit"):
         create_operator_worktree(task, layout)
     assert not layout.workspace_dir(task.operator_id).exists()
+
+
+@pytest.fixture
+def editable(monkeypatch: pytest.MonkeyPatch):
+    """Make one repository read as an editable install for the code under test."""
+
+    def _apply(repo: Path) -> None:
+        monkeypatch.setattr(
+            worktree_module,
+            "needs_inplace",
+            lambda candidate: Path(candidate).resolve() == repo.resolve(),
+        )
+
+    return _apply
+
+
+def test_an_editable_repository_is_borrowed_rather_than_copied(
+    tmp_path: Path,
+    editable,
+) -> None:
+    """A private checkout of an editable install is edited and never imported."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    borrowed = create_operator_worktree(task, layout)
+    try:
+        assert borrowed.inplace is True
+        assert borrowed.workspace == repo.resolve()
+        assert not layout.workspace_dir(task.operator_id).exists()
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD").startswith(CAMPAIGN_BRANCH_PREFIX)
+        assert _git(repo, "rev-parse", "HEAD") == base_commit
+    finally:
+        release_operator_worktree(borrowed)
+
+
+def test_releasing_a_borrowed_repository_undoes_the_campaign(tmp_path: Path, editable) -> None:
+    """The patch is already published, so the tree it was built in is disposable."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    origin_ref = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+    borrowed = create_operator_worktree(task, layout)
+    borrowed.kernel_path.write_text("VALUE = 2\n", encoding="utf-8")
+    (repo / "forge_experiments").mkdir(exist_ok=True)
+    (repo / "forge_experiments" / "iteration.json").write_text("{}", encoding="utf-8")
+    keepsake = repo / "operator-notes.txt"
+    keepsake.write_text("mine\n", encoding="utf-8")
+
+    release_operator_worktree(borrowed)
+
+    assert (repo / "sglang" / "kernels" / "fused_moe.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (repo / "forge_experiments").exists()
+    assert keepsake.read_text(encoding="utf-8") == "mine\n"
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == origin_ref
+    assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
+    assert borrowed.branch not in _git(repo, "branch", "--list", borrowed.branch)
+
+
+def test_a_second_campaign_can_borrow_the_repository_after_release(tmp_path: Path, editable) -> None:
+    """The lock has to come off, or the next operator never starts."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+
+    release_operator_worktree(create_operator_worktree(task, layout))
+    again = create_operator_worktree(task, layout)
+
+    try:
+        assert again.inplace is True
+    finally:
+        release_operator_worktree(again)
+
+
+def test_a_repository_already_borrowed_is_refused(tmp_path: Path, editable) -> None:
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    held = create_operator_worktree(task, layout)
+
+    try:
+        with pytest.raises(WorktreeError, match="already holds"):
+            create_operator_worktree(task, layout)
+    finally:
+        release_operator_worktree(held)
+
+
+def test_a_repository_that_is_not_the_base_commit_is_refused(tmp_path: Path, editable) -> None:
+    """Borrowing a dirty tree would fold someone else's edit into this patch."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    (repo / "sglang" / "kernels" / "fused_moe.py").write_text("VALUE = 99\n", encoding="utf-8")
+
+    with pytest.raises(WorktreeError, match="carries uncommitted changes against base commit"):
+        create_operator_worktree(task, layout)
+
+
+def test_a_campaign_branch_a_killed_run_left_behind_is_reclaimed(tmp_path: Path, editable) -> None:
+    """Nothing in this process runs when the host kills the controller outright."""
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    _git(repo, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}abandoned", base_commit)
+    (repo / "sglang" / "kernels" / "fused_moe.py").write_text("half-finished\n", encoding="utf-8")
+
+    borrowed = create_operator_worktree(task, layout)
+
+    try:
+        assert borrowed.inplace is True
+        assert borrowed.kernel_path.read_text(encoding="utf-8") == "VALUE = 1\n"
+    finally:
+        release_operator_worktree(borrowed)

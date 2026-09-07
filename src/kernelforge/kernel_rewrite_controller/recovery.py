@@ -23,6 +23,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     OperatorWorktree,
     changed_files_from_base,
     export_patch_from_base,
+    operator_workspace,
 )
 from kernelforge.loop.reporting import BestResultPublisher
 
@@ -143,7 +144,7 @@ def recover_task_result(
     if parsed.task is None:
         return RecoveryResult(operator_id=Path(task_dir).name, published=False, reason=parsed.reason)
     task = parsed.task
-    workspace = layout.workspace_dir(task.operator_id)
+    workspace = operator_workspace(task, layout)
     if not workspace.is_dir():
         return RecoveryResult(
             operator_id=task.operator_id,
