@@ -140,9 +140,9 @@ def _setup_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
     commands = [str(c) for c in (enablement.get("setup_commands") or []) if str(c)]
     ledger = [row for row in (enablement.get("setup_executions") or []) if isinstance(row, Mapping)]
     if not ledger:
-        # State written before the ledger existed still projects the R1a step
-        # set: projecting zero steps from an absent ledger would silently narrow
-        # a frozen field's coverage, with no code to say so.
+        # A durable command list with no ledger carries no occurrence identity,
+        # which the decision names ``setup_occurrences_unknown``; projecting no
+        # step at all would instead narrow a frozen field with nothing saying so.
         return [_setup_step(cmd, occurrence=None) for cmd in commands]
     by_digest = {command_digest(cmd): cmd for cmd in commands}
     occurrences = _digest_occurrences(ledger)

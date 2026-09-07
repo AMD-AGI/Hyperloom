@@ -159,6 +159,9 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
     """
     if not names:
         return {}
+    # Source for the attempt interpreter, not this one: a name it cannot resolve
+    # is skipped and a ``RECORD`` it cannot read yields the empty digest, while
+    # anything else fails the probe and is caught by the exit-status check below.
     probe = (
         "import hashlib,json,sys\n"
         "import importlib.metadata as m\n"
@@ -166,13 +169,13 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
         "for name in sys.argv[1:]:\n"
         "    try:\n"
         "        dist=m.distribution(name)\n"
-        "    except Exception:\n"
+        "    except m.PackageNotFoundError:\n"
         "        continue\n"
         "    digest=''\n"
         "    try:\n"
         "        record=dist.read_text('RECORD') or ''\n"
         "        digest='sha256:'+hashlib.sha256(record.encode()).hexdigest() if record else ''\n"
-        "    except Exception:\n"
+        "    except (OSError, ValueError):\n"
         "        digest=''\n"
         "    out[name]={'version': dist.version or '', 'artifact_digest': digest}\n"
         "print(json.dumps(out))\n"
