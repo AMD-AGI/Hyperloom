@@ -161,7 +161,10 @@ def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
         reasons.append(_reason("activation_incomplete", "config_path"))
     evidence = section.get("launch_evidence")
     if not isinstance(evidence, Mapping) or not evidence:
-        reasons.append(_reason("activation_incomplete", "launch_evidence"))
+        # The reason names the launch of a projected configuration; with none
+        # projected there is no launch to have been observed.
+        if accepted_config:
+            reasons.append(_reason("activation_incomplete", "launch_evidence"))
         return reasons
     binding = evidence.get("observed_model_binding")
     binding = binding if isinstance(binding, Mapping) else {}
@@ -256,7 +259,7 @@ def _runtime_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _root_reasons(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Judge that every replayed step names a tree a consumer can reconstruct."""
+    """Judge that every replayed step and artifact names a reconstructable tree."""
     roots = {str(r.get("id")): r for r in (section.get("roots") or []) if isinstance(r, Mapping)}
     reasons: list[dict[str, Any]] = []
     for index, step in enumerate(steps):
@@ -265,6 +268,12 @@ def _root_reasons(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]
         record = roots.get(str(step.get("root_id") or ""))
         if record is None or not record.get("contributions"):
             reasons.append(_reason("root_unidentified", f"step[{index}]"))
+    for index, artifact in enumerate(section.get("kept_artifacts") or []):
+        if not isinstance(artifact, Mapping):
+            continue
+        record = roots.get(str(artifact.get("root_id") or ""))
+        if record is None or not record.get("contributions"):
+            reasons.append(_reason("root_unidentified", f"artifact[{index}]"))
     for root_id, record in roots.items():
         # A read that failed leaves is_git standing over no commit, which names
         # no tree a consumer can check out.
@@ -334,20 +343,29 @@ def _expected_op_reasons(
 
 
 def _artifact_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """An artifact with no captured payload cannot be restored by the recipe."""
-    captured: set[str] = set()
+    """An artifact with no captured payload cannot be restored by the recipe.
+
+    Containment is judged against the artifact's own root: the same
+    framework-relative layout repeats across a checkout and its installed copy,
+    so a pooled path set would let one root's capture answer for another's.
+    """
+    captured: dict[str, set[str]] = {}
     for snapshot in section.get("source_snapshots") or []:
-        if isinstance(snapshot, Mapping):
-            captured.update(
-                str(f.get("rel")) for f in (snapshot.get("files") or []) if isinstance(f, Mapping) and f.get("rel")
-            )
+        if not isinstance(snapshot, Mapping):
+            continue
+        rels = captured.setdefault(str(snapshot.get("root_id") or ""), set())
+        rels.update(
+            str(f.get("rel"))
+            for f in (snapshot.get("files") or [])
+            if isinstance(f, Mapping) and f.get("rel") and str(f.get("op") or "") != "missing"
+        )
     reasons: list[dict[str, Any]] = []
-    for artifact in section.get("kept_artifacts") or []:
+    for index, artifact in enumerate(section.get("kept_artifacts") or []):
         if not isinstance(artifact, Mapping):
             continue
         rel = str(artifact.get("rel_target") or "")
-        if rel and rel not in captured:
-            reasons.append(_reason("artifact_not_self_contained", rel))
+        if rel and rel not in captured.get(str(artifact.get("root_id") or ""), set()):
+            reasons.append(_reason("artifact_not_self_contained", f"artifact[{index}]"))
     return reasons
 
 
@@ -366,8 +384,9 @@ def _setup_reasons(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
         stranded = not row.get("present_at_final_launch") and not row.get("replayed_at_final_launch")
         if outcome == "failed" or (outcome == "applied" and stranded):
             reasons.append(_reason("setup_effect_outside_verified_launch", scope))
-        # A failed apt or conda has already written outside the distribution set.
-        if outcome != "skipped" and str(row.get("installer") or "") not in ("", "pip"):
+        # Only a completed execution mutated the accepted environment; a failed
+        # one is already named an effect outside the verified launch.
+        if outcome == "applied" and str(row.get("installer") or "") not in ("", "pip"):
             reasons.append(_reason("closure_scope_incomplete", scope))
         if outcome == "applied" and row.get("unresolved_inputs"):
             reasons.append(_reason("setup_inputs_incomplete", scope))
@@ -384,14 +403,15 @@ def _truncation_reasons(
     Every applied command is replayed as a base into every later round, so the
     only way one is absent from the accepted round's ledger is the resolver's
     cap -- which distinguishes "capped out of the validated run" from "no round
-    proposed it".
+    proposed it". Membership identifies that round rather than the presence
+    flag: a round whose every reached command failed carries no present row.
     """
-    rounds = {str(row.get("round_task_id") or "") for row in ledger if row.get("present_at_final_launch")}
-    if not rounds:
+    accepted = [row for row in ledger if row.get("at_accepted_round")]
+    if not accepted:
         return []
     # Every row of that round, not only its applied ones: a command it reached
     # and failed is a mutation, which has its own reason.
-    reached = {str(row.get("cmd_digest") or "") for row in ledger if str(row.get("round_task_id") or "") in rounds}
+    reached = {str(row.get("cmd_digest") or "") for row in accepted}
     missing = [cmd for cmd in commands if command_digest(cmd) not in reached]
     return [_reason("setup_ledger_truncated", "setup_commands")] if missing else []
 
@@ -494,9 +514,11 @@ def _payload_references(
             refs.append(("source_snapshot_missing", root_id, "", ""))
             continue
         refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel)
-    config_path = str((section.get("accepted_config") or {}).get("config_path") or "").strip("/")
+    accepted_config = section.get("accepted_config") or {}
+    config_path = str(accepted_config.get("config_path") or "").strip("/")
     if config_path:
-        refs.append(("artifact_not_self_contained", "config_path", config_path, ""))
+        digest = str(accepted_config.get("config_digest") or "")
+        refs.append(("artifact_not_self_contained", "config_path", config_path, digest))
     for index, step in enumerate(steps):
         # A digest names the bytes an install consumed; only the delivery makes
         # them obtainable.
@@ -509,19 +531,24 @@ def _payload_references(
     return refs
 
 
-def referenced_payloads(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """Return ``{path: sha256}`` for the bytes a delivery must be asked about.
+def referenced_payloads(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str]]:
+    """Return the ``(path, sha256)`` payloads a delivery must be asked about.
 
     The digest is ``""`` where the recipe recorded none; where it recorded one,
-    a delivery carrying different bytes is not carrying this payload.
+    a delivery carrying different bytes is not carrying this payload. One path
+    referenced under two digests yields two entries: two occurrences consumed
+    different bytes there, and a delivery holding one is not holding the other.
     """
-    return {path: digest for _code, _scope, path, digest in _payload_references(section, steps) if path}
+    return {(path, digest) for _code, _scope, path, digest in _payload_references(section, steps) if path}
 
 
 def _delivery_reasons(
     section: Mapping[str, Any],
     steps: Sequence[Mapping[str, Any]],
-    delivered: Iterable[str],
+    delivered: Iterable[tuple[str, str]],
 ) -> list[dict[str, Any]]:
     """Refuse a bundle whose referenced bytes it does not actually carry.
 
@@ -529,12 +556,13 @@ def _delivery_reasons(
     independent consumer cannot execute, so the export fails closed rather than
     reporting a self-contained artifact it is not. Judged per captured file, not
     per manifest: the manifest travels in this section, and the bytes it names
-    do not.
+    do not. Judged per ``(path, digest)`` besides, so a delivery satisfying one
+    occurrence's bytes does not answer for another occurrence's at that path.
     """
-    packaged = {str(p).strip("/") for p in delivered}
+    packaged = {(str(path).strip("/"), str(digest or "")) for path, digest in delivered}
     reasons: list[dict[str, Any]] = []
-    for code, scope, path, _digest in _payload_references(section, steps):
-        if path not in packaged:
+    for code, scope, path, digest in _payload_references(section, steps):
+        if (path, digest) not in packaged:
             reasons.append(_reason(code, scope))
     return reasons
 
@@ -544,7 +572,7 @@ def evaluate_replay_sufficiency(
     *,
     steps: Sequence[Mapping[str, Any]],
     section: Mapping[str, Any],
-    delivered_paths: Iterable[str] | None = None,
+    delivered_payloads: Iterable[tuple[str, str]] | None = None,
     launch_argv_refused: bool = False,
 ) -> dict[str, Any]:
     """Decide whether the projected recipe can be replayed.
@@ -553,10 +581,11 @@ def evaluate_replay_sufficiency(
         enablement: The durable enablement state, keyed by field name.
         steps: The projected ``recipe_steps`` array.
         section: The emitted enablement section this decision travels in.
-        delivered_paths: The session-relative paths an export actually packages.
-            When given, every payload the recipe references must be among them
-            or the export fails closed; when ``None`` no delivery is being
-            assembled and the recipe is judged on its content alone.
+        delivered_payloads: The ``(session-relative path, sha256)`` payloads an
+            export actually delivers. When given, every payload the recipe
+            references must be among them or the export fails closed; when
+            ``None`` no delivery is being assembled and the recipe is judged on
+            its content alone.
         launch_argv_refused: Whether the sanitizer refused a launch line it could
             not represent, so the evidence carries no observed argv at all.
 
@@ -578,8 +607,8 @@ def evaluate_replay_sufficiency(
     reasons.extend(_build_reasons(enablement, steps))
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
-    if delivered_paths is not None:
-        reasons.extend(_delivery_reasons(section, steps, delivered_paths))
+    if delivered_payloads is not None:
+        reasons.extend(_delivery_reasons(section, steps, delivered_payloads))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:

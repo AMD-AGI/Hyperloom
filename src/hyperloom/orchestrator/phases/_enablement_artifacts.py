@@ -10,6 +10,7 @@ reaches the archive and the fix cannot be replayed by a later session.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -87,6 +88,11 @@ def role_path(files: list[dict[str, str]], role: str) -> str:
     return next((entry["path"] for entry in files if entry["role"] == role), "")
 
 
+def role_digest(files: list[dict[str, str]], role: str) -> str:
+    """The sha256 recorded for ``role``'s archived copy, or ``""`` when absent."""
+    return next((entry.get("sha256", "") for entry in files if entry["role"] == role), "")
+
+
 def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[str, str]]:
     """Archive one enablement round's patches, specialist result and launch config.
 
@@ -98,8 +104,8 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
         res: The ``integrate_patch`` result for an enablement round.
 
     Returns:
-        One ``{"path", "role"}`` entry per deliverable that landed, ``path``
-        session-relative POSIX. Roles: ``patch`` (any number),
+        One ``{"path", "role", "sha256"}`` entry per deliverable that landed,
+        ``path`` session-relative POSIX. Roles: ``patch`` (any number),
         ``specialist_result``, ``prompt``, ``launch_config``, ``server_log``.
         A copy the size ceiling refused is absent rather than listed.
     """
@@ -112,7 +118,11 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
     written: list[dict[str, str]] = []
 
     def _record(role: str, dest: Path) -> None:
-        written.append({"path": dest.relative_to(root).as_posix(), "role": role})
+        try:
+            digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+        written.append({"path": dest.relative_to(root).as_posix(), "role": role, "sha256": digest})
 
     patches_dir = round_dir / "patches"
     copied: set[str] = set()

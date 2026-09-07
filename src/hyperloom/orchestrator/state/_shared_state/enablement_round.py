@@ -61,6 +61,10 @@ class EnablementRound:
     human_review_logged: list = field(default_factory=list)
     # Path to the materialized config produced by the KEEP'd candidate bench.
     accepted_config_path: str = ""
+    # sha256 of the archived copy at accepted_config_path, taken when it was
+    # archived: the recipe references those bytes, so an edit to the delivered
+    # file has to be detectable against an identity nothing downstream re-derives.
+    accepted_config_digest: str = ""
     # Env/arg layers the KEEP'd bench ran with; replayed by the revalidation baseline.
     accepted_config: dict = field(default_factory=dict)
     # Task identity for the current revalidation baseline task.

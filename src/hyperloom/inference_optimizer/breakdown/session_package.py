@@ -37,7 +37,7 @@ import zipfile
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable
 
 from ..session.paths import is_path_within
 
@@ -441,35 +441,43 @@ def _apply_caps(matched: list[Path], session_dir: Path) -> tuple[list[tuple[Path
     return included, False, []
 
 
-def deliverable(session_dir: Path | str, expected: Mapping[str, str]) -> set[str]:
-    """Return which of ``expected``'s paths this bundle would hand a consumer.
+def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Return which of ``expected``'s payloads this bundle would hand a consumer.
 
-    ``expected`` maps each session-relative path to the sha256 its recorder took
-    of it, or ``""`` where none was taken. A path is deliverable when the
-    packager's own selection and caps admit it *and*, where a digest was
-    recorded, the bytes on disk still hash to it -- a recorded digest that no
-    longer matches names content the consumer would receive in a form the recipe
-    does not describe.
+    ``expected`` pairs each session-relative path with the sha256 its recorder
+    took of it, or ``""`` where none was taken; the same path may appear under
+    two digests, and at most one of them can be satisfied by what is on disk. A
+    payload is deliverable when the curated selection matches its path, the
+    session holds it as a regular file resolving inside itself, it alone fits
+    the byte cap, and -- where a digest was recorded -- the bytes still hash to
+    it.
 
-    The caps are the packager's, applied the way it applies them: cumulatively,
-    over the whole selection in the order it bundles. A per-file test would call
-    a payload deliverable that the real run drops because earlier files had
-    already spent the budget.
+    Each payload is judged alone. The bundle's byte budget is spent in selection
+    order, so charging a referenced payload for unrelated files sorted ahead of
+    it would refuse a recipe over content it does not name; what a truncated
+    bundle actually dropped is the packager's own manifest to report.
     """
-    wanted = {str(k).strip("/"): str(v or "") for k, v in expected.items() if str(k).strip("/")}
-    if not wanted:
-        return set()
     try:
         sd = Path(session_dir).resolve()
-        if not sd.is_dir():
-            return set()
-        matched, _unmatched, _refused = _select(sd)
-        included, _truncated, _dropped = _apply_caps(matched, sd)
     except OSError:
         log.debug("session package: deliverable scan failed for %s", session_dir, exc_info=True)
         return set()
-    admitted = {rel: path for path, rel, _sz in included if rel in wanted}
-    return {rel for rel, path in admitted.items() if _digest_matches(path, wanted[rel])}
+    out: set[tuple[str, str]] = set()
+    for raw_path, raw_digest in expected:
+        rel = str(raw_path).strip("/")
+        if not rel or not any(_glob_match(rel, pattern) for pattern in PACKAGE_GLOBS):
+            continue
+        candidate = sd / rel
+        try:
+            if not _is_packageable(candidate, sd) or candidate.stat().st_size > _MAX_TOTAL_BYTES:
+                continue
+        except OSError:
+            log.debug("session package: deliverable check failed for %s", rel, exc_info=True)
+            continue
+        digest = str(raw_digest or "")
+        if _digest_matches(candidate, digest):
+            out.add((rel, digest))
+    return out
 
 
 def _digest_matches(path: Path, expected_sha256: str) -> bool:

@@ -242,6 +242,7 @@ def build_execution_row(
         "source": str(source),
         "outcome": outcome,
         "round_disposition": "unreported",
+        "at_accepted_round": False,
         "present_at_final_launch": False,
         "replayed_at_final_launch": False,
         "credential_class": classify_credential_class(cmd),
@@ -259,7 +260,7 @@ def mark_round_disposition(
     disposition: str,
     accepted: bool,
 ) -> list[dict[str, Any]]:
-    """Record a round's outcome onto its rows, and presence at the graded launch.
+    """Record a round's outcome onto its rows, its membership and its presence.
 
     Presence is per occurrence and succession is a separate fact: an entry *is*
     an entry of the accepted round, while another occurrence of the same digest
@@ -276,6 +277,9 @@ def mark_round_disposition(
         if own:
             row["round_disposition"] = str(disposition)
         if own or accepted:
+            # Membership, not effect: a round whose every reached command failed
+            # is still the round the lane accepted.
+            row["at_accepted_round"] = bool(own and accepted)
             row["present_at_final_launch"] = bool(own and accepted and str(row.get("outcome")) == "applied")
     if not accepted:
         return rows

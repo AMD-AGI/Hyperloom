@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -59,7 +60,9 @@ def test_applied_patch_is_copied(tmp_path):
     written = snapshot_round(tmp_path, _res(patches_applied=[str(src / "001_fix.patch")]))
     dest = tmp_path / "reports" / "enablement" / "abc123" / "patches" / "001_fix.patch"
     assert dest.read_text() == "diff --git a/f b/f\n"
-    assert written == [{"path": "reports/enablement/abc123/patches/001_fix.patch", "role": "patch"}]
+    assert [{"path": e["path"], "role": e["role"]} for e in written] == [
+        {"path": "reports/enablement/abc123/patches/001_fix.patch", "role": "patch"}
+    ]
 
 
 def test_every_patch_of_a_round_is_reported(tmp_path):
@@ -80,7 +83,9 @@ def test_unapplied_workspace_patch_is_still_copied(tmp_path):
     (src / "002_try.diff").write_text("diff\n", encoding="utf-8")
     written = snapshot_round(tmp_path, _res())
     assert (tmp_path / "reports" / "enablement" / "abc123" / "patches" / "002_try.diff").is_file()
-    assert written == [{"path": "reports/enablement/abc123/patches/002_try.diff", "role": "patch"}]
+    assert [{"path": e["path"], "role": e["role"]} for e in written] == [
+        {"path": "reports/enablement/abc123/patches/002_try.diff", "role": "patch"}
+    ]
 
 
 def test_specialist_result_and_prompt_are_copied(tmp_path):
@@ -108,6 +113,15 @@ def test_launch_config_is_copied(tmp_path):
     cfg = _launch_config(tmp_path)
     snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
     assert (tmp_path / "reports" / "enablement" / "abc123" / "launch_config.yaml").is_file()
+
+
+def test_each_archived_copy_carries_the_digest_of_the_bytes_that_landed(tmp_path):
+    """The recipe references the archived copy, so its identity is taken here."""
+    from hyperloom.orchestrator.phases._enablement_artifacts import role_digest
+
+    body = b"tp: 8\n"
+    written = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(_launch_config(tmp_path, body))))
+    assert role_digest(written, "launch_config") == hashlib.sha256(body).hexdigest()
 
 
 def test_recorded_config_path_is_the_archived_copy(tmp_path):

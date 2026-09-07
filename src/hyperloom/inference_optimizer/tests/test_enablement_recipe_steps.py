@@ -381,11 +381,14 @@ def test_recipe_steps_absent_for_empty_enablement():
 
 
 def test_enablement_state_roundtrip_ignores_recipe_steps():
+    """The emitted key is a projection, so carrying it changes nothing loaded."""
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
-    loaded = EnablementRound.from_dict({"recipe_steps": [{"kind": "setup"}], "setup_commands": ["pip install a"]})
+    persisted = {"setup_commands": ["pip install a"]}
+    loaded = EnablementRound.from_dict({"recipe_steps": [{"kind": "setup"}], **persisted})
     assert loaded.setup_commands == ["pip install a"]
     assert not hasattr(loaded, "recipe_steps")
+    assert loaded == EnablementRound.from_dict(persisted)
 
 
 def test_remote_recipe_unaffected_by_recipe_steps():

@@ -32,6 +32,7 @@ from hyperloom.orchestrator.enablement.recipe.projections import (
     project_runtime_provenance,
 )
 from hyperloom.orchestrator.enablement.recipe.steps import command_digest
+from hyperloom.orchestrator.enablement.recipe.sufficiency import _BUILTIN_REQUIRED_INPUTS
 from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
     build_execution_row,
     mark_round_disposition,
@@ -52,8 +53,13 @@ def _decide(enablement=None, section=None, delivered=None):
         enablement,
         steps=steps,
         section=dict(section or {}),
-        delivered_paths=delivered,
+        delivered_payloads=delivered,
     )
+
+
+def _payloads(*paths):
+    """Pair each path with the empty digest, for payloads no recorder digested."""
+    return [(path, "") for path in paths]
 
 
 def _row(cmd="pip install foo", *, seq=1, outcome="applied", task="r1", env=None, cwd="/tmp"):
@@ -203,6 +209,20 @@ def test_a_command_the_accepted_round_failed_was_not_capped_out_of_it():
     assert "setup_ledger_truncated" not in codes
 
 
+def test_a_capped_command_is_reported_when_the_accepted_round_only_failed():
+    """No row of that round is present, yet the round is still the accepted one."""
+    rows = _accepted([_row("pip install foo", seq=1, outcome="failed", task="kept")], task="kept")
+    assert all(row["present_at_final_launch"] is False for row in rows)
+    state = {"setup_commands": ["pip install foo", "pip install capped"], "setup_executions": rows}
+    assert "setup_ledger_truncated" in _codes(_decide(state))
+
+
+def test_a_round_that_only_failed_still_reaches_its_own_commands():
+    rows = _accepted([_row("pip install foo", seq=1, outcome="failed", task="kept")], task="kept")
+    state = {"setup_commands": ["pip install foo"], "setup_executions": rows}
+    assert "setup_ledger_truncated" not in _codes(_decide(state))
+
+
 def test_a_durable_command_no_row_of_the_accepted_round_reached_is_truncated():
     cmd = "pip install foo"
     rows = _accepted([_row(cmd, seq=1, task="kept")], task="kept")
@@ -210,10 +230,13 @@ def test_a_durable_command_no_row_of_the_accepted_round_reached_is_truncated():
     assert "setup_ledger_truncated" in codes
 
 
-def test_a_failed_non_python_installer_still_scopes_the_closure():
-    """apt writes outside the distribution set whether or not it exits zero."""
+def test_a_failed_non_python_installer_scopes_nothing_of_its_own():
+    """The code names a completed mutation; a failed one is already refused as an
+    effect outside the verified launch."""
     rows = _accepted([_row("apt-get install -y libfoo", seq=1, outcome="failed", task="kept")], task="kept")
-    assert "closure_scope_incomplete" in _codes(_decide({"setup_executions": rows}))
+    codes = _codes(_decide({"setup_executions": rows}))
+    assert "closure_scope_incomplete" not in codes
+    assert "setup_effect_outside_verified_launch" in codes
 
 
 def test_a_skipped_non_python_installer_scopes_nothing():
@@ -304,12 +327,15 @@ def test_complete_builtin_plan_raises_no_build_inputs_incomplete():
     assert "build_inputs_incomplete" not in _codes(_decide(state))
 
 
-def test_each_missing_builtin_member_raises_build_inputs_incomplete():
-    for member in ("component", "ref", "resolved_sha", "max_jobs", "env_digest", "ambient_digest"):
-        row = _attempt("bA")
-        row["build_inputs"][member] = "" if isinstance(row["build_inputs"][member], str) else 0
-        state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
-        assert "build_inputs_incomplete" in _codes(_decide(state)), member
+@pytest.mark.parametrize("member", _BUILTIN_REQUIRED_INPUTS)
+def test_each_missing_builtin_member_raises_build_inputs_incomplete(member):
+    row = _attempt("bA")
+    # Indexed, not fetched with a default: a required member the fixture never
+    # carried would otherwise pass this test while proving nothing.
+    value = row["build_inputs"][member]
+    row["build_inputs"][member] = "" if isinstance(value, str) else 0
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    assert "build_inputs_incomplete" in _codes(_decide(state))
 
 
 def test_custom_command_build_is_incomplete_with_every_member_present():
@@ -617,10 +643,15 @@ def test_an_empty_accepted_config_emits_a_null_source_and_null_evidence():
     assert out["accepted_config_source"] is None and out["launch_evidence"] is None
 
 
-def test_a_recipe_no_launch_observed_is_activation_incomplete_without_a_config():
-    """An unconfigured round is one more launch nothing observed, not an exemption."""
+def test_a_recipe_with_no_configuration_reports_no_unobserved_launch():
+    """With nothing configured there is no launch the evidence had to confirm."""
     codes = _codes(_decide({"kept_patches": ["/p/1.patch"], "framework_root": "/fr"}, {}))
-    assert "activation_incomplete" in codes
+    assert "activation_incomplete" not in codes
+
+
+def test_a_projected_configuration_no_launch_observed_is_activation_incomplete():
+    section = {"accepted_config": {"config_path": "reports/enablement/spec-1/launch_config.yaml"}}
+    assert "activation_incomplete" in _codes(_decide({"kept_patches": ["/p/1.patch"]}, section))
 
 
 def test_five_accepted_config_keys_survive_the_projection():
@@ -841,7 +872,52 @@ def test_artifact_target_no_snapshot_captured_is_not_self_contained():
     section = {
         "roots": project_roots([{**_root(), "path": "/fr"}]),
         "source_snapshots": [_snapshot()],
-        "kept_artifacts": [{"target": "/fr/srt/b.py", "rel_target": "srt/b.py"}],
+        "kept_artifacts": [{"target": "/fr/srt/b.py", "rel_target": "srt/b.py", "root_id": "r1"}],
+    }
+    assert "artifact_not_self_contained" in _codes(_decide({}, section))
+
+
+def test_an_artifact_bound_to_no_root_is_unidentified():
+    """An artifact names a tree the same way a patch step does, or it names none."""
+    section = {
+        "roots": project_roots([{**_root(), "path": "/fr"}]),
+        "source_snapshots": [_snapshot()],
+        "kept_artifacts": [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root_id": None}],
+    }
+    assert "root_unidentified" in _codes(_decide({}, section))
+
+
+def test_an_artifact_bound_to_an_unrecorded_root_is_unidentified():
+    section = {
+        "roots": project_roots([{**_root(), "path": "/fr"}]),
+        "source_snapshots": [_snapshot()],
+        "kept_artifacts": [{"target": "/pkg/srt/a.py", "rel_target": "srt/a.py", "root_id": "r2"}],
+    }
+    assert "root_unidentified" in _codes(_decide({}, section))
+
+
+def test_another_roots_capture_does_not_contain_this_artifact():
+    """The same framework-relative layout repeats across a checkout and its copy."""
+    section = {
+        "roots": project_roots(
+            [
+                {**_root(), "path": "/fr"},
+                {**_root(root_id="r2", contributions=("artifact_install",), rel="sglang"), "path": "/pkg/sglang"},
+            ]
+        ),
+        "source_snapshots": [_snapshot(), _snapshot(root_id="r2", files=())],
+        "kept_artifacts": [{"target": "/pkg/sglang/srt/a.py", "rel_target": "srt/a.py", "root_id": "r2"}],
+    }
+    codes = _codes(_decide({}, section))
+    assert "artifact_not_self_contained" in codes
+    assert "root_unidentified" not in codes
+
+
+def test_a_target_recorded_missing_is_not_a_captured_payload():
+    section = {
+        "roots": project_roots([{**_root(), "path": "/fr"}]),
+        "source_snapshots": [_snapshot(files=(("srt/a.py", "missing"),), complete=False)],
+        "kept_artifacts": [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root_id": "r1"}],
     }
     assert "artifact_not_self_contained" in _codes(_decide({}, section))
 
@@ -896,7 +972,7 @@ def test_a_kept_artifact_alone_also_demands_a_named_target():
     section = {
         "roots": project_roots([{**_root(), "path": "/fr"}]),
         "source_snapshots": [_snapshot(files=(("srt/a.py", "upsert"),))],
-        "kept_artifacts": [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py"}],
+        "kept_artifacts": [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root_id": "r1"}],
     }
     assert "accepted_stack_not_launched" in _codes(_decide({}, section))
 
@@ -1173,7 +1249,7 @@ def _delivery_section():
 
 
 def _delivered_everything():
-    return [CONFIG_PAYLOAD, SNAPSHOT_PAYLOAD]
+    return _payloads(CONFIG_PAYLOAD, SNAPSHOT_PAYLOAD)
 
 
 def test_fully_packaged_delivery_stays_sufficient():
@@ -1183,7 +1259,7 @@ def test_fully_packaged_delivery_stays_sufficient():
 
 def test_a_snapshot_whose_captured_file_is_undelivered_is_missing():
     """The manifest travelling in the section is not the payload."""
-    decision = _decide(_sufficient_state(), _delivery_section(), delivered=[CONFIG_PAYLOAD])
+    decision = _decide(_sufficient_state(), _delivery_section(), delivered=_payloads(CONFIG_PAYLOAD))
     assert decision["status"] == "insufficient"
     assert "source_snapshot_missing" in _codes(decision)
 
@@ -1191,12 +1267,12 @@ def test_a_snapshot_whose_captured_file_is_undelivered_is_missing():
 def test_a_declared_deletion_needs_no_delivered_payload():
     section = _delivery_section()
     section["source_snapshots"] = [_snapshot(files=(("srt/gone.py", "delete"),))]
-    decision = _decide(_sufficient_state(), section, delivered=[CONFIG_PAYLOAD])
+    decision = _decide(_sufficient_state(), section, delivered=_payloads(CONFIG_PAYLOAD))
     assert "source_snapshot_missing" not in _codes(decision)
 
 
 def test_an_undelivered_config_is_not_self_contained():
-    codes = _codes(_decide(_sufficient_state(), _delivery_section(), delivered=[SNAPSHOT_PAYLOAD]))
+    codes = _codes(_decide(_sufficient_state(), _delivery_section(), delivered=_payloads(SNAPSHOT_PAYLOAD)))
     assert codes.count("artifact_not_self_contained") == 1
 
 
@@ -1208,8 +1284,52 @@ def test_an_installs_local_payload_must_reach_the_consumer_too(tmp_path):
     state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": rows}
     undelivered = _decide(state, _delivery_section(), delivered=_delivered_everything())
     assert "artifact_not_self_contained" in _codes(undelivered)
-    delivered = _decide(state, _delivery_section(), delivered=[*_delivered_everything(), "private.whl"])
+    wheel_digest = hashlib.sha256(b"wheel-bytes").hexdigest()
+    delivered = _decide(
+        state,
+        _delivery_section(),
+        delivered=[*_delivered_everything(), ("private.whl", wheel_digest)],
+    )
     assert "artifact_not_self_contained" not in _codes(delivered)
+
+
+def test_one_occurrences_bytes_do_not_answer_for_anothers_at_that_path(tmp_path):
+    """Two occurrences that consumed different bytes are two references."""
+    requirements = tmp_path / "reqs.txt"
+    cmd = "pip install -r reqs.txt"
+    requirements.write_text("foo==1.0\n", encoding="utf-8")
+    first = _row(cmd, seq=1, task="advanced", cwd=tmp_path)
+    requirements.write_text("foo==2.0\n", encoding="utf-8")
+    second = _row(cmd, seq=2, task="kept", cwd=tmp_path)
+    rows = _accepted([first, second], task="kept")
+    state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": rows}
+
+    digests = {i["sha256"] for row in rows for i in row["input_identity"]}
+    assert len(digests) == 2
+    latest = next(i["sha256"] for i in second["input_identity"])
+    partial = _decide(state, _delivery_section(), delivered=[*_delivered_everything(), ("reqs.txt", latest)])
+    assert "artifact_not_self_contained" in _codes(partial)
+
+    whole = _decide(
+        state,
+        _delivery_section(),
+        delivered=[*_delivered_everything(), *((("reqs.txt", d)) for d in digests)],
+    )
+    assert "artifact_not_self_contained" not in _codes(whole)
+
+
+def test_a_configuration_digest_binds_the_delivered_config_to_its_bytes():
+    section = _delivery_section()
+    section["accepted_config"]["config_digest"] = "d" * 64
+    undigested = _decide(_sufficient_state(), section, delivered=_delivered_everything())
+    assert "artifact_not_self_contained" in _codes(undigested)
+
+    bound = _decide(
+        _sufficient_state(),
+        section,
+        delivered=[(CONFIG_PAYLOAD, "d" * 64), (SNAPSHOT_PAYLOAD, "")],
+    )
+    assert "artifact_not_self_contained" not in _codes(bound)
 
 
 def test_no_delivery_assembled_leaves_the_contract_unapplied():
@@ -1250,8 +1370,8 @@ def test_the_bundle_carries_the_captured_bytes_and_not_the_capture_manifest(tmp_
     session = _session_bundle(tmp_path)
     manifest_rel = "optimization_stack/enablement/r1/manifest.json"
     (session / manifest_rel).write_text("{}", encoding="utf-8")
-    delivered = deliverable(session, {SNAPSHOT_PAYLOAD: "", manifest_rel: ""})
-    assert delivered == {SNAPSHOT_PAYLOAD}
+    delivered = deliverable(session, _payloads(SNAPSHOT_PAYLOAD, manifest_rel))
+    assert delivered == {(SNAPSHOT_PAYLOAD, "")}
 
 
 def test_a_session_bundle_missing_the_referenced_config_fails_closed(tmp_path):
@@ -1318,11 +1438,11 @@ def _really_packaged(session, tmp_path):
     return {str(row["path"]) for row in manifest["included_files"]}, manifest
 
 
-def test_the_verdict_and_the_real_packaging_agree_under_a_cumulative_cap(tmp_path, monkeypatch):
-    """The cap is spent in selection order, so an earlier file can drop a later one.
+def test_an_unrelated_file_spending_the_budget_does_not_refuse_a_small_payload(tmp_path, monkeypatch):
+    """The refusal names the recipe's own content, never a file it does not name.
 
-    A per-payload size test calls a small snapshot deliverable while the run that
-    actually bundles it has already spent the budget on the files before it.
+    The real bundle still truncates in selection order, and its own manifest is
+    what reports that; the verdict is judged per payload.
     """
     from hyperloom.inference_optimizer.breakdown import session_package
 
@@ -1336,8 +1456,26 @@ def test_the_verdict_and_the_real_packaging_agree_under_a_cumulative_cap(tmp_pat
     packaged, real = _really_packaged(session, tmp_path)
 
     assert SNAPSHOT_PAYLOAD not in packaged and real["truncated"] is True
-    assert decision["status"] == "insufficient"
-    assert "source_snapshot_missing" in _codes(decision)
+    assert decision["status"] == "sufficient", decision["reasons"]
+
+
+def test_the_count_cap_decides_no_single_payload(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown import session_package
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable
+
+    session = _session_bundle(tmp_path)
+    monkeypatch.setattr(session_package, "_MAX_FILES", 1)
+    wanted = _payloads(SNAPSHOT_PAYLOAD, CONFIG_PAYLOAD)
+    assert deliverable(session, wanted) == set(wanted)
+
+
+def test_a_payload_alone_over_the_byte_cap_is_still_refused(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown import session_package
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable
+
+    session = _session_bundle(tmp_path, snapshot_bytes=b"y" * 4096)
+    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 64)
+    assert deliverable(session, _payloads(SNAPSHOT_PAYLOAD)) == set()
 
 
 def test_the_verdict_and_the_real_packaging_agree_when_everything_fits(tmp_path):
@@ -1359,10 +1497,10 @@ def test_a_delivered_payload_whose_bytes_changed_is_not_the_recorded_one(tmp_pat
     requirements.write_text("foo==1.0\n", encoding="utf-8")
     rel = "reports/enablement/spec-1/requirements.txt"
     recorded = hashlib.sha256(requirements.read_bytes()).hexdigest()
-    assert deliverable(session, {rel: recorded}) == {rel}
+    assert deliverable(session, [(rel, recorded)]) == {(rel, recorded)}
 
     requirements.write_text("foo==2.0\n", encoding="utf-8")
-    assert deliverable(session, {rel: recorded}) == set()
+    assert deliverable(session, [(rel, recorded)]) == set()
 
 
 def test_a_mutated_requirements_file_makes_the_recipe_insufficient(tmp_path):
@@ -1515,6 +1653,8 @@ def test_closure_status_is_verified_when_only_unrelated_reasons_stand():
         {
             "kept_patches": ["/p/1.patch"],
             "framework_root": "/fr",
+            "setup_commands": ["pip install foo"],
+            "setup_executions": _accepted([_row("pip install foo", seq=1, task="kept")], task="kept"),
             "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
             "installed_versions_at_keep": {"sglang": "0.4"},
         }
@@ -1536,6 +1676,22 @@ def test_a_session_with_no_ledger_certifies_no_closure():
     )
     codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
     assert "setup_occurrences_unknown" in codes and "closure_scope_incomplete" not in codes
+    assert out["dependency_closure_status"] == "unverified"
+
+
+def test_an_absent_ledger_with_no_commands_still_certifies_no_closure():
+    """The ledger is the only record of which installer families ran, so its
+    absence leaves the scope unobserved rather than clean."""
+    out = _collect(
+        {
+            "kept_patches": ["/p/1.patch"],
+            "framework_root": "/fr",
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
+    assert "setup_occurrences_unknown" not in codes
     assert out["dependency_closure_status"] == "unverified"
 
 
