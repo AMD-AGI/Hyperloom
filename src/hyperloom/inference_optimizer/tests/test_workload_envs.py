@@ -104,7 +104,9 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
     assert "--variant 4" in envs["EXTRA_SGLANG_ARGS"]
-    assert envs["SGLANG_REMOVE_ME"] == "override"
+    # Named in both extra_envs and unset_envs: the removal is the more specific
+    # intent and wins, so the bare-string unset_envs form is proven to apply.
+    assert "SGLANG_REMOVE_ME" not in envs
 
 
 def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch):

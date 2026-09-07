@@ -1618,7 +1618,6 @@ def _enforce_critic_gate(
             "specialist_task_id": subject,
             "patches_applied": [],
             "patches_reverted": [],
-            "config_changes_applied": {},
             "reason": (
                 f"integrate_patch requires a permissive Critic verdict "
                 f"(approve/advise) for {subject!r}; {_detail}. Refusing to run."
@@ -1712,9 +1711,8 @@ class IntegratePatchExecutor:
             stash_note: str = ctx._ip_stash_note  # type: ignore[attr-defined]
             applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
             applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
-            config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
-            extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
             extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
+            extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
             dropped_env_overrides: list[str] = ctx._ip_dropped_env_overrides  # type: ignore[attr-defined]
             setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
@@ -1731,9 +1729,8 @@ class IntegratePatchExecutor:
                 stash_note=stash_note,
                 applied=applied,
                 applied_artifacts=applied_artifacts,
-                config_changes_applied=config_changes_applied,
-                extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                extra_server_args_applied=extra_server_args_applied,
                 dropped_env_overrides=dropped_env_overrides,
                 setup_result=setup_result,
             )
@@ -1765,7 +1762,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": str(params.get("specialist_task_id") or "").strip(),
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "reason": (
                     "specialist integrate_patch is not supported in "
                     "multi-node mode (no git-diff pod fan-out); skipped "
@@ -1795,7 +1791,6 @@ class IntegratePatchExecutor:
                     ),
                     "patches_applied": [],
                     "patches_reverted": [],
-                    "config_changes_applied": {},
                 }
             task_id = ctx.task.task_id
             scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
@@ -1891,7 +1886,6 @@ class IntegratePatchExecutor:
                 "error": "patch_source=upstream_pr requires params.candidate (the discovered PR row)",
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
             }
         if shared_state is not None:
             # Same rebind the specialist lane does: a task queued before a KEEP
@@ -1918,7 +1912,6 @@ class IntegratePatchExecutor:
                 "error": "cannot resolve a framework source root to apply the candidate to",
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
             }
 
         materialized = materialize_candidate_patches(
@@ -1935,7 +1928,6 @@ class IntegratePatchExecutor:
                 "candidate": candidate,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "patch_source_mode": materialized.mode,
                 "workspace": str(scratch),
             }
@@ -2000,7 +1992,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": f"attempt-runtime provision aborted: {exc}",
             }
@@ -2024,7 +2015,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": f"attempt-runtime provision raised: {exc!r}",
             }
@@ -2038,7 +2028,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": f"attempt-runtime provision failed: {result.error}",
                 "provision_result": result.to_state(),
@@ -2109,7 +2098,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": reason,
             }
@@ -2155,9 +2143,8 @@ class IntegratePatchExecutor:
         ctx: Any,
         *,
         output_root: Path,
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         dropped_env_overrides: list[str],
         setup_result: dict[str, Any],
     ) -> None:
@@ -2168,9 +2155,8 @@ class IntegratePatchExecutor:
         separately, as the tree takes it.
         """
         ctx._ip_output_root = output_root  # type: ignore[attr-defined]
-        ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
-        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_dropped_env_overrides = dropped_env_overrides  # type: ignore[attr-defined]
         ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
 
@@ -2265,43 +2251,6 @@ class IntegratePatchExecutor:
             params=params,
             done_payload=done_payload,
         )
-        undeclared_gates = _switch_manifest.undeclared_switch_gates(patch_paths, switch_manifest)
-        if undeclared_gates:
-            reason = (
-                f"patch gates on undeclared environment switch(es) "
-                f"{', '.join(undeclared_gates)}: every gate a framework rewrite "
-                f"introduces must be declared in the '{_switch_manifest.MANIFEST_KEY}' "
-                f"manifest, otherwise the switch-off parity leg and per-lever "
-                f"attribution silently do not run"
-            )
-            # Only the manifest feeds switch_env, so an enablement round may instead
-            # arm its gate through the proposal. One that is armed nowhere would
-            # bench inert and reproduce the same failure, so it is still refused.
-            is_enablement = bool(params.get("enablement"))
-            unarmed_gates = [g for g in undeclared_gates if g not in proposal_extra_envs]
-            if not is_enablement or unarmed_gates:
-                if is_enablement:
-                    reason = (
-                        f"patch gates on environment switch(es) "
-                        f"{', '.join(unarmed_gates)} that nothing turns on: declare "
-                        f"them in the '{_switch_manifest.MANIFEST_KEY}' manifest or "
-                        f"set them in the proposal, otherwise the patch benches inert"
-                    )
-                log.warning("integrate_patch: %s", reason)
-                return {
-                    "status": "reverted",
-                    "error_class": "framework_switch_gates_undeclared",
-                    "error": reason,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "config_changes_applied": {},
-                    "reason": reason,
-                    "framework_switch_problems": switch_problems + [reason],
-                    "undeclared_switch_gates": undeclared_gates,
-                }
-            log.info("integrate_patch(enablement): %s — armed by the proposal, benching", reason)
-            switch_problems.append(reason)
         if switch_manifest and not patch_paths:
             # A manifest without a patch describes switches that gate code which
             # was never delivered. Setting them would be a no-op, and registering
@@ -2356,7 +2305,6 @@ class IntegratePatchExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "artifacts_applied": [],
-                "config_changes_applied": {},
                 "reason": (
                     "AITER GEMM model-config artifacts must contain measured, "
                     "non-placeholder rows for the target GPU architecture and CU count"
@@ -2384,9 +2332,8 @@ class IntegratePatchExecutor:
                 self._publish_gate_state(
                     ctx,
                     output_root=output_root,
-                    config_changes_applied={},
-                    extra_server_args_applied="",
                     extra_envs_applied={},
+                    extra_server_args_applied="",
                     dropped_env_overrides=[],
                     setup_result=setup_result,
                 )
@@ -2396,7 +2343,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
                 "setup_commands_applied": list(setup_result.get("applied") or []),
@@ -2461,7 +2407,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "lane": _lane_early,
                 "retry_feedback": [],
                 "prior_patches": [str(p) for p in patch_paths],
@@ -2504,7 +2449,6 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [],
-                    "config_changes_applied": {},
                     "lane": _lane_missing,
                     "retry_feedback": [],
                     "prior_patches": [str(p) for p in patch_paths],
@@ -2558,7 +2502,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
             }
 
         # The stash is on the stack and the tree is about to be mutated, so
@@ -2637,7 +2580,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
-                "config_changes_applied": {},
                 "workspace": str(output_root),
                 "lane": lane,
                 "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
@@ -2675,14 +2617,12 @@ class IntegratePatchExecutor:
                         "patches_applied": [],
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_applied": [],
-                        "config_changes_applied": {},
                         "workspace": str(output_root),
                     },
                 )
 
         extra_server_args_applied = proposal_extra_args
         extra_envs_applied = dict(proposal_extra_envs)
-        config_changes_applied = dict(extra_envs_applied)
 
         if params.get("apply_only"):
             return _with_stash_restore(
@@ -2695,7 +2635,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [str(p) for p in applied],
                     "patches_reverted": [],
                     "artifacts_applied": applied_artifacts,
-                    "config_changes_applied": config_changes_applied,
                     "extra_server_args_applied": extra_server_args_applied,
                     "extra_envs_applied": extra_envs_applied,
                     "dropped_env_overrides": dropped_env_overrides,
@@ -2709,9 +2648,8 @@ class IntegratePatchExecutor:
         self._publish_gate_state(
             ctx,
             output_root=output_root,
-            config_changes_applied=config_changes_applied,
-            extra_server_args_applied=extra_server_args_applied,
             extra_envs_applied=extra_envs_applied,
+            extra_server_args_applied=extra_server_args_applied,
             dropped_env_overrides=dropped_env_overrides,
             setup_result=setup_result,
         )
@@ -2732,9 +2670,8 @@ class IntegratePatchExecutor:
         stash_note: str,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         dropped_env_overrides: list[str],
         setup_result: dict[str, Any],
     ) -> dict[str, Any]:
@@ -2783,7 +2720,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "reason": str(exc),
                     "workspace": str(output_root),
                 },
@@ -2802,7 +2738,6 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
-                    "config_changes_applied": {},
                     "reason": f"bench raised: {exc!r}",
                     "workspace": str(output_root),
                 },
@@ -2820,9 +2755,8 @@ class IntegratePatchExecutor:
                 stash_note=stash_note,
                 applied=applied,
                 applied_artifacts=applied_artifacts,
-                config_changes_applied=config_changes_applied,
-                extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                extra_server_args_applied=extra_server_args_applied,
                 setup_result=setup_result,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
@@ -2841,9 +2775,8 @@ class IntegratePatchExecutor:
                 stash_note=stash_note,
                 applied=applied,
                 applied_artifacts=applied_artifacts,
-                config_changes_applied=config_changes_applied,
-                extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                extra_server_args_applied=extra_server_args_applied,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
                 ctx=ctx,
@@ -2865,9 +2798,8 @@ class IntegratePatchExecutor:
         stash_note: str,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         setup_result: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
@@ -2897,13 +2829,11 @@ class IntegratePatchExecutor:
         the result (``enablement_kept_stack_action``) so it survives rearm. On
         REVERT / non-KEEP, the attempt runtime dir is GC'd.
 
-        Every verdict carries ``framework_switch_problems`` (auditable switch-gate
-        demotion record) and ``framework_root`` (the source tree patches were applied
+        Every verdict carries ``framework_root`` (the source tree patches were applied
         against, needed to replay them on a fresh machine).
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
-        switch_problems: list[str] = list(getattr(ctx, "_ip_switch_problems", None) or [])
 
         def _gc_on_revert() -> None:
             """GC the attempt runtime dir on a non-KEEP enablement outcome."""
@@ -3013,10 +2943,8 @@ class IntegratePatchExecutor:
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_applied": applied_artifacts,
                         "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": config_changes_applied,
                         "extra_envs_applied": extra_envs_applied,
                         "extra_server_args_applied": extra_server_args_applied,
-                        "framework_switch_problems": switch_problems,
                         "framework_root": str(framework_root or ""),
                         "output_throughput": new_tput,
                         "enablement": True,
@@ -3062,8 +2990,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
-                    "framework_switch_problems": switch_problems,
                     "framework_root": str(framework_root or ""),
                     "output_throughput": new_tput,
                     "enablement": True,
@@ -3100,10 +3026,8 @@ class IntegratePatchExecutor:
             "patches_applied": [str(p) for p in applied],
             "patches_reverted": [],
             "artifacts_applied": applied_artifacts,
-            "config_changes_applied": config_changes_applied,
             "extra_server_args_applied": extra_server_args_applied,
             "extra_envs_applied": extra_envs_applied,
-            "framework_switch_problems": switch_problems,
             "framework_root": str(framework_root or ""),
             "output_throughput": new_tput,
             "enablement": True,
@@ -3216,9 +3140,8 @@ class IntegratePatchExecutor:
         stash_note: str,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
         ctx: Any,
@@ -3253,7 +3176,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                 },
@@ -3379,7 +3301,6 @@ class IntegratePatchExecutor:
                         "patches_applied": [],
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": {},
                         "output_throughput": new_tput,
                         "delta_pct": delta_pct,
                         "accuracy_pass": accuracy_pass,
@@ -3387,7 +3308,6 @@ class IntegratePatchExecutor:
                         "keep_threshold_pct": keep_threshold_pct,
                         "reason": str(parity.get("reason") or "switch-off parity failed"),
                         "switch_off_parity": parity,
-                        "framework_switch_problems": switch_problems,
                         "bench_result": bench_result,
                         "workspace": str(output_root),
                     },
@@ -3470,7 +3390,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
                     "accuracy_pass": accuracy_pass,
@@ -3547,7 +3466,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
                     "bench_result": bench_result,
@@ -3660,7 +3578,6 @@ class IntegratePatchExecutor:
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
-                "config_changes_applied": config_changes_applied,
                 "extra_server_args_applied": extra_server_args_applied,
                 "extra_envs_applied": extra_envs_applied,
                 "output_throughput": new_tput,
@@ -3685,7 +3602,6 @@ class IntegratePatchExecutor:
                 # Attribution from here is leave-one-out.
                 "framework_levers": switch_manifest,
                 "framework_lever_outcome": ("default_on" if switch_manifest else ""),
-                "framework_switch_problems": switch_problems,
                 "switch_off_parity": parity,
             },
         )
@@ -3940,7 +3856,6 @@ class IntegratePatchExecutor:
                 # Empty on purpose: the code is present but dormant, so nothing
                 # may enter current_best. The levers below are how it gets turned
                 # on, one measured bundle at a time.
-                "config_changes_applied": {},
                 "extra_server_args_applied": "",
                 "extra_envs_applied": {},
                 "output_throughput": new_tput,
@@ -3954,7 +3869,6 @@ class IntegratePatchExecutor:
                 "framework_root": str(framework_root or ""),
                 "framework_levers": switch_manifest,
                 "framework_lever_outcome": "registered_off",
-                "framework_switch_problems": switch_problems,
                 "switch_off_parity": parity,
             },
         )
@@ -4492,32 +4406,26 @@ class IntegratePatchExecutor:
             out_name="integrate_patch.with_envs.yaml",
         )
 
-        _base_envs = dict(params.get("base_extra_envs") or {})
-        _variant_envs = dict(_base_envs)
-        _variant_envs.update(extra_envs_applied)
+        base_envs = dict(params.get("base_extra_envs") or {})
+        base_remove = to_str_list(params.get("base_remove_args"))
+        base_unset = to_str_list(params.get("base_unset_envs"))
+        args_mode = str(params.get("base_args_mode") or "append")
+        # The variant carries this round's own levers; run_grid composes the
+        # stack under them.
+        variant_envs = dict(extra_envs_applied)
         # Eval-origin enablement needs a raw accuracy for its runnable gate, so
         # RUN_EVAL=true must survive any variant overlay.
         if bool(params.get("enablement")) and _is_eval_origin(params):
-            _variant_envs["RUN_EVAL"] = "true"
-        _unset = to_str_list(params.get("base_unset_envs"))
-        for name in unset_envs or []:
-            key = str(name).strip()
-            if not key:
-                continue
-            # Removing it from the variant env too: ``unset_envs`` drops inherited
-            # values, but a key present in both would otherwise be re-added here.
-            _variant_envs.pop(key, None)
-            if key not in _unset:
-                _unset.append(key)
+            variant_envs["RUN_EVAL"] = "true"
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}{variant_suffix}",
             extra_server_args=extra_server_args_applied,
-            extra_envs=_variant_envs,
-            remove_args=to_str_list(params.get("base_remove_args")),
-            unset_envs=_unset,
-            args_mode=str(params.get("base_args_mode") or "append"),
+            extra_envs=variant_envs,
+            unset_envs=to_str_list(unset_envs),
+            args_mode=args_mode,
             note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
         )
+        effective_unset = list(dict.fromkeys(base_unset + list(variant.unset_envs)))
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:
             # Preserve list/dict values; apply_runtime_override expects them.
@@ -4548,7 +4456,10 @@ class IntegratePatchExecutor:
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
                 result_dir=override_result_dir,
-                base_args_mode=str(params.get("base_args_mode") or "append"),
+                base_args_mode=args_mode,
+                base_extra_envs=base_envs,
+                base_remove_args=base_remove,
+                base_unset_envs=base_unset,
                 serving_lease=serving_lease,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
@@ -4582,20 +4493,26 @@ class IntegratePatchExecutor:
                     "server_log_path": r.server_log_path or "",
                     # Materialized config used for this bench; needed by revalidation.
                     "materialized_config": str(config_path),
-                    # Read off the variant so a replay cannot drift from the graded run.
-                    # RUN_EVAL is dropped: the replay owns its own eval contract.
+                    # The composed stack, not the variant alone: revalidation
+                    # replays this and would otherwise boot without the base
+                    # layer. RUN_EVAL is dropped -- the replay owns its own
+                    # eval contract.
                     "effective_config": {
-                        "extra_envs": {k: v for k, v in variant.extra_envs.items() if k != "RUN_EVAL"},
+                        "extra_envs": {
+                            k: v
+                            for k, v in {**base_envs, **variant.extra_envs}.items()
+                            if k != "RUN_EVAL" and k not in effective_unset
+                        },
                         "extra_server_args": compose_server_args(
                             inherited_args="",
                             base_extra_args=str(params.get("base_extra_args") or "").strip(),
                             variant_extra_args=variant.extra_server_args,
-                            remove_args=variant.remove_args,
-                            args_mode=variant.args_mode,
+                            remove_args=base_remove,
+                            args_mode=args_mode,
                         ),
-                        "remove_args": list(variant.remove_args),
-                        "unset_envs": list(variant.unset_envs),
-                        "args_mode": variant.args_mode,
+                        "remove_args": list(base_remove),
+                        "unset_envs": list(effective_unset),
+                        "args_mode": args_mode,
                     },
                 }
             )

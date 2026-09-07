@@ -139,7 +139,7 @@ async def test_a_refused_argv_never_launches_and_never_opens_a_repair_round(
     assert loaded.observation.stage_failed == LadderStage.ARGV_PARSE
     assert pf.is_argv_invalid(loaded.observation)
 
-    lane = _lane(session, tasks, rounds, result["enablement_launch_log"], attempts=0)
+    lane = _lane(session, tasks, rounds, result["enablement_launch_log"])
     lane.shared_state.enablement.launch_observation_path = result["boot_observation_path"]
 
     # Tick after tick, the backstop declines to author against it and the run

@@ -1806,9 +1806,6 @@ def materialize_config_with_envs(
             log.warning("Refusing to unset pinned benchmark env %s", key)
             continue
         envs.pop(str(key), None)
-    for key in unset_list:
-        if isinstance(extra_envs, dict) and key in extra_envs:
-            envs[str(key)] = str(extra_envs[key])
     if pending_vllm_profiler_flags and framework_env == "EXTRA_VLLM_ARGS":
         # The profile path's iteration bounds have to be the LAST word on this env,
         # because three separate steps above can drop them: a candidate carrying

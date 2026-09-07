@@ -351,13 +351,22 @@ def target_analysis_report_md(session_dir: Path) -> Path:
 
 
 def recipe_kb_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root."""
+    """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root.
+
+    This directory holds only *derived* bookkeeping — the authoritative recipe
+    store is the local KB root (``$HYPERLOOM_LOCAL_KB_ROOT`` / ``workspace_root()/kb``,
+    mirrored to gbrain), which lives outside the session tree. The snapshots
+    here (``.kb_pitfalls.json`` / ``.kb_lessons.json``) are rewritten by every
+    T0 anchor, so a session that predates the ``runtime/cortex`` ->
+    ``runtime/recipe_kb`` rename simply regenerates them; no migration is needed.
+
+    Args:
+        session_dir (Path): The session root directory.
+
+    Returns:
+        Path: The absolute path to ``<session_dir>/runtime/recipe_kb``.
+    """
     return Path(session_dir) / "runtime" / "recipe_kb"
-
-
-def recipe_kb_warm_json(session_dir: Path) -> Path:
-    """Compute the path to ``.kb_warm.json``, the T0 warm-start recipe snapshot."""
-    return recipe_kb_dir(session_dir) / ".kb_warm.json"
 
 
 def recipe_kb_pitfalls_json(session_dir: Path) -> Path:
@@ -478,7 +487,6 @@ __all__ = [
     "recipe_kb_lessons_json",
     "recipe_kb_pending_ndjson",
     "recipe_kb_pitfalls_json",
-    "recipe_kb_warm_json",
     "decision_trace_path",
     "proposal_task_map_path",
     "forge_steps_path",

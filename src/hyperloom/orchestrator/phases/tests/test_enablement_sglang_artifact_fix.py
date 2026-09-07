@@ -468,7 +468,7 @@ def test_replay_script_is_valid_bash(tmp_path):
 
 
 def test_state_without_the_new_fields_still_loads():
-    enablement = EnablementRound.from_dict({"kept_patches": ["/patch1"], "attempts": 3})
+    enablement = EnablementRound.from_dict({"kept_patches": ["/patch1"]})
     assert enablement.kept_patches == ["/patch1"]
     assert enablement.kept_artifacts == []
     assert enablement.last_grounding_drop_reason == []

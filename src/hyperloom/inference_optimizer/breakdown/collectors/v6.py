@@ -1384,9 +1384,7 @@ def _source_attempt(
         "framework_levers": _dict_rows(outputs.get("framework_levers")),
         "config_delta": {
             "extra_server_args": str(outputs.get("extra_server_args_applied") or ""),
-            "extra_envs": dict(
-                _mapping(_first(outputs.get("extra_envs_applied"), outputs.get("config_changes_applied")))
-            ),
+            "extra_envs": dict(_mapping(outputs.get("extra_envs_applied"))),
         },
         "artifacts": {
             "patches_applied": _string_list(outputs.get("patches_applied")),
@@ -1983,7 +1981,6 @@ def _stage_reached(
         enablement = state.get("enablement")
         if isinstance(enablement, dict) and any(
             (
-                int(enablement.get("attempts") or 0) > 0,
                 bool(enablement.get("pending")),
                 bool(enablement.get("validation_pending")),
                 bool(enablement.get("succeeded")),

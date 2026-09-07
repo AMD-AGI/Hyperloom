@@ -519,21 +519,9 @@ index 0000000..1111111 100644
 +    return 2
 """
 
-# A patch that gates its rewrite on an environment switch but does not declare it.
-_ENV_GATED_PATCH_WITHOUT_MANIFEST = """\
-diff --git a/src.py b/src.py
-index 0000000..1111111 100644
---- a/src.py
-+++ b/src.py
-@@ -1,2 +1,3 @@
- def f():
--    return 1
-+    import os
-+    return 2 if os.environ.get("HL_UNDECLARED_CACHE", "") == "1" else 1
-"""
-
-
-# Default manifest for the integrate_patch runs below: a hoist enabler plus the cache it unlocks.
+# Default manifest for the integrate_patch runs below: a hoist enabler plus the
+# cache it unlocks. Named so a test can pass ``switches=[]`` to mean "no manifest
+# at all", which is a materially different case from "the default one".
 _DEFAULT_MANIFEST: list[dict[str, Any]] = [
     {"switch": "HL_HOIST", "category": "hoist_loop_invariant", "enables": ["HL_CACHE"]},
     {"switch": "HL_CACHE", "category": "memoize_invariant"},
@@ -669,7 +657,7 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
     assert len(result["patches_applied"]) == 1
     # Nothing may enter the running configuration.
     assert result["extra_envs_applied"] == {}
-    assert result["config_changes_applied"] == {}
+    assert result["extra_envs_applied"] == {}
     # The code is still on disk, just dormant.
     assert (repo / "src.py").read_text().endswith("return 2\n")
     assert "enabler" in result["reason"]
@@ -687,7 +675,7 @@ async def test_an_incorrect_switched_rewrite_is_kept_inert_and_flagged(tmp_path,
     assert result["status"] == "kept_inert"
     assert result.get("quality_unverified") is True
     # Applied but dormant: nothing may enter current_best off this verdict.
-    assert result["config_changes_applied"] == {}
+    assert result["extra_envs_applied"] == {}
     assert result["extra_envs_applied"] == {}
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
@@ -815,33 +803,18 @@ async def test_a_patch_that_is_not_inert_when_disabled_is_reverted(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_an_env_gated_patch_without_a_manifest_is_rejected(tmp_path, monkeypatch):
-    """A gate the manifest does not declare disables every guarantee, silently."""
-    result, repo, _, legs = await _run_rewrite_integrate(
-        tmp_path,
-        monkeypatch,
-        delta_pct=8.0,
-        switches=[],
-        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
-    )
-    assert result["status"] == "reverted"
-    assert result["error_class"] == "framework_switch_gates_undeclared"
-    assert "HL_UNDECLARED_CACHE" in result["reason"]
-    # Refused before spending a benchmark leg on it.
-    assert not legs, "an undeclared gate must be caught before benching"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
+async def test_a_plain_patch_without_a_manifest_is_still_benched(tmp_path, monkeypatch):
+    """Most framework work is a straight edit with no switch, and must still run.
 
-
-@pytest.mark.asyncio
-async def test_a_plain_patch_without_env_gates_still_needs_no_manifest(tmp_path, monkeypatch):
-    """The check must not turn every ordinary framework patch into a rejection."""
-    result, _, _, legs = await _run_rewrite_integrate(
+    Without a manifest there are no levers and no parity leg, but the patch is a
+    patch: it earns a benchmark like any other.
+    """
+    _result, _, _, legs = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
         delta_pct=8.0,
         switches=[],
     )
-    assert result.get("error_class") != "framework_switch_gates_undeclared"
     assert legs, "a plain patch must still be benched"
 
 
@@ -1022,41 +995,3 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
-
-
-@pytest.mark.asyncio
-async def test_env_gated_patch_proceeds_to_bench_when_the_proposal_arms_it(tmp_path, monkeypatch):
-    """An enablement round may arm its gate through the proposal instead of the manifest."""
-    result_en, _, _, legs_en = await _run_rewrite_integrate(
-        tmp_path,
-        monkeypatch,
-        delta_pct=8.0,
-        switches=[],
-        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
-        extra_params={"enablement": True, "extra_envs": {"HL_UNDECLARED_CACHE": "1"}},
-    )
-    assert result_en.get("error_class") != "framework_switch_gates_undeclared", (
-        "an enablement gate armed by the proposal must not be refused"
-    )
-    assert legs_en, "enablement round must have attempted a bench"
-    problems = result_en.get("framework_switch_problems") or []
-    assert any("undeclared environment switch" in p for p in problems), (
-        f"the demoted gate must stay auditable in the result, got {problems!r}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_env_gated_patch_refused_when_nothing_arms_it(tmp_path, monkeypatch):
-    """An enablement gate armed by neither manifest nor proposal benches inert."""
-    result_en, _, _, legs_en = await _run_rewrite_integrate(
-        tmp_path,
-        monkeypatch,
-        delta_pct=8.0,
-        switches=[],
-        patch_body=_ENV_GATED_PATCH_WITHOUT_MANIFEST,
-        extra_params={"enablement": True},
-    )
-    assert result_en["status"] == "reverted"
-    assert result_en["error_class"] == "framework_switch_gates_undeclared"
-    assert "HL_UNDECLARED_CACHE" in result_en["reason"]
-    assert not legs_en, "a gate nothing turns on must not spend a bench leg"

@@ -1134,7 +1134,6 @@ def collect_enablement(
     # Sessions predating the flag load with the SharedState default, so that is also the right value to report for
     # them.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
-    attempts = _as_int(_eg(state, "attempts"))
     # Rounds come from the ledger, not from state: a round outlives the process
     # that took it.
     ledger = collect_round_ledger(session_dir, warnings)
@@ -1146,7 +1145,7 @@ def collect_enablement(
     have_kept_patches = isinstance(kept_patches_raw, list) and bool(kept_patches_raw)
     # Detect eval-origin by active origin OR persisted kind from a completed run.
     have_eval = origin == "eval" or bool(eval_kind)
-    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_eval or ledger.get("round_count"))
+    engaged = bool(dispatched or have_kept_patches or have_eval or ledger.get("round_count"))
     if not (engaged or mode == "off" or have_active or have_attempts or have_build_manifest or have_last_failure):
         return {}
 
@@ -1154,7 +1153,6 @@ def collect_enablement(
         "mode": mode,
         "engaged": engaged,
         "origin": "eval" if have_eval else "boot",
-        "attempts": attempts,
         "dispatched": dispatched,
         "succeeded": bool(_eg(state, "succeeded")),
         "pending": bool(_eg(state, "pending")),

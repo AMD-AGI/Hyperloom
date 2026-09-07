@@ -8,8 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import atomic_write_json, atomic_write_text
-from hyperloom.orchestrator.actions.executors.integrate_patch import _sanitize_setup_command
+from hyperloom.common.io import atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import (
     enablement_dir,
     enablement_round_dir,
@@ -35,8 +34,6 @@ _FILE_SIZE_LIMIT = 2 * 1024 * 1024
 _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
 
 _LOG_TRUNCATION_NOTE = "[hyperloom] truncated: the first {dropped} bytes are missing; the tail follows.\n"
-
-_LAUNCH_LOG_EXCERPT_CHARS = 1200
 
 
 def _copy(src: Path, dest: Path) -> bool:
@@ -131,29 +128,6 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
         if _copy_log_tail(Path(server_log), dest):
             archive.record(ROLE_SERVER_LOG, dest)
 
-    launch_log = str(res.get("enablement_launch_log") or "")
-    # Written last so the config path it names is the copy that just landed under ``reports/``, not the ``runs/``
-    # original the collector drops.
-    atomic_write_json(
-        round_dir / "round.json",
-        {
-            "status": res.get("status"),
-            "specialist_task_id": task_id,
-            "patches_applied": res.get("patches_applied") or [],
-            "config_changes_applied": res.get("config_changes_applied") or {},
-            "extra_envs_applied": res.get("extra_envs_applied") or {},
-            "dropped_env_overrides": res.get("dropped_env_overrides") or [],
-            "extra_server_args_applied": res.get("extra_server_args_applied") or "",
-            # Redacted HERE and not where the list is built: the same field is the replay channel -- ``lane.py``
-            # stacks it into ``state.enablement.setup_commands`` and the next round EXECUTES what it finds there.
-            "setup_commands_applied": [_sanitize_setup_command(c) for c in (res.get("setup_commands_applied") or [])],
-            "framework_switch_problems": res.get("framework_switch_problems") or [],
-            "after_signature": res.get("after_signature") or {},
-            "enablement_accepted_config_path": archive.path_for(ROLE_LAUNCH_CONFIG),
-            "enablement_effective_config": res.get("enablement_effective_config") or {},
-            "launch_log_excerpt": launch_log[:_LAUNCH_LOG_EXCERPT_CHARS],
-        },
-    )
     return archive
 
 

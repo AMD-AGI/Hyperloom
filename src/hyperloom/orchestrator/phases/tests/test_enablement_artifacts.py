@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -34,7 +33,6 @@ def _res(**kw):
         "status": "kept",
         "specialist_task_id": "abc123",
         "patches_applied": [],
-        "config_changes_applied": {},
         "extra_envs_applied": {},
         "extra_server_args_applied": "",
         "setup_commands_applied": [],
@@ -45,17 +43,6 @@ def _res(**kw):
     }
     base.update(kw)
     return base
-
-
-def test_round_json_records_the_result(tmp_path):
-    snapshot_round(
-        tmp_path,
-        _res(extra_envs_applied={"A": "1"}, extra_server_args_applied="--flag"),
-    )
-    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
-    assert data["status"] == "kept"
-    assert data["extra_envs_applied"] == {"A": "1"}
-    assert data["extra_server_args_applied"] == "--flag"
 
 
 def test_applied_patch_is_copied(tmp_path):
@@ -121,18 +108,14 @@ def test_recorded_config_path_is_the_archived_copy(tmp_path):
     """The runs/ original is dropped by the collector, so only the copy resolves."""
     cfg = _launch_config(tmp_path)
     archive = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
-    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
     assert archive.path_for(ROLE_LAUNCH_CONFIG) == "reports/enablement/abc123/launch_config.yaml"
-    assert data["enablement_accepted_config_path"] == "reports/enablement/abc123/launch_config.yaml"
 
 
 def test_config_the_copy_refused_is_not_recorded(tmp_path):
     """Naming a file the archive does not hold is worse than naming none."""
     cfg = _launch_config(tmp_path, body=b"x" * (_FILE_SIZE_LIMIT + 1))
     archive = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
-    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
     assert archive.path_for(ROLE_LAUNCH_CONFIG) == ""
-    assert data["enablement_accepted_config_path"] == ""
 
 
 def test_server_log_is_archived(tmp_path):
@@ -189,14 +172,6 @@ def test_a_log_still_growing_cannot_exceed_the_bound(tmp_path, monkeypatch):
     assert real_stat(dest).st_size == _SERVER_LOG_TAIL_LIMIT
 
 
-def test_round_json_redacts_the_setup_commands(tmp_path):
-    """The field is also the replay channel, so a token must not land in it."""
-    cmd = "pip install --index-url https://ghp_0123456789abcdefghij@host/simple foo"
-    snapshot_round(tmp_path, _res(setup_commands_applied=[cmd]))
-    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
-    assert "0123456789abcdefghij" not in data["setup_commands_applied"][0]
-
-
 def test_binary_noise_cannot_inflate_the_archived_log(tmp_path):
     """Replacing malformed bytes would triple them; the archive bound must hold."""
     log = tmp_path / "server.log"
@@ -230,21 +205,9 @@ def test_oversized_artifact_is_skipped(tmp_path):
     assert archive.to_list() == []
 
 
-def test_launch_log_excerpt_is_bounded(tmp_path):
-    snapshot_round(tmp_path, _res(enablement_launch_log="E" * 5000))
-    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
-    assert len(data["launch_log_excerpt"]) == 1200
-
-
 def test_unsafe_task_id_is_refused(tmp_path):
     with pytest.raises(ValueError):
         snapshot_round(tmp_path, _res(specialist_task_id="../evil"))
-
-
-def test_demoted_switch_gate_is_recorded(tmp_path):
-    snapshot_round(tmp_path, _res(framework_switch_problems=["patch gates on undeclared HL_X"]))
-    data = json.loads((tmp_path / "reports" / "enablement" / "abc123" / "round.json").read_text())
-    assert data["framework_switch_problems"] == ["patch gates on undeclared HL_X"]
 
 
 def test_round_without_a_specialist_is_skipped(tmp_path):

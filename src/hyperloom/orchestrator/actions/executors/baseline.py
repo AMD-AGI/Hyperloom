@@ -100,6 +100,7 @@ from ._inferencex_patcher import (
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
     failed_patch_anchors,
+    failed_patch_anchors_in,
 )
 from ._magpie_patcher import ensure_eval_concurrency_compat
 from ._patch_snapshot import (
@@ -1986,8 +1987,29 @@ class BaselineExecutor:
     _EVAL_CRITICAL_ANCHORS = ("eval_dest",)
 
     def _eval_patch_anchors_result(self, ix_root: str | None) -> dict[str, Any] | None:
-        """Fail the launch when an eval-critical patch can no longer be applied."""
-        broken = [s for s in failed_patch_anchors(ix_root or None) if s.name in self._EVAL_HOOK_ANCHORS]
+        """Fail the launch when an eval-critical patch can no longer be applied.
+
+        The ``ensure_*`` calls above report a miss as ``False`` and no caller
+        reads it, so an upstream edit that moves an anchor takes the patch
+        offline silently -- the run still looks healthy and only the symptom (no
+        score) shows up much later. This is the same failure mode that took the
+        probe offline before it was re-homed to a real file. Checked only when
+        this run executes lm-eval; anchors that merely degrade something are
+        logged, not fatal.
+
+        Scoped to the checkout Magpie will benchmark. Env-wide discovery also
+        reaches the InferenceX bundled with the installed Magpie, which a run
+        that pins ``benchmark.inferencex_path`` never executes — judging it
+        aborts every eval run on rot in a tree nothing here reads.
+
+        Args:
+            ix_root: The resolved InferenceX root for this run, if any.
+
+        Returns:
+            An early-return failure dict, or ``None`` to proceed.
+        """
+        rotted = failed_patch_anchors_in(ix_root) if ix_root else failed_patch_anchors(None)
+        broken = [s for s in rotted if s.name in self._EVAL_HOOK_ANCHORS]
         if not broken:
             return None
         for status in broken:

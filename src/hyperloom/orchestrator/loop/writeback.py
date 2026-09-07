@@ -2980,7 +2980,7 @@ class WritebackCollaborator:
                 )
 
         # Merge envs: start from previous stack top envs so source-layer KEEPs
-        # (config_changes_applied={}) do not clear prior explore/env layers.
+        # (extra_envs_applied={}) do not clear prior explore/env layers.
         _prev_envs = dict((previous.get("extra_envs") or {}) if isinstance(previous, dict) else {})
         _new_envs = dict(bv.get("extra_envs") or {}) if isinstance(bv, dict) else {}
         _merged_envs = dict(_prev_envs)
@@ -4352,19 +4352,17 @@ class WritebackCollaborator:
                 "name": specialist_task_id or "integrate_patch_keep",
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                "candidate_extra_envs": dict(
-                    result.get("extra_envs_applied") or result.get("config_changes_applied") or {}
-                ),
+                "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "recipe_delta": {
                     "extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                    "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
+                    "extra_envs": dict(result.get("extra_envs_applied") or {}),
                     "remove_args": to_str_list(result.get("remove_args_applied") or task_params.get("remove_args")),
                     "unset_envs": to_str_list(result.get("unset_envs_applied") or task_params.get("unset_envs")),
                     "args_mode": str(result.get("args_mode") or task_params.get("args_mode") or "append")
                     .strip()
                     .lower(),
                 },
-                "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
+                "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(new_tput),
                 **graded_axes_of(result.get("bench_result") or result),
                 "workspace": result.get("workspace"),
@@ -5111,17 +5109,15 @@ class WritebackCollaborator:
             bv = {
                 "name": sid,
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                "candidate_extra_envs": dict(
-                    result.get("extra_envs_applied") or result.get("config_changes_applied") or {}
-                ),
+                "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "recipe_delta": {
                     "extra_server_args": str(result.get("extra_server_args_applied") or ""),
-                    "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
+                    "extra_envs": dict(result.get("extra_envs_applied") or {}),
                     "remove_args": to_str_list(result.get("remove_args_applied") or result.get("remove_args")),
                     "unset_envs": to_str_list(result.get("unset_envs_applied") or result.get("unset_envs")),
                     "args_mode": str(result.get("args_mode") or "append").strip().lower(),
                 },
-                "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
+                "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
                 **graded_axes_of(result.get("bench_result") or result),
                 "workspace": result.get("workspace"),

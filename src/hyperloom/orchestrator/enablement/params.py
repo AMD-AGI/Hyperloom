@@ -129,14 +129,15 @@ class EnablementParams(CoordinatorCollaborator):
         as ``UNKNOWN`` — the LLM specialist repairs from the raw log so a
         brand-new gap type never wedges the run.
 
-        On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
-        different bridging PR leads, and the notes flag that prior attempts
-        reverted — steering the sub-agent toward a different bridge.
+        After a round that bought no ground (``attempt > 0``) the ranked
+        candidate list is *rotated* so a different bridging PR leads, and the
+        notes flag the revert — steering the sub-agent toward a different bridge.
 
         Args:
             launch_log: Captured launch / traceback text.
-            attempt: Zero-based dispatch index; drives candidate rotation and a
-                retry hint in the mandate.
+            attempt: Consecutive rounds that cleared nothing; drives candidate
+                rotation and a retry hint in the mandate. Zero after an advance,
+                so a progressing bring-up is never told to change approach.
 
         Returns:
             dict | None: Specialist task params (tagged ``enablement`` +
@@ -181,7 +182,7 @@ class EnablementParams(CoordinatorCollaborator):
             plan,
             deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC),
         )
-        # Lead with a different candidate each attempt (deterministic left-rotation).
+        # Lead with a different candidate each stalled round (deterministic left-rotation).
         if candidate_refs and attempt:
             n = len(candidate_refs)
             k = attempt % n
@@ -239,9 +240,9 @@ class EnablementParams(CoordinatorCollaborator):
             )
         elif attempt:
             notes = (
-                f"RETRY (attempt {attempt + 1}): a previous enablement patch for this "
-                f"failure was REVERTED (did not make the combo runnable). Try a DIFFERENT "
-                f"bridging approach / candidate than before."
+                f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
+                f"patch for this failure was REVERTED (did not make the combo runnable). "
+                f"Try a DIFFERENT bridging approach / candidate than before."
             )
         if grounding_drops:
             drop_note = (

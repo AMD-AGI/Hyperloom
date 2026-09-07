@@ -25,8 +25,8 @@ from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from ..phases._enablement_artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
-from ..state.round_store import BOOTED, FAILED, Round
-from ..state.task_registry import TerminalTaskReuse, create_in_cursor
+from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
+from ..state.task_registry import create_in_cursor
 
 if TYPE_CHECKING:
     from ..bringup import EnvVerdict
@@ -39,10 +39,6 @@ log = _logging.getLogger(__name__)
 
 #: Shortest lease a renewal may stamp.
 _MIN_LEASE_SEC = 300.0
-
-
-class _DuplicateAuthoring(Exception):
-    """The authoring key already names a live specialist, so no round is taken."""
 
 
 class EnablementLane(CoordinatorCollaborator):
@@ -74,14 +70,14 @@ class EnablementLane(CoordinatorCollaborator):
             return ""
         if state.baseline_failure_streak < 1:
             return ""
-        # A monotonic count, not a progress predicate: each attempt seeds a
-        # baseline whose failure seeds the next.
-        if state.enablement.attempts >= _ENABLEMENT_MAX_ATTEMPTS:
+        stalled = await self.rounds.consecutive_stalled()
+        if stalled >= _ENABLEMENT_MAX_ATTEMPTS:
             if not state.stop_reason:
                 state.set_stop_reason("enablement_attempts_exhausted")
                 state.save(self.session_dir)
                 log.warning(
-                    "ENABLEMENT: attempt cap reached (%d); stopping the run",
+                    "ENABLEMENT: %d consecutive rounds bought no ground (cap %d); stopping the run",
+                    stalled,
                     _ENABLEMENT_MAX_ATTEMPTS,
                 )
             return ""
@@ -89,11 +85,10 @@ class EnablementLane(CoordinatorCollaborator):
         if deadline is not None and deadline.expired():
             return ""
         launch_log = state.enablement.launch_log
-        attempt = state.enablement.attempts
         # Reaches the network and stats a checkout on a network mount, so it
         # runs off the tick; discovery degrades to repos-only at the deadline.
         params = await offload(
-            lambda: self._build_enablement_specialist_params(launch_log, attempt=attempt),
+            lambda: self._build_enablement_specialist_params(launch_log, attempt=stalled),
             deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC).tightened_to(deadline),
             label="enablement specialist params",
         )
@@ -108,7 +103,7 @@ class EnablementLane(CoordinatorCollaborator):
         # may block the authoring dispatch below, which is this method's point.
         try:
             await self._maybe_enqueue_specialist_requested_build()
-            await self._maybe_escalate_to_targeted_build(launch_log, attempt=attempt)
+            await self._maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
         except Exception:  # noqa: BLE001 — a build escalation must not cost the round
             log.exception("enablement: build escalation failed")
         from ..actions.executors._multi_node_env import is_multi_node
@@ -116,23 +111,20 @@ class EnablementLane(CoordinatorCollaborator):
         if is_multi_node():
             return ""
         await self._warm_specialist_params(params)
-        idem = f"enablement_authoring:{params['enablement_failure_kind']}:{attempt}"
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_tid = await self._open_authoring_round(
             params=params,
-            idempotency_key=idem,
             lanes=lanes,
             lease_ttl_sec=int(ttl),
         )
         if not spec_tid:
             return ""
-        state.enablement.attempts = attempt + 1
         state.save(self.session_dir)
         log.info(
-            "ENABLEMENT: dispatched authoring specialist kind=%s attempt=%d task=%s",
+            "ENABLEMENT: dispatched authoring specialist kind=%s stalled=%d task=%s",
             params["enablement_failure_kind"],
-            attempt + 1,
+            stalled,
             spec_tid,
         )
         return spec_tid
@@ -230,55 +222,46 @@ class EnablementLane(CoordinatorCollaborator):
         self,
         *,
         params: dict[str, Any],
-        idempotency_key: str,
         lanes: list[str],
         lease_ttl_sec: int,
     ) -> str:
         """Acquire the round and create the specialist that holds it, together.
 
         The holder's task row is written by the acquiring cursor, so the two
-        land together or not at all.
+        land together or not at all. ``holder`` is minted here and never reused,
+        so the task's idempotency key cannot collide; what keeps a second round
+        from opening is the round mutex, not that key.
 
         Args:
             params: The specialist's task params.
-            idempotency_key: Key the specialist row is created under; also the
-                acquire's request id.
             lanes: Lanes the specialist must hold while running.
             lease_ttl_sec: The specialist's lease, and the round's first one.
 
         Returns:
-            str: The holder task id, or ``""`` when nothing was dispatched --
-            the machine was excluded, or the key already names a live round.
+            str: The holder task id, or ``""`` when the machine was excluded.
         """
         holder = uuid.uuid4().hex
 
         def _join(cur: sqlite3.Cursor) -> None:
-            _task, existing = create_in_cursor(
+            create_in_cursor(
                 cur,
                 kind="specialist",
                 params=params,
-                idempotency_key=idempotency_key,
+                idempotency_key=holder,
                 requires_lanes=lanes,
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=lease_ttl_sec,
                 task_id=holder,
             )
-            if existing:
-                raise _DuplicateAuthoring(f"{idempotency_key!r} already names a live authoring specialist")
 
-        try:
-            acquired = await self.rounds.open(
-                f"enablement-{holder}",
-                holder_task_id=holder,
-                lease_sec=float(lease_ttl_sec),
-                now_unix=time.time(),
-                request_id=idempotency_key,
-                join=_join,
-                evidence={"idempotency_key": idempotency_key},
-            )
-        except (_DuplicateAuthoring, TerminalTaskReuse) as exc:
-            log.info("ENABLEMENT: no round opened -- %s", exc)
-            return ""
+        acquired = await self.rounds.open(
+            f"enablement-{holder}",
+            holder_task_id=holder,
+            lease_sec=float(lease_ttl_sec),
+            now_unix=time.time(),
+            request_id=holder,
+            join=_join,
+        )
         if not acquired.ok:
             log.info("ENABLEMENT: round not opened (%s)", acquired.reason)
             return ""
@@ -629,16 +612,20 @@ class EnablementLane(CoordinatorCollaborator):
         archived_config = archive.path_for(ROLE_LAUNCH_CONFIG)
         if status == "kept" and archived_config:
             state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
-        # A rearm always ends the round; only a KEEP booted and was graded.
-        await self._settle_enablement_round(BOOTED if status == "kept" else FAILED, reason=status)
+        # A rearm always ends the round; only a KEEP booted and was graded, and
+        # an advance is the ledger's record that the cap must not charge it.
+        is_advanced = status == "advanced" or bool(res.get("advanced"))
+        await self._settle_enablement_round(
+            BOOTED if status == "kept" else ADVANCED if is_advanced else FAILED,
+            reason=status,
+        )
         state.save(self.session_dir)
         log.info(
-            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s stacked=%d next_attempt=%d%s",
+            "ENABLEMENT: rearm from integrate status=%s succeeded=%s advanced=%s stacked=%d%s",
             status,
             bool(state.enablement.succeeded),
-            status == "advanced" or bool(res.get("advanced")),
+            is_advanced,
             len(state.enablement.kept_patches),
-            state.enablement.attempts,
             f" stop_reason={stop_set}" if stop_set else "",
         )
 

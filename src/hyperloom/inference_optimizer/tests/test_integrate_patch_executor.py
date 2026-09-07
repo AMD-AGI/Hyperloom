@@ -792,7 +792,7 @@ async def test_executor_config_changes_only_no_patches(tmp_path: Path):
     )
     result = await executor(ctx)
     assert result["status"] == "applied_no_bench"
-    assert result["config_changes_applied"] == {"VLLM_USE_AITER": "1"}
+    assert result["extra_envs_applied"] == {"VLLM_USE_AITER": "1"}
     assert result["patches_applied"] == []
 
 
@@ -1277,7 +1277,7 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
     down verbatim -- redacting where the list is built would hand pip a masked
     URL. It is redacted at the artifact writer instead.
     """
-    from hyperloom.orchestrator.phases import _enablement_artifacts as art
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _sanitize_setup_command
 
     cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
     monkeypatch.setattr(
@@ -1288,36 +1288,8 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
     # Replay must still work: the stored command is the one that ran.
     assert out["applied"] == [cmd]
 
-    written = [art._sanitize_setup_command(c) for c in out["applied"]]
+    written = [_sanitize_setup_command(c) for c in out["applied"]]
     assert "ghp_notarealtoken" not in " ".join(written), "the artifact would carry the token"
-
-
-def test_round_artifact_on_disk_carries_no_credential(tmp_path):
-    """Assert on the file, not on the helper.
-
-    The test above checks ``_sanitize_setup_command`` in isolation, which stays
-    green if the call is dropped from the writer -- and the writer is the thing
-    that produces the durable artifact. ``round.json`` is copied into the
-    archive and read back by later sessions, so a token in it outlives the run.
-    """
-    import json
-
-    from hyperloom.orchestrator.phases import _enablement_artifacts as art
-
-    token = "ghp_notarealtoken"
-    art.snapshot_round(
-        tmp_path,
-        {
-            "status": "ok",
-            "specialist_task_id": "t1",
-            "setup_commands_applied": [f"pip install --index-url https://u:{token}@pkgs.internal/simple aiperf"],
-        },
-    )
-
-    written = (art.enablement_round_dir(tmp_path, "t1") / "round.json").read_text(encoding="utf-8")
-    assert token not in written, "the durable round artifact carried a credential"
-    # Still a usable record of what ran, not an empty field.
-    assert "pip install" in json.loads(written)["setup_commands_applied"][0]
 
 
 def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
@@ -1614,11 +1586,10 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 
     variant = captured["grid"][0]
     assert captured["base_extra_args"] == "--base-flag value"
+    assert captured["base_extra_envs"] == {"BASE_ENV": "1"}
     assert variant.extra_server_args == extra_args
-    assert variant.extra_envs == {
-        "BASE_ENV": "1",
-        "VLLM_ROCM_USE_AITER": "1",
-    }
+    # Variant carries only the proposal envs; base envs go to run_grid.
+    assert variant.extra_envs == {"VLLM_ROCM_USE_AITER": "1"}
 
 
 @pytest.mark.asyncio

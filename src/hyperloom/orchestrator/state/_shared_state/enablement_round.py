@@ -34,7 +34,6 @@ class EnablementRound:
     # ``launch_log``: captured launch/traceback text when baseline cannot launch.
     launch_log: str = ""
     launch_observation_path: str = ""
-    attempts: int = 0
     succeeded: bool = False
     # Task id of the most recently completed enablement specialist round.
     last_specialist_task_id: str = ""

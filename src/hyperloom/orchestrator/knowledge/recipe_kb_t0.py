@@ -24,7 +24,6 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_frame
 from hyperloom.inference_optimizer.session.session_paths import (
     recipe_kb_lessons_json,
     recipe_kb_pitfalls_json,
-    recipe_kb_warm_json,
 )
 
 
@@ -1118,37 +1117,13 @@ def run_t0_anchor(
             config_donor_tier = dtier
             config_donor_conf = dconf
 
-    # Keep warm.json envelope shape stable; new readers prefer shared_state.warm_start_recipe.
-    warm_text = json.dumps(
-        {"points": [warm_point] if warm_point else []},
-        sort_keys=True,
-    )
-    try:
-        warm_path = recipe_kb_warm_json(sd)
-        warm_path.parent.mkdir(parents=True, exist_ok=True)
-        warm_path.write_text(
-            json.dumps(
-                {
-                    "workload": workload,
-                    "hw": hw,
-                    "tier": warm_tier,
-                    "confidence": warm_conf,
-                    "recipe": warm_point,
-                    "raw": warm_text,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        shared_state.warm_start_recipe = {
-            "workload": workload,
-            "hw": hw,
-            "tier": warm_tier,
-            "confidence": warm_conf,
-            "recipe": warm_point,
-        }
-    except OSError as exc:
-        log.warning("warm_start snapshot write failed: %s", exc)
+    shared_state.warm_start_recipe = {
+        "workload": workload,
+        "hw": hw,
+        "tier": warm_tier,
+        "confidence": warm_conf,
+        "recipe": warm_point,
+    }
 
     # WarmStartContext: model-facing projection of the KB result, with an explicit hit/seed_only/miss status.
     if not warm_point:

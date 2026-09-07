@@ -305,10 +305,9 @@ def test_current_setting_sh_is_included(tmp_path: Path) -> None:
 
 
 def test_enablement_artifacts_are_included(tmp_path: Path) -> None:
-    """reports/enablement/** covers round.json, patches, and the setting script."""
+    """reports/enablement/** covers patches and the setting script."""
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
-    _write(sd / "reports" / "enablement" / "tid-abc" / "round.json", '{"status":"kept"}')
     _write(sd / "reports" / "enablement" / "tid-abc" / "patches" / "001_fix.patch", "diff\n")
     _write(sd / "reports" / "enablement" / "enablement_setting.sh", "#!/usr/bin/env bash\n")
     dest = tmp_path / "ws"
@@ -316,7 +315,6 @@ def test_enablement_artifacts_are_included(tmp_path: Path) -> None:
     out = package_session_artifacts(sd, session_id="en-sid", dest_root=dest)
     assert out is not None
     names = _zip_names(out)
-    assert "reports/enablement/tid-abc/round.json" in names
     assert "reports/enablement/tid-abc/patches/001_fix.patch" in names
     assert "reports/enablement/enablement_setting.sh" in names
 

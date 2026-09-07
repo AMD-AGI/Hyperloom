@@ -251,8 +251,8 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Enablement gave up without a booting baseline: a revalidation the
         # round depended on never promoted.
         "enablement_stalled",
-        # Enablement attempt cap: as many authoring attempts as the session is
-        # allowed have been opened. Bounds dispatches rather than evidence.
+        # Enablement attempt cap: too many consecutive rounds bought no ground.
+        # A bring-up that is still advancing is bounded by the run's wall clock.
         "enablement_attempts_exhausted",
         # The baseline could not produce an accuracy result even though the
         # accuracy test was expected to run (broken eval / missing quality

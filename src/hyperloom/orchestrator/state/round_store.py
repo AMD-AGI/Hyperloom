@@ -38,6 +38,9 @@ BOOTED = "booted"
 FAILED = "failed"
 ABANDONED = "abandoned"
 
+#: The round cleared a new boot failure without reaching a clean boot.
+ADVANCED = "advanced"
+
 #: The lease ran out and the holder's processes were confirmed killed.
 EXPIRED_REAPED = "expired_reaped"
 
@@ -48,7 +51,7 @@ EXPIRED_UNREAPED = "expired_unreaped"
 #: confirmed the holder dead or did not.
 EXPIRY_OUTCOMES = frozenset({EXPIRED_REAPED, EXPIRED_UNREAPED})
 
-OUTCOMES = frozenset({BOOTED, FAILED, ABANDONED, *EXPIRY_OUTCOMES})
+OUTCOMES = frozenset({BOOTED, FAILED, ABANDONED, ADVANCED, *EXPIRY_OUTCOMES})
 
 #: Rejection reasons, recorded on the outbox row.
 UNKNOWN_ROUND = "unknown_round"
@@ -663,6 +666,30 @@ class RoundStore:
             (float(now_unix),),
         )
         return [Round.from_row(r) for r in rows]
+
+    async def consecutive_stalled(self) -> int:
+        """Count the newest settled rounds that bought no ground.
+
+        The scan stops at the first :data:`BOOTED` or :data:`ADVANCED` round.
+        A round the machine ended -- :data:`ABANDONED` or expired -- proves
+        nothing either way and is skipped rather than counted.
+
+        Returns:
+            int: Consecutive stalled rounds, newest first.
+        """
+        rows = await self.db.fetchall(
+            "SELECT outcome FROM bringup_rounds WHERE state = ? ORDER BY settled_unix DESC",
+            (SETTLED,),
+        )
+        neutral = {ABANDONED, *EXPIRY_OUTCOMES}
+        count = 0
+        for row in rows:
+            outcome = row["outcome"]
+            if outcome in (BOOTED, ADVANCED):
+                break
+            if outcome not in neutral:
+                count += 1
+        return count
 
 
 def _load(cur: sqlite3.Cursor, round_id: str) -> Round | None:

@@ -309,7 +309,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
     "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
-    "enablement_attempts_exhausted": "The enablement loop used its whole attempt allowance without producing a baseline that boots, so it stopped instead of retrying indefinitely.",
+    "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
         "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "

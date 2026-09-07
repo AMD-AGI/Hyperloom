@@ -148,19 +148,19 @@ async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
     )
 
 
-def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: str, *, attempts: int):
+def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: str):
     """Build the collaborator surface the enablement lane runs against.
 
     Only the coordinator attributes the lane actually reads are supplied; the
-    lane's own methods are the real ones, so admission, the idempotency key and
-    the registry row are all production behaviour.
+    lane's own methods are the real ones, so admission and the registry row are
+    all production behaviour. The cap is derived from the ledger (rounds),
+    so callers pre-seed the round store to set up the desired precondition.
 
     Args:
         session: The session root.
         tasks: The real task registry rows are created in.
         rounds: The real round store the lane acquires from.
         launch_log: The failure the round is repairing.
-        attempts: How many enablement attempts have already been made.
 
     Returns:
         A shim carrying the real ``EnablementLane`` methods.
@@ -169,12 +169,12 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         framework="vllm",
         model_name="scripted/Model",
         model_path="",
+        reference_model="",
         gpu_type="mi300x",
         enablement_mode="all",
-        enablement=EnablementRound(attempts=attempts, launch_log=launch_log),
+        enablement=EnablementRound(launch_log=launch_log),
         baseline_tput=0.0,
         baseline_failure_streak=1,
-        tick=attempts,
         stop_reason="",
         save=lambda *a, **k: None,
     )
@@ -306,7 +306,7 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         # and the cards outlive the process that held them by longer still. The
         # next tick is therefore on the far side of that grace.
         monkeypatch.setattr(time, "time", _advanced_by(1.0))
-        lane = _lane(session, tasks, rounds, excerpt.text if excerpt is not None else "", attempts=tick)
+        lane = _lane(session, tasks, rounds, excerpt.text if excerpt is not None else "")
         task_id = await lane._maybe_enqueue_enablement_specialist()
         assert task_id, "the lane opened no repair task for a boot that failed"
         row = await tasks.get(task_id)
@@ -438,7 +438,6 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
 
     state = coordinator.shared_state
     state.enablement_mode = "all"
-    state.enablement.attempts = 2
     state.enablement.kept_patches = ["srt/attention.py"]
 
     played = await _settle_failures(coordinator, session, slot, len(launches.scenario.attempts))
@@ -454,13 +453,29 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
     assert launches.served == 3
 
 
+async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
+    """Settle N FAILED rounds into the ledger as precondition for cap tests."""
+
+    for i in range(n):
+        rid = f"seed-failed-{i:03d}"
+        holder = f"holder-{i:03d}"
+        now = float(i)
+        await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=now, request_id=rid)
+        await rounds.settle(
+            rid, holder_task_id=holder, fence=1, outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}"
+        )
+
+
 @pytest.mark.asyncio
 async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     round_slot,
     registry,
     monkeypatch,
 ):
-    """The allowance is spent by counting, so a progressing round still ends."""
+    """Consecutive rounds that repair nothing exhaust the cap and stop the run.
+
+    The cap is derived from the ledger, so we seed FAILED rounds directly.
+    """
     import hyperloom.agents.framework.sources as sources
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
@@ -473,9 +488,9 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     tasks, rounds, _locks = registry
     launch_log = boot_log_for(LadderStage.ENGINE_INIT)
 
-    # One under the cap still dispatches, so the cap is what stops the next one
-    # rather than something else about a round this deep.
-    lane = _lane(session, tasks, rounds, launch_log, attempts=_ENABLEMENT_MAX_ATTEMPTS - 1)
+    # One under the cap: the lane still dispatches.
+    await _seed_failed_rounds(rounds, _ENABLEMENT_MAX_ATTEMPTS - 1)
+    lane = _lane(session, tasks, rounds, launch_log)
     assert await lane._maybe_enqueue_enablement_specialist()
     assert not lane.shared_state.stop_reason
     # That round has to end before the next one can ask for the machine, and a
@@ -483,10 +498,52 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert await rounds.held() is None
 
-    lane = _lane(session, tasks, rounds, launch_log, attempts=_ENABLEMENT_MAX_ATTEMPTS)
+    # Now at the cap: the lane must stop.
+    assert await rounds.consecutive_stalled() == _ENABLEMENT_MAX_ATTEMPTS
     assert await lane._maybe_enqueue_enablement_specialist() == ""
     assert lane.shared_state.stop_reason == "enablement_attempts_exhausted"
-    assert int(lane.shared_state.enablement.attempts) == _ENABLEMENT_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_an_advancing_round_does_not_exhaust_the_cap(
+    round_slot,
+    registry,
+    monkeypatch,
+):
+    """An advancing round resets the streak so a bring-up outlives the cap.
+
+    The cap counts consecutive stalled rounds; ADVANCED resets the streak.
+    """
+    import hyperloom.agents.framework.sources as sources
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
+    from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_ATTEMPTS
+
+    monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
+    monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
+
+    session, _slot = round_slot
+    tasks, rounds, _locks = registry
+    launch_log = boot_log_for(LadderStage.ENGINE_INIT)
+
+    # Seed cap - 1 failed rounds so the next dispatch brings us to cap - 1 stalled.
+    await _seed_failed_rounds(rounds, _ENABLEMENT_MAX_ATTEMPTS - 1)
+    lane = _lane(session, tasks, rounds, launch_log)
+    assert await lane._maybe_enqueue_enablement_specialist()
+    assert not lane.shared_state.stop_reason
+
+    # An advancing result settles the open round as ADVANCED, resetting the streak.
+    await lane._maybe_rearm_enablement(
+        {"enablement": True, "status": "advanced", "patches_applied": ["vllm/platforms/rocm.py"]}
+    )
+    assert await rounds.held() is None
+    assert await rounds.consecutive_stalled() == 0
+
+    # The advance cleared the failure backstop; a new baseline failure lets the
+    # lane dispatch again, and the run is still live.
+    lane.shared_state.baseline_failure_streak = 1
+    assert await lane._maybe_enqueue_enablement_specialist()
+    assert not lane.shared_state.stop_reason
 
 
 @pytest.mark.asyncio
@@ -505,7 +562,7 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
 
     session, _slot = round_slot
     tasks, rounds, _locks = registry
-    lane = _lane(session, tasks, rounds, boot_log_for(LadderStage.ENGINE_INIT), attempts=0)
+    lane = _lane(session, tasks, rounds, boot_log_for(LadderStage.ENGINE_INIT))
     assert await lane._maybe_enqueue_enablement_specialist()
     held = await rounds.held()
     assert held is not None

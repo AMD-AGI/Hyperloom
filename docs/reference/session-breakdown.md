@@ -669,7 +669,7 @@ a round: a round has to outlive the process that took it, so no field in
 |------------------------|---------------|---------------------------------------------------------------------------------------------------|
 | `round_id`             | string        | Identity of the round.                                                                              |
 | `state`                | string        | `open` while a holder has it, `settled` once it ended.                                              |
-| `outcome`              | string        | `booted` / `failed` / `abandoned` / `expired_reaped` / `expired_unreaped`; empty while open.        |
+| `outcome`              | string        | `booted` / `advanced` / `failed` / `abandoned` / `expired_reaped` / `expired_unreaped`; empty while open. `advanced` means the round cleared a new boot failure but the model did not yet boot cleanly.  |
 | `holder_task_id`       | string        | Task holding it (specialist, or the integrate that took it over).                                   |
 | `fence`                | int           | The holder's token; only a handoff advances it.                                                     |
 | `opened_unix`          | float         | When the round was acquired.                                                                        |
@@ -681,7 +681,8 @@ These three stopped being emitted in the v6 export that added `rounds[]`.
 
 | Field              | Disposition                                                                                                                          |
 |--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `stall_streak`     | **Removed.** A counter on session state could be resurrected by a crash between the round and the write. What bounds a session that cannot boot is now the attempt cap, reported as the `enablement_attempts_exhausted` stop reason. |
+| `attempts`         | **Removed.** A dispatch counter on session state duplicated the ledger's `round_count`. The ledger is the authoritative source; `rounds[].round_count` replaces it. |
+| `stall_streak`     | **Removed.** A counter on session state could be resurrected by a crash between the round and the write. What bounds a session whose rounds stop clearing boot failures is now the attempt cap, reported as the `enablement_attempts_exhausted` stop reason; a session still advancing is bounded by the run's wall clock. |
 | `inflight_task_id` | **Renamed** to `round_holder_task_id`, and re-sourced. It named the authoring specialist; the round it stood for also covers the integrate that consumes the specialist's deliverable, and the holder is whichever of the two currently has it. |
 | `dispatch_tick`    | **Removed.** It dated a round by a coordinator tick counter that no consumer could convert to a time. `rounds[].opened_unix` dates the same event in wall-clock seconds. |
 

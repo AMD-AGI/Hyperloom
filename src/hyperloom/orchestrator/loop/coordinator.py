@@ -38,9 +38,10 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Enablement attempt cap: authoring attempts one session may open, in total.
-# Bounds the loop by dispatches, which a round consumes even when its boot
-# produced no observation to charge.
+# Enablement attempt cap: consecutive settled rounds that made no progress
+# before the lane stops dispatching. Advancing rounds (outcome ADVANCED or
+# BOOTED) reset the streak; abandoned and expired rounds are skipped.
+# The wall clock is the outer bound for a bring-up still making progress.
 _ENABLEMENT_MAX_ATTEMPTS: int = 8
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
@@ -604,7 +605,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._resumed_from = self._detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
-        self._reap_orphaned_servers_best_effort()
+        self._reap_orphaned_servers_best_effort(phase="boot")
         # Before any bring-up can dispatch: an attempt classified against a
         # different pin is not comparable with its neighbours.
         self._pin_source_trees()

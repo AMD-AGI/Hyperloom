@@ -289,7 +289,6 @@ def _enqueue_self(**state_kw):
         enablement_mode=state_kw.get("enablement_mode", "all"),
         enablement=EnablementRound(
             succeeded=state_kw.get("enablement_succeeded", False),
-            attempts=state_kw.get("enablement_attempts", 0),
             human_review_logged=state_kw.get("enablement_human_review_logged", []),
             kept_patches=state_kw.get("enablement_kept_patches", []),
             launch_log=state_kw.get("enablement_launch_log", _MISSING_ARCH_LOG),
@@ -413,7 +412,6 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch):
     # The round was acquired by the specialist itself, and both landed.
     held = await fake.rounds.held()
     assert held is not None and held.holder_task_id == tid
-    assert fake.shared_state.enablement.attempts == 1
     rows = await _queued_of_kind(fake, "specialist")
     assert [r.task_id for r in rows] == [tid]
     assert rows[0].params["enablement"] is True
@@ -483,20 +481,18 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
     # First dispatch.
     tid1 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid1
-    assert fake.shared_state.enablement.attempts == 1
-    first_idem = (await fake.tasks.get(tid1)).idempotency_key
+    first_params = (await fake.tasks.get(tid1)).params
 
     # Simulate the authored patch being REVERTED -> the rearm settles the round.
     await fake._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert await fake.rounds.held() is None
     assert fake.shared_state.enablement.succeeded is False
 
-    # Next tick re-dispatches with a new attempt index + distinct idempotency.
+    # Next tick re-dispatches (round mutex prevents stacking; second round is new).
     tid2 = await Coordinator._maybe_enqueue_enablement_specialist(fake)
     assert tid2 and tid2 != tid1
-    assert fake.shared_state.enablement.attempts == 2
     second = await fake.tasks.get(tid2)
-    assert first_idem != second.idempotency_key
+    # The settled failed round bumps the dispatch ordinal from 0 -> 1.
     assert second.params["enablement_attempt"] == 1
     # Retry mandate flags the prior revert.
     assert "RETRY" in second.params["notes"]

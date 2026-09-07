@@ -239,8 +239,8 @@ def test_collect_enablement_boot_origin_round_surfaced():
         Path("/tmp"),
         _state(
             enablement_mode="launch",
-            enablement_attempts=1,
             enablement_succeeded=True,
+            enablement_kept_patches=["/tmp/patches/001.patch"],
             enablement_last_specialist_task_id="spec-1",
             enablement_launch_log="EngineCore failed to start.\nTraceback (most recent call last):",
             enablement_attempt_runtimes=[],
@@ -254,7 +254,6 @@ def test_collect_enablement_boot_origin_round_surfaced():
     # No session database under this root, so no round is reported as open.
     assert out["dispatched"] is False
     assert out["origin"] == "boot"
-    assert out["attempts"] == 1
     assert out["succeeded"] is True
     assert out["last_specialist_task_id"] == "spec-1"
     assert "EngineCore failed to start." in out["launch_log_excerpt"]
@@ -285,7 +284,7 @@ def test_collect_enablement_reads_the_open_round_from_the_store(tmp_path):
             )
         )
         assert opened.ok
-        out = collect_enablement(tmp_path, _state(enablement_mode="launch", enablement_attempts=1), [])
+        out = collect_enablement(tmp_path, _state(enablement_mode="launch", enablement_launch_log="boot failed"), [])
     finally:
         db.close()
     assert out["dispatched"] is True
@@ -298,7 +297,6 @@ def test_collect_enablement_opt_out_recorded_but_armed_idle_hidden():
     off_out = collect_enablement(Path("/tmp"), _state(enablement_mode="off"), [])
     assert off_out["mode"] == "off"
     assert off_out["engaged"] is False
-    assert off_out["attempts"] == 0
     assert collect_enablement(Path("/tmp"), _state(enablement_mode="all"), []) == {}
     # A session predating the flag loads with the SharedState default.
     assert collect_enablement(Path("/tmp"), _state(), []) == {}
@@ -309,7 +307,6 @@ def test_collect_enablement_kept_patches_relativized_and_log_bounded():
         Path("/tmp/sess"),
         _state(
             enablement_mode="all",
-            enablement_attempts=2,
             enablement_kept_patches=["/tmp/sess/patches/001_fix.patch"],
             enablement_kept_stack_action={"kind": "runtime_candidate", "framework": "vllm"},
             enablement_candidate_refs=["PR:901"],
@@ -338,7 +335,7 @@ def test_collect_enablement_framework_root_surfaced():
         [],
     )
     assert out["framework_root"] == "/sgl-workspace/sglang"
-    assert "framework_root" not in collect_enablement(Path("/tmp/sess"), _state(enablement_attempts=1), [])
+    assert "framework_root" not in collect_enablement(Path("/tmp/sess"), _state(enablement_kept_patches=["x"]), [])
 
 
 def test_collect_enablement_setting_script_field(tmp_path):
@@ -348,7 +345,7 @@ def test_collect_enablement_setting_script_field(tmp_path):
 
     out = collect_enablement(
         tmp_path,
-        _state(enablement_attempts=1),
+        _state(enablement_kept_patches=["x"]),
         [],
     )
     assert out.get("setting_script") == "reports/enablement/enablement_setting.sh"
@@ -357,7 +354,7 @@ def test_collect_enablement_setting_script_field(tmp_path):
 def test_collect_enablement_setting_script_absent_when_no_file(tmp_path):
     out = collect_enablement(
         tmp_path,
-        _state(enablement_attempts=1),
+        _state(enablement_kept_patches=["x"]),
         [],
     )
     assert "setting_script" not in out
@@ -371,7 +368,7 @@ def test_collect_enablement_kept_artifacts_included():
     out = collect_enablement(
         Path("/tmp/sess"),
         _state(
-            enablement_attempts=1,
+            enablement_kept_patches=["x"],
             enablement_kept_artifacts=[
                 {
                     "target": "/sgl-workspace/sglang/srt/foo.py",
@@ -397,7 +394,7 @@ def test_collect_enablement_kept_artifacts_tolerates_dirty_entries():
     out = collect_enablement(
         Path("/tmp/sess"),
         _state(
-            enablement_attempts=1,
+            enablement_kept_patches=["x"],
             enablement_kept_artifacts=[
                 "a plain string",
                 None,

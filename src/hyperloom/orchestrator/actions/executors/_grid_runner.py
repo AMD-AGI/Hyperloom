@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 import yaml
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
@@ -460,6 +461,9 @@ def _build_variant_yaml(
     benchmark_script: str | None = None,
     server_lifecycle: dict[str, Any] | None = None,
     base_args_mode: str = "append",
+    base_extra_envs: dict[str, str] | None = None,
+    base_remove_args: list[str] | None = None,
+    base_unset_envs: list[str] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk."""
     with base_yaml_path.open(encoding="utf-8") as f:
@@ -474,11 +478,18 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
+    replacing = str(base_args_mode).strip().lower() == "replace"
+    variant_remove = to_str_list(getattr(variant, "remove_args", []))
+    # A replacing base drops the inherited string wholesale, so only the
+    # variant's own removals still name flags that survive to be stripped.
+    effective_remove = (
+        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
+    )
     combined = compose_server_args(
-        inherited_args="" if str(base_args_mode).strip().lower() == "replace" else str(envs.get(extra_args_env, "")),
+        inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
         base_extra_args=base_extra_args,
         variant_extra_args=variant.extra_server_args,
-        remove_args=getattr(variant, "remove_args", []),
+        remove_args=effective_remove,
         args_mode=getattr(variant, "args_mode", "append"),
     )
     # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
@@ -498,6 +509,14 @@ def _build_variant_yaml(
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     elif extra_args_env in envs:
         envs.pop(extra_args_env, None)
+    # Composed base-then-variant, so a variant unsetting a key the base sets
+    # removes it: the last layer to name a key is the one that decides it.
+    for k in to_str_list(base_unset_envs):
+        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            continue
+        envs.pop(k, None)
+    for k, v in (base_extra_envs or {}).items():
+        envs[str(k)] = str(v)
     for k in getattr(variant, "unset_envs", []) or []:
         # Unsetting a pin retargets the benchmark rather than toggling a knob.
         if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
@@ -1054,6 +1073,9 @@ async def run_grid(
     soft_deadline_sec: float | None = None,
     server_lifecycle: dict[str, Any] | None = None,
     base_args_mode: str = "append",
+    base_extra_envs: dict[str, str] | None = None,
+    base_remove_args: list[str] | None = None,
+    base_unset_envs: list[str] | None = None,
     warmup_before_measure: bool | None = None,
     preclean_before_run: bool = True,
     server_already_ready: bool = False,
@@ -1312,6 +1334,9 @@ async def run_grid(
                 benchmark_script=benchmark_script,
                 server_lifecycle=server_lifecycle,
                 base_args_mode=base_args_mode,
+                base_extra_envs=base_extra_envs,
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -1373,6 +1398,9 @@ async def run_grid(
                             "port": int(lifecycle.get("port") or 0),
                         },
                         base_args_mode=base_args_mode,
+                        base_extra_envs=base_extra_envs,
+                        base_remove_args=base_remove_args,
+                        base_unset_envs=base_unset_envs,
                     )
                 else:
                     log.info(
@@ -1406,6 +1434,9 @@ async def run_grid(
                     benchmark_script=benchmark_script,
                     server_lifecycle=warmup_lifecycle,
                     base_args_mode=base_args_mode,
+                    base_extra_envs=base_extra_envs,
+                    base_remove_args=base_remove_args,
+                    base_unset_envs=base_unset_envs,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning(
