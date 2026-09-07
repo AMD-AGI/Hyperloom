@@ -176,9 +176,8 @@ run:
 - [`3h`](hyperloom-qwen3-8b-3h/SKILL.md) — Qwen3-8B, short no-kernel run; best
   for a first end-to-end check.
 - [`12h`](hyperloom-qwen3-14b-fp8-12h/SKILL.md) — Qwen3-14B-FP8, medium-length FP8 run.
-- [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run with
-  the per-kernel KernelForge backend instead of GEAK. Setup asks which backend
-  to use after you pick `12h`.
+- [`12h forge`](hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md) — the same run on the
+  KernelForge kernel backend.
 - [`custom advanced`](hyperloom-custom-advanced/SKILL.md) — user-selected model,
   framework, TP/EP, concurrency, ISL/OSL, precision, budget, phase toggles, and
   advanced CLI flags.

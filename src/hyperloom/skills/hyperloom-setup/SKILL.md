@@ -344,8 +344,7 @@ phase to route) or for `custom advanced` (that skill collects its own flags).
 
 Present exactly these two option labels in this order:
 
-1. `geak (Recommended)` — the default backend, which owns the whole kernel
-   phase.
+1. `geak` — the default backend, which owns the whole kernel phase.
 2. `forge` — the per-kernel KernelForge backend.
 
 Both options run the identical Qwen3-14B-FP8 workload and budget; only the
@@ -354,9 +353,9 @@ kernel backend differs, so the two runs stay directly comparable.
 The choice selects which demo skill to load and sets
 `KERNEL_OPT_BACKEND_ORDER`:
 
-- `geak (Recommended)` → load `hyperloom-qwen3-14b-fp8-12h`. Leave
-  `KERNEL_OPT_BACKEND_ORDER` unset, or write `geak`; anything other than an
-  exact `forge` already means GEAK.
+- `geak` → load `hyperloom-qwen3-14b-fp8-12h`. Leave `KERNEL_OPT_BACKEND_ORDER`
+  unset, or write `geak`; anything other than an exact `forge` already means
+  GEAK.
 - `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge` and write
   `KERNEL_OPT_BACKEND_ORDER=forge` to `.env` so a `--resume-from` relaunch keeps
   the same backend.
@@ -391,7 +390,7 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 `.claude/skills/`, `.cursor/skills/`); load the matching one by name:
 
 - `3h` → `hyperloom-qwen3-8b-3h`
-- `12h` + `geak (Recommended)` → `hyperloom-qwen3-14b-fp8-12h`
+- `12h` + `geak` → `hyperloom-qwen3-14b-fp8-12h`
 - `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge`
 - `custom advanced` → `hyperloom-custom-advanced`
 
