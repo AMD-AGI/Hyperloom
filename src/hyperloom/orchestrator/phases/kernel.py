@@ -724,6 +724,7 @@ class KernelPhase(PhaseHandler):
         gpu_pin = _resolve_gpu_pin(recipe_envs=_recipe_envs)
         # Resolve TP and GPU ids together so the values cannot disagree.
         _tp = _coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
+        # Clamp ids to the visible mask, then TP to the resulting device set.
         _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
         _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
         _gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
