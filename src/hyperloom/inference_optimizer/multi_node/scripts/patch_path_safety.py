@@ -1,10 +1,4 @@
-"""Path constraints for kernel patch apply/revert on inference pods (stdlib only).
-
-Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
-(RayJob). Restricts patch targets to vLLM/SGLang/AITER install roots, keeps
-backups under ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default
-``/var/kernel_patch_backups``), and hosts the atomic write both apply paths use.
-"""
+"""Path constraints for kernel patch apply/revert on inference pods (stdlib only)."""
 
 from __future__ import annotations
 
@@ -16,8 +10,7 @@ from pathlib import Path
 
 _DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
 
-# Superset of orchestrator.framework.paths._STATIC_PATCH_FALLBACK_ROOTS
-# (adds the /sgl-workspace/* image roots).
+# Superset of orchestrator.framework.paths._STATIC_PATCH_FALLBACK_ROOTS (adds the /sgl-workspace/* image roots).
 _DEFAULT_PATCH_TARGET_ROOTS: tuple[str, ...] = (
     "/sgl-workspace/aiter/",
     "/sgl-workspace/sglang/",
@@ -44,14 +37,7 @@ _ALLOWED_EDITABLE_ROOTS = frozenset({"/sgl-workspace/aiter", "/sgl-workspace/sgl
 
 
 def _normalize_root(path: str) -> str:
-    """Normalize a root path to a trailing-slash form.
-
-    Args:
-        path: Raw path string.
-
-    Returns:
-        str: Stripped path with a trailing slash, or empty when blank.
-    """
+    """Normalize a root path to a trailing-slash form."""
     p = str(path or "").strip()
     if not p:
         return ""
@@ -59,14 +45,7 @@ def _normalize_root(path: str) -> str:
 
 
 def _merge_roots(*groups: tuple[str, ...]) -> tuple[str, ...]:
-    """Merge root groups, dropping blanks and duplicates.
-
-    Args:
-        *groups: One or more ordered root groups.
-
-    Returns:
-        tuple[str, ...]: De-duplicated roots in first-seen order.
-    """
+    """Merge root groups, dropping blanks and duplicates."""
     seen: set[str] = set()
     out: list[str] = []
     for group in groups:
@@ -78,13 +57,7 @@ def _merge_roots(*groups: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def resolve_patch_target_roots() -> tuple[str, ...]:
-    """Return allowed framework roots for patch targets.
-
-    Merges static defaults with ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
-
-    Returns:
-        tuple[str, ...]: Normalized framework root prefixes.
-    """
+    """Return allowed framework roots for patch targets."""
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
     env_roots: list[str] = []
     for raw in env.split(":") if env else ():
@@ -106,25 +79,13 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
 
 
 def resolve_kernel_backup_root() -> Path:
-    """Resolve the allowed kernel backup directory on the pod.
-
-    Returns:
-        Path: Absolute backup root from ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR``.
-    """
+    """Resolve the allowed kernel backup directory on the pod."""
     raw = (os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR") or _DEFAULT_KERNEL_BACKUP_ROOT).strip()
     return Path(raw).resolve()
 
 
 def _path_under_root(path: Path, root: Path) -> bool:
-    """Return whether ``path`` is ``root`` or nested under ``root``.
-
-    Args:
-        path: Path to test (need not exist).
-        root: Allowed root directory.
-
-    Returns:
-        bool: True when ``path`` resolves under ``root``.
-    """
+    """Return whether ``path`` is ``root`` or nested under ``root``."""
     try:
         path.resolve().relative_to(root.resolve())
         return True
@@ -133,15 +94,7 @@ def _path_under_root(path: Path, root: Path) -> bool:
 
 
 def assert_target_path_allowed(target: Path, *, must_exist: bool = False) -> None:
-    """Raise ValueError when ``target`` is outside framework patch roots.
-
-    Args:
-        target: Pod-side file path to patch or restore.
-        must_exist: When true, require that ``target`` is an existing file.
-
-    Raises:
-        ValueError: When the path is disallowed or missing (if required).
-    """
+    """Raise ValueError when ``target`` is outside framework patch roots."""
     resolved = target.resolve()
     if must_exist and not resolved.is_file():
         raise ValueError(f"target_path does not exist: {target}")
@@ -153,43 +106,21 @@ def assert_target_path_allowed(target: Path, *, must_exist: bool = False) -> Non
 
 
 def assert_backup_dir_allowed(backup_dir: Path) -> None:
-    """Raise ValueError when ``backup_dir`` is outside the kernel backup root.
-
-    Args:
-        backup_dir: Directory where pre-patch backups are written.
-
-    Raises:
-        ValueError: When the directory is outside the allowed backup root.
-    """
+    """Raise ValueError when ``backup_dir`` is outside the kernel backup root."""
     root = resolve_kernel_backup_root()
     if not _path_under_root(backup_dir.resolve(), root):
         raise ValueError(f"backup_dir {backup_dir} not under {root}")
 
 
 def assert_backup_path_allowed(backup: Path) -> None:
-    """Raise ValueError when ``backup`` is outside the kernel backup root.
-
-    Args:
-        backup: Backup file path recorded by a prior apply.
-
-    Raises:
-        ValueError: When the backup path is outside the allowed backup root.
-    """
+    """Raise ValueError when ``backup`` is outside the kernel backup root."""
     root = resolve_kernel_backup_root()
     if not _path_under_root(backup.resolve(), root):
         raise ValueError(f"backup_path {backup} not under {root}")
 
 
 def assert_revert_paths_allowed(target: Path, backup: Path) -> None:
-    """Validate revert target and backup paths before restoring from backup.
-
-    Args:
-        target: Pod-side file path to restore.
-        backup: Recorded backup file from the matching apply.
-
-    Raises:
-        ValueError: When either path is outside its allowed root.
-    """
+    """Validate revert target and backup paths before restoring from backup."""
     assert_target_path_allowed(target, must_exist=False)
     assert_backup_path_allowed(backup)
 
@@ -282,16 +213,7 @@ def finalize_patch_records(records: list[dict]) -> dict:
 
 
 def atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Write ``data`` to ``target`` atomically (tmp file in-dir + ``os.replace``).
-
-    Args:
-        target (Path): Destination file path (parent dirs are created).
-        data (bytes): Bytes to write.
-
-    Raises:
-        OSError: If writing the temp file or replacing the target fails; the
-            temp file is removed first.
-    """
+    """Write ``data`` to ``target`` atomically (tmp file in-dir + ``os.replace``)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(
         prefix=f".{target.name}.",

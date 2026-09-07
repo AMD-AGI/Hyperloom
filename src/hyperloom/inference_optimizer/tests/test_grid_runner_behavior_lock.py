@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``run_grid``: variant-boundary progress,
-``keep_going_on_failure`` asymmetry, and auto-warmup teardown timing."""
+"""Behavior-lock tests for ``run_grid``: variant-boundary progress, ``keep_going_on_failure`` asymmetry, and
+auto-warmup teardown timing.
+"""
 
 from __future__ import annotations
 
@@ -36,8 +37,8 @@ from .conftest import chatty_child, suppression_window_s
 def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root_behavior_lock")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-    # Multi-node client warmup is orthogonal noise; keep it off so the mocked
-    # ``run_with_session_kill`` call counts are unambiguous.
+    # Multi-node client warmup is orthogonal noise; keep it off so the mocked ``run_with_session_kill`` call counts
+    # are unambiguous.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BENCH_WARMUP", "0")
 
 
@@ -102,9 +103,7 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
     return ws
 
 
-# ---------------------------------------------------------------------------
 # Variant-boundary progress matrix
-# ---------------------------------------------------------------------------
 
 
 def _run_capturing_variant_notes(
@@ -149,18 +148,10 @@ def _run_capturing_variant_notes(
 
 
 class TestVariantBoundaryReportsEveryOutcome:
-    """``_report_finished_variant`` fires on every variant outcome, including
-    the multi-node ``mn_server_restart_failed`` path that used to leave before
-    reaching it."""
+    """``_report_finished_variant`` fires on every variant outcome, including"""
 
     def test_mn_server_restart_failed_reaches_the_variant_boundary(self, tmp_path, monkeypatch):
-        """A variant whose remote server never came back still ends its own row.
-
-        This was the one outcome that recorded its result and left, so the row a
-        stall signal reads stayed at ``started`` for the rest of the session
-        while the variant was already over — and unlike a reaped round, nothing
-        else moves the task afterwards to make the stale row harmless.
-        """
+        """A variant whose remote server never came back still ends its own row."""
         # Warmup must be off so multi-node truly hits the restart path.
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
@@ -210,15 +201,11 @@ class TestVariantBoundaryReportsEveryOutcome:
         assert landed == [("c0", 1), ("c1", 2)]
 
 
-# ---------------------------------------------------------------------------
 # keep_going_on_failure asymmetry
-# ---------------------------------------------------------------------------
 
 
 class TestKeepGoingAsymmetry:
-    """The break gates are keyed on ``rc != 0``: an ``rc==0`` failure (invalid
-    measurement, or no workspace) ALWAYS continues to the next variant even when
-    ``keep_going_on_failure=False``; only an ``rc != 0`` failure breaks."""
+    """The break gates are keyed on ``rc != 0``: an ``rc==0`` failure (invalid"""
 
     def _run(self, run_side_effect, base, out):
         with patch(
@@ -286,13 +273,7 @@ class TestKeepGoingAsymmetry:
         assert results[0].returncode == 1
 
     def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
-        """Last-resort: empty pipe and no log files, diagnostic only in report.errors.
-
-        The live scriptable miss writes ``scriptable_stderr.log`` (then aliased
-        to ``benchmark_stderr.log``), so the on-disk log fallback fires first.
-        This fixture is the remaining contract: abort_reason.json still gets
-        ``error`` when nothing on disk exists except the report.
-        """
+        """Last-resort: empty pipe and no log files, diagnostic only in report.errors."""
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
@@ -322,16 +303,14 @@ class TestKeepGoingAsymmetry:
         assert "custom_mi355x.sh" in marker["error"]
 
 
-# ---------------------------------------------------------------------------
 # auto-warmup teardown timing
-# ---------------------------------------------------------------------------
 
 
 class TestAutoWarmupTeardown:
-    """With auto-warmup engaged (single-node, Magpie built-in script,
-    ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP=1``), ``teardown_lifecycle_server`` is
-    called exactly once per variant on each of these paths, keyed on the
-    resolved lifecycle framework/port."""
+    """With auto-warmup engaged (single-node, Magpie built-in script, ``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP=1``),
+    ``teardown_lifecycle_server`` is called exactly once per variant on each of these paths, keyed on the resolved
+    lifecycle framework/port.
+    """
 
     def _run_capture_teardown(self, run_side_effect, base, out):
         teardown_calls: list = []
@@ -361,8 +340,8 @@ class TestAutoWarmupTeardown:
 
     def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
-        # Pin the free-port picker so the teardown-port assertion is
-        # deterministic (baseline uses a per-session free port).
+        # Pin the free-port picker so the teardown-port assertion is deterministic (baseline uses a per-session free
+        # port).
         monkeypatch.setattr(
             "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
             lambda: 8888,
@@ -447,8 +426,7 @@ class TestAutoWarmupTeardown:
         assert teardown_calls[0]["framework"] == "sglang"
 
     def test_warmup_round_timeout_tears_down_once(self, tmp_path, monkeypatch):
-        """Companion path: the warmup round itself times out (its own teardown
-        branch, before the measured round is ever reached)."""
+        """Companion path: the warmup round itself times out (its own teardown"""
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
@@ -466,10 +444,8 @@ class TestAutoWarmupTeardown:
         assert teardown_calls[0]["framework"] == "sglang"
 
 
-# ---------------------------------------------------------------------------
-# _resolve_mn_effective_server_args: prefer the materialized variant YAML;
-# fall back to recomposing from the base YAML when the variant read fails.
-# ---------------------------------------------------------------------------
+# _resolve_mn_effective_server_args: prefer the materialized variant YAML; fall back to recomposing from the base YAML
+# when the variant read fails.
 class TestResolveMnEffectiveServerArgs:
     def _base(self, tmp_path: Path, *, args: str = "--tp 8") -> Path:
         base = tmp_path / "base.yaml"
@@ -497,8 +473,7 @@ class TestResolveMnEffectiveServerArgs:
             base_extra_args="--base-extra",
             base_args_mode="append",
         )
-        # Read verbatim from the variant YAML; the variant/base extras are NOT
-        # re-composed on this happy path.
+        # Read verbatim from the variant YAML; the variant/base extras are NOT re-composed on this happy path.
         assert out == "--tp 8 --chunked-prefill 4096"
 
     def test_variant_env_absent_returns_empty(self, tmp_path):
@@ -544,9 +519,7 @@ class TestResolveMnEffectiveServerArgs:
         assert "--chunked-prefill 2048" in out
 
 
-# ---------------------------------------------------------------------------
 # Per-variant progress heartbeat
-# ---------------------------------------------------------------------------
 
 
 class TestVariantHeartbeat:
@@ -597,16 +570,7 @@ class TestVariantHeartbeat:
         assert landed[0]["output_throughput"] == 800.0
 
     def test_the_note_names_the_variant_that_ran_not_the_last_row(self):
-        """The tail of ``results`` is not always the variant that just reported.
-
-        A stop cause that ends the batch — a session budget spent, an
-        orchestrator cancel — records the round it stopped and then a not-run row
-        for every later variant, so the tail becomes the last variant in the grid
-        while the one that ran is still where it was appended. Taking the note
-        off the tail renames the round in the only durable per-variant artefact
-        the run leaves while it is in flight, and the log line one frame away
-        keeps saying the right thing.
-        """
+        """The tail of ``results`` is not always the variant that just reported."""
         grid = [GridVariant(name=f"c{i}") for i in range(3)]
         stopped = gr.VariantResult(
             name="c0",
@@ -680,12 +644,7 @@ class TestVariantHeartbeat:
         monkeypatch,
         progress_cadence,
     ):
-        """Entry markers alone leave the row silent for a whole variant timeout.
-
-        The benchmark is the longest single block in the session; bounding the
-        gap between notes is the only assertion a dropped liveness callback
-        cannot pass.
-        """
+        """Entry markers alone leave the row silent for a whole variant timeout."""
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)

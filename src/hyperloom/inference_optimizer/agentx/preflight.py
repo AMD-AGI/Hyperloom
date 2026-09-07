@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX preflight: resolve and capability-check the aiperf binary.
-
-``HYPERLOOM_AGENTX`` needs an aiperf build with AgentX (``weka-trace``) support.
-This module verifies *capability*, not mere existence, so a plain mainline
-aiperf on ``PATH`` fails loud with actionable guidance instead of erroring deep
-inside a benchmark run.
-"""
+"""AgentX preflight: resolve and capability-check the aiperf binary."""
 
 from __future__ import annotations
 
@@ -20,14 +14,7 @@ from typing import Callable, Mapping, Optional
 
 
 class AgentXPreflightError(RuntimeError):
-    """Raised when the aiperf binary is missing or not AgentX-capable.
-
-    ``repairable`` separates "this box does not have the build we pin" -- which
-    ``agentx.repair`` can fix by running the packaged installer -- from "the
-    operator asked for something this build will not do", which reinstalling the
-    same pinned build cannot change. Carried as a flag set at each raise site
-    rather than inferred from the message, so the two never drift apart.
-    """
+    """Raised when the aiperf binary is missing or not AgentX-capable."""
 
     def __init__(self, *args: object, repairable: bool = False) -> None:
         super().__init__(*args)
@@ -39,16 +26,14 @@ def resolve_aiperf_bin(env: Mapping[str, str]) -> Optional[str]:
     override = (env.get("AIPERF_BIN") or "").strip()
     if override:
         return override
-    # Resolve against the SAME PATH the benchmark subprocess will use (the child
-    # env), not this process's os.environ, so preflight probes the binary that
-    # actually runs. Falls back to os.environ PATH when env has none.
+    # Resolve against the SAME PATH the benchmark subprocess will use (the child env), not this process's os.environ,
+    # so preflight probes the binary that actually runs.
     return shutil.which("aiperf", path=env.get("PATH"))
 
 
 SCENARIO_NAME = "inferencex-agentx-mvp"
 
-# Corpora aiperf_client.sh can select on its own (the model-family whitelist
-# picks one of these two). An operator override is checked on top of them.
+# Corpora aiperf_client.sh can select on its own (the model-family whitelist picks one of these two).
 _DEFAULT_CORPORA = (
     "semianalysis_cc_traces_weka_062126",
     "semianalysis_cc_traces_weka_062126_256k",
@@ -73,12 +58,7 @@ def _default_probe(aiperf_bin: str) -> str:
 
 
 def _interpreters_for(aiperf_bin: str) -> list[str]:
-    """Interpreters that might have the probed aiperf importable.
-
-    install.sh pips aiperf into Hyperloom's own environment, so ``sys.executable``
-    is the usual hit; an ``AIPERF_BIN`` pointing at another venv is served by the
-    python sitting next to it.
-    """
+    """Interpreters that might have the probed aiperf importable."""
     import sys
 
     sibling = Path(aiperf_bin).resolve().parent / "python"
@@ -86,12 +66,7 @@ def _interpreters_for(aiperf_bin: str) -> list[str]:
 
 
 def _default_loader_probe(aiperf_bin: str) -> Optional[list[str]]:
-    """Return the scenario's loader allowlist, or None if it cannot be read.
-
-    Read from the *scenario registry* of the aiperf that will actually run, not
-    from help text: the allowlist is the thing that decides whether this build
-    measures the corpus we are about to hand it.
-    """
+    """Return the scenario's loader allowlist, or None if it cannot be read."""
     import json
 
     for interp in _interpreters_for(aiperf_bin):
@@ -102,13 +77,8 @@ def _default_loader_probe(aiperf_bin: str) -> Optional[list[str]]:
                 text=True,
                 timeout=60,
             )
-        # SubprocessError as well as OSError: subprocess.run(timeout=...) raises
-        # TimeoutExpired, which descends from SubprocessError, not OSError. Left
-        # uncaught it escapes check_aiperf_capability entirely -- turning the
-        # documented "degrade to the flag probe with a warning" into a hard
-        # preflight failure, on the one input (a hung interpreter) the timeout
-        # exists to handle. The sibling probes in cli/preflight.py already catch
-        # both.
+        # SubprocessError as well as OSError: subprocess.run(timeout=...) raises TimeoutExpired, which descends from
+        # SubprocessError, not OSError.
         except (OSError, subprocess.SubprocessError):
             continue
         if out.returncode != 0:
@@ -130,37 +100,7 @@ def check_aiperf_capability(
     loader_probe: "Optional[Callable[[str], Optional[list[str]]]]" = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> None:
-    """Raise :class:`AgentXPreflightError` unless ``aiperf_bin`` can run AgentX.
-
-    The check that matters is not "does this build have the flags" -- measured:
-    the previous pin (aiperf 0.8.0) carries ``weka-trace``, ``--scenario`` and
-    ``--benchmark-duration``, and even defines a scenario by the same name, yet
-    its invariants differ (no ``require_streaming``, a 60s trace idle-gap cap
-    against the current 10s system cap, no profile-metric coverage floor). What
-    separates the two is the scenario's own loader allowlist: the current corpus
-    is simply not in the old one.
-
-    So this asks the aiperf that will actually run whether its scenario admits
-    the corpus we are about to hand it -- the invariant itself rather than a
-    proxy for it. That also closes the path a flag probe cannot see: an operator
-    pinning an OLDER corpus via ``WEKA_LOADER_OVERRIDE`` (upstream's own H100
-    recipes do) lands in the stale build's allowlist and would otherwise replay
-    it under the wrong invariants and stamp the result submittable.
-
-    Falls back to the flag probe, loudly, when the allowlist cannot be read at
-    all -- refusing outright would break setups that work today over what may be
-    nothing worse than an unusual install layout.
-
-    Args:
-        aiperf_bin: Resolved aiperf path (None/empty means "not found").
-        require_progress_api: Require the local phase-progress API used by
-            AgentX trace capture.
-        probe: Injectable help-text probe, used for the fallback path.
-        loader_probe: Injectable allowlist probe; returns the scenario's
-            permitted loaders, or None when they cannot be determined.
-        env: Environment the benchmark will run with; read for an operator
-            corpus pin. Defaults to the current process environment.
-    """
+    """Raise :class:`AgentXPreflightError` unless ``aiperf_bin`` can run AgentX."""
     if not aiperf_bin:
         raise AgentXPreflightError(
             "HYPERLOOM_AGENTX is on but aiperf was not found. Install the pinned "
@@ -176,15 +116,7 @@ def check_aiperf_capability(
 
     loaders = (loader_probe or _default_loader_probe)(aiperf_bin)
     if loaders is not None:
-        # Two distinct questions, and only asking the second one leaves the
-        # silent path open. Measured: with WEKA_LOADER_OVERRIDE pointing at an
-        # older corpus -- which upstream's own H100/H200 recipes do -- the stale
-        # build admits it, so a run-scoped check alone waves the stale build
-        # through and it replays under the wrong invariants.
-        #
-        # (1) Is this build current? The 062126 corpora were added alongside the
-        #     current invariant set, so their presence dates the build. This
-        #     holds regardless of which corpus the run happens to select.
+        # Two distinct questions, and only asking the second one leaves the silent path open.
         stale = [c for c in _DEFAULT_CORPORA if c not in loaders]
         if stale:
             raise AgentXPreflightError(
@@ -198,8 +130,7 @@ def check_aiperf_capability(
                 f"point AIPERF_BIN at one.",
                 repairable=True,
             )
-        # (2) Will this run's corpus be admitted? Catches a typo or a corpus this
-        #     scenario does not permit, before a server boot rather than after.
+        # (2) Will this run's corpus be admitted?
         if override and override not in loaders:
             raise AgentXPreflightError(
                 f"the corpus pin {override!r} is not in the {SCENARIO_NAME!r} loader "
@@ -210,8 +141,8 @@ def check_aiperf_capability(
             return
 
     if loaders is None:
-        # Allowlist unreadable: fall back to the old flag probe, and say that the
-        # real check did not run so a stale build is not silently blessed.
+        # Allowlist unreadable: fall back to the old flag probe, and say that the real check did not run so a stale
+        # build is not silently blessed.
         print(
             f"WARNING: could not read the {SCENARIO_NAME!r} loader allowlist from "
             f"{aiperf_bin!r}; falling back to a flag-presence check, which cannot "
@@ -231,9 +162,8 @@ def check_aiperf_capability(
     try:
         help_text = probe(aiperf_bin)
     except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
-        # Repairable like its siblings: a half-installed aiperf whose ``--help``
-        # cannot even be read is exactly what reinstalling the pin fixes, and
-        # ``ensure_aiperf`` force-reinstalls when the recorded ref does not match.
+        # Repairable like its siblings: a half-installed aiperf whose ``--help`` cannot even be read is exactly what
+        # reinstalling the pin fixes, and ``ensure_aiperf`` force-reinstalls when the recorded ref does not match.
         raise AgentXPreflightError(
             f"aiperf capability probe failed for {aiperf_bin!r}: {exc}",
             repairable=True,
@@ -254,8 +184,8 @@ def check_aiperf_capability(
     if require_progress_api:
         api_flags = [flag for flag in ("--api-host", "--api-port") if flag not in (help_text or "")]
         if api_flags:
-            # Same shape: the pinned build has these flags, so a build without
-            # them is a build the installer can replace.
+            # Same shape: the pinned build has these flags, so a build without them is a build the installer can
+            # replace.
             raise AgentXPreflightError(
                 f"aiperf at {aiperf_bin!r} cannot expose phase progress "
                 f"(missing: {', '.join(api_flags)}); install the pinned "

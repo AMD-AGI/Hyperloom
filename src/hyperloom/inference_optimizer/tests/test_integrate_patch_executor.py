@@ -44,8 +44,8 @@ index 0000000..1111111 100644
 """
 
 
-# Targets an existing file with stale context lines — exercises the
-# ``git_apply_failed`` path, distinct from the ``patch_target_missing`` preflight.
+# Targets an existing file with stale context lines — exercises the ``git_apply_failed`` path, distinct from the
+# ``patch_target_missing`` preflight.
 _BAD_PATCH = """\
 diff --git a/src.py b/src.py
 index 0000000..1111111 100644
@@ -58,8 +58,8 @@ index 0000000..1111111 100644
 """
 
 
-# Targets a file absent from the framework tree — must be caught by the
-# missing-target preflight, not a wasted ``git apply``.
+# Targets a file absent from the framework tree — must be caught by the missing-target preflight, not a wasted ``git
+# apply``.
 _MISSING_TARGET_PATCH = """\
 diff --git a/nonexistent.py b/nonexistent.py
 index 0000000..1111111 100644
@@ -240,8 +240,8 @@ def test_git_apply_reverse_rolls_back(tmp_path: Path):
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
-# Specialists author patches whose ``+++ b/<path>`` prefix is not a simple
-# ``-p1`` strip; the executor must auto-detect the strip level.
+# Specialists author patches whose ``+++ b/<path>`` prefix is not a simple ``-p1`` strip; the executor must
+# auto-detect the strip level.
 def _deep_prefix_patch(depth: int) -> str:
     prefix = "/".join(f"d{i}" for i in range(depth))
     return (
@@ -296,8 +296,7 @@ def _patch_for(rel_path: str) -> str:
 
 
 def _root_resolution_repos(tmp_path: Path, monkeypatch):
-    """The live layout: an unrelated repo heading the allowlist, and the
-    session's own framework tree further down it."""
+    """The live layout: an unrelated repo heading the allowlist, and the"""
     unrelated = tmp_path / "aiter"
     (unrelated / "csrc").mkdir(parents=True)
     (unrelated / "csrc" / "kernel.cpp").write_text("old\n")
@@ -320,17 +319,7 @@ def test_unresolvable_patch_target_does_not_divert_to_an_unrelated_repo(
     tmp_path: Path,
     monkeypatch,
 ):
-    """The incident this guards against, stated directly.
-
-    Target-aware matching is all-or-nothing across the patch set, so a single
-    path that resolves nowhere rejects the tree that holds all the others. The
-    next choice used to be the head of the allowlist — ``/sgl-workspace/aiter/``,
-    which leads the static defaults whatever the session is optimising. Patches
-    naming the real tree's files then could not apply, and two of the first six
-    candidates in a live session were written off as ``rejected_apply_fail`` at
-    +0.00% with nothing in the log to say they had been aimed at the wrong
-    repository.
-    """
+    """The incident this guards against, stated directly."""
     unrelated, session = _root_resolution_repos(tmp_path, monkeypatch)
     patches = []
     for name, body in (
@@ -350,8 +339,7 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
     tmp_path: Path,
     monkeypatch,
 ):
-    """The session root is a fallback, not an override: a patch set that does
-    resolve must keep going to the tree that actually holds it."""
+    """The session root is a fallback, not an override: a patch set that does"""
     unrelated, session = _root_resolution_repos(tmp_path, monkeypatch)
     patch = tmp_path / "kernel.patch"
     patch.write_text(_patch_for("csrc/kernel.cpp"))
@@ -363,8 +351,7 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
 
 
 def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch):
-    """``resolve_session_framework_root`` answers "which tree is this session
-    optimising", which is a different question from "what may be edited"."""
+    """``resolve_session_framework_root`` answers \"which tree is this session"""
     from hyperloom.orchestrator.framework.paths import (
         _scriptable_frameworks,
         resolve_session_framework_root,
@@ -485,8 +472,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
-    """A patch targeting a file absent from the framework tree is rejected by
-    the preflight with ``patch_target_missing`` before any ``git apply`` runs."""
+    """A patch targeting a file absent from the framework tree is rejected by"""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -517,11 +503,7 @@ async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
-    """Multi-node: the executor must SKIP neutrally (status='skipped', NOT
-    'failed') without applying to the sandbox — a sandbox-only apply would not
-    affect pod-side serving. A neutral skip lets the session keep running
-    every other action (the Coordinator only records integrate_patch results
-    whose status == 'kept', so a skip rolls no failure tally)."""
+    """Multi-node: the executor must SKIP neutrally (status='skipped', NOT"""
     from hyperloom.orchestrator.actions.executors import (
         _multi_node_env as mne,
     )
@@ -549,8 +531,8 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
     )
     result = await executor(ctx)
 
-    # Neutral skip — explicitly NOT a failure (no error_class), and NOT a KEEP
-    # (so the Coordinator records nothing and the session continues).
+    # Neutral skip — explicitly NOT a failure (no error_class), and NOT a KEEP (so the Coordinator records nothing and
+    # the session continues).
     assert result["status"] == "skipped"
     assert result["status"] != "failed"
     assert result["status"] != "kept"
@@ -563,9 +545,7 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypatch):
-    """Single-node (is_multi_node False): the guard must NOT fire — the
-    executor proceeds to the normal apply path bit-for-bit. This is the
-    regression lock for the 'never affect single-node' hard requirement."""
+    """Single-node (is_multi_node False): the guard must NOT fire — the"""
     from hyperloom.orchestrator.actions.executors import (
         _multi_node_env as mne,
     )
@@ -825,9 +805,8 @@ async def test_executor_accepts_explicit_server_args_and_envs(tmp_path: Path):
     assert result["extra_envs_applied"] == {"VLLM_ROCM_USE_AITER": "1"}
 
 
-# Enablement runnable gate: the bench is the launch probe; positive throughput
-# means the server booted -> KEEP; else -> REVERT. The perf/accuracy KEEP gate is
-# bypassed for enablement-tagged integrations.
+# Enablement runnable gate: the bench is the launch probe; positive throughput means the server booted -> KEEP; else
+# -> REVERT.
 async def _run_enablement_integrate(
     tmp_path: Path,
     monkeypatch,
@@ -965,11 +944,7 @@ async def test_enablement_eval_origin_keeps_at_or_above_floor(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_enablement_eval_origin_reverts_when_accuracy_has_no_task_or_metric(tmp_path: Path, monkeypatch):
-    """A score with no task/metric did not come from a real eval.
-
-    The candidate's own run is the only correctness authority; a bare number
-    with no provenance must not clear the gate.
-    """
+    """A score with no task/metric did not come from a real eval."""
     result, _ = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
@@ -985,13 +960,7 @@ async def test_enablement_eval_origin_reverts_when_accuracy_has_no_task_or_metri
 
 @pytest.mark.asyncio
 async def test_enablement_eval_origin_keeps_a_measured_accuracy(tmp_path: Path, monkeypatch):
-    """A measured, above-floor accuracy is KEPT.
-
-    Regression for the burned Kimi-Linear run: an unrelated eval-less
-    re-baseline used to poison the stored eval-contract fingerprint, which
-    vetoed every later candidate without ever reading its accuracy. Nothing
-    outside this candidate's own run may decide its correctness.
-    """
+    """A measured, above-floor accuracy is KEPT."""
     result, _ = await _run_enablement_integrate(
         tmp_path,
         monkeypatch,
@@ -1042,13 +1011,7 @@ async def test_enablement_reverts_when_same_failure_persists(tmp_path: Path, mon
 
 @pytest.mark.asyncio
 async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, monkeypatch):
-    """Patch clears the shape_mismatch gap but boot stops at a new missing_weight gap.
-
-    The server still does not fully boot (output_throughput=0), but the failure
-    moved to a new, deeper actionable signature -> status='advanced': the patch
-    is recorded for stacking, the new failure log is surfaced, and the working
-    tree is reverted to clean for deterministic re-application next round.
-    """
+    """Patch clears the shape_mismatch gap but boot stops at a new missing_weight gap."""
     before = {
         "kind": "shape_mismatch",
         "offending_file": "vllm/model_executor/parameter.py",
@@ -1135,23 +1098,18 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
         "sudo apt-get install -y gh",
         "npm install -g @scope/tool",
         "PIP_NO_CACHE_DIR=1 pip install baz",
-        # Version specifiers legitimately contain >/< and must be accepted;
-        # the durable enablement env-upgrade replay depends on these (a bare
-        # metachar guard used to silently skip every one of them).
+        # Version specifiers legitimately contain >/< and must be accepted; the durable enablement env-upgrade replay
+        # depends on these (a bare metachar guard used to silently skip every one of them).
         "pip install -U 'transformers>=4.58'",
         "pip install -U transformers>=4.58",
         "pip install 'torch<2.11' 'vllm>=0.21,<0.24'",
         "VLLM_ROCM_USE_AITER=1 pip install vllm>=0.21",
-        # An absolute path to the same installer is the same operation. Measured:
-        # two sessions hit one missing dependency and got opposite outcomes
-        # because one specialist wrote the venv's uv by path and the other did
-        # not -- the verdict turned on spelling, not on what the command does.
+        # An absolute path to the same installer is the same operation.
         "/opt/venv/bin/uv pip install aiperf",
         "/opt/venv/bin/pip install aiperf",
         "/usr/bin/python3 -m pip install aiperf",
         "sudo /usr/bin/apt-get install -y gh",
-        # Creating an isolated environment to install into. Rejecting these left
-        # PIP_BREAK_SYSTEM_PACKAGES as the only spelling that survived.
+        # Creating an isolated environment to install into.
         "uv venv /opt/aiperf-venv",
         "python3 -m venv /opt/aiperf-venv",
         "/opt/venv/bin/uv venv /opt/aiperf-venv",
@@ -1180,26 +1138,21 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "pip install foo | tee /etc/x",
         "echo `whoami`",
         "pip install x $(malicious)",
-        # The allowlist is matched against the NORMALISED text, but the replay
-        # executes the ORIGINAL string under shell=True. A blanket basename
-        # strip would let a specialist drop its own `pip` into the workspace and
-        # borrow the allowlisted name, so only absolute system prefixes may be
-        # reduced to a basename.
+        # The allowlist is matched against the NORMALISED text, but the replay executes the ORIGINAL string under
+        # shell=True.
         "./pip install foo",
         "../pip install foo",
         "bin/pip install foo",
         "/tmp/pip install foo",
         "workspace/uv pip install foo",
-        # Traversal defeats the prefix check unless the segments are guarded:
-        # the string STARTS with a trusted prefix and still resolves to the
-        # workspace-writable path that "/tmp/pip install foo" is rejected for.
+        # Traversal defeats the prefix check unless the segments are guarded: the string STARTS with a trusted prefix
+        # and still resolves to the workspace-writable path that "/tmp/pip install foo" is rejected for.
         "/usr/bin/../../tmp/pip install foo",
         "/opt/venv/../../tmp/pip install foo",
         "/usr/local/./../../tmp/pip install foo",
         "/bin/../tmp/pip install foo",
-        # Basename matching must not turn the allowlist into "anything with a
-        # path": what the gate decides is the KIND of operation, and these are
-        # still not installs.
+        # Basename matching must not turn the allowlist into "anything with a path": what the gate decides is the KIND
+        # of operation, and these are still not installs.
         "/usr/bin/rm -rf /tmp/x",
         "/bin/systemctl restart docker",
         "./configure --prefix=/usr",
@@ -1239,13 +1192,7 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
 
 
 def test_skipped_setup_commands_are_named_in_the_round_reason():
-    """A rejected command must reach the conclusion, not just a log line.
-
-    It used to be a lone ``log.warning``. Downstream saw the round's outcome
-    with no link to the cause, so the same proposal was re-authored and
-    re-dropped until the budget ran out -- the fix was never the problem, and
-    nothing in the result said so.
-    """
+    """A rejected command must reach the conclusion, not just a log line."""
     reason = _with_skipped_setup_reason(
         "authored patch produced no gain",
         {"applied": [], "skipped": ["/opt/x/uv venv /opt/v", "ln -sf a b"], "failed": []},
@@ -1256,16 +1203,7 @@ def test_skipped_setup_commands_are_named_in_the_round_reason():
 
 
 def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monkeypatch):
-    """``applied`` is the replay channel AND an artifact. It needs both.
-
-    ``lane.py`` stacks ``setup_commands_applied`` into
-    ``state.enablement.setup_commands``, and the next round EXECUTES what it
-    finds there. The allowlist admits
-    ``pip install --index-url https://user:token@host/simple foo``, so the
-    command that must stay runnable is also the one that must not be written
-    down verbatim -- redacting where the list is built would hand pip a masked
-    URL. It is redacted at the artifact writer instead.
-    """
+    """``applied`` is the replay channel AND an artifact. It needs both."""
     from hyperloom.orchestrator.phases import _enablement_artifacts as art
 
     cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
@@ -1282,13 +1220,7 @@ def test_applied_commands_stay_runnable_but_are_redacted_on_disk(tmp_path, monke
 
 
 def test_round_artifact_on_disk_carries_no_credential(tmp_path):
-    """Assert on the file, not on the helper.
-
-    The test above checks ``_sanitize_setup_command`` in isolation, which stays
-    green if the call is dropped from the writer -- and the writer is the thing
-    that produces the durable artifact. ``round.json`` is copied into the
-    archive and read back by later sessions, so a token in it outlives the run.
-    """
+    """Assert on the file, not on the helper."""
     import json
 
     from hyperloom.orchestrator.phases import _enablement_artifacts as art
@@ -1310,13 +1242,7 @@ def test_round_artifact_on_disk_carries_no_credential(tmp_path):
 
 
 def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, monkeypatch):
-    """The list itself must be safe, not just the sentence built from it.
-
-    ``setup_commands_skipped`` is copied verbatim into four result payloads and
-    from there into the journal, the report and the KB. Sanitising only at the
-    reporting sites protects those four and leaks at the fifth, so the list is
-    stored in its safe form.
-    """
+    """The list itself must be safe, not just the sentence built from it."""
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: pytest.fail("a rejected command was executed"))
 
     out = _run_setup_commands(
@@ -1334,12 +1260,7 @@ def test_run_setup_commands_stores_the_skipped_list_already_sanitised(tmp_path, 
 
 
 def test_skipped_setup_commands_are_redacted_and_bounded(monkeypatch):
-    """Rejected commands are LLM-written text that lands in durable results.
-
-    They reach the journal, the report and the KB, and are read back into the
-    next round's mandate -- so a credential in one must not survive, and twelve
-    long ones must not bury the reason they are appended to.
-    """
+    """Rejected commands are LLM-written text that lands in durable results."""
     skipped = [f"rm -rf /tmp/{i}/ghp_notarealtoken " + "y" * 400 for i in range(30)]
     out = _with_skipped_setup_reason("boot failed", {"applied": [], "skipped": skipped, "failed": []})
 
@@ -1472,8 +1393,7 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
     def fake_run(cmd, *args, **kwargs):
         calls.append(list(cmd))
-        # Dry-run accepts the target so the test exercises Hyperloom's own
-        # boundary check before real apply.
+        # Dry-run accepts the target so the test exercises Hyperloom's own boundary check before real apply.
         if "--dry-run" in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
         raise AssertionError("real patch apply must not run for escaping targets")
@@ -1514,10 +1434,7 @@ def test_derive_lane_perf_explore():
 
 @pytest.mark.asyncio
 async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
-    """phase-3 §3.1: the patch benchmark forwards a serving lease to run_grid
-    and closes it, so it serializes on the whole-machine serving_slot instead
-    of colliding with a concurrent GPU-specialist server (the observed
-    ``reverted_smoke_fail`` root cause)."""
+    """phase-3 §3.1: the patch benchmark forwards a serving lease to run_grid"""
     from unittest.mock import MagicMock, patch
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
@@ -1608,9 +1525,7 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monkeypatch):
-    """TOCTOU regression: when a task was queued at baseline tput/args, but an
-    Explore KEEP advanced current_best before execution, bench must use the live
-    stack top and REVERT if the measured tput sits below it."""
+    """TOCTOU regression: when a task was queued at baseline tput/args, but an"""
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -1702,8 +1617,8 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
             "--async-scheduling --kv-cache-dtype fp8_e4m3",
             [],
         ),
-        # unset_envs drops an inherited key AND is reported, which a params-only
-        # re-derivation of the config cannot see.
+        # unset_envs drops an inherited key AND is reported, which a params-only re-derivation of the config cannot
+        # see.
         (
             {
                 "base_extra_envs": {"VLLM_ROCM_USE_AITER_FP4BMM": "0", "VLLM_X": "1"},
@@ -1780,14 +1695,8 @@ async def test_enablement_keep_forwards_captured_effective_config(tmp_path: Path
     assert result["enablement_effective_config"] == captured
 
 
-# --------------------------------------------------------------------------- #
-# Structural vetting of an untrusted diff, before it reaches ``git apply``.
-#
-# ``vet_patches`` only runs at authoring time, so an explicit ``params.patches``
-# entry and every fetched ``upstream_pr`` diff reach the executor unvetted. Two
-# gates cover them: patch-root resolution, and ``_stage_apply``'s unified-diff
-# and path checks. The invariant asserted here is the one they jointly hold.
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Structural vetting of an untrusted
+# diff, before it reaches ``git apply``.
 
 _NOT_A_DIFF = "#!/bin/sh\nrm -rf /\n"
 
@@ -1808,8 +1717,8 @@ _BARE_ABSOLUTE_PATCH = """\
 +pwned:x:0:0
 """
 
-# Headers resolve to a real file, so patch-root resolution admits it; it carries
-# no hunk, so only the structural gate in _stage_apply can refuse it.
+# Headers resolve to a real file, so patch-root resolution admits it; it carries no hunk, so only the structural gate
+# in _stage_apply can refuse it.
 _RESOLVABLE_BUT_NOT_A_DIFF = "--- a/src.py\n+++ b/src.py\n"
 
 

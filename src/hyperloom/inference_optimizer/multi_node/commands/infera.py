@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Infera (InferaDeployment) idle-pod backend command cluster.
-
-Drives an InferaDeployment the platform already provisioned: idle worker pods
-(mn-idle.sh) and an SSH control plane instead of a RayJob with the Ray
-Dashboard. The benchmark entry point is the Infera frontend, NOT sglang rank-0
-:8888. Each GPU role binds a distinct per-role sshd port
-(decode offset by the role stride); ``restart-server`` SSH-fans-out
-``launch_infera_node.py`` to every worker pod, which launches
-``infera.engine.sglang`` / ``infera.engine.vllm`` per rank.
-"""
+"""Infera (InferaDeployment) idle-pod backend command cluster."""
 
 from __future__ import annotations
 
@@ -50,28 +41,12 @@ EXIT_TRANSIENT = 1
 
 
 def _infera_all_gpu_targets(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every GPU pod SSH target (PD => prefill+decode, else worker).
-
-    Args:
-        state (dict[str, Any]): The infera state.
-
-    Returns:
-        list[dict[str, Any]]: The GPU pod SSH target dicts.
-    """
+    """Every GPU pod SSH target (PD => prefill+decode, else worker)."""
     return infera_support.gpu_ssh_targets_from_state(state)
 
 
 def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
-    """Resolve a legacy host IP to a full SSH target (with per-role port).
-
-    Args:
-        state (dict[str, Any]): The infera state.
-        ip (str): The pod IP to resolve.
-
-    Returns:
-        dict[str, Any]: The matching SSH target, or a synthesized one using
-        the session default SSH port.
-    """
+    """Resolve a legacy host IP to a full SSH target (with per-role port)."""
     ip = str(ip or "").strip()
     for t in _infera_all_gpu_targets(state):
         if str(t.get("podIP") or "").strip() == ip:
@@ -80,15 +55,7 @@ def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
 
 
 def _infera_require_state() -> dict[str, Any]:
-    """Load infera state; require an ssh key + at least one GPU pod IP.
-
-    Returns:
-        dict[str, Any]: The loaded infera state.
-
-    Raises:
-        RuntimeError: If the state backend is not ``infera``, no GPU pod IPs
-            are recorded, or the ssh key path is missing.
-    """
+    """Load infera state; require an ssh key + at least one GPU pod IP."""
     state = _mn_cli._load_state()
     if state.get("backend") != "infera":
         raise _mn_cli.ConfigurationError(
@@ -109,29 +76,17 @@ def _infera_require_state() -> dict[str, Any]:
     return state
 
 
-# Env-var prefixes forwarded from the controller's os.environ to the
-# SSH-launched framework child (sandbox-side tuning vars not present in the pod
-# container env and not recovered from pid1).
+# Env-var prefixes forwarded from the controller's os.environ to the SSH-launched framework child (sandbox-side tuning
+# vars not present in the pod container env and not recovered from pid1).
 _FORWARD_ENV_PREFIXES = ("MORI_", "SGLANG_MORI_", "SGLANG_DISAGGREGATION_")
 
 
 def _collect_forward_env() -> dict[str, str]:
-    """Read prompt-provided tuning vars from os.environ for SSH forwarding.
-
-    Returns:
-        dict[str, str]: Prefix-matched tuning vars, the translated torch
-        profiler dir, the shared-FS server-log dir, an optional AITER_REBUILD
-        signal, and any explicit per-variant overrides (which win on key
-        collisions).
-    """
+    """Read prompt-provided tuning vars from os.environ for SSH forwarding."""
     fwd = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in _FORWARD_ENV_PREFIXES)}
-    # Multi-node torch profiler: the infera SSH path (unlike the RayJob path in
-    # launch_multinode.py) never pins SGLANG_TORCH_PROFILER_DIR, so sglang writes
-    # traces to pod-local /tmp where the sandbox cannot read them -> roofline's
-    # profile_no_trace_failed. Translate the controller's shared-FS trace dir
-    # (HYPERLOOM_MN_PROFILE_TRACE_DIR, set by restart_server_for_round) into
-    # SGLANG_TORCH_PROFILER_DIR so the SSH-launched sglang emits traces to the
-    # wekafs path both server pods and the sandbox mount.
+    # Multi-node torch profiler: the infera SSH path (unlike the RayJob path in launch_multinode.py) never pins
+    # SGLANG_TORCH_PROFILER_DIR, so sglang writes traces to pod-local /tmp where the sandbox cannot read them ->
+    # roofline's profile_no_trace_failed.
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
@@ -144,9 +99,8 @@ def _collect_forward_env() -> dict[str, str]:
                     fwd.pop(str(key), None)
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_UNSET_FWD_ENV is not valid JSON; skipping per-variant env unsets")
-    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV
-    # as a JSON object; forwarded verbatim regardless of prefix and take
-    # precedence over prefix-matched values for the same key.
+    # Explicit per-variant env overrides come through HYPERLOOM_MN_EXTRA_FWD_ENV as a JSON object; forwarded verbatim
+    # regardless of prefix and take precedence over prefix-matched values for the same key.
     extra_fwd = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV", "").strip()
     if extra_fwd:
         try:
@@ -156,25 +110,19 @@ def _collect_forward_env() -> dict[str, str]:
                     fwd[str(k)] = str(v)
         except (ValueError, TypeError):
             warn("HYPERLOOM_MN_EXTRA_FWD_ENV is not valid JSON; skipping per-variant env forwarding")
-    # Expand any $VAR (e.g. $USER_DATA_PATH) left in the profiler dir so the
-    # SSH-launched sglang on the pod (where those vars are undefined) writes
-    # traces to an absolute shared-FS path, not an unresolved literal.
+    # Expand any $VAR (e.g. $USER_DATA_PATH) left in the profiler dir so the SSH-launched sglang on the pod (where
+    # those vars are undefined) writes traces to an absolute shared-FS path, not an unresolved literal.
     if fwd.get("SGLANG_TORCH_PROFILER_DIR"):
         fwd["SGLANG_TORCH_PROFILER_DIR"] = os.path.expandvars(fwd["SGLANG_TORCH_PROFILER_DIR"])
-    # Forward a shared-FS (WekaFS) server-log dir so the SSH-launched sglang
-    # writes server.log to shared storage the client can read, not pod-local
-    # /tmp. Absolute-only; launch_infera_node adds a per-pod suffix to avoid
-    # prefill/decode collisions.
+    # Forward a shared-FS (WekaFS) server-log dir so the SSH-launched sglang writes server.log to shared storage the
+    # client can read, not pod-local /tmp.
     _slog = os.path.expandvars(
         os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
     )
     if _slog.startswith("/") and "$" not in _slog:
         fwd["HYPERLOOM_MN_SERVER_LOG_DIR"] = _slog
-    # aiter/cpp_itfs runtime-compiled kernels (GH #458): the integrate re-baseline
-    # sets AITER_REBUILD=1 (transiently) so aiter wipes its build dir and
-    # recompiles the patched kernel on import. Forward it to the SSH-launched
-    # sglang, else the pod reuses the params-hashed pre-patch .so (measures the
-    # unpatched kernel). Absent on normal rounds, so this is a no-op then.
+    # aiter/cpp_itfs runtime-compiled kernels (GH #458): the integrate re-baseline sets AITER_REBUILD=1 (transiently)
+    # so aiter wipes its build dir and recompiles the patched kernel on import.
     aiter_rebuild = os.environ.get("AITER_REBUILD", "").strip()
     if aiter_rebuild:
         fwd["AITER_REBUILD"] = aiter_rebuild
@@ -190,24 +138,7 @@ def _infera_fanout_launch(
     poll_timeout: int,
     print_logs: bool,
 ) -> tuple[int, list[dict]]:
-    """Ship + run launch_infera_node.py on each GPU pod over SSH.
-
-    Returns ``(rc, per_pod_results)``. rc != 0 if any pod's launcher exits
-    non-zero. The SAME launch_args go to every pod in the group — each
-    self-determines its node-rank from $LWS_WORKER_INDEX pod-side.
-
-    Args:
-        state (dict[str, Any]): The infera state (ssh key / port / known_hosts).
-        launch_args (str): The launcher argv string sent to every pod.
-        targets (list[dict]): SSH targets ``{podIP, sshPort, podId?, role?}``.
-        label (str): Human-readable label used in log lines.
-        poll_timeout (int): Per-pod SSH timeout in seconds.
-        print_logs (bool): When ``True``, print each pod's stdout / stderr.
-
-    Returns:
-        tuple[int, list[dict]]: ``(rc, per_pod_results)`` where ``rc`` is
-        non-zero if any pod's launcher failed.
-    """
+    """Ship + run launch_infera_node.py on each GPU pod over SSH."""
     script = _mn_cli._read_pod_script("launch_infera_node.py")
     forward_env = _collect_forward_env()
     if forward_env:
@@ -249,8 +180,7 @@ def _infera_fanout_launch(
     return rc_total, results
 
 
-# Pod-side one-liner: is the recorded server PID still alive? Emits MN_ALIVE /
-# MN_DEAD so the controller can decide whether an Infera resume is safe.
+# Pod-side one-liner: is the recorded server PID still alive?
 _INFERA_PID_PROBE = (
     'pid="$(cat /tmp/mn_infera_server.pid 2>/dev/null || true)"; '
     'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo MN_ALIVE; else echo MN_DEAD; fi'
@@ -263,16 +193,7 @@ def _pd_role_pod_counts(
     prefill_targets: list[dict[str, Any]] | None = None,
     decode_targets: list[dict[str, Any]] | None = None,
 ) -> tuple[int, int]:
-    """Return prefill/decode pod counts from targets or persisted state lists.
-
-    Args:
-        state: Multi-node state dict (may carry ``prefill_pod_ips`` / ``decode_pod_ips``).
-        prefill_targets: Optional resolved prefill SSH targets (wins over state).
-        decode_targets: Optional resolved decode SSH targets (wins over state).
-
-    Returns:
-        tuple[int, int]: ``(prefill_count, decode_count)``.
-    """
+    """Return prefill/decode pod counts from targets or persisted state lists."""
     if prefill_targets is not None:
         prefill_n = len(prefill_targets)
     else:
@@ -291,20 +212,7 @@ def _resolve_pd_node_counts(
     prefill_targets: list[dict[str, Any]] | None = None,
     decode_targets: list[dict[str, Any]] | None = None,
 ) -> tuple[int, int]:
-    """Resolve PD group sizes: explicit CLI wins, else pod-list length.
-
-    Matches ``external_state`` synthesis and lifecycle ``_resolve_pd_args`` so
-    persisted ``last_restart_pd_*`` equals the ``nnodes`` used at launch.
-
-    Args:
-        args: Parsed ``restart-server`` / create arguments.
-        state: Multi-node state for pod-list fallback.
-        prefill_targets: Optional prefill targets (wins over state lists).
-        decode_targets: Optional decode targets (wins over state lists).
-
-    Returns:
-        tuple[int, int]: ``(pd_prefill_nodes, pd_decode_nodes)``.
-    """
+    """Resolve PD group sizes: explicit CLI wins, else pod-list length."""
     prefill_n, decode_n = _pd_role_pod_counts(
         state,
         prefill_targets=prefill_targets,
@@ -322,29 +230,7 @@ def _infera_restart_config_matches(
     pd_mode: str,
     kv_transfer_backend: str = "",
 ) -> bool:
-    """Whether the requested restart matches the last successful Infera launch.
-
-    Covers the same ground as the RayJob resume fast path, which compares one
-    topology record rather than these fields one by one: framework / model /
-    tp / ep / pd_mode / normalized extra-args, plus the per-role PD knobs and
-    the KV transfer backend when disaggregated. A mismatch means the round
-    changed a served flag, so the server MUST be relaunched (never resumed) or
-    the benchmark would measure stale config.
-
-    Args:
-        state (dict[str, Any]): The infera multi-node state (carries
-            ``last_restart_*``).
-        args (argparse.Namespace): Parsed ``restart-server`` arguments.
-        framework (str): Resolved framework for this restart.
-        pd_mode (str): Resolved PD mode (``"aggregated"`` / ``"disaggregated"``).
-        kv_transfer_backend (str): Resolved PD KV-transfer backend for this
-            restart. It reaches the pods as
-            ``--disaggregation-transfer-backend``, so it is a served flag and
-            must block a resume when it changes.
-
-    Returns:
-        bool: True only when every served-config field matches the last launch.
-    """
+    """Whether the requested restart matches the last successful Infera launch."""
     if not state.get("last_restart_framework"):
         return False
     base_match = (
@@ -360,8 +246,7 @@ def _infera_restart_config_matches(
         return False
     if pd_mode != "disaggregated":
         return True
-    # Compare effective PD topology (CLI explicit > pod-list inference), not raw
-    # CLI zeros left unset by the operator.
+    # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
     prefill_n, decode_n = _pd_role_pod_counts(state)
     args_pn, args_dn = _resolve_pd_node_counts(args, state)
     state_pn = int(state.get("last_restart_pd_prefill_nodes") or 0) or prefill_n
@@ -386,21 +271,7 @@ def _infera_servers_alive(
     *,
     timeout: int,
 ) -> bool:
-    """Whether EVERY GPU pod still has its prior server process alive.
-
-    SSH-probes each pod's ``/tmp/mn_infera_server.pid`` (``kill -0``). Returns
-    True only when every pod reports the recorded PID alive. Any dead /
-    unreachable / malformed pod yields False (fail-safe: the caller then does a
-    full kill+relaunch rather than risk resuming a dead server).
-
-    Args:
-        state (dict[str, Any]): The infera multi-node state.
-        targets (list[dict[str, Any]]): GPU pod SSH targets to probe.
-        timeout (int): Per-pod SSH timeout in seconds.
-
-    Returns:
-        bool: True iff every pod's recorded server PID is alive.
-    """
+    """Whether EVERY GPU pod still has its prior server process alive."""
     if not targets:
         return False
     for target in targets:
@@ -418,25 +289,7 @@ def _infera_servers_alive(
 
 
 def _infera_restart_server(args: argparse.Namespace) -> int:
-    """Infera restart: SSH fan-out launch_infera_node.py to every worker pod.
-
-    Each pod kills its prior server (PID file) and relaunches
-    infera.engine.sglang / infera.engine.vllm wired with
-    --nnodes/--node-rank/--dist-init-addr (rank from the pod's own
-    $LWS_WORKER_INDEX). The launcher detaches immediately, so this returns
-    once every rank has SPAWNED — readiness (MoE cold start) is polled
-    sandbox-side against the frontend service_url, never blocked here.
-
-    Args:
-        args (argparse.Namespace): Parsed ``restart-server`` arguments.
-
-    Returns:
-        int: ``0`` when every launcher spawned, ``1`` when at least one failed.
-
-    Raises:
-        RuntimeError: For an unsupported framework, or when PD disaggregation
-            is requested on a non-sglang framework.
-    """
+    """Infera restart: SSH fan-out launch_infera_node.py to every worker pod."""
     state = _infera_require_state()
     framework = (args.framework or state.get("framework") or "sglang").lower()
     if framework not in ("sglang", "vllm"):
@@ -457,15 +310,15 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
-    # Topology is fixed at create time, so state.pd_mode is authoritative: a PD
-    # deployment must restart in PD mode even if --pd-mode defaulted otherwise.
+    # Topology is fixed at create time, so state.pd_mode is authoritative: a PD deployment must restart in PD mode
+    # even if --pd-mode defaulted otherwise.
     pd_mode = (
         "disaggregated"
         if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated" or state.get("pd_mode") == "disaggregated"
         else "aggregated"
     )
-    # Empty is a valid answer: it leaves the flag off so sglang picks its own
-    # default, which is the backend preferred on this fabric anyway.
+    # Empty is a valid answer: it leaves the flag off so sglang picks its own default, which is the backend preferred
+    # on this fabric anyway.
     kv = getattr(args, "pd_transfer_backend", "") or ""
     poll_timeout = _mn_cli._poll_timeout_from_args(args)
     print_logs = getattr(args, "print_logs", False)
@@ -474,14 +327,9 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     pd_prefill_nodes = 0
     pd_decode_nodes = 0
 
-    # Resume fast-path (parity with the RayJob path): if this restart's config
-    # matches the last successful launch AND every GPU pod's prior server is
-    # still alive, skip the SSH kill+relaunch (which re-triggers a multi-minute
-    # MoE cold start). Disabled via MULTI_NODE_RESTART_RESUME_RUNNING=0, which
-    # restart_server_for_round scopes when force_full_restart is set (e.g. after
-    # a kernel patch, so the pod re-imports patched modules). Fail-safe: any
-    # unreachable/dead pod falls through to a full relaunch; the sandbox-side
-    # /health wait + reclaim-retry are the final backstop for a stale resume.
+    # Resume fast-path (parity with the RayJob path): if this restart's config matches the last successful launch AND
+    # every GPU pod's prior server is still alive, skip the SSH kill+relaunch (which re-triggers a multi-minute MoE
+    # cold start).
     resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").strip().lower() not in (
         "0",
         "false",
@@ -506,9 +354,8 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     if pd_mode == "disaggregated":
         if framework != "sglang":
             raise _mn_cli.ConfigurationError("PD disaggregation is sglang-only on the Infera backend")
-        # Prefill group + decode group: each is its own LWS, each pod uses its
-        # own $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS. We send per-group tp/nnodes
-        # and the matching --disaggregation-mode.
+        # Prefill group + decode group: each is its own LWS, each pod uses its own
+        # $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS.
         prefill_targets = infera_support.pod_targets_from_lists(
             state.get("prefill_pods"),
             state.get("prefill_pod_ips"),
@@ -521,11 +368,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             default_port=_mn_cli._infera_default_ssh_port(state) + infera_support.INFERA_SSH_PORT_ROLE_STRIDE,
             default_role="decode",
         )
-        # A PD restart needs both legs. Skipping an empty one used to leave
-        # rc_total at 0, so a --pd-mode disaggregated run against a state whose
-        # pod lists are aggregated made no SSH connection at all and still
-        # reported "infera servers launched" and exit 0 -- after which the round
-        # benchmarked whatever was already running and called it a result.
+        # A PD restart needs both legs.
         missing = [role for role, targets in (("prefill", prefill_targets), ("decode", decode_targets)) if not targets]
         if missing:
             raise _mn_cli.ConfigurationError(
@@ -543,9 +386,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         pn, dn = pd_prefill_nodes, pd_decode_nodes
         ptp = int(getattr(args, "pd_prefill_tp", 0) or 0) or int(args.tp)
         dtp = int(getattr(args, "pd_decode_tp", 0) or 0) or int(args.tp)
-        # Per-role EP / extra-args; 0 / "" falls back to the shared --ep /
-        # --extra-args. The shared --extra-args is the base and the per-role
-        # string is appended after it (role-specific flags win, last-wins).
+        # Per-role EP / extra-args; 0 / "" falls back to the shared --ep / --extra-args.
         shared_ep = int(getattr(args, "ep", 1) or 1)
         shared_extra = getattr(args, "extra_args", "") or ""
         pep = int(getattr(args, "pd_prefill_ep", 0) or 0) or shared_ep
@@ -626,8 +467,8 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         state["last_restart_pd_decode_nodes"] = pd_decode_nodes
         state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
         state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
-        # The orchestrator's PD arg resolution reads this key as its fallback
-        # tier between an explicit argument and $PD_TRANSFER_BACKEND.
+        # The orchestrator's PD arg resolution reads this key as its fallback tier between an explicit argument and
+        # $PD_TRANSFER_BACKEND.
         state["last_restart_pd_transfer_backend"] = kv
         state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
         state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
@@ -649,14 +490,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
 
 
 def _infera_kill_inference(args: argparse.Namespace) -> int:
-    """Infera kill: SSH fan-out launch_infera_node.py --kill-only to every GPU pod.
-
-    Args:
-        args (argparse.Namespace): Parsed ``kill-inference`` arguments.
-
-    Returns:
-        int: ``0`` when every pod's kill succeeded, ``1`` otherwise.
-    """
+    """Infera kill: SSH fan-out launch_infera_node.py --kill-only to every GPU pod."""
     state = _infera_require_state()
     framework = (state.get("last_restart_framework") or state.get("framework") or "sglang").lower()
     gpu_targets = _infera_all_gpu_targets(state)
@@ -694,21 +528,7 @@ def _infera_ssh_node_op(
     *,
     timeout: int,
 ) -> tuple[dict | None, dict]:
-    """Ship kernel_node_ops.py to one pod over SSH and run one subcommand.
-
-    Returns ``(parsed_json_or_None, transport)`` where transport carries the
-    ssh rc / stderr for diagnostics.
-
-    Args:
-        state (dict[str, Any]): The infera state (ssh key / port).
-        target (dict[str, Any]): SSH target ``{podIP, sshPort, podId?}``.
-        op_args (str): The ``kernel_node_ops.py`` subcommand argv string.
-        timeout (int): SSH timeout in seconds.
-
-    Returns:
-        tuple[dict | None, dict]: ``(parsed_json_or_None, transport)`` where
-        ``transport`` carries the ssh rc / stderr.
-    """
+    """Ship kernel_node_ops.py to one pod over SSH and run one subcommand."""
     ip = str(target.get("podIP") or "").strip()
     port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
     script = _mn_cli._read_bundled_pod_python_script("kernel_node_ops.py")
@@ -733,24 +553,7 @@ def _infera_ssh_node_op(
 
 
 def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
-    """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch
-    set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``.
-
-    The ray path submits a Ray-actor fan-out; the infera path has no ray, so
-    each GPU pod runs the patcher locally over SSH. Both annotate the sglang
-    torch.profiler output the same way, so the NFS-shared trace dir (see
-    SGLANG_TORCH_PROFILER_DIR forwarding in _collect_forward_env) is consumable
-    by TraceLens identically — only the dispatch differs. Idempotent: the
-    in-pod script sentinel-greps and returns status=skipped on already-patched
-    pods, so it is safe to call on every restart_server_for_round.
-
-    Args:
-        args (argparse.Namespace): Parsed ``apply-tracelens-patch`` arguments.
-
-    Returns:
-        int: ``0`` when every pod applied / skipped, ``1`` on any failure, or
-        ``EXIT_CONFIG_ERROR`` when the tracelens root / GPU pods are missing.
-    """
+    """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch"""
     state = _infera_require_state()
     tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
     if not tracelens_root:
@@ -771,10 +574,8 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
     timeout = _mn_cli._poll_timeout_from_args(args)
     per_pod: list[dict] = []
     failures: list[dict] = []
-    # Pod-side interpreter: sglang lives in /opt/venv on the canonical
-    # ROCm sglang-infera images; /usr/bin/python3 lacks sglang so
-    # _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
-    # Allow override via $HYPERLOOM_MN_POD_PYTHON.
+    # Pod-side interpreter: sglang lives in /opt/venv on the canonical ROCm sglang-infera images; /usr/bin/python3
+    # lacks sglang so _apply_on_pod's `import sglang` fails with "No module named 'sglang'".
     pod_python = os.environ.get("HYPERLOOM_MN_POD_PYTHON", "/opt/venv/bin/python")
     for target in gpu_targets:
         ip = str(target.get("podIP") or "").strip()
@@ -828,19 +629,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
 
 
 def _infera_apply_patch(args: argparse.Namespace) -> int:
-    """Infera apply-patch: SSH fan-out kernel_node_ops.py apply to every GPU pod.
-
-    Emits the SAME JSON shape as kernel_patch_multinode.py (command/status/
-    per_node/failures), with ``per_node[].host`` keyed by the pod IP so the
-    sandbox builds an IP->backup_path revert map.
-
-    Args:
-        args (argparse.Namespace): Parsed ``apply-patch`` arguments.
-
-    Returns:
-        int: ``0`` when every pod applied the patch, ``1`` on any failure, or
-        ``EXIT_CONFIG_ERROR`` when the patch file is missing.
-    """
+    """Infera apply-patch: SSH fan-out kernel_node_ops.py apply to every GPU pod."""
     state = _infera_require_state()
     patch_path = Path(args.patch_file)
     if not patch_path.is_file():
@@ -904,15 +693,7 @@ def _infera_apply_patch(args: argparse.Namespace) -> int:
 
 
 def _infera_revert_patch(args: argparse.Namespace) -> int:
-    """Infera revert-patch: SSH each pod in the IP->backup_path map + restore.
-
-    Args:
-        args (argparse.Namespace): Parsed ``revert-patch`` arguments.
-
-    Returns:
-        int: ``0`` when every pod reverted, ``1`` on any failure, or
-        ``EXIT_CONFIG_ERROR`` when the backup map is missing / invalid.
-    """
+    """Infera revert-patch: SSH each pod in the IP->backup_path map + restore."""
     state = _infera_require_state()
     try:
         records_by_host = json.loads(getattr(args, "records_json", "") or "{}")
@@ -1000,16 +781,7 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
 
 
 def _infera_kernel_bench(args: argparse.Namespace) -> int:
-    """Infera kernel-bench: run the micro-benchmark on ONE GPU pod over SSH.
-
-    Args:
-        args (argparse.Namespace): Parsed ``kernel-bench`` arguments.
-
-    Returns:
-        int: ``0`` when the bench succeeded, ``1`` when it failed, or
-        ``EXIT_CONFIG_ERROR`` / ``EXIT_TRANSIENT`` on missing GPU pods / no
-        pod JSON.
-    """
+    """Infera kernel-bench: run the micro-benchmark on ONE GPU pod over SSH."""
     state = _infera_require_state()
     gpu_targets = _infera_all_gpu_targets(state)
     if not gpu_targets:
@@ -1049,18 +821,7 @@ def _infera_kernel_bench(args: argparse.Namespace) -> int:
 
 
 def _resolve_geak_src(explicit: str | None) -> str:
-    """Resolve the shared-FS GEAK source dir the sandbox install.sh cloned.
-
-    Resolution: --geak-src > $HYPERLOOM_GEAK_SRC > $HYPERLOOM_ROOT/geak >
-    $USER_DATA_PATH/runtime/geak. Must be a path both sandbox and pod see
-    (under $USER_DATA_PATH).
-
-    Args:
-        explicit (str | None): The ``--geak-src`` flag value, or ``None``.
-
-    Returns:
-        str: The resolved GEAK source dir, or ``""`` when no source resolves.
-    """
+    """Resolve the shared-FS GEAK source dir the sandbox install.sh cloned."""
     if explicit and explicit.strip():
         return explicit.strip()
     env = os.environ.get("HYPERLOOM_GEAK_SRC", "").strip()
@@ -1076,19 +837,7 @@ def _resolve_geak_src(explicit: str | None) -> str:
 
 
 def cmd_install_geak(args: argparse.Namespace) -> int:
-    """Install the GEAK CLI on every Infera GPU pod over SSH (idempotent).
-
-    pip-installs the shared-FS GEAK checkout into each pod's framework venv so
-    the kernel-agent SSH placement (run_geak_over_ssh) finds ``geak`` on PATH.
-    Infera-only (kernel-agent on RayJob uses the Ray runtime, not this).
-
-    Args:
-        args (argparse.Namespace): Parsed ``install-geak`` arguments.
-
-    Returns:
-        int: ``0`` when every pod installed / skipped, non-zero on any failure
-        (or ``EXIT_CONFIG_ERROR`` when the GEAK source can't be resolved).
-    """
+    """Install the GEAK CLI on every Infera GPU pod over SSH (idempotent)."""
     state = _infera_require_state()
     geak_src = _resolve_geak_src(getattr(args, "geak_src", None))
     if not geak_src:

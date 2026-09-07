@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator resume tests.
-
-Covers resume detection, ``replay_for_resume`` rebuilding undecided
-pending_proposals, pruned_families preservation, lazy replay on the first
-``tick()``, and reopening the phase machine for a session that stopped in CLOSE.
-"""
+"""Coordinator resume tests."""
 
 from __future__ import annotations
 
@@ -63,14 +58,7 @@ async def test_existing_state_json_triggers_resume(session_dir):
 
 
 class TestAClosedSessionIsReopenedOnResume:
-    """CLOSE has no way out, so a leg that loads it would tick in it to the end.
-
-    The machine's only terminal phase, and the run loop stops on ``stop_reason``
-    rather than on the phase. A resumed leg that keeps CLOSE therefore spends its
-    whole new clock in a phase admitting nothing but ``report``,
-    ``session_breakdown`` and ``recover``. Every design that stops early on the
-    promise of "resume with more budget" rests on this being reopened.
-    """
+    """CLOSE has no way out, so a leg that loads it would tick in it to the end."""
 
     @pytest.mark.asyncio
     async def test_a_session_stopped_in_close_starts_the_next_leg_at_the_entrance(
@@ -105,12 +93,7 @@ class TestAClosedSessionIsReopenedOnResume:
         self,
         session_dir,
     ):
-        """The flag means "the sequencer already wrote the breakdown".
-
-        Carried into a leg that then never reaches CLOSE, it silences the
-        end-of-run safety net that would have written one, and the leg finishes
-        with no breakdown at all.
-        """
+        """The flag means \"the sequencer already wrote the breakdown\"."""
         SharedState(session_id="closed", phase="CLOSE", close_sequence_done=True).save(session_dir)
 
         coordinator = Coordinator(session_dir, backends=_backends_full())
@@ -136,15 +119,7 @@ class TestAClosedSessionIsReopenedOnResume:
         self,
         session_dir,
     ):
-        """Reopening the phase is only half of it; the round has to be admissible.
-
-        A cold anchor is a positive ``baseline_tput``, which is what the singleton
-        rule refuses repeats on -- so the leg would reopen at PRELUDE, decline to
-        finish while the mark is set, decline to close while the clock is healthy,
-        and have the one round that clears the mark denied on its way in. This is
-        the last link in the chain the whole cold-anchor design rests on, and
-        nothing above it can tell whether it holds.
-        """
+        """Reopening the phase is only half of it; the round has to be admissible."""
         SharedState(
             session_id="cold",
             phase="CLOSE",
@@ -327,8 +302,8 @@ async def test_replay_mixed_pending_and_decided(session_dir):
             tail = await c1.bus.tail(topic="proposal", n=1)
             proposal_ids.append(tail[0].msg_id)
             if action == "baseline":
-                # profile/explore require baseline_tput > 0 (execution_order);
-                # the real baseline action would have set this on completion.
+                # profile/explore require baseline_tput > 0 (execution_order); the real baseline action would have set
+                # this on completion.
                 c1.shared_state.baseline_tput = 100.0
 
         await c1._handle_intent(
@@ -586,12 +561,7 @@ class TestN24KernelAgentEnvHardFail:
         monkeypatch,
         capsys,
     ):
-        """The installer emits credentials as a conditional block (#1169).
-
-        The comparison line inside it contains ``=`` without being an
-        assignment, so a parser that splits on ``=`` alone would invent a key
-        and warn about it on every launch.
-        """
+        """The installer emits credentials as a conditional block (#1169)."""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         (runtime / "kernel-agent.env.sh").write_text(
@@ -612,8 +582,8 @@ class TestN24KernelAgentEnvHardFail:
             cli_preflight._load_kernel_agent_env_fallback()
             loaded_key = _os.environ.get("ANTHROPIC_API_KEY")
         finally:
-            # The loader writes straight into os.environ, which monkeypatch
-            # cannot roll back; a leaked credential reshapes later auth tests.
+            # The loader writes straight into os.environ, which monkeypatch cannot roll back; a leaked credential
+            # reshapes later auth tests.
             _os.environ.pop("ANTHROPIC_API_KEY", None)
 
         assert loaded_key == "ak-install-time"
@@ -637,8 +607,8 @@ class TestN24KernelAgentEnvHardFail:
         assert _os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] == "/from/custom"
 
 
-# A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env
-# file; template placeholders are treated as unset.
+# A stale/placeholder TRACELENS_ROOT is corrected from the installer-written env file; template placeholders are
+# treated as unset.
 class TestTracelensRootEnvCorrection:
     @pytest.fixture(autouse=True)
     def _isolate_env(self, monkeypatch):
@@ -693,8 +663,7 @@ class TestTracelensRootEnvCorrection:
         assert _os.environ["TRACELENS_ROOT"] == str(inherited)
 
     def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
-        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the
-        env file must NOT be promoted to an explicit MAGPIE_PATH override."""
+        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the"""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         magpie_dir = tmp_path / "not-a-magpie-checkout"

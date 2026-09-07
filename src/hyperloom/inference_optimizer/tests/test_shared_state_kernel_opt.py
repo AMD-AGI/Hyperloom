@@ -17,10 +17,9 @@ def state() -> SharedState:
     return SharedState()
 
 
-# Invariant 1: empty kernel_id is a no-op
-# Invariant 2: KEEP wins; non-KEEP never overwrites a pending KEEP
-# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy.
-# next_pending_keep_kernel_id queue semantics
+# Invariant 1: empty kernel_id is a no-op Invariant 2: KEEP wins; non-KEEP never overwrites a pending KEEP
+# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy. next_pending_keep_kernel_id queue
+# semantics
 def test_next_pending_keep_drains_in_micro_speedup_order(state: SharedState):
     """KEEPs on different source_files drain highest-micro-first as the stack fills."""
     _seed_keep(state, "k001", decision="KEEP", micro=2.5, source_file="/p/file_a.py", artifact="/t/a1.py")
@@ -188,15 +187,7 @@ def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: Shared
 
 
 def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState):
-    """Replay of a real trace: 2 of its reusable hot kernels report untried.
-
-    The gpu_pct values below are verbatim from the recorded session and must NOT
-    be tuned to the gate. Under the 5% ``_DEFAULT_HOT_KERNEL_MIN_GPU_PCT`` k001
-    (23.7), k002 (37.3) and k004 (9.7) clear it; k005 (2.8) and k003 (1.3) are
-    below it and k006/k007 are non-reusable. k004 is the case the old 10% gate
-    dropped: a real hot kernel that no wrapper-free operator in this trace could
-    have reached.
-    """
+    """Replay of a real trace: 2 of its reusable hot kernels report untried."""
     _set_trace(
         state,
         hot_kernels=[
@@ -242,16 +233,7 @@ def test_untried_hot_kernels_reproduces_log1_session_164910Z(state: SharedState)
 
 
 def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: SharedState):
-    """mori's dispatch (7%) + combine (5%) must clear the gate together.
-
-    Neither member clears the 10% default threshold alone, but
-    _apply_vendor_operator_playbook_grouping() (tracelens_analysis.py) stamps
-    vendor_playbook_aggregate_gpu_pct=12.0 on both, since the pair is deliberately dispatched
-    as one forge-loop session (see KernelForge PR #88 / the mori vendor
-    playbook). Regression for a real gap: the gate used to compare each row's
-    own gpu_pct, so a split load like this was silently dropped as
-    below_min_gpu_pct on both members despite clearing the floor combined.
-    """
+    """mori's dispatch (7%) + combine (5%) must clear the gate together."""
     _set_trace(
         state,
         hot_kernels=[
@@ -274,19 +256,12 @@ def test_untried_hot_kernels_vendor_playbook_group_gated_on_aggregate(state: Sha
         ],
     )
     untried = state.untried_hot_reusable_kernels()
-    # Both members carry the group's full aggregate and must both clear the
-    # gate. No task_groups metadata is supplied here, and the two rows do
-    # NOT share (source_file, name) -- names differ (`::dispatch` vs
-    # `::combine`) -- so neither the group-key dedup nor the identity-dedup
-    # fallback collapses them into one; both remain distinct, separately
-    # gated rows.
+    # Both members carry the group's full aggregate and must both clear the gate.
     assert set(untried) == {"k010", "k011"}, "vendor-playbook group must not be dropped as below_min_gpu_pct"
 
 
 def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedState):
-    """A playbook's min_gpu_pct_floor is a floor on the *threshold*, not a
-    bypass: an aggregate that clears a loosened env override but not the
-    playbook's own floor must still be gated out."""
+    """A playbook's min_gpu_pct_floor is a floor on the *threshold*, not a"""
     _set_trace(
         state,
         hot_kernels=[
@@ -301,28 +276,13 @@ def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedSt
             },
         ],
     )
-    # A caller loosening the env default to 1.0% must not let this in: the
-    # playbook's own floor (10.0) still applies.
+    # A caller loosening the env default to 1.0% must not let this in: the playbook's own floor (10.0) still applies.
     untried = state.untried_hot_reusable_kernels(min_gpu_pct=1.0)
     assert untried == []
 
 
 def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state: SharedState):
-    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate
-    was a no-op on the production path because ``untried_hot_reusable_kernels()``
-    reads ``hot_kernels_top15`` (SharedState._build_hot_kernel_summaries()'s
-    projected ``summary_entry``, an explicit key whitelist) in preference to
-    raw ``hot_kernels``, and that whitelist dropped
-    ``vendor_playbook_aggregate_gpu_pct`` / ``vendor_playbook_min_gpu_pct_floor``
-    / ``vendor_playbook_group_id`` / ``patch_strategy`` entirely.
-
-    ``_set_trace()`` (used by the sibling tests above) assigns
-    ``last_trace_analyze`` directly and never populates ``hot_kernels_top15``,
-    so those tests fall through to the raw, unprojected ``hot_kernels`` and
-    cannot catch this -- this test goes through the real
-    ``record_trace_analyze()`` entry point instead, exactly like a live
-    trace-analyze result would.
-    """
+    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate"""
     state.record_trace_analyze(
         {"trace_input": "/tmp/trace.json"},
         {
@@ -351,15 +311,15 @@ def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state
             ],
         },
     )
-    # The projection must actually carry the fields through -- this is the
-    # exact assertion that fails without the _build_hot_kernel_summaries() fix.
+    # The projection must actually carry the fields through -- this is the exact assertion that fails without the
+    # _build_hot_kernel_summaries() fix.
     projected = {row["kernel_id"]: row for row in state.last_trace_analyze["hot_kernels_top15"]}
     assert projected["k010"]["vendor_playbook_aggregate_gpu_pct"] == 12.0
     assert projected["k010"]["patch_strategy"] == "vendor_playbook"
     assert projected["k010"]["vendor_playbook_group_id"] == "mori_ep_dispatch_combine"
 
-    # Split-load pass-through direction: neither member clears the 10%
-    # default alone (7%, 5%), but the pair's aggregate (12%) must.
+    # Split-load pass-through direction: neither member clears the 10% default alone (7%, 5%), but the pair's
+    # aggregate (12%) must.
     untried = state.untried_hot_reusable_kernels()
     assert set(untried) == {"k010", "k011"}, (
         "aggregate gate must not degrade to bare gpu_pct on the real "
@@ -370,12 +330,7 @@ def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state
 def test_untried_hot_kernels_vendor_playbook_floor_still_applies_via_real_projection(
     state: SharedState,
 ):
-    """Unsafe-direction counterpart of the test above: a playbook's own
-    ``min_gpu_pct_floor`` must still block dispatch through the real
-    projection path, even when the caller has loosened
-    ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``. Before the projection fix this
-    degraded to the bare (loosened) threshold, letting a below-floor group
-    burn a whole forge-loop session."""
+    """Unsafe-direction counterpart of the test above: a playbook's own"""
     state.record_trace_analyze(
         {"trace_input": "/tmp/trace.json"},
         {
@@ -450,8 +405,8 @@ def test_untried_hot_kernels_skips_when_source_file_integrated(state: SharedStat
         state,
         hot_kernels=[
             {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            # Both are comfortably above the 10% gate, so the only thing that can
-            # drop k001 below is the integrate on its source_file.
+            # Both are comfortably above the 10% gate, so the only thing that can drop k001 below is the integrate on
+            # its source_file.
             {"kernel_id": "k009", "gpu_pct": 12.0, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
         ],
     )
@@ -484,8 +439,8 @@ def test_untried_hot_kernels_caps_at_top_n(state: SharedState, monkeypatch):
     assert len(untried) == 3
 
 
-# record_kernel_integrate_result distinguishes integration faults from
-# genuine gate REVERTs and gives faults an independent bounded retry budget.
+# record_kernel_integrate_result distinguishes integration faults from genuine gate REVERTs and gives faults an
+# independent bounded retry budget.
 def _integrate_result(
     kernel_id: str,
     *,
@@ -601,8 +556,7 @@ def test_integrate_genuine_revert_rejects_immediately(state: SharedState):
 def test_integrate_bare_apply_fault_is_retryable_without_error_class(
     state: SharedState,
 ):
-    """A status=failed/decision=REVERT envelope with NO top-level error_class
-    must be treated as a retryable fault, not a genuine REVERT."""
+    """A status=failed/decision=REVERT envelope with NO top-level error_class"""
     entry = state.record_kernel_integrate_result(
         # NOTE: no error_class — mirrors the bare handler envelope.
         _integrate_result("k001", decision="REVERT", status="failed"),

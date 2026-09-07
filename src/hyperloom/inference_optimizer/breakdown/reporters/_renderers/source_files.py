@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Source-files manifest renderer — what files this breakdown was
-built from. Helps operators replay or audit a session.
-"""
+"""Source-files manifest renderer — what files this breakdown was"""
 
 from __future__ import annotations
 
@@ -14,18 +12,7 @@ from ..base import RenderedSection, md_table, register_renderer
 
 @register_renderer("source_files")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the source-files manifest section.
-
-    Lists, per file kind, how many artifacts the breakdown was built from
-    plus a short preview, so a session can be replayed or audited. Skipped
-    when no source-files manifest is present.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered source-files section.
-    """
+    """Render the source-files manifest section."""
     sf = breakdown.get("source_files") or {}
     if not sf:
         return RenderedSection(

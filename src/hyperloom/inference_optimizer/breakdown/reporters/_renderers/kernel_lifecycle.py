@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel lifecycle renderer — one row per detected kernel with its full optimization lifecycle.
-
-Columns are built locally in ``render`` and are dynamic: ``bw%`` /
-``compute%`` are omitted when no detected kernel reports them. Skipped when no
-kernels were detected (implies the profile phase never ran).
-"""
+"""Kernel lifecycle renderer — one row per detected kernel with its full optimization lifecycle."""
 
 from __future__ import annotations
 
@@ -23,15 +18,7 @@ _MAX_NAME_LEN = 70
 
 
 def _short_name(name: str) -> str:
-    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail).
-
-    Args:
-        name: Full kernel name to shorten.
-
-    Returns:
-        The name unchanged when short enough, otherwise a head + tail
-        elision joined by ``"..."``.
-    """
+    """Shorten a kernel name keeping head + tail (CK/ROCBLAS variants differ at the tail)."""
     if not name:
         return ""
     if len(name) <= _MAX_NAME_LEN:
@@ -42,15 +29,7 @@ def _short_name(name: str) -> str:
 
 
 def _fmt_speedup(v: Any) -> str:
-    """Format a speedup multiplier for a table cell.
-
-    Args:
-        v (Any): The speedup value; non-numeric or ``None`` yields an em dash.
-
-    Returns:
-        str: A string like ``"1.25x"``, or ``"—"`` when the value is missing
-            or non-numeric.
-    """
+    """Format a speedup multiplier for a table cell."""
     if v is None:
         return "—"
     try:
@@ -61,16 +40,7 @@ def _fmt_speedup(v: Any) -> str:
 
 
 def _lane_summary(lane: dict[str, Any] | None) -> str:
-    """Format a per-lane summary cell: best-speedup + attempts + last decision.
-
-    Args:
-        lane (dict[str, Any] | None): A GEAK or Forge lane record with optional
-            ``best_speedup``, ``attempts`` and ``decision`` keys.
-
-    Returns:
-        str: A compact cell like ``"1.25x (3 att) [KEEP]"``, or ``"—"`` when
-            the lane never touched the kernel.
-    """
+    """Format a per-lane summary cell: best-speedup + attempts + last decision."""
     if not lane:
         return "—"
     spd = _fmt_speedup(lane.get("best_speedup"))
@@ -86,20 +56,7 @@ def _lane_summary(lane: dict[str, Any] | None) -> str:
 
 @register_renderer("kernel_lifecycle")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the kernel-lifecycle section as a single per-kernel table.
-
-    Emits one row per detected kernel with its full optimization
-    lifecycle (selection, backend attempts, adoption, final decision),
-    splitting long-tail unselected kernels into a collapsible block. The
-    section is marked skipped when no kernels were detected.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered section with key facts, decisions and
-            the markdown table.
-    """
+    """Render the kernel-lifecycle section as a single per-kernel table."""
     kl = breakdown.get("kernel_lifecycle") or {}
     raw_detected = kl.get("detected") or []
     detected: list[dict[str, Any]] = []
@@ -201,14 +158,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     headers += ["selected", "GEAK", "Forge", "adopted_by", "final"]
 
     def _row_for(d: dict[str, Any]) -> list[Any]:
-        """Build one table row for a detected kernel record.
-
-        Args:
-            d (dict[str, Any]): A single detected-kernel record.
-
-        Returns:
-            list[Any]: The cell values matching the active ``headers`` order.
-        """
+        """Build one table row for a detected kernel record."""
         row: list[Any] = [
             d.get("kernel_id") or "—",
             _short_name(d.get("name") or ""),

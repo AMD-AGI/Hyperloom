@@ -158,8 +158,8 @@ class TestResolvePatchTargetRoots:
     def test_honours_flydsl_root_env(self, monkeypatch, env_key):
         monkeypatch.setenv(env_key, "/checkouts/FlyDSL")
         roots = fp.resolve_patch_target_roots()
-        # Both variants: the apply gate matches a lower-cased path verbatim,
-        # while a path-resolving consumer needs the real case.
+        # Both variants: the apply gate matches a lower-cased path verbatim, while a path-resolving consumer needs the
+        # real case.
         assert "/checkouts/FlyDSL/" in roots
         assert "/checkouts/flydsl/" in roots
 
@@ -171,12 +171,7 @@ class TestResolvePatchTargetRoots:
 
 class TestResolveKernelSearchRoots:
     def test_drops_roots_that_do_not_exist(self, monkeypatch, tmp_path):
-        """A pinned root that no longer exists must not reach the caller.
-
-        Grepping an absent directory yields no hits, which is indistinguishable
-        from a kernel whose source is genuinely absent -- the exact failure that
-        silently emptied kernel-opt's candidate list.
-        """
+        """A pinned root that no longer exists must not reach the caller."""
         present = tmp_path / "vllm"
         present.mkdir()
         monkeypatch.setattr(
@@ -189,11 +184,7 @@ class TestResolveKernelSearchRoots:
         assert fp.resolve_kernel_search_roots() == (f"{present}/",)
 
     def test_excludes_bare_site_packages_parents(self, monkeypatch, tmp_path):
-        """Only package dirs, never the whole site-packages tree.
-
-        The allowlist reports the parent so an editability check can contain any
-        installed file; grepping it would scan every wheel on the host.
-        """
+        """Only package dirs, never the whole site-packages tree."""
         parent = tmp_path / "dist-packages"
         (parent / "vllm").mkdir(parents=True)
         monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: (f"{parent}/",))
@@ -221,16 +212,7 @@ class TestResolveKernelSearchRoots:
 
 
 class TestEveryKernelSourcePackageIsDiscoverable:
-    """One package list, reached by all three discovery mechanisms.
-
-    ``sgl_kernel`` holds SGLang's kernel sources and was named by the tool that
-    greps for them but by none of the discovery paths here. Because this
-    resolver imports successfully in every non-standalone run, the tool's own
-    list was never consulted -- so a host with a standalone ``sgl_kernel`` wheel
-    reported it as searched and never searched it. A package present in only
-    some of the three mechanisms is the shape of that bug, so the tests below
-    assert all three derive from the same tuple.
-    """
+    """One package list, reached by all three discovery mechanisms."""
 
     def test_sgl_kernel_is_a_framework_source_package(self):
         assert "sgl_kernel" in fp.FRAMEWORK_SOURCE_PACKAGES
@@ -336,8 +318,8 @@ class TestProbeFrameworkSourceRootsForEnv:
             assert f"{name}/" in result
 
     def test_isolated_vllm_venv_root_fallback(self, tmp_path, monkeypatch):
-        # Isolated vLLM: main VIRTUAL_ENV has no vllm; VLLM_VENV_ROOT points at
-        # the isolated venv holding vllm + split AITER, which must be discovered.
+        # Isolated vLLM: main VIRTUAL_ENV has no vllm; VLLM_VENV_ROOT points at the isolated venv holding vllm + split
+        # AITER, which must be discovered.
         main_venv = tmp_path / "opt-venv"
         (main_venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
         iso_venv = tmp_path / "vllm-venv"
@@ -402,12 +384,7 @@ class TestDefaultSourceRootsIncludesXdit:
 
 
 class TestScriptableRepoRootDiscovery:
-    """A scriptable framework runs from a checkout, not an installed package.
-
-    A live session probed the framework as ``missing`` with the checkout
-    checkout on disk, so PolicyGate would have rejected any patch against
-    ``hyvideo/`` and framework-agent had no source to work on.
-    """
+    """A scriptable framework runs from a checkout, not an installed package."""
 
     def test_repo_path_env_lands_in_allowlist(self, tmp_path, monkeypatch):
         checkout = tmp_path / "my-framework"
@@ -431,14 +408,7 @@ class TestScriptableRepoRootDiscovery:
 
 
 class TestGenericFrameworkRepoPath:
-    """A session is single-framework, so the operator should not need the prefix.
-
-    ``<FRAMEWORK>_REPO_PATH`` requires knowing the framework name before the right
-    variable can be set, and switching frameworks means switching variable names —
-    for a value that cannot collide, since the CLI locks ``$FRAMEWORK`` for the run.
-    The generic form is also the only way to point at a framework that is neither
-    pip-installed nor registered as scriptable, such as an editable vllm checkout.
-    """
+    """A session is single-framework, so the operator should not need the prefix."""
 
     def test_generic_env_lands_in_allowlist(self, tmp_path, monkeypatch):
         checkout = tmp_path / "some-framework"
@@ -808,12 +778,8 @@ def test_detect_strategy_accepts_dist_packages_vllm_py(
     assert strat["compiled"] is False
 
 
-# --- aiter_meta split-wheel rebuild recognition (regression) ---
-# aiter device sources ship in the sibling ``aiter_meta`` package, so hot
-# kernels land under ``.../dist-packages/aiter_meta/csrc/...``. The JIT/cpp_itfs
-# rebuild gates keyed only ``/aiter/csrc/``, so a KEPT aiter_meta .cu deployed
-# but never re-JIT'd -> integrate saw a stale binary and REVERT'd
-# (fault_attempts_exhausted; observed 07.25-07.30 on Qwen3-8B/Llama/Mixtral).
+# --- aiter_meta split-wheel rebuild recognition (regression) --- aiter device sources ship in the sibling
+# ``aiter_meta`` package, so hot kernels land under ``.../dist-packages/aiter_meta/csrc/...``.
 
 _AITER_META_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/kernels/quant_kernels.cu")
 _AITER_META_CPP_ITFS_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu")

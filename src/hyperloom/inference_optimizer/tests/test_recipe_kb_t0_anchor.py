@@ -386,9 +386,7 @@ def test_t0_anchor_requires_explicit_session_dir(
         run_t0_anchor(kb, state, workload="m", hw="mi300x")
 
 
-# ---------------------------------------------------------------------------
 # _cascade_warm_start_search: the L1-L4 warm-start tier resolution.
-# ---------------------------------------------------------------------------
 _ACTIONABLE = {
     "best_throughput": 100.0,
     "validated_gain_pct": 10.0,
@@ -445,8 +443,8 @@ def test_cascade_l1_get_recipe_exception_is_swallowed():
 
 
 def test_cascade_l2_skips_same_cid_and_nonactionable():
-    # A row with the target cid is skipped; a bare non-actionable row is skipped;
-    # only the actionable distinct-cid row is accepted.
+    # A row with the target cid is skipped; a bare non-actionable row is skipped; only the actionable distinct-cid row
+    # is accepted.
     kb = _FakeKB(
         get_result={"canonical_id": "CID:other"},
         search_by_labels=[

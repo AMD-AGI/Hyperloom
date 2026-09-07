@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring,
-option building (resume / context tools / raw mode), timeout handling, the
-conversational session capture, and SDK-stream error tolerance."""
+"""Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring, option building (resume / context tools / raw
+mode), timeout handling, the conversational session capture, and SDK-stream error tolerance.
+"""
 
 from __future__ import annotations
 
@@ -206,13 +206,14 @@ async def test_run_timeout():
 
 # ---- run(): idle timeout tolerates a slow-but-live stream -----
 async def test_run_idle_timeout_allows_slow_but_live_stream():
-    """A model that keeps streaming (gaps < idle budget) must NOT be killed,
-    even when the TOTAL turn wall-clock exceeds ``call_timeout_s``."""
+    """A model that keeps streaming (gaps < idle budget) must NOT be killed, even when the TOTAL turn wall-clock
+    exceeds ``call_timeout_s``.
+    """
 
     async def _slow_live(*, prompt, options):
         for _ in range(4):
-            # Per-message gap stays under the idle budget while cumulative time exceeds it,
-            # proving the guard is idle-based, not a total wall-clock cap.
+            # Per-message gap stays under the idle budget while cumulative time exceeds it, proving the guard is
+            # idle-based, not a total wall-clock cap.
             await asyncio.sleep(0.03)
             yield _Msg(content=[_emit_tool_block()])
 
@@ -266,8 +267,7 @@ async def test_run_skips_diagnostics_when_not_requested():
 
 # ---- gateway endpoint identifier -----------------------------------------
 def test_gateway_endpoint_drops_url_userinfo(monkeypatch):
-    """The diagnostic is appended to an on-disk trace, and a base URL of the
-    form ``https://user:key@gw/...`` puts the key in netloc."""
+    """The diagnostic is appended to an on-disk trace, and a base URL of the"""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://user:s3cret@gw.example.com:8443/api/v1")
     assert _backend()._gateway_endpoint_identifier() == "gw.example.com"
 
@@ -370,8 +370,7 @@ class _StopMsg(_Msg):
 
 
 async def test_stop_reason_reaches_metadata():
-    """Without it a truncated reply is indistinguishable from a badly formatted
-    one, so the SDK's own stop reason must survive to the caller."""
+    """Without it a truncated reply is indistinguishable from a badly formatted"""
     stream = [_StopMsg(content=[TextBlock("half a rep")], result="half a rep", stop_reason="max_tokens")]
     b = _backend()
     b.sdk_query_factory = _query(stream)

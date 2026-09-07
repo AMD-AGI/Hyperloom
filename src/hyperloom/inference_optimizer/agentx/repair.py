@@ -1,30 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Runtime repair of the AgentX aiperf dependency.
-
-``HYPERLOOM_AGENTX`` declares aiperf as a required, version-pinned dependency,
-and ``install.sh`` already knows how to install it (``ensure_aiperf``, pinned to
-``AIPERF_REF`` in lockstep with ``INFERENCEX_REF``). What was missing is that the
-install was conditioned on a *runtime* mode flag being true in the *installer's*
-process, with nothing keeping the two moments consistent: provision without
-``HYPERLOOM_AGENTX``/``INSTALL_AIPERF``, turn AgentX on later, and the box has no
-aiperf. Both halves behaved as designed; the combination did not.
-
-Measured: that gap sent a known, self-declared dependency into the enablement
-lane, where an LLM specialist re-derived the install from scratch and had its
-commands rejected by the setup-command allowlist -- spending the run's budget on
-a problem this repository could already fix in one call. The preflight's own
-error text names the fix ("install the pinned build via install.sh"), but it is
-written for an operator, and on that path there is no operator.
-
-So resolve it where the requirement is actually known. The runtime flag is the
-single source of truth for "this box needs aiperf"; install-time opt-in stays a
-pre-warm optimisation. Repair is attempted at most once per process (a second
-attempt cannot succeed where the first failed, and a grid re-preflights every
-round), and a failed repair is never silent -- it is folded into the preflight
-error the caller surfaces, alongside the original diagnosis.
-"""
+"""Runtime repair of the AgentX aiperf dependency."""
 
 from __future__ import annotations
 
@@ -67,12 +44,7 @@ _ERROR_LINE_BUDGET = 4
 
 
 def install_script_path() -> Path:
-    """Return the packaged ``assets/install.sh``.
-
-    Resolved from this module rather than from ``$REPO_ROOT`` so a wheel install
-    repairs itself with the installer it actually shipped with -- the pin only
-    means anything when the installer and the running code are the same vintage.
-    """
+    """Return the packaged ``assets/install.sh``."""
     return Path(__file__).resolve().parent.parent / "assets" / "install.sh"
 
 
@@ -81,22 +53,7 @@ def ensure_aiperf_installed(
     env: Optional[Mapping[str, str]] = None,
     timeout_sec: int = REPAIR_TIMEOUT_SEC,
 ) -> Optional[str]:
-    """Install the pinned aiperf via the packaged installer.
-
-    Idempotent by construction: ``ensure_aiperf`` skips when the recorded ref
-    already matches and force-reinstalls when it does not, so this is safe to
-    call for a missing build and for a stale one alike.
-
-    Args:
-        env: Environment for the installer subprocess. Defaults to this
-            process's environment.
-        timeout_sec: Wall-clock bound on the installer.
-
-    Returns:
-        ``None`` when aiperf is installed, else a one-line summary of why the
-        repair did not land (never raises: the caller folds this into the
-        preflight error it was already about to report).
-    """
+    """Install the pinned aiperf via the packaged installer."""
     if _REPAIR_KEY in _REPAIR_RESULT:
         prior = _REPAIR_RESULT[_REPAIR_KEY]
         if prior is not None:
@@ -114,19 +71,14 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
         return f"the packaged installer is missing at {script}"
 
     child_env = dict(os.environ if env is None else env)
-    # ``--only-aiperf`` already bypasses the opt-in gate, but state the opt-in so
-    # the installer's own log says why it ran, and so a future refactor that
-    # re-routes this through the ordinary gate keeps working.
+    # ``--only-aiperf`` already bypasses the opt-in gate, but state the opt-in so the installer's own log says why it
+    # ran, and so a future refactor that re-routes this through the ordinary gate keeps working.
     child_env["INSTALL_AIPERF"] = "1"
-    # The installer runs under ``set -u`` and expands ``${HOME}`` for its state
-    # dir. The benchmark child env this inherits does not always carry HOME, and
-    # the resulting "HOME: unbound variable" reads like a packaging bug rather
-    # than a missing variable, so supply this process's own.
+    # The installer runs under ``set -u`` and expands ``${HOME}`` for its state dir.
     if not child_env.get("HOME"):
-        # setdefault would leave an empty-string HOME in place, and the
-        # installer expands ${HOME}/.hyperloom into an unwritable
-        # /.hyperloom -- the stamp write then fails and every later
-        # provision redoes the install this one was supposed to record.
+        # setdefault would leave an empty-string HOME in place, and the installer expands ${HOME}/.hyperloom into an
+        # unwritable /.hyperloom -- the stamp write then fails and every later provision redoes the install this one
+        # was supposed to record.
         child_env["HOME"] = os.path.expanduser("~")
 
     log.warning(
@@ -157,26 +109,11 @@ def _install_aiperf(*, env: Optional[Mapping[str, str]], timeout_sec: int) -> Op
 
 
 def _output_tail(stdout: Optional[str], stderr: Optional[str]) -> str:
-    """The installer lines worth keeping, redacted, flattened onto one line.
-
-    The installer inherits the session environment, so its output can echo a
-    credential; this lands in a benchmark result that is written to disk.
-
-    Lines that name a failure are kept even when they fall outside the tail
-    window. Measured against a Python 3.10 box, where the line that gives the
-    actual cause --
-
-        ERROR: Package 'aiperf' requires a different Python: 3.10.12 not in ...
-
-    -- landed second-from-last behind nine lines of torch-gate warnings. A plain
-    tail would have dropped exactly the sentence this summary exists to carry,
-    and the reader would have been left with "install failed" and no reason.
-    """
+    """The installer lines worth keeping, redacted, flattened onto one line."""
     from hyperloom.common.env_safety import redact_secret_values
 
-    # Joined rather than concatenated: a stdout tail without a trailing newline
-    # would otherwise fuse into the first stderr line, and that first stderr line
-    # is usually the pip error this summary exists to carry.
+    # Joined rather than concatenated: a stdout tail without a trailing newline would otherwise fuse into the first
+    # stderr line, and that first stderr line is usually the pip error this summary exists to carry.
     combined = "\n".join(part for part in ((stdout or "").strip(), (stderr or "").strip()) if part)
     if not combined:
         return "(no output)"

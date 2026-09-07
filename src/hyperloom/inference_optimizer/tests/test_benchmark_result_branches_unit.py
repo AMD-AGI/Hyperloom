@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for benchmark-result parsing: leak harvesting, rescue-path
-salvage, raw-result merging, TPOT derivation, and OSL resolution."""
+"""Branch coverage for benchmark-result parsing: leak harvesting, rescue-path"""
 
 from __future__ import annotations
 

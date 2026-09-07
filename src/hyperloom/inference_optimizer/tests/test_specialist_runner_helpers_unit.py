@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for SpecialistRunner pure helpers + workspace file protocol:
-failure classification, empty-done synthesis, redaction, path resolution, and
-the prompt/transcript/heartbeat/done writers."""
+"""Coverage for SpecialistRunner pure helpers + workspace file protocol: failure classification, empty-done synthesis,
+redaction, path resolution, and the prompt/transcript/heartbeat/done writers.
+"""
 
 from __future__ import annotations
 
@@ -256,9 +256,7 @@ def _finalize(r, tmp_path, payload):
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
-    """The Critic is told to reject a proposal_set carrying self-reported gain
-    fields, which costs the round every idea in it. Dropping them makes that
-    verdict unreachable; the audit note still records what was there."""
+    """The Critic is told to reject a proposal_set carrying self-reported gain"""
     result, written = _finalize(
         _runner(),
         tmp_path,
@@ -317,16 +315,7 @@ def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
 
 
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
-    """A framework specialist must get a worktree of the framework it patches.
-
-    ``framework_source_roots`` is the source-file allowlist, and its order is
-    arbitrary with respect to the session: on a pod that ships aiter as a git
-    checkout, aiter sorts first. A WorldPlay session then handed its specialist
-    an aiter worktree, the specialist authored correct patches against
-    ``hyvideo/`` paths that are absent from it, and patch-safety dropped every
-    one as ``missing_target`` — leaving an env-only proposal that toggled a
-    switch with no code behind it and measured 0.0% five rounds running.
-    """
+    """A framework specialist must get a worktree of the framework it patches."""
     aiter = tmp_path / "aiter"
     aiter.mkdir()
     (aiter / ".git").mkdir()

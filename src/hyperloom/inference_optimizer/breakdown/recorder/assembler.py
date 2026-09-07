@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read-side of the breakdown recorder.
-
-Assembles the per-producer fragments written by :class:`~.recorder.Recorder`
-into a ``{section: value}`` mapping ready to drop into the
-``session_breakdown.json`` envelope:
-
-* ``singleton`` sections -> the payload of the latest fragment (by ``ts``).
-* plain ``item`` sections -> payloads concatenated into a list, ordered by
-  ``seq`` then ``ts``.
-* v4 entity streams (``_V4_ENTITY_IDS``) -> partial updates ordered by ``ts``
-  then ``seq`` and deep-merged by stable id, so the result carries one entry
-  per entity rather than one per fragment.
-
-A compose/normalize pass runs last and reconciles across fragments:
-``versions`` collapses to a ``{tool: meta}`` map (last write per tool wins),
-``critic_iterations`` / ``robustness_signals`` and the ``kernel_*``
-substreams are folded into their composed sections, and competing kernel
-route operations are rewritten to ``status="superseded"``. Bad/partial
-fragments are skipped and noted in ``warnings``.
-"""
+"""Read-side of the breakdown recorder."""
 
 from __future__ import annotations
 
@@ -56,45 +37,20 @@ _NESTED_ENTITY_IDS: tuple[str, ...] = (
 
 
 def parts_dir(session_dir: Path | str) -> Path:
-    """Return the breakdown spool directory for ``session_dir``.
-
-    Args:
-        session_dir (Path | str): the session root directory.
-
-    Returns:
-        Path: the breakdown parts (spool) directory under the session.
-    """
+    """Return the breakdown spool directory for ``session_dir``."""
     from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     return breakdown_parts_dir(Path(session_dir))
 
 
 def has_parts(session_dir: Path | str) -> bool:
-    """True iff at least one record fragment exists for this session.
-
-    Args:
-        session_dir: The session root directory.
-
-    Returns:
-        ``True`` when the spool directory holds at least one ``*.json``
-        fragment.
-    """
+    """True iff at least one record fragment exists for this session."""
     d = parts_dir(session_dir)
     return d.is_dir() and any(d.glob("*.json"))
 
 
 def _load(path: Path, warnings: list[str]) -> dict[str, Any] | None:
-    """Read and parse one fragment file, noting problems into ``warnings``.
-
-    Args:
-        path (Path): the fragment file to read.
-        warnings (list[str]): a list that parse/validation warnings are
-            appended to.
-
-    Returns:
-        dict[str, Any] | None: the parsed fragment record, or ``None`` when it
-            cannot be read or is not a JSON object.
-    """
+    """Read and parse one fragment file, noting problems into ``warnings``."""
     rec = read_json(
         path,
         default=_UNREADABLE,
@@ -114,22 +70,7 @@ def assemble_parts(
     warnings: list[str] | None = None,
     keep_event_rows: bool = False,
 ) -> dict[str, Any]:
-    """Return ``{section: list | dict}`` assembled from the spool directory.
-
-    Empty mapping when no fragments exist (caller falls back to collectors).
-
-    Args:
-        session_dir: The session root directory.
-        warnings: Optional list to append parse/validation warnings to; a
-            fresh list is used when not provided.
-        keep_event_rows: Retain the :data:`EVENT_SECTIONS` substreams instead
-            of dropping them. Only :func:`event_parts` sets this; the breakdown
-            envelope never wants them.
-
-    Returns:
-        A ``{section: list | dict}`` mapping assembled from the spool
-        directory, or ``{}`` when no fragments exist.
-    """
+    """Return ``{section: list | dict}`` assembled from the spool directory."""
     warns = warnings if warnings is not None else []
     d = parts_dir(session_dir)
     if not d.is_dir():
@@ -158,10 +99,8 @@ def assemble_parts(
         else:
             items.setdefault(section, []).append(rec)
 
-    # A singleton fragment is named for its producer, so a section with more
-    # than one is a section two producers both claimed. Only the newest
-    # survives, and the other producer's payload does not merge into it -- it
-    # is dropped whole. Nothing downstream can see that it existed.
+    # A singleton fragment is named for its producer, so a section with more than one is a section two producers both
+    # claimed.
     for section, producers in discarded.items():
         warns.append(
             f"recorder: {section} was written as a singleton by more than one "
@@ -180,10 +119,8 @@ def assemble_parts(
                 conflicts=conflicts,
             )
             if conflicts:
-                # Repeated updates from one producer merge into one fragment
-                # before they ever reach here, so two payloads for one id came
-                # from two producers. Merging is the point; disagreeing on a
-                # field is not, and the later write wins purely on timestamp.
+                # Repeated updates from one producer merge into one fragment before they ever reach here, so two
+                # payloads for one id came from two producers.
                 warns.append(
                     f"recorder: {section} entities were written by more than "
                     "one producer with conflicting values, and the later write "
@@ -306,15 +243,7 @@ def _merge_v4_entities(
     id_fields: tuple[str, ...],
     conflicts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge time-ordered partial entity updates by stable id.
-
-    Args:
-        payloads: Entity payloads in recorder order, oldest first.
-        id_fields: The fields any of which carries the entity's stable id.
-        conflicts: Optional list that ``<id>.<field>`` is appended to whenever
-            a later update replaces a value with a different one, so a caller
-            can report what the merge decided on its own.
-    """
+    """Merge time-ordered partial entity updates by stable id."""
     merged: list[dict[str, Any]] = []
     index_by_id: dict[str, int] = {}
     for payload in payloads:
@@ -361,21 +290,11 @@ def _deep_merge(
         elif isinstance(previous, list) and isinstance(value, list):
             merged[key] = _merge_lists(previous, value, conflicts=conflicts, path=path)
         elif key == "started_at" and previous and value and entity_root:
-            # Partial updates describe one operation. The first fragment owns
-            # its start time; later result/finalization updates must not move
-            # the start forward merely because they were written later.
-            #
-            # Only at the entity root (``path`` is the bare stable id, or empty
-            # for a direct call): a substep / gate / extension nested below has
-            # its own start time, and quietly keeping the smaller of two would
-            # stamp one sub-entity with another's clock and swallow the conflict.
+            # Partial updates describe one operation.
             merged[key] = min(str(previous), str(value))
         else:
             if conflicts is not None and previous is not None and value is not None and previous != value:
-                # A field arriving twice with two values. Filling a gap is what
-                # partial updates are for and says nothing; replacing an answer
-                # with a different one is a disagreement settled by whichever
-                # fragment happened to sort last.
+                # A field arriving twice with two values.
                 conflicts.append(f"{path}.{key}" if path else key)
             merged[key] = value
     return merged
@@ -425,12 +344,7 @@ def _merge_lists(
 
 
 def _compose_versions(out: dict[str, Any]) -> None:
-    """Fold the ``versions`` item substream into a top-level ``{tool: meta}``
-    map (last write per tool wins). No-op when nothing was recorded.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
+    """Fold the ``versions`` item substream into a top-level ``{tool: meta}``"""
     rows = out.get("versions")
     if not isinstance(rows, list):
         return
@@ -444,13 +358,7 @@ def _compose_versions(out: dict[str, Any]) -> None:
 
 
 def _compose_critic_robustness(out: dict[str, Any]) -> None:
-    """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams
-    into the ``critic_robustness`` singleton. Pops the raw substreams so they
-    don't leak into the breakdown envelope.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
+    """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams"""
     critic_iters = out.pop("critic_iterations", None)
     rob_signals = out.pop("robustness_signals", None)
     if critic_iters is None and rob_signals is None:
@@ -505,22 +413,7 @@ EVENT_SECTIONS: tuple[str, ...] = KERNEL_EVENT_SECTIONS + ROOFLINE_EVENT_SECTION
 
 
 def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
-    """Read back the event rows of the bound session, keyed by section.
-
-    Assembly pops these sections, so a caller that wants them -- the phase
-    closing an event, or finalize recovering one that never closed -- reads
-    them through here instead.
-
-    Args:
-        sections: The sections to read, e.g. :data:`KERNEL_EVENT_SECTIONS`.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping holding those sections, each
-        defaulting to an empty list.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Read back the event rows of the bound session, keyed by section."""
     from ...session.session_binding import bound_session  # local: avoid import cycle
 
     assembled = assemble_parts(bound_session(), warnings=[], keep_event_rows=True)
@@ -532,68 +425,28 @@ def event_parts(sections: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
 
 
 def kernel_event_parts() -> dict[str, list[dict[str, Any]]]:
-    """Return the KERNEL substreams of the bound session, keyed by section.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping over
-        :data:`KERNEL_EVENT_SECTIONS`.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Return the KERNEL substreams of the bound session, keyed by section."""
     return event_parts(KERNEL_EVENT_SECTIONS)
 
 
 def roofline_event_parts() -> dict[str, list[dict[str, Any]]]:
-    """Return the roofline substreams of the bound session, keyed by section.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping over
-        :data:`ROOFLINE_EVENT_SECTIONS`.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Return the roofline substreams of the bound session, keyed by section."""
     return event_parts(ROOFLINE_EVENT_SECTIONS)
 
 
 def baseline_event_parts() -> dict[str, list[dict[str, Any]]]:
-    """Return the baseline substreams of the bound session, keyed by section.
-
-    Returns:
-        A ``{section: [payload, ...]}`` mapping over
-        :data:`BASELINE_EVENT_SECTIONS`.
-
-    Raises:
-        SessionNotBoundError: If no session is bound.
-    """
+    """Return the baseline substreams of the bound session, keyed by section."""
     return event_parts(BASELINE_EVENT_SECTIONS)
 
 
 def _drop_event_rows(out: dict[str, Any]) -> None:
-    """Drop the v6 event substreams from the breakdown envelope.
-
-    These are recorded for the v6 timeline, which assembles them into events
-    when the phase or action that produced them ends. They carry no meaning of
-    their own in ``session_breakdown.json``, and leaving them in would publish
-    ten undocumented sections alongside the events built from them.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
+    """Drop the v6 event substreams from the breakdown envelope."""
     for section in EVENT_SECTIONS:
         out.pop(section, None)
 
 
 def _compose_kernel_journey(out: dict[str, Any]) -> None:
-    """Fold the four kernel-lifecycle item substreams into a single
-    kernel-major ``kernel_journey`` view (discovery -> dispatch -> backend
-    attempts -> e2e), then pop the raw substreams. No-op when no substream was
-    recorded.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
+    """Fold the four kernel-lifecycle item substreams into a single"""
     discovery = out.pop("kernel_discovery", None)
     dispatch = out.pop("kernel_dispatch", None)
     backend = out.pop("kernel_backend_result", None)
@@ -656,15 +509,7 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
         )
 
     def _gpu(k: dict[str, Any]) -> float:
-        """Return a kernel's gpu_pct as a float (``-inf`` when absent/unparseable).
-
-        Args:
-            k: A kernel record mapping.
-
-        Returns:
-            The kernel's ``gpu_pct`` as a float, or ``-inf`` when absent or
-            unparseable.
-        """
+        """Return a kernel's gpu_pct as a float (``-inf`` when absent/unparseable)."""
         v = k.get("gpu_pct")
         try:
             return float(v) if v is not None else float("-inf")
@@ -679,17 +524,7 @@ def _compose_kernel_journey(out: dict[str, Any]) -> None:
 
 
 def _best_micro_speedup(attempts: list[dict[str, Any]]) -> float | None:
-    """Best (max) micro_speedup across a kernel's attempts, or None.
-
-    Surfaces the kernel-level achieved speedup at the journey-entry top level.
-
-    Args:
-        attempts: A kernel's backend attempt rows.
-
-    Returns:
-        The maximum ``micro_speedup`` across the attempts, or ``None`` when
-        none is present/parseable.
-    """
+    """Best (max) micro_speedup across a kernel's attempts, or None."""
     best: float | None = None
     for att in attempts:
         if not isinstance(att, dict):
@@ -709,17 +544,7 @@ def _kernel_outcome(
     attempts: list[dict[str, Any]],
     e2e: dict[str, Any],
 ) -> str:
-    """Coarse per-kernel outcome: adopted / reverted / attempted / dispatched /
-    skipped / discovered (in lifecycle-descending precedence).
-
-    Args:
-        dispatch: The kernel's dispatch row.
-        attempts: The kernel's backend attempt rows.
-        e2e: The kernel's end-to-end row.
-
-    Returns:
-        The coarse per-kernel outcome label.
-    """
+    """Coarse per-kernel outcome: adopted / reverted / attempted / dispatched /"""
     if e2e:
         decision = str(e2e.get("decision") or "").upper()
         validation_tier = str(e2e.get("final_validation_tier") or e2e.get("validation_tier") or "").strip().lower()
@@ -742,14 +567,7 @@ def _kernel_outcome(
 
 
 def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
-    """Count each critic iteration's verdict (mirrors the collector).
-
-    Args:
-        critic_iters: Critic iteration entries to tally by verdict.
-
-    Returns:
-        A summary ``{"total": int, "by_verdict": {verdict: count}}``.
-    """
+    """Count each critic iteration's verdict (mirrors the collector)."""
     by_verdict: dict[str, int] = {}
     total = 0
     for entry in critic_iters:

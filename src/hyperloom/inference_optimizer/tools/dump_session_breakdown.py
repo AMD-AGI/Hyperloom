@@ -2,39 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Dump ``session_breakdown.json`` for one hyperloom session directory.
-
-This is the offline / historical / debugging entrypoint. The same
-builder is used by:
-
-* Coordinator action ``session_breakdown`` (live, agent-driven)
-* ``cli.py`` finally block (live, end-of-session safety net)
-* This script (offline / batch / shared-filesystem sessions)
-
-Examples
---------
-
-::
-
-    # Live session in this sandbox ($INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR,
-    # else $USER_DATA_PATH / /workspace/hyperloom)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown
-
-    # Historical session on a shared filesystem
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
-        --session-dir /shared/hyperloom-sessions/<user>/<sid>
-
-    # Override output path (don't touch session_dir)
-    python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
-        --session-dir <SD> --output /tmp/breakdown-<sid>.json
-
-    # Bulk historical
-    for d in /shared/hyperloom-sessions/*/*; do
-        [ -d "$d" ] || continue
-        python -m hyperloom.inference_optimizer.tools.dump_session_breakdown \\
-            --session-dir "$d" > /dev/null
-    done
-"""
+"""Dump ``session_breakdown.json`` for one hyperloom session directory."""
 
 from __future__ import annotations
 
@@ -49,13 +17,7 @@ from ..session.paths import session_dir as default_session_dir
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser for the session-breakdown CLI.
-
-    Returns:
-        argparse.ArgumentParser: Parser configured with ``--session-dir``,
-        ``--output``, ``--dry-run``, ``--print``, ``--include-transcripts``,
-        and ``--verbose`` options.
-    """
+    """Build the argument parser for the session-breakdown CLI."""
     parser = argparse.ArgumentParser(
         prog="dump_session_breakdown",
         description=__doc__,
@@ -106,12 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _setup_logging(verbose: int) -> None:
-    """Configure root logging level from a verbosity count.
-
-    Args:
-        verbose (int): Verbosity count; ``0`` -> WARNING, ``1`` -> INFO,
-            ``>=2`` -> DEBUG.
-    """
+    """Configure root logging level from a verbosity count."""
     level = logging.WARNING
     if verbose == 1:
         level = logging.INFO
@@ -124,15 +81,7 @@ def _setup_logging(verbose: int) -> None:
 
 
 def _summary_line(breakdown: dict) -> str:
-    """Format a one-line summary of a session breakdown.
-
-    Args:
-        breakdown (dict): Session breakdown mapping produced by ``build``.
-
-    Returns:
-        str: Single-line summary with session id, stop reason, validated gain,
-        and assorted invocation/lifecycle counts.
-    """
+    """Format a one-line summary of a session breakdown."""
     sess = breakdown.get("session") or {}
     final = breakdown.get("final") or {}
     optimization_entries = (breakdown.get("optimizations") or {}).get("entries") or []
@@ -157,19 +106,7 @@ def _summary_line(breakdown: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Build and (optionally) write the session breakdown JSON.
-
-    Resolves the session directory, then either prints a dry-run summary or
-    writes ``session_breakdown.json`` and prints the summary line.
-
-    Args:
-        argv (list[str] | None): Argument vector to parse; defaults to
-            ``sys.argv`` when ``None``.
-
-    Returns:
-        int: ``0`` on success, ``2`` when the session directory is missing, or
-        ``1`` when writing the breakdown fails.
-    """
+    """Build and (optionally) write the session breakdown JSON."""
     args = _build_parser().parse_args(argv)
     _setup_logging(args.verbose)
     log = logging.getLogger("dump_session_breakdown")

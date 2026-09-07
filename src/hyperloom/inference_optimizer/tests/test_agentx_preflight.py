@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX preflight: AIPERF_BIN resolution + capability (weka-trace) check.
-
-Contract:
-- ``resolve_aiperf_bin`` prefers ``AIPERF_BIN`` env, else PATH lookup, else None.
-- ``check_aiperf_capability`` raises ``AgentXPreflightError`` when the binary is
-  missing OR lacks the AgentX (weka-trace) capability. It verifies *capability*,
-  not mere existence. The probe is injectable so the check is testable offline.
-"""
+"""AgentX preflight: AIPERF_BIN resolution + capability (weka-trace) check."""
 
 from __future__ import annotations
 
@@ -93,12 +86,7 @@ def test_capability_rejects_build_without_progress_api():
 
 
 def test_capability_rejects_pre_scenario_build():
-    """weka-trace alone is stale: those builds predate the 062126 corpus.
-
-    Their scenario allowlist rejects the corpus the client now requests and
-    they have no ``--benchmark-duration``, so accepting them would defer the
-    failure to an hour into a run instead of surfacing it at startup.
-    """
+    """weka-trace alone is stale: those builds predate the 062126 corpus."""
 
     def _probe(_bin):
         return "usage: aiperf profile\n  --custom-dataset-type weka-trace ...\n"
@@ -117,11 +105,6 @@ def test_probe_failure_raises_not_crash():
 
 
 # --- loader-allowlist assertion ------------------------------------------------
-#
-# Flag presence cannot separate the pinned build from the previous one: aiperf
-# 0.8.0 carries weka-trace, --scenario and --benchmark-duration, and defines a
-# scenario by the same name, but locks different invariants and predates the
-# current corpus. The allowlist is the discriminator.
 
 _NEW = [
     "semianalysis_cc_traces_weka_with_subagents",
@@ -169,13 +152,7 @@ def test_stale_build_is_rejected():
 
 
 def test_stale_build_is_rejected_even_when_the_pinned_corpus_is_admitted():
-    """The silent path a run-scoped check alone leaves open.
-
-    Upstream's own H100/H200 recipes pin an older corpus via
-    WEKA_LOADER_OVERRIDE. A stale aiperf DOES admit that corpus, so asking only
-    "is this run's corpus allowed" waves the stale build through and it replays
-    under the wrong invariants. Build currency has to be asserted separately.
-    """
+    """The silent path a run-scoped check alone leaves open."""
     with pytest.raises(AgentXPreflightError) as ei:
         _check(_OLD, env={"WEKA_LOADER_OVERRIDE": "semianalysis_cc_traces_weka_with_subagents"})
     assert "stale build" in str(ei.value)
@@ -204,8 +181,7 @@ def test_agentx_dataset_outranks_weka_loader_override():
 
 
 def test_unreadable_allowlist_falls_back_and_says_so(capsys):
-    """Refusing outright would break setups that work today over what may be an
-    unusual install layout -- but the weaker check must not pass silently."""
+    """Refusing outright would break setups that work today over what may be an"""
     check_aiperf_capability(
         "/venv/bin/aiperf",
         loader_probe=lambda _b: None,
@@ -226,13 +202,7 @@ def test_unreadable_allowlist_still_rejects_a_flagless_build():
 
 
 def test_loader_probe_survives_a_hung_interpreter(monkeypatch):
-    """A timeout must degrade to the flag probe, not escape the check.
-
-    ``subprocess.run(timeout=...)`` raises ``TimeoutExpired``, which descends
-    from ``SubprocessError`` rather than ``OSError`` -- so catching only the
-    latter let it propagate out of ``check_aiperf_capability`` and become a hard
-    preflight failure, on exactly the input the timeout exists to handle.
-    """
+    """A timeout must degrade to the flag probe, not escape the check."""
     import subprocess
 
     from hyperloom.inference_optimizer.agentx import preflight as pf

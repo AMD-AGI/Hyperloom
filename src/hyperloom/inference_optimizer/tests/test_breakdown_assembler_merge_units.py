@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Fragment merge semantics in the breakdown assembler.
-
-Producers write partial fragments from deep inside their own work, and a second
-write of the same entity id merges into the first. What that merge keeps, and
-what it silently replaces, decides whether a recorded fact survives to the
-archive -- so these pin the merge rather than any one caller's output.
-"""
+"""Fragment merge semantics in the breakdown assembler."""
 
 from __future__ import annotations
 

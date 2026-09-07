@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the runtime repair of the AgentX aiperf dependency.
-
-The defect these pin down: ``HYPERLOOM_AGENTX`` declares aiperf as a required,
-version-pinned dependency and ``install.sh`` already knows how to install it,
-but the install was gated on a *runtime* flag being true in the *installer's*
-process. Provision without the flag, turn AgentX on later, and the preflight
-fails with advice ("install it via install.sh") that no one on the path is able
-to act on -- so a known dependency gap was routed into the enablement lane and
-re-derived by an LLM specialist.
-"""
+"""Tests for the runtime repair of the AgentX aiperf dependency."""
 
 from __future__ import annotations
 
@@ -49,10 +40,7 @@ def _cfg(tmp_path):
 
 
 def _raiser(*errors):
-    """Return a check_aiperf_capability stub raising ``errors`` in order.
-
-    A ``None`` entry means "this call passes".
-    """
+    """Return a check_aiperf_capability stub raising ``errors`` in order."""
     calls = {"n": 0}
     queue = list(errors)
 
@@ -68,12 +56,7 @@ def _raiser(*errors):
 
 # ── the installer contract: Python and the shell must agree on the flag ──────
 def test_install_script_ships_the_only_aiperf_entrypoint():
-    """The flag repair.py shells out with must exist in the packaged installer.
-
-    Python and the shell are edited in different files; without this the two
-    can drift and the repair would fail with an "unknown option" that looks
-    like an environment problem rather than a packaging one.
-    """
+    """The flag repair.py shells out with must exist in the packaged installer."""
     script = repair.install_script_path()
     assert script.is_file(), f"packaged installer missing at {script}"
     text = script.read_text(encoding="utf-8")
@@ -81,28 +64,13 @@ def test_install_script_ships_the_only_aiperf_entrypoint():
 
 
 def test_install_script_marks_an_explicitly_requested_aiperf_as_required():
-    """A dependency the operator asked for must not fail soft.
-
-    ``ensure_aiperf`` warned and returned on a failed install, so even the
-    opt-in path left aiperf absent silently.
-    """
+    """A dependency the operator asked for must not fail soft."""
     text = repair.install_script_path().read_text(encoding="utf-8")
     assert "AIPERF_REQUIRED" in text
 
 
 def test_install_script_prewarms_aiperf_when_the_build_ships_the_client():
-    """A default provision must install aiperf, not skip it.
-
-    The gate used to read INSTALL_AIPERF / HYPERLOOM_AGENTX -- runtime mode
-    flags -- to decide an install-time question. Nobody sets them while
-    provisioning, because the mode is chosen later, per session. Measured on the
-    incident cluster: 11 of 13 provisioning runs logged "aiperf (AgentX)
-    skipped" and left a box that could not run AgentX at all.
-
-    The presence of the shipped client is the install-time-knowable signal, so
-    the default branch installs on it. Asserted against the packaged installer
-    because this is the one behaviour the incident turned on.
-    """
+    """A default provision must install aiperf, not skip it."""
     text = repair.install_script_path().read_text(encoding="utf-8")
     assert "AGENTX_ASSET_DIR" in text
     # The default branch must reach ensure_aiperf, not just log a skip.
@@ -112,11 +80,7 @@ def test_install_script_prewarms_aiperf_when_the_build_ships_the_client():
 
 
 def test_agentx_assets_exist_so_a_source_checkout_prewarms():
-    """The signal the installer keys on must actually be present in-tree.
-
-    A rename of ``assets/agentx`` would silently turn the pre-warm back into a
-    skip -- the same silent regression, one directory along.
-    """
+    """The signal the installer keys on must actually be present in-tree."""
     from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
 
     assets = agentx_asset_dir()
@@ -170,12 +134,7 @@ def test_repair_redacts_secrets_from_installer_output(monkeypatch):
 
 
 def test_repair_keeps_the_cause_when_warnings_push_it_out_of_the_tail(monkeypatch):
-    """The line that gives the reason must survive a noisy installer.
-
-    Shape taken from a measured run on a Python 3.10 box: the pip line naming
-    the actual cause sat behind nine torch-gate warnings. A plain tail would
-    have dropped exactly the sentence this summary exists to carry.
-    """
+    """The line that gives the reason must survive a noisy installer."""
     noise = "\n".join(f"[inference-optimizer WARN] torch gate note {i}" for i in range(20))
     cause = "ERROR: Package 'aiperf' requires a different Python: 3.10.12 not in '<3.14,>=3.11'"
     monkeypatch.setattr(
@@ -259,13 +218,7 @@ def test_stale_build_is_reinstalled(tmp_path, monkeypatch):
 
 
 def test_aiperf_bin_override_is_not_repaired(tmp_path, monkeypatch):
-    """An operator override is not a supply gap, and installing cannot close it.
-
-    ``ensure_aiperf`` returns 0 without doing anything when AIPERF_BIN is set,
-    and ``resolve_aiperf_bin`` hands back that same binary afterwards. Repairing
-    would report an install that never happened and point the reader away from
-    the only thing that fixes it.
-    """
+    """An operator override is not a supply gap, and installing cannot close it."""
     monkeypatch.setattr(_DEPLOY, lambda d: None)
     monkeypatch.setattr(_RESOLVE, lambda env: "/custom/aiperf")
     monkeypatch.setattr(_CHECK, _raiser(AgentXPreflightError("aiperf was not found", repairable=True)))
@@ -284,11 +237,7 @@ def test_aiperf_bin_override_is_not_repaired(tmp_path, monkeypatch):
 
 
 def test_capability_check_sees_the_child_env(tmp_path, monkeypatch):
-    """The corpus pin lives in the benchmark env, not this process's.
-
-    Without it the loader-allowlist admission check reads an empty override and
-    a misspelled corpus sails through preflight to die after the server boots.
-    """
+    """The corpus pin lives in the benchmark env, not this process's."""
     seen = {}
     monkeypatch.setattr(_DEPLOY, lambda d: None)
     monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
@@ -312,11 +261,7 @@ def test_repair_supplies_home_to_the_installer(monkeypatch):
 
 
 def test_operator_config_error_is_not_reinstalled(tmp_path, monkeypatch):
-    """A corpus pin outside the allowlist is the operator's, not the build's.
-
-    Reinstalling the same pinned build cannot change the verdict, so spending
-    minutes on a pip install before failing would only delay the diagnosis.
-    """
+    """A corpus pin outside the allowlist is the operator's, not the build's."""
     monkeypatch.setattr(_DEPLOY, lambda d: None)
     monkeypatch.setattr(_RESOLVE, lambda env: "/opt/venv/bin/aiperf")
     check = _raiser(AgentXPreflightError("the corpus pin 'typo' is not in the allowlist"))
@@ -359,31 +304,17 @@ def test_a_repaired_binary_is_memoized_like_any_other(tmp_path, monkeypatch):
     assert check.calls["n"] == 2  # the second round reuses the post-repair verdict
 
 
-# ── the installer gate, executed rather than read ────────────────────────────
-# The tests above assert on the TEXT of install.sh, which is what a packaging
-# drift check can do. Both defects this gate has had were behavioural and
-# invisible to a text match: a falsy INSTALL_AIPERF started installing once the
-# pre-warm became the default arm, and a bare $ONLY_AIPERF in a sibling function
-# broke every preflight test under `set -u`. So run the real block.
+# ── the installer gate, executed rather than read ──────────────────────────── The tests above assert on the TEXT of
+# install.sh, which is what a packaging drift check can do.
 
 
 def _bash(script: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    """Run ``script`` by bare name from its own directory.
-
-    Absolute paths are the one thing bash flavours disagree about -- WSL wants
-    ``/mnt/c/...`` and Git Bash wants ``C:/...`` -- and a relative name works in
-    every one of them, including the Linux CI runner.
-    """
+    """Run ``script`` by bare name from its own directory."""
     return subprocess.run(["bash", script.name], cwd=str(script.parent), capture_output=True, text=True, env=env)
 
 
 def _run_aiperf_gate(tmp_path: Path, *, env: dict[str, str], ships_client: bool = True) -> str:
-    """Execute install.sh's aiperf gate in isolation and return what it logged.
-
-    The block is sliced out of the packaged installer rather than restated, so a
-    change to the real gate that nobody mirrors here fails the assertions
-    instead of quietly passing against a stale copy.
-    """
+    """Execute install.sh's aiperf gate in isolation and return what it logged."""
     text = repair.install_script_path().read_text(encoding="utf-8")
     start = text.index('if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then')
     end = text.index("\nensure_bench_serving_deps", start)
@@ -398,9 +329,8 @@ def _run_aiperf_gate(tmp_path: Path, *, env: dict[str, str], ships_client: bool 
             "\n".join(
                 [
                     "#!/usr/bin/env bash",
-                    # `set -u` is what install.sh itself runs under, and is the
-                    # only reason the ONLY_AIPERF defect was a hard failure
-                    # rather than a silently-false branch.
+                    # `set -u` is what install.sh itself runs under, and is the only reason the ONLY_AIPERF defect was
+                    # a hard failure rather than a silently-false branch.
                     "set -uo pipefail",
                     f'HYPERLOOM_BENCHMARK_BACKEND_LC="{env.get("BACKEND", "vllm")}"',
                     f'INSTALL_AIPERF="{env.get("INSTALL_AIPERF", "")}"',
@@ -422,20 +352,18 @@ def _run_aiperf_gate(tmp_path: Path, *, env: dict[str, str], ships_client: bool 
 @pytest.mark.parametrize(
     ("flags", "expect_install"),
     [
-        # Nobody set anything: the provisioning case the incident was measured
-        # in. This must install, and it is the whole point of the change.
+        # Nobody set anything: the provisioning case the incident was measured in.
         ({}, True),
         ({"INSTALL_AIPERF": "1"}, True),
         ({"HYPERLOOM_AGENTX": "on"}, True),
         ({"HYPERLOOM_AGENTX": " ON "}, True),
-        # Declining by name has to keep working. Before the falsy arm existed
-        # these fell through to the pre-warm and installed anyway.
+        # Declining by name has to keep working.
         ({"INSTALL_AIPERF": "0"}, False),
         ({"INSTALL_AIPERF": "false"}, False),
         ({"INSTALL_AIPERF": " OFF "}, False),
         ({"HYPERLOOM_AGENTX": "no"}, False),
-        # An unparseable value is not a decline; it falls to the default arm,
-        # which is the safe direction -- a typo must not silently disarm AgentX.
+        # An unparseable value is not a decline; it falls to the default arm, which is the safe direction -- a typo
+        # must not silently disarm AgentX.
         ({"INSTALL_AIPERF": "bogus"}, True),
     ],
 )
@@ -445,23 +373,20 @@ def test_installer_aiperf_gate_truth_table(tmp_path, flags, expect_install):
 
 
 def test_installer_gate_makes_an_explicit_request_fatal(tmp_path):
-    """Asked for by name means AIPERF_REQUIRED=1, which is what makes
-    ``ensure_aiperf`` die instead of warn."""
+    """Asked for by name means AIPERF_REQUIRED=1, which is what makes"""
     out = _run_aiperf_gate(tmp_path, env={"INSTALL_AIPERF": "1"})
     assert "RAN ensure_aiperf required=1" in out
 
 
 def test_installer_gate_prewarm_stays_non_fatal(tmp_path):
-    """The default arm must not raise the flag: an interpreter that cannot
-    supply aiperf must not block a provision that was never going to use it."""
+    """The default arm must not raise the flag: an interpreter that cannot"""
     out = _run_aiperf_gate(tmp_path, env={})
     assert "RAN ensure_aiperf required=0" in out
     assert "pre-warming" in out
 
 
 def test_installer_gate_skips_a_build_without_the_client(tmp_path):
-    """The pre-warm keys on the shipped client, so a build without it says so
-    rather than installing a dependency it has no use for."""
+    """The pre-warm keys on the shipped client, so a build without it says so"""
     out = _run_aiperf_gate(tmp_path, env={}, ships_client=False)
     assert "RAN ensure_aiperf" not in out
     assert "ships no" in out
@@ -477,11 +402,7 @@ def test_installer_gate_leaves_the_bypass_backend_alone(tmp_path):
 def _run_sliced_function(
     tmp_path: Path, opener: str, *, preamble: list[str], env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
-    """Run one install.sh function standalone, the way test_setup_cli does.
-
-    That harness is the reason `${ONLY_AIPERF:-0}` has to be defaulted: it
-    declares a handful of variables and nothing else, under `set -u`.
-    """
+    """Run one install.sh function standalone, the way test_setup_cli does."""
     text = repair.install_script_path().read_text(encoding="utf-8")
     start = text.index(opener)
     name = opener.split("(", 1)[0]
@@ -499,17 +420,7 @@ def _run_sliced_function(
     ["preflight_validate_credentials() {", "ensure_torch_compatible_with_gpu() {"],
 )
 def test_only_aiperf_guards_tolerate_an_undeclared_flag(tmp_path, opener):
-    """The ``--only-aiperf`` early returns must not require ONLY_AIPERF to exist.
-
-    ``ONLY_AIPERF`` is assigned at the top of install.sh, but these functions
-    are also run standalone: test_setup_cli.py slices
-    ``preflight_validate_credentials`` into a generated script whose preamble
-    declares a handful of variables and nothing else, under ``set -u``. A bare
-    ``$ONLY_AIPERF`` there is an unbound variable, which took out all eight CI
-    test shards -- five preflight tests died before reaching what they assert.
-
-    So the preamble here deliberately does NOT declare it.
-    """
+    """The ``--only-aiperf`` early returns must not require ONLY_AIPERF to exist."""
     proc = _run_sliced_function(
         tmp_path,
         opener,
@@ -533,12 +444,7 @@ def test_only_aiperf_guards_tolerate_an_undeclared_flag(tmp_path, opener):
 
 
 def test_repair_reports_an_unrunnable_installer(monkeypatch):
-    """A packaged install.sh that cannot be executed is a packaging fault.
-
-    Real shape: a wheel unpacked without the executable bit, or a $TMPDIR
-    mounted noexec. The OSError carries the only useful detail, and swallowing
-    it would leave "repair failed" with nothing to act on.
-    """
+    """A packaged install.sh that cannot be executed is a packaging fault."""
 
     def _boom(cmd, **kw):
         raise PermissionError(13, "Permission denied")
@@ -551,12 +457,7 @@ def test_repair_reports_an_unrunnable_installer(monkeypatch):
 
 
 def test_repair_says_so_when_a_failed_installer_printed_nothing(monkeypatch):
-    """A silent non-zero exit must still name itself.
-
-    Without the fallback the message ends at "exited 2: " -- a colon and a
-    blank, which reads as a truncated log rather than as "the installer said
-    nothing", and sends the reader looking for output that does not exist.
-    """
+    """A silent non-zero exit must still name itself."""
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, "", "   \n\n"))
     err = repair.ensure_aiperf_installed(env={})
     assert err is not None
@@ -564,12 +465,7 @@ def test_repair_says_so_when_a_failed_installer_printed_nothing(monkeypatch):
 
 
 def test_repair_keeps_stdout_and_stderr_on_separate_lines(monkeypatch):
-    """A stdout tail without a trailing newline must not fuse into stderr.
-
-    The first stderr line is usually the pip error this summary exists to
-    carry; concatenating the streams glued it onto the end of an unrelated
-    progress line, where a reader scanning for "ERROR:" at line start misses it.
-    """
+    """A stdout tail without a trailing newline must not fuse into stderr."""
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -581,12 +477,7 @@ def test_repair_keeps_stdout_and_stderr_on_separate_lines(monkeypatch):
 
 
 def test_repair_replaces_an_empty_home_not_just_a_missing_one(monkeypatch):
-    """``HOME=""`` is not the same as unset, and setdefault treats it as set.
-
-    install.sh expands ``${HOME}/.hyperloom`` for its install stamp; an empty
-    HOME makes that ``/.hyperloom``, which is unwritable, so the stamp never
-    lands and every later provision redoes the install it was meant to record.
-    """
+    """``HOME=\"\"`` is not the same as unset, and setdefault treats it as set."""
     seen = {}
 
     def _run(cmd, **kw):
@@ -599,14 +490,7 @@ def test_repair_replaces_an_empty_home_not_just_a_missing_one(monkeypatch):
 
 
 def test_post_repair_failure_is_marked_unrepairable(tmp_path, monkeypatch):
-    """The installer reported success and the build is still unusable.
-
-    This is no longer a supply gap this process can close, and the distinction
-    is load-bearing: the repair result is memoized as a success, so a caller
-    that trusted ``repairable`` would re-enter the repair branch, get that
-    memoized success handed straight back, and arrive here again having done
-    nothing at all.
-    """
+    """The installer reported success and the build is still unusable."""
     monkeypatch.setattr(_DEPLOY, lambda d: None)
     monkeypatch.setattr(_RESOLVE, lambda env: "/opt/venv/bin/aiperf")
     monkeypatch.setattr(_INSTALL, lambda **kw: None)  # the install "succeeds"
@@ -626,12 +510,7 @@ def test_post_repair_failure_is_marked_unrepairable(tmp_path, monkeypatch):
 
 
 def test_an_unreadable_config_is_left_to_magpie(tmp_path, monkeypatch):
-    """AgentX preparation must not be the thing that reports a broken config.
-
-    Magpie parses the same file moments later and says so with the context this
-    module does not have; failing here first would replace that diagnosis with
-    a traceback from the AgentX path, pointing at the wrong subsystem.
-    """
+    """AgentX preparation must not be the thing that reports a broken config."""
     called = {"deploy": False}
     monkeypatch.setattr(_DEPLOY, lambda d: called.__setitem__("deploy", True))
     bad = tmp_path / "cfg.yaml"

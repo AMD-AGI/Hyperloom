@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for policy gate.py pure helpers + PolicyGate path/freeform helpers:
-presence checks, GPU-count probing, lane ceilings, path allowlists, and the
-free-form task-description guard."""
+"""Coverage for policy gate.py pure helpers + PolicyGate path/freeform helpers: presence checks, GPU-count probing,
+lane ceilings, path allowlists, and the free-form task-description guard.
+"""
 
 from __future__ import annotations
 
@@ -226,12 +226,7 @@ def test_freeform_description_destructive_text_allowed() -> None:
 
 
 def test_phase_semantics_prompt_names_every_internal_action() -> None:
-    """The orchestration prompt must name the actions PolicyGate will deny.
-
-    Telling the model that ``framework`` is Coordinator-managed while the
-    runtime denies ``framework_agent`` invites a proposal that costs a tick
-    and gets rejected as coordinator_managed_action.
-    """
+    """The orchestration prompt must name the actions PolicyGate will deny."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         COORDINATOR_INTERNAL_ACTIONS,
     )

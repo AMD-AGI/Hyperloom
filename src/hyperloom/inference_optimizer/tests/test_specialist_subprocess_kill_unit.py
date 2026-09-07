@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for specialist_subprocess process teardown: the SIGTERM/SIGKILL
-``_kill`` ladder."""
+"""Coverage for specialist_subprocess process teardown: the SIGTERM/SIGKILL"""
 
 from __future__ import annotations
 

@@ -1,15 +1,4 @@
-"""A MoE checkpoint is not MoE in every layer.
-
-``867f119cb`` restored the MoE FFN to the PerfModel breakdown, but charged it
-to all ``num_hidden_layers`` and kept skipping the dense FFN entirely. Real
-checkpoints run a dense prefix: GLM-5.3-Flash and GLM-5.3 both set
-``first_k_dense_replace: 3``, so 3 of their 45 / 78 layers have gate/up/down
-and no experts. Counting those layers as MoE overstates the largest term in
-the breakdown and drops a real one.
-
-The config numbers below are read off ``/shared_nfs/models/GLM-5.3*/config.json``
-on the fleet, not invented.
-"""
+"""A MoE checkpoint is not MoE in every layer."""
 
 from __future__ import annotations
 
@@ -52,16 +41,12 @@ class TestTheLayerSplit:
         assert _split({"decoder_sparse_step": 2}, 8, 64) == (4, 4)
 
     def test_the_stride_is_phased_on_the_absolute_layer_index(self):
-        # Both upstreams phase on layer_idx, not on the offset from the dense
-        # prefix. DeepSeek/GLM:
-        #     layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
-        # so with prefix 3 / stride 2 over 8 layers the MoE layers are 4 and 6 --
-        # not 3, 5, 7, which is what re-basing to (i - first_dense) produced.
+        # Both upstreams phase on layer_idx, not on the offset from the dense prefix.
         assert _split({"first_k_dense_replace": 3, "moe_layer_freq": 2}, 8, 64) == (2, 6)
 
     def test_qwen_counts_from_one_not_zero(self):
-        # Qwen3-MoE: (layer_idx + 1) % decoder_sparse_step == 0, so with stride 3
-        # over 8 layers it is 2, 5 -- the shifted-by-one set of 0, 3, 6.
+        # Qwen3-MoE: (layer_idx + 1) % decoder_sparse_step == 0, so with stride 3 over 8 layers it is 2, 5 -- the
+        # shifted-by-one set of 0, 3, 6.
         assert _split({"decoder_sparse_step": 3}, 8, 64) == (2, 6)
 
     def test_mlp_only_layers_stay_dense(self):
@@ -84,8 +69,8 @@ class TestTheLayerSplit:
         assert _split({"first_k_dense_replace": 999}, 8, 64) == (0, 8)
 
     def test_a_boolean_freq_is_not_read_as_a_stride(self):
-        # ``True`` is an int in Python; treating it as stride 1 would be right
-        # by accident, but treating ``False`` as 0 would divide by zero.
+        # ``True`` is an int in Python; treating it as stride 1 would be right by accident, but treating ``False`` as
+        # 0 would divide by zero.
         assert _split({"moe_layer_freq": False}, 8, 64) == (8, 0)
 
 
@@ -139,15 +124,14 @@ class TestThePerfModelUsesTheSplit:
         q = next(o for o in _breakdown(_flash_meta()).ops if o.name == "q_proj")
 
         # q_proj repeats over all 45 layers; gate_proj over the 3 dense ones.
-        # Same M, so the ratio is purely the repeat count.
         per_layer_gate = gate.flops / 3
         per_layer_q = q.flops / 45
         assert per_layer_gate == pytest.approx(per_layer_q * (12288 / 4096) * 1.0, rel=0.01)
 
     def test_attention_still_repeats_over_every_layer(self):
         ops = {o.name: o for o in _breakdown(_flash_meta()).ops}
-        # Every layer has attention regardless of its FFN kind; this must not
-        # have been dragged along by the FFN split.
+        # Every layer has attention regardless of its FFN kind; this must not have been dragged along by the FFN
+        # split.
         assert ops["sdpa"].flops == pytest.approx(
             next(o for o in _breakdown(_flash_meta(moe_layers=45, dense_ffn_layers=0)).ops if o.name == "sdpa").flops
         )
@@ -239,10 +223,7 @@ class TestLoadModelMetaFillsTheSplit:
 
         assert no_prefix is not None and prefix is not None
         assert prefix.expert_weight_bytes == pytest.approx(no_prefix.expert_weight_bytes * 42 / 45, rel=1e-6)
-        # Per-token active bytes go *up*, and that is the point. Bytes moved out
-        # of the expert pool are dense-FFN weights, and a dense layer's weights
-        # are read for every token, whereas only 8 of 288 experts are. Charging
-        # them as experts under-counted the decode weight traffic.
+        # Per-token active bytes go *up*, and that is the point.
         assert prefix.active_weight_bytes > no_prefix.active_weight_bytes
 
     def test_a_dense_checkpoint_reports_every_layer_as_dense_ffn(self, tmp_path):

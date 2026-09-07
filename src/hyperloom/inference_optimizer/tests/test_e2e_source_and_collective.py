@@ -24,16 +24,16 @@ from hyperloom.orchestrator.kernel.request_handlers import (  # noqa: E402
 from hyperloom.orchestrator.phases.kernel import KernelPhase  # noqa: E402
 
 
-# Paths must sit under a reusable framework root, else patchability rejects them
-# for a reason unrelated to what this test covers.
+# Paths must sit under a reusable framework root, else patchability rejects them for a reason unrelated to what this
+# test covers.
 _TRITON_LAUNCHER_REL = Path("python/sglang/kernels/ops/moe/fused_moe_e2e.py")
 _COLLECTIVE_LAUNCHER_REL = Path("aiter/dist/device_communicators/custom_all_reduce.py")
 _TRITON_DEFINITION_REL = Path("python/sglang/kernels/ops/moe/mxfp8_moe_amd_gfx95.py")
 _COLLECTIVE_DEFINITION_REL = Path("csrc/include/custom_all_reduce.cuh")
 
 _TRITON_KERNEL = "_mxfp8_grouped_gemm_kernel"
-# The trace carries the full mangled symbol; TraceLens elides it in the report,
-# so the fixture uses each form where the real pipeline would.
+# The trace carries the full mangled symbol; TraceLens elides it in the report, so the fixture uses each form where
+# the real pipeline would.
 _COLLECTIVE_KERNEL = "_ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi8EEEvPNS_8RankDataENS_11RankSignalsEiiii"
 _COLLECTIVE_KERNEL_TRUNCATED = "_ZN5aiter33reduce_scatter_cross_device_storeIDF16bLi8EEEvPNS_8RankDataENS_1..."
 
@@ -107,12 +107,7 @@ def _kernel(name: str, corr: int, ts: float) -> dict:
 
 @pytest.fixture()
 def trace_file(tmp_path: Path, framework_sources: dict[str, str]) -> Path:
-    """A trace carrying both launch stacks, gzipped like a real capture.
-
-    The Triton stack ends in triton runtime plumbing and the collective stack in
-    aiter's JIT dispatch wrapper; both must be walked past to reach the user
-    frame that names the source.
-    """
+    """A trace carrying both launch stacks, gzipped like a real capture."""
     events: list[dict] = []
 
     # Triton kernel: user frame -> triton runtime -> builtin launch.
@@ -188,8 +183,8 @@ def analysis_md(tmp_path: Path) -> Path:
         ]
     lines += ["", "## Detailed Analysis", ""]
     for index, (title, row_text) in enumerate(blocks, 1):
-        # The compute-tier marker is what makes a block a candidate block; the
-        # parser skips any heading not preceded by one.
+        # The compute-tier marker is what makes a block a candidate block; the parser skips any heading not preceded
+        # by one.
         lines += [
             f'<a id="detailed-analysis-compute-p{index}"></a>',
             f"<!-- reasoning-candidate tier=compute rank={index} -->",
@@ -210,13 +205,7 @@ def analysis_md(tmp_path: Path) -> Path:
 
 
 def _finalize(analysis_md: Path, trace_file: Path) -> list[dict]:
-    """Both stages the real CLI runs, in order.
-
-    ``_finalize_candidates`` resolves sources and patchability;
-    ``enrich_candidates_with_runtime_metadata`` then attaches the kernel contract
-    that types a candidate as a collective. Running only the first leaves the
-    collective lane with nothing to select, so the seam belongs in this test.
-    """
+    """Both stages the real CLI runs, in order."""
     import argparse
 
     rows = tsr.parse_analysis_md(analysis_md, top_k=20)
@@ -289,14 +278,7 @@ def test_collective_resolves_despite_the_vendor_placeholder(
 
 
 def _state_as_orchestrator_sees_it(candidates: list[dict], tmp_path: Path):
-    """Reproduce what shared state actually holds after a trace analysis.
-
-    ``record_trace_analyze`` stores a roofline-oriented projection in
-    ``hot_kernels_top15`` -- no ``kernel_contract``, no ``kernel_repo``, no
-    shapes -- and keeps the enriched rows on disk at ``candidates_path``. A test
-    that feeds the full rows in directly would hide a lane that reads the
-    projection.
-    """
+    """Reproduce what shared state actually holds after a trace analysis."""
     path = tmp_path / "kernel_candidates.json"
     path.write_text(json.dumps({"hot_kernels": candidates}, default=str), encoding="utf-8")
     projection = [
@@ -349,11 +331,7 @@ def test_collective_lane_gate_opens_on_this_analysis(analysis_md, trace_file):
 
 
 def test_bare_runtime_api_is_never_routed(analysis_md, trace_file):
-    """hipGraphLaunch is a launch API, not a kernel.
-
-    Name-grepping it used to match aiter's hipify mapping table, which was then
-    handed to a backend as if it were rewritable kernel source.
-    """
+    """hipGraphLaunch is a launch API, not a kernel."""
     item = _by_kernel(_finalize(analysis_md, trace_file), "hipGraphLaunch")
     assert item["reusable_native_kernel"] is False
     assert not item["recommended_backends"]

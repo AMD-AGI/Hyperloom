@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``_patch_source_pr``: turning a PR candidate into a diff on disk.
-
-Carried over from ``test_framework_agent_executor`` when the materialisation
-half moved out of that executor. The URL-scheme check in particular is a
-security test, not a behaviour test: the ``diff_url`` reaches the runtime from
-a remote KB/API response, so honouring ``file://`` would read the local
-filesystem on a remote party's say-so.
-"""
+"""Coverage for ``_patch_source_pr``: turning a PR candidate into a diff on disk."""
 
 from __future__ import annotations
 
@@ -72,8 +65,7 @@ def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
 
 
 def test_fetch_diff_to_path_rejects_file_url(tmp_path: Path):
-    """A ``file://`` diff_url must not be fetched: the URL reaches us from a
-    remote KB/API response, so honouring it would read the local filesystem."""
+    """A ``file://`` diff_url must not be fetched: the URL reaches us from a"""
     src = tmp_path / "secret.patch"
     src.write_text(_VALID_PATCH, encoding="utf-8")
     dest = tmp_path / "out" / "got.patch"
@@ -135,8 +127,7 @@ def test_materialize_explicit_patches_are_used_verbatim(tmp_path: Path):
 
 
 def test_materialize_refuses_to_bench_when_every_explicit_patch_is_missing(tmp_path: Path):
-    """An empty patch list would bench the unpatched tree and report the
-    baseline as the candidate's verdict, so it must be a terminal result."""
+    """An empty patch list would bench the unpatched tree and report the"""
     out = materialize_candidate_patches(
         candidate={},
         params={"patches": [str(tmp_path / "gone.patch")]},

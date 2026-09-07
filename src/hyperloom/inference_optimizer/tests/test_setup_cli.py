@@ -267,8 +267,8 @@ def test_baremetal_setup_migrates_retired_deepseek_env_to_both_sides(tmp_path: P
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                # The credentials in this scenario must come from .env alone, so
-                # don't inherit any provider variable from the pytest process.
+                # The credentials in this scenario must come from .env alone, so don't inherit any provider variable
+                # from the pytest process.
                 "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
                 "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
                 "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
@@ -330,8 +330,8 @@ def _baremetal_credential_functions() -> str:
 _CLEAN_PROVIDER_ENV = [
     "unset OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS",
     "unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN",
-    # Now that the shell reads the subscription token too, a developer machine
-    # exporting one would otherwise change what these runs resolve.
+    # Now that the shell reads the subscription token too, a developer machine exporting one would otherwise change
+    # what these runs resolve.
     "unset CLAUDE_CODE_OAUTH_TOKEN",
     "unset CLAUDE_MODEL CODEX_MODEL GEAK_CLAUDE_MODEL",
     "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL",
@@ -339,12 +339,7 @@ _CLEAN_PROVIDER_ENV = [
 
 
 def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: Path):
-    """The configuration the docs now recommend must survive a setup run.
-
-    Both sides are on one host, so the OpenAI side is part of the same gateway
-    credential rather than a second provider -- and that has to be decided from
-    the URLs, not from whether a legacy DEEPSEEK_* migration happened to run.
-    """
+    """The configuration the docs now recommend must survive a setup run."""
     dotenv = tmp_path / ".env"
     dotenv.write_text(
         "\n".join(
@@ -389,9 +384,8 @@ def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: 
     assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in text
     assert "OPENAI_BASE_URL=https://api.deepseek.com/v1" in text
     assert "OPENAI_API_KEY=deepseek-test-key" in text
-    # A gateway that authenticates on a header needs both sides' headers to
-    # survive: this deployment shape is exactly the one that cannot re-derive
-    # them from the keys.
+    # A gateway that authenticates on a header needs both sides' headers to survive: this deployment shape is exactly
+    # the one that cannot re-derive them from the keys.
     assert 'ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
     assert 'OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
 
@@ -512,10 +506,9 @@ _SHIM_CASES = {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     },
-    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_*
-    # leftover must be ignored whole rather than pointing the run at DeepSeek's
-    # host -- where the migrated API key would also outrank the token and move
-    # the run onto API billing.
+    # A subscription token is a configured Anthropic side, so a stale DEEPSEEK_* leftover must be ignored whole rather
+    # than pointing the run at DeepSeek's host -- where the migrated API key would also outrank the token and move the
+    # run onto API billing.
     "subscription token already configured": {
         "_".join(("DEEPSEEK", "API", "KEY")): "sk-ds",
         "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")): "sk-ant-oat01-fake",
@@ -532,9 +525,7 @@ def _optimizer_shim() -> tuple[str, str]:
 
 
 def _baremetal_shim() -> tuple[str, str]:
-    # Carries read_dotenv_var along, which this shim consults for each retired
-    # key. DOTENV points at a missing file below, so the .env lookups come back
-    # empty and only the exported values drive the comparison.
+    # Carries read_dotenv_var along, which this shim consults for each retired key.
     return _baremetal_credential_functions(), "migrate_legacy_deepseek_env"
 
 
@@ -547,17 +538,7 @@ _SHIM_INSTALLERS = {
 @pytest.mark.parametrize("installer", sorted(_SHIM_INSTALLERS))
 @pytest.mark.parametrize("case", sorted(_SHIM_CASES))
 def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str, installer: str):
-    """Every shell shim and ``deepseek_compat_env`` must resolve identically.
-
-    Three copies of this translation exist (Python plus the two installers that
-    own an entrypoint); a divergence would send credentials to a different
-    endpoint depending on which one the operator happened to use.
-
-    ``ANTHROPIC_AUTH_TOKEN`` is excluded from the compared set on purpose and
-    pinned separately below: an installer's job ends at a ``.env``, which only
-    ever carries the API-key spelling, while the Python shim resolves in-process
-    where offering the bearer spelling as well costs nothing.
-    """
+    """Every shell shim and ``deepseek_compat_env`` must resolve identically."""
     env = _SHIM_CASES[case]
     shim_text, entry_point = _SHIM_INSTALLERS[installer]()
 
@@ -567,8 +548,8 @@ def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                # The Python side is given an explicit mapping, so the shell has
-                # to start from the same blank slate rather than inherit pytest's.
+                # The Python side is given an explicit mapping, so the shell has to start from the same blank slate
+                # rather than inherit pytest's.
                 *_CLEAN_PROVIDER_ENV,
                 "warn() { :; }",
                 "log() { :; }",
@@ -592,8 +573,8 @@ def test_shell_shim_matches_python_deepseek_compat_env(tmp_path: Path, case: str
 
     for name in _SHIM_REPORTED_VARS:
         assert from_shell.get(name, "") == from_python.get(name, ""), name
-    # The documented exception, asserted rather than assumed: no installer may
-    # start writing the bearer spelling without this test being updated.
+    # The documented exception, asserted rather than assumed: no installer may start writing the bearer spelling
+    # without this test being updated.
     assert from_shell.get("ANTHROPIC_AUTH_TOKEN", "") == env.get("ANTHROPIC_AUTH_TOKEN", "")
 
 
@@ -602,8 +583,8 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
         (
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
-            # The gate is what's under test here; the legacy shim has its own
-            # coverage and is defined outside the extracted slice.
+            # The gate is what's under test here; the legacy shim has its own coverage and is defined outside the
+            # extracted slice.
             ["preflight_load_dotenv() { :; }", "normalize_legacy_deepseek_env() { :; }"],
         ),
         (
@@ -614,8 +595,8 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
-        # Start at the cross-provider check so the extracted slice is the whole
-        # credential preflight, including the rejection helper it calls.
+        # Start at the cross-provider check so the extracted slice is the whole credential preflight, including the
+        # rejection helper it calls.
         start = script_text.index("preflight_reject_cross_provider() {")
         end = script_text.index(
             "\npreflight_validate_credentials", script_text.index("preflight_validate_credentials() {")
@@ -699,8 +680,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
 
 
 def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
-    """install_baremetal.sh rejects a mispaired config during setup, like the CLI
-    preflight and the other two installers."""
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI"""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
@@ -838,8 +818,7 @@ def test_baremetal_setup_accepts_oauth_only_without_mirroring_it(tmp_path: Path)
 
 
 def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Path):
-    """Mirrors the CLI: both keys imply their own official endpoint, so neither
-    borrows the other's and the pair is legal."""
+    """Mirrors the CLI: both keys imply their own official endpoint, so neither"""
     script_paths = [
         (
             "install",
@@ -887,8 +866,7 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
 
 
 def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_path: Path):
-    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its
-    own base URL."""
+    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its"""
     script_paths = [
         (
             "install",
@@ -1057,12 +1035,7 @@ def _runtime_dep_loop(install_script: Path) -> str:
 
 
 def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
-    """An atom-only host must not be told sgl_kernel is missing.
-
-    atom images ship neither SGLang nor its sgl_kernel companion, so probing for
-    it there only produces a scary 'missing' line about a dependency the run
-    will never use.
-    """
+    """An atom-only host must not be told sgl_kernel is missing."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
 
     host_py = tmp_path / "host-python"
@@ -1100,12 +1073,7 @@ def test_baremetal_runtime_deps_skip_sgl_kernel_without_sglang(tmp_path: Path):
 
 
 def test_baremetal_preflight_probes_atom_by_default():
-    """Phase 1 must accept an atom-only host without extra flags.
-
-    The default probe list gated on sglang/vllm alone, so setup inside an
-    atom-only image died with 'no serving framework importable' even though
-    atom was installed and is a registered framework.
-    """
+    """Phase 1 must accept an atom-only host without extra flags."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     text = install_script.read_text(encoding="utf-8")
 
@@ -1117,13 +1085,7 @@ def test_baremetal_preflight_probes_atom_by_default():
 
 
 def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
-    """A prebuilt image may carry its own triton.
-
-    The torch/triton pin exists to protect a framework build. When
-    --install-framework is none there is nothing to build, so a drifting triton
-    must warn rather than fail the whole preflight -- rocm/atom:latest ships a
-    triton newer than torch's pin.
-    """
+    """A prebuilt image may carry its own triton."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     text = install_script.read_text(encoding="utf-8")
 
@@ -1141,12 +1103,7 @@ def test_baremetal_triton_pin_is_advisory_when_installing_nothing():
 
 
 def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
-    """The real installer with its ``main`` invocation stripped.
-
-    Lets a test source the script and drive its actual functions against a fake
-    host, so behaviour is asserted end to end rather than by matching source
-    text.
-    """
+    """The real installer with its ``main`` invocation stripped."""
     text = install_script.read_text(encoding="utf-8")
     marker = '\nmain "$@"\n'
     assert marker in text, "install_baremetal.sh must end by invoking main"
@@ -1217,12 +1174,7 @@ def _dotenv_lines(dotenv: Path) -> list[str]:
 
 
 def test_baremetal_atom_only_host_writes_framework_atom(tmp_path: Path):
-    """The whole point of probing atom: the .env downstream skills read must say so.
-
-    Preflight accepting atom is not enough — resolution used to return only
-    sglang/vllm, so an atom-only host finished setup with no FRAMEWORK at all
-    and every downstream skill defaulted to the wrong engine.
-    """
+    """The whole point of probing atom: the .env downstream skills read must say so."""
     dotenv = tmp_path / ".env"
     res = _drive_installer(tmp_path, importable={"atom"}, dotenv=dotenv, body="write_runtime_dotenv")
 
@@ -1354,11 +1306,7 @@ _FAKE_SONAMES = {
 
 
 def _fake_elf_tools(tmp_path: Path, sonames: dict[str, str] = _FAKE_SONAMES) -> Path:
-    """A readelf/ldconfig stub so the fake libraries report a DT_SONAME.
-
-    Real hosts read the soname off an ELF header; the fixtures here are plain
-    files, so without this the soname half of the hotfix is silently skipped.
-    """
+    """A readelf/ldconfig stub so the fake libraries report a DT_SONAME."""
     bin_dir = tmp_path / "fake-elf-tools"
     bin_dir.mkdir(exist_ok=True)
     cases = "\n".join(
@@ -1425,8 +1373,7 @@ _SYNC_BODY_SOFT = f"{_SYNC_BODY} || true"
 
 
 def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
-    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is
-    invisible to torch.profiler and decode traces stay empty."""
+    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is"""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=_SYNC_BODY,
@@ -1443,8 +1390,7 @@ def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
-    """Re-running used to re-copy unconditionally and stamp a fresh backup dir
-    holding the already-hotfixed copy, piling large .so files into site-packages."""
+    """Re-running used to re-copy unconditionally and stamp a fresh backup dir"""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=f"{_SYNC_BODY}\n{_SYNC_BODY}",
@@ -1461,8 +1407,7 @@ def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
-    """cmp only proves the bytes landed; the new libamdhip64 still has to work
-    against the other ROCm libs torch bundles under $ORIGIN."""
+    """cmp only proves the bytes landed; the new libamdhip64 still has to work"""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=_SYNC_BODY_SOFT,
@@ -1478,9 +1423,7 @@ def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_path: Path):
-    """A torch upgrade between runs left the snapshot describing the previous
-    install, so the new vendor libs were overwritten with no copy kept and a
-    rollback would have pushed the old ABI into the new torch."""
+    """A torch upgrade between runs left the snapshot describing the previous"""
     torch_lib = tmp_path / "torch" / "lib"
     res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1552,8 +1495,7 @@ def test_hotfix_asset_change_keeps_the_vendor_backup(tmp_path: Path):
 
 
 def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_path: Path):
-    """When torch never shipped libroctracer64.so, a single-library hotfix bump
-    must not treat the injected tracer as a vendor refresh trigger."""
+    """When torch never shipped libroctracer64.so, a single-library hotfix bump"""
     hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1571,8 +1513,7 @@ def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_
 
 
 def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path):
-    """A truncated fingerprint can force a refresh, but the rebuild must not
-    promote hotfix bytes already sitting in torch/lib into the vendor snapshot."""
+    """A truncated fingerprint can force a refresh, but the rebuild must not"""
     fp = f'"{tmp_path}/torch/lib/{_BACKUP_DIRNAME}/.fingerprint"'
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1589,8 +1530,7 @@ def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path
 
 
 def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
-    """torch resolves the versioned soname first, so copying the bytes under the
-    unversioned name alone left the profiler on the vendor library."""
+    """torch resolves the versioned soname first, so copying the bytes under the"""
     bin_dir = _fake_elf_tools(tmp_path)
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1612,8 +1552,7 @@ def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
 
 
 def test_torch_lib_sync_relinks_a_soname_alias_that_went_missing(tmp_path: Path):
-    """Matching bytes are not enough to call the sync done: a pip reinstall can
-    drop the alias and leave the versioned lookup back on the vendor library."""
+    """Matching bytes are not enough to call the sync done: a pip reinstall can"""
     bin_dir = _fake_elf_tools(tmp_path)
     alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
@@ -1645,8 +1584,7 @@ def test_torch_lib_sync_skips_a_second_run_once_aliases_exist(tmp_path: Path):
 
 
 def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
-    """A torch that ships a real file under the versioned name must get it back
-    byte for byte, not the symlink the sync put there."""
+    """A torch that ships a real file under the versioned name must get it back"""
     bin_dir = _fake_elf_tools(tmp_path)
     vendor_alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
@@ -1669,8 +1607,7 @@ def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
 
 
 def test_verify_hotfix_only_fails_when_no_hotfix_is_installed(tmp_path: Path):
-    """--verify-hotfix is a standalone check, so it has to report a bad state
-    instead of exiting clean on a host that never applied the hotfix."""
+    """--verify-hotfix is a standalone check, so it has to report a bad state"""
     bin_dir = _fake_elf_tools(tmp_path)
     res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1714,8 +1651,7 @@ def test_sync_warns_when_framework_imports_but_torch_lib_is_missing(tmp_path: Pa
 
 
 def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path: Path):
-    """A busy GPU or HIP OOM fails the probe both before and after the restore.
-    Once the vendor bytes are back, that must degrade to "not applied", not die."""
+    """A busy GPU or HIP OOM fails the probe both before and after the restore."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1754,8 +1690,7 @@ def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path:
 
 
 def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
-    """The installer runs under set -e: a bare sync call would end setup instead
-    of degrading to "hotfix not applied"."""
+    """The installer runs under set -e: a bare sync call would end setup instead"""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1801,9 +1736,7 @@ def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
 
 
 def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
-    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under
-    $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never
-    runs the benchmark and left the profiler unfixed."""
+    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under"""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1900,8 +1833,7 @@ def test_restore_persisted_framework_env_without_vllm_venv_root(
 
 
 def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
-    """A re-run with --install-framework none must reuse .env's isolated vLLM
-    env so torch/lib sync still targets the venv that runs benchmarks."""
+    """A re-run with --install-framework none must reuse .env's isolated vLLM"""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -2016,8 +1948,7 @@ def _drive_hotfix_gate(
         importable=importable,
         dotenv=dotenv,
         body=(
-            # Pinned so the result does not depend on whether the test host
-            # itself is a container.
+            # Pinned so the result does not depend on whether the test host itself is a container.
             f"running_in_container() {{ return {0 if in_container else 1}; }}\n"
             "rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"
         ),
@@ -2025,8 +1956,7 @@ def _drive_hotfix_gate(
 
 
 def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
-    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying
-    /opt/rocm into their torch/lib trades a vendor-validated pair for an untested one."""
+    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying"""
     res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" not in res.stdout
@@ -2040,8 +1970,7 @@ def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
 
 
 def test_baremetal_run_mode_keeps_the_hotfix_for_vllm(tmp_path: Path):
-    """The framework split is docker-only: a bare-metal vLLM host profiles through
-    the same ROCm libs the overlay fixes, so gating it there would lose profiling."""
+    """The framework split is docker-only: a bare-metal vLLM host profiles through"""
     res = _drive_hotfix_gate(tmp_path, run_mode="baremetal", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -2226,20 +2155,18 @@ def test_kernel_install_no_longer_exports_openai_safe_credentials():
     assert "_OPENAI_KEY_VAL" not in script_text
     assert "_snap_safe" not in script_text
     assert "_snap_openai" not in script_text
-    # The kernel-agent drives Claude Code, so kernel-agent.env.sh stays
-    # Anthropic-only regardless of what the gateway serves.
+    # The kernel-agent drives Claude Code, so kernel-agent.env.sh stays Anthropic-only regardless of what the gateway
+    # serves.
     assert "export OPENAI_BASE_URL" not in write_text
     assert "export OPENAI_API_KEY" not in write_text
 
-    # The gateway credentials may be *read* in memory -- the single-gateway
-    # branch derives ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from
-    # OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
-    # _resolve_llm_endpoints(). What must never happen is persisting them:
-    # neither exported into kernel-agent.env.sh nor written back to .env.
+    # The gateway credentials may be *read* in memory -- the single-gateway branch derives
+    # ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY from OPENAI_BASE_URL + OPENAI_API_KEY, mirroring the CLI's
+    # _resolve_llm_endpoints().
     assert "export OPENAI_API_KEY" not in write_text
     assert "upsert_dotenv_var OPENAI_API_KEY" not in write_text
-    # The legacy gateway key is never read, exported or persisted -- but a stale
-    # value left in a migrating .env is still scrubbed.
+    # The legacy gateway key is never read, exported or persisted -- but a stale value left in a migrating .env is
+    # still scrubbed.
     assert "export SAFE_API_KEY" not in script_text
     assert "upsert_dotenv_var SAFE_API_KEY" not in script_text
     assert "remove_dotenv_var SAFE_API_KEY" in write_text
@@ -2459,9 +2386,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
-    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator
-    put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY /
-    ANTHROPIC_BASE_URL after install)."""
+    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator"""
     install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
@@ -2543,16 +2468,15 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     # kernel-agent env mirrors the same Anthropic values and no OpenAI leak.
     assert "export ANTHROPIC_API_KEY='anthropic-real-key'" in kernel_text
     assert "export ANTHROPIC_BASE_URL='https://api.anthropic.com'" in kernel_text
-    # A header-authenticated gateway needs its header here too, and the single
-    # quotes must keep ${VAR} intact for parse_custom_headers to expand.
+    # A header-authenticated gateway needs its header here too, and the single quotes must keep ${VAR} intact for
+    # parse_custom_headers to expand.
     assert "export ANTHROPIC_CUSTOM_HEADERS='Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}'" in kernel_text
     assert "export OPENAI_API_KEY=" not in kernel_text
     assert "OPENAI_API_KEY=" not in dotenv_text
 
 
 def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
-    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted
-    there in addition to kernel-agent.env.sh."""
+    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted"""
 
     def bash_path(path: Path) -> str:
         text = str(path)

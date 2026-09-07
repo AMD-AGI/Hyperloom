@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the attempt-runtime provision-stage wiring in integrate_patch.
-
-Exercises _stage_provision_attempt_runtime and the YAML-layer runtime activation
-in isolation, plus the KEEP/rearm stack-action survival and GC. All subprocess /
-adapter calls are mocked so no ROCm / network / real venv is needed.
-"""
+"""Tests for the attempt-runtime provision-stage wiring in integrate_patch."""
 
 from __future__ import annotations
 
@@ -84,20 +79,13 @@ def _executor(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _neutralize_disk_preflight(monkeypatch):
-    """Stop the real disk_preflight from leaking the runner's free-space into
-    these tests. The provision stage runs disk_preflight before consulting the
-    adapter; on a space-constrained CI runner (< 20 GB free on /tmp) it would
-    raise DiskPreflightError and short-circuit provision-logic tests that never
-    intend to exercise it. Tests that DO exercise it re-patch disk_preflight
-    themselves (that patch wins over this autouse no-op)."""
+    """Stop the real disk_preflight from leaking the runner's free-space into"""
     import hyperloom.agents.framework.isolation as iso
 
     monkeypatch.setattr(iso, "disk_preflight", lambda *_a, **_k: None)
 
 
-# ---------------------------------------------------------------------------
 # provision stage: no candidate / skip paths
-# ---------------------------------------------------------------------------
 
 
 async def test_no_candidate_is_noop(_executor):
@@ -125,9 +113,7 @@ async def test_multi_node_skips_provision(_executor, monkeypatch):
     assert called["n"] == 0  # adapter never consulted in multi-node
 
 
-# ---------------------------------------------------------------------------
 # provision ok / fail
-# ---------------------------------------------------------------------------
 
 
 async def test_provision_ok_sets_ctx(_executor, monkeypatch):
@@ -187,9 +173,7 @@ async def test_disk_preflight_failure_returns_reverted(_executor, monkeypatch):
     assert called["n"] == 0  # never reached the adapter
 
 
-# ---------------------------------------------------------------------------
 # decision gate: runtime lands in materialized YAML, not os.environ
-# ---------------------------------------------------------------------------
 
 
 def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch):
@@ -228,9 +212,7 @@ def test_opt_venv_path_never_replaced(tmp_path):
     assert "/opt/venv/bin" in parts  # shared venv still present, not replaced
 
 
-# ---------------------------------------------------------------------------
 # rearm: KEEP'd stack action survives one rearm cycle
-# ---------------------------------------------------------------------------
 
 
 def test_kept_stack_action_survives_rearm(monkeypatch):

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SpecialistRunner subprocess + worktree tests.
-
-Pins the production specialist dispatch: per-task git worktree, the
-``claude --print --add-dir ...`` spawn, done.json + patch harvesting, and the
-tool whitelist. Uses a hermetic fake ``claude`` shell script.
-"""
+"""SpecialistRunner subprocess + worktree tests."""
 
 from __future__ import annotations
 
@@ -61,11 +56,7 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
 
 
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
-    """A subscription-only parent must hand the token down untouched.
-
-    Mirroring it into either API-key var would drop the child out of
-    subscription mode and 401 it.
-    """
+    """A subscription-only parent must hand the token down untouched."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -291,8 +282,7 @@ def test_runner_accepts_subprocess_config_only():
 
 
 def test_denylist_blocks_dangerous_process_tools():
-    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule
-    against global process cleanup that could kill the serving / benchmark process."""
+    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule"""
     assert "KillShell" in SPECIALIST_TOOL_DENYLIST
     assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
 
@@ -458,9 +448,7 @@ async def test_subprocess_path_injects_llm_stability_env(
     fake_framework_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The dispatcher injects low-risk claude-code stability flags but does not
-    set API_TIMEOUT_MS by default; liveness is governed by the process.log /
-    heartbeat stale reaper."""
+    """The dispatcher injects low-risk claude-code stability flags but does not"""
     # Ensure no inherited values mask the setdefault under test.
     for var in (
         "API_TIMEOUT_MS",
@@ -640,8 +628,7 @@ async def test_subprocess_recovers_partial_when_no_final(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A specialist that wrote only the partial (then died before the final
-    done.json) surfaces the partial as a non-empty result."""
+    """A specialist that wrote only the partial (then died before the final"""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
@@ -675,9 +662,7 @@ async def test_wall_budget_overrides_legacy_max_seconds(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung
-    specialist well before the legacy ``max_turns × per_turn`` ceiling (here
-    2 × 15 = 30s)."""
+    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung"""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="hang")
     session_dir = tmp_path / "session"
@@ -726,8 +711,7 @@ class _FakeProc:
 async def test_reap_loop_process_log_activity_prevents_stale_kill(
     tmp_path: Path,
 ):
-    """A specialist that streams to process.log but never self-writes
-    heartbeat.json must NOT be reaped as stale."""
+    """A specialist that streams to process.log but never self-writes"""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     process_log = workspace / "process.log"
@@ -769,8 +753,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """With neither heartbeat.json nor process.log activity, the reaper
-    still reaps a silent/hung subprocess as stale."""
+    """With neither heartbeat.json nor process.log activity, the reaper"""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
@@ -811,12 +794,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 # ── extend_lease moves the live wall-clock deadline ──────────────────────────
 @pytest.fixture
 def _live_reaper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A reaper whose only stop condition is the hard wall-clock cap.
-
-    Keeps process.log fresh so the staleness path never fires, and stubs
-    ``_kill`` so the timeout never signals a real process group (the fake
-    proc reuses this pytest process's pid).
-    """
+    """A reaper whose only stop condition is the hard wall-clock cap."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "process.log").write_text("alive\n", encoding="utf-8")
@@ -855,20 +833,13 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
     elapsed = time.monotonic() - started
 
     assert outcome["timed_out"] is True, outcome
-    # Killed at ~0.3s. The bound is loose because only the direction matters:
-    # a loaded CI box can stretch this, but it can never finish early.
+    # Killed at ~0.3s.
     assert elapsed < 5.0, elapsed
 
 
 @pytest.mark.asyncio
 async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_reaper):
-    """The regression this fix exists for.
-
-    ``extend_lease`` used to push the task / lane / GPU leases out while the
-    subprocess kept the ``max_seconds`` deadline computed once at spawn, so the
-    specialist still died on schedule. The reaper must re-read the extension
-    every poll.
-    """
+    """The regression this fix exists for."""
     disp, proc, workspace = _live_reaper
     subprocess_.clear_wall_budget_extension("task-live")
 
@@ -884,19 +855,18 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
             task_id="task-live",
         )
     )
-    # Grant the extension while the run is still in flight, before the
-    # original 0.3s cap would have fired.
+    # Grant the extension while the run is still in flight, before the original 0.3s cap would have fired.
     await asyncio.sleep(0.15)
     subprocess_.grant_wall_budget_extension("task-live", 0.6)
-    # The reaper recomputes `max_seconds + wall_budget_extension(task_id)`
-    # every poll, so this is the deadline it now enforces.
+    # The reaper recomputes `max_seconds + wall_budget_extension(task_id)` every poll, so this is the deadline it now
+    # enforces.
     assert subprocess_.wall_budget_extension("task-live") == 0.6
     outcome = await loop
     elapsed = time.monotonic() - started
 
     assert outcome["timed_out"] is True, outcome
-    # Survived past the base cap — the load-independent half of the proof
-    # (a slow box only ever pushes this later, never earlier).
+    # Survived past the base cap — the load-independent half of the proof (a slow box only ever pushes this later,
+    # never earlier).
     assert elapsed > 0.7, elapsed
     subprocess_.clear_wall_budget_extension("task-live")
 
@@ -921,8 +891,8 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
     elapsed = time.monotonic() - started
 
     assert outcome["timed_out"] is True, outcome
-    # The other task's 600s grant would have kept this alive far past any
-    # plausible scheduling delay, so a bound this loose still proves isolation.
+    # The other task's 600s grant would have kept this alive far past any plausible scheduling delay, so a bound this
+    # loose still proves isolation.
     assert elapsed < 30.0, elapsed
     subprocess_.clear_wall_budget_extension("task-other")
 
@@ -968,8 +938,8 @@ class _FakeGpuSpecialistLease:
         env_mode="merge",
         stdin_path=None,
     ) -> None:
-        # §3.3 non-blocking start: record + stage the done file, mark the pid
-        # ready so poll_started() returns immediately on the next tick.
+        # §3.3 non-blocking start: record + stage the done file, mark the pid ready so poll_started() returns
+        # immediately on the next tick.
         self.started = {
             "cmd": cmd,
             "cwd": cwd,
@@ -1006,8 +976,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """With a gpu_lease, run() launches inside the actor (no local Popen) and
-    strips *_VISIBLE_DEVICES so Ray owns the card assignment (P2/T4)."""
+    """With a gpu_lease, run() launches inside the actor (no local Popen) and"""
     workspace = tmp_path / "ws"
     lease = _FakeGpuSpecialistLease(workspace)
 
@@ -1054,11 +1023,7 @@ async def test_run_clears_stale_wall_budget_extension(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A reused task_id must not inherit a previous run's granted extension.
-
-    The registry is keyed by task_id and lives for the process, so a grant left
-    behind by an earlier dispatch would silently widen the next run's deadline.
-    """
+    """A reused task_id must not inherit a previous run's granted extension."""
     workspace = tmp_path / "ws"
     lease = _FakeGpuSpecialistLease(workspace)
     monkeypatch.setattr(

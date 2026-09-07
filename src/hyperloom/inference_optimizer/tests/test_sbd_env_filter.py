@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session-breakdown env filter: record the eval prompt wire-format, still drop secrets.
-
-MAGPIE_EVAL_TOKENIZED_REQUESTS records whether the accuracy eval sent string
-prompts (``false``, forced on PD so the sglang_router does not 422) or lm_eval's
-default token-id prompts. It must survive into the breakdown so a PD run's
-accuracy is distinguishable from an aggregated one's -- but its name contains
-"TOKEN", which the credential denylist would otherwise strip.
-"""
+"""Session-breakdown env filter: record the eval prompt wire-format, still drop secrets."""
 
 from __future__ import annotations
 

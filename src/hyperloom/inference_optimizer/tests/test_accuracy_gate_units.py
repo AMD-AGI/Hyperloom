@@ -145,8 +145,7 @@ class TestGradeIntegrateAccuracy:
         assert out["blocked"] is False
 
     def test_falls_back_to_warmup_round_eval_output(self, monkeypatch, tmp_path):
-        """The double-run evaluates in the warmup round only, so the result dict
-        carries no accuracy and the score must be recovered from the workspace."""
+        """The double-run evaluates in the warmup round only, so the result dict"""
         warmup = tmp_path / "warmup_round" / "benchmark_sglang_smoke"
         warmup.mkdir(parents=True)
         (warmup / "results_gsm8k.json").write_text(
@@ -174,11 +173,7 @@ class TestGradeIntegrateAccuracy:
 
 class TestEnablementReaders:
     def test_floor_default_rejects_a_collapsed_model(self):
-        """The default must be strong enough to be the only correctness authority.
-
-        A run once KEPT a candidate scoring gsm8k=0.00076 because the floor was
-        0.0 and the gate degenerated to ``accuracy > 0``.
-        """
+        """The default must be strong enough to be the only correctness authority."""
         assert ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR > 0.0
         assert not ag.accuracy_meets_floor(0.00076, ag.DEFAULT_ENABLEMENT_ACCURACY_FLOOR)
 

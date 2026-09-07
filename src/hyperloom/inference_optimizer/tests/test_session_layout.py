@@ -85,11 +85,7 @@ def test_workspace_root_independent_of_session_pin(tmp_path, monkeypatch):
 
 
 def test_relative_user_data_path_resolves_identically_from_every_cwd(tmp_path, monkeypatch):
-    """A relative $USER_DATA_PATH must not follow each subprocess's cwd.
-
-    Absolutising on read is not enough — every process would re-expand the
-    relative value against its own cwd — so the CLI rewrites the env var itself.
-    """
+    """A relative $USER_DATA_PATH must not follow each subprocess's cwd."""
     from hyperloom.inference_optimizer import cli
 
     (tmp_path / "nested").mkdir()
@@ -128,11 +124,7 @@ def test_make_session_dir_per_model_ts_layout(tmp_path, monkeypatch):
 
 
 def test_make_session_dir_same_second_launches_get_distinct_dirs(tmp_path, monkeypatch):
-    """Two launches of one model inside the same UTC second must not share a dir.
-
-    ``session_dir.name`` is also the de-facto session id (KB fact writes,
-    per-session sinks), so a shared dir merges two runs' identity as well.
-    """
+    """Two launches of one model inside the same UTC second must not share a dir."""
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     monkeypatch.setattr(paths, "utc_now_compact", lambda: "20260814T073026Z")
     first = paths.make_session_dir(model_name="DeepSeek-R1-0528")
@@ -176,8 +168,8 @@ def test_runtime_dir_is_workspace_shared(tmp_path, monkeypatch):
 
 
 def test_magpie_dir_is_cache_and_decoupled_from_user_data(tmp_path, monkeypatch):
-    # Magpie resolves under the deps cache root (mirrors install.sh),
-    # NOT under $USER_DATA_PATH/runtime, so script + runtime agree on one checkout.
+    # Magpie resolves under the deps cache root (mirrors install.sh), NOT under $USER_DATA_PATH/runtime, so script +
+    # runtime agree on one checkout.
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path / "shared"))
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
@@ -215,9 +207,8 @@ def test_resolve_dep_dir_prefers_env_var(tmp_path, monkeypatch):
 
 
 def test_resolve_dep_dir_globs_pinned_checkout_when_env_unset(tmp_path, monkeypatch):
-    # install.sh clones <name>@<sha>; a process that did NOT inherit the exported
-    # env var must still resolve that checkout, not the bare path the installer
-    # never created (the #3 regression).
+    # install.sh clones <name>@<sha>; a process that did NOT inherit the exported env var must still resolve that
+    # checkout, not the bare path the installer never created (the #3 regression).
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     pinned = tmp_path / "cache" / "TraceLens@deadbeef"
@@ -247,8 +238,8 @@ def test_resolve_dep_dir_falls_back_to_bare_when_no_pinned(tmp_path, monkeypatch
     assert paths.resolve_dep_dir("Magpie", "MAGPIE_PATH") == tmp_path / "cache" / "Magpie"
 
 
-# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the
-# same checkout as install.sh even when TRACELENS_ROOT was not inherited.
+# TraceLens root resolution: mirrors magpie_dir so trace analysis resolves the same checkout as install.sh even when
+# TRACELENS_ROOT was not inherited.
 def test_tracelens_root_derives_from_cache_root_when_env_unset(tmp_path, monkeypatch):
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
     monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "cache"))
@@ -554,8 +545,7 @@ def test_policy_source_file_outside_trusted_scope_denied(tmp_path):
 
 
 def test_policy_framework_source_root_outside_trusted_scope_denied(tmp_path):
-    # A framework_source_root override escaping trusted source scopes must be
-    # rejected under strict_paths.
+    # A framework_source_root override escaping trusted source scopes must be rejected under strict_paths.
     gate = _gate(tmp_path)
     intent = Intent(
         type=IntentType.REQUEST,

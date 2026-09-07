@@ -1,28 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bundle a session's consumer-facing artifacts into a single zip under
-``/workspace`` so the Claw sandbox sync picks it up.
-
-Products live under ``session_dir`` (``$USER_DATA_PATH``), often outside
-``/workspace`` which is the only path Claw syncs. This copies the small set
-of result/report/analysis files into one zip inside ``/workspace``, and by
-default also drops them loose (uncompressed, original tree) under the dest
-root so a consumer can fetch a single file without unzipping (disable via
-``HYPERLOOM_SESSION_PACKAGE_LOOSE=0``). A ``PACKAGE_MANIFEST.{json,txt}``
-describing the bundle is written alongside the files it describes.
-
-Contract:
-* Best-effort: never raises. On any failure returns ``None`` and logs;
-  the caller treats the canonical per-file writes as the source of truth.
-* Selection is a glob spec (:data:`PACKAGE_GLOBS`) resolved against the
-  session dir; only the curated result/report set is matched.
-* A selected entry is only bundled when it is a regular file resolving
-  inside the session, so a link planted in this shared-filesystem
-  directory cannot pull outside content into the dest root.
-* The manifest lists what was written, and ``complete`` is false whenever
-  anything selected is missing from it.
-"""
+"""Bundle a session's consumer-facing artifacts into a single zip under"""
 
 from __future__ import annotations
 
@@ -41,15 +20,12 @@ from ..session.paths import is_path_within
 
 log = logging.getLogger(__name__)
 
-# Default destination root. Claw mounts the synced workspace at ``/workspace``
-# regardless of where ``$USER_DATA_PATH`` points, so anchor the bundle here.
-# Overridable via env for non-Claw envs and tests.
+# Default destination root.
 ENV_PACKAGE_DEST_ROOT = "HYPERLOOM_SESSION_PACKAGE_DEST"
 DEFAULT_DEST_ROOT = Path("/workspace")
 
-# Also lay the curated files down loose (uncompressed, relative tree) under the
-# dest root so a consumer can fetch one file without unzipping.
-# Set "0"/"false"/"no" to write only the zip.
+# Also lay the curated files down loose (uncompressed, relative tree) under the dest root so a consumer can fetch one
+# file without unzipping.
 ENV_PACKAGE_LOOSE = "HYPERLOOM_SESSION_PACKAGE_LOOSE"
 
 #: Subdir under the dest root where bundles land.
@@ -59,9 +35,7 @@ MANIFEST_JSON_NAME = "PACKAGE_MANIFEST.json"
 MANIFEST_TXT_NAME = "PACKAGE_MANIFEST.txt"
 PACKAGE_SCHEMA_VERSION = 2
 
-# Curated artifact selection, relative to session_dir. Glob patterns match
-# POSIX-style relative paths; ``**`` spans directories. Results / reports /
-# analysis only — never the bulky ``runs/`` traces or per-turn agent dumps.
+# Curated artifact selection, relative to session_dir.
 PACKAGE_GLOBS: tuple[str, ...] = (
     # ── top-level core ────────────────────────────────────────────────
     "session_breakdown.json",
@@ -110,22 +84,13 @@ _MAX_TOTAL_BYTES = 256 * 1024 * 1024  # 256 MB
 
 
 def _dest_root() -> Path:
-    """Resolve the destination root for session packages.
-
-    Returns:
-        The path from ``ENV_PACKAGE_DEST_ROOT`` when set, otherwise the
-        default destination root.
-    """
+    """Resolve the destination root for session packages."""
     override = (os.environ.get(ENV_PACKAGE_DEST_ROOT) or "").strip()
     return Path(override) if override else DEFAULT_DEST_ROOT
 
 
 def _loose_enabled() -> bool:
-    """Whether to also drop loose (unzipped) copies. Defaults to True.
-
-    Returns:
-        ``True`` unless the env override disables loose copies.
-    """
+    """Whether to also drop loose (unzipped) copies. Defaults to True."""
     raw = (os.environ.get(ENV_PACKAGE_LOOSE) or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
@@ -134,19 +99,7 @@ def _copy_loose_tree(
     included: list[tuple[Path, str, int]],
     loose_dir: Path,
 ) -> tuple[list[tuple[str, int]], list[str]]:
-    """Copy each included file into ``loose_dir`` preserving its relative
-    tree. Best-effort, per-file isolated: one unreadable file never aborts
-    the rest. Files are overwritten in place (no wholesale wipe of the
-    shared dest root).
-
-    Args:
-        included: Tuples of ``(source path, relative path, size)`` to copy.
-        loose_dir: Destination root for the loose tree.
-
-    Returns:
-        The ``(relative path, size)`` pairs that landed and the relative
-        paths that could not be copied.
-    """
+    """Copy each included file into ``loose_dir`` preserving its relative"""
     loose_dir.mkdir(parents=True, exist_ok=True)
     copied: list[tuple[str, int]] = []
     failed: list[str] = []
@@ -163,12 +116,7 @@ def _copy_loose_tree(
 
 
 def _write_loose_manifest(loose_dir: Path, manifest: dict) -> None:
-    """Write the manifest pair describing the loose tree.
-
-    Args:
-        loose_dir: Destination root holding the loose tree.
-        manifest: Manifest dict describing what actually landed there.
-    """
+    """Write the manifest pair describing the loose tree."""
     try:
         (loose_dir / MANIFEST_JSON_NAME).write_text(
             json.dumps(manifest, indent=2),
@@ -183,34 +131,12 @@ def _write_loose_manifest(loose_dir: Path, manifest: dict) -> None:
 
 
 def _is_packageable(path: Path, session_dir: Path) -> bool:
-    """Whether ``path`` is a regular file resolving inside ``session_dir``.
-
-    Refuses a symlink whose target escapes the session, and sockets and
-    devices, which are not artifacts and cannot be archived.
-
-    Args:
-        path: Candidate file discovered under ``session_dir``.
-        session_dir: The resolved session root.
-
-    Returns:
-        Whether the entry is safe to bundle.
-    """
+    """Whether ``path`` is a regular file resolving inside ``session_dir``."""
     return is_path_within(path, session_dir) and path.is_file()
 
 
 def _iter_session_files(session_dir: Path) -> list[Path]:
-    """All files under session_dir (one walk), so glob matching is a
-    single pass instead of N globs each re-walking the tree.
-
-    Symlinked directories are not descended into, so only an entry itself
-    can be a link.
-
-    Args:
-        session_dir: Root directory to walk.
-
-    Returns:
-        Absolute paths of every file found under ``session_dir``.
-    """
+    """All files under session_dir (one walk), so glob matching is a"""
     out: list[Path] = []
     for dp, _dn, fn in os.walk(session_dir):
         for f in fn:
@@ -219,22 +145,7 @@ def _iter_session_files(session_dir: Path) -> list[Path]:
 
 
 def _select(session_dir: Path) -> tuple[list[Path], list[str], list[str]]:
-    """Return (matched absolute paths, unmatched globs, refused paths).
-
-    A glob is reported "unmatched" when it selected zero files — useful
-    audit signal in the manifest (e.g. conc_sweep_summary absent because
-    the sweep was skipped). A glob that only selected entries failing the
-    session boundary still counts as a hit, and those entries are returned
-    separately so the manifest can name them.
-
-    Args:
-        session_dir: Session directory whose files are matched against the
-            package globs.
-
-    Returns:
-        A tuple of the matched absolute paths, the patterns that matched
-        nothing, and the relative paths refused by the boundary check.
-    """
+    """Return (matched absolute paths, unmatched globs, refused paths)."""
     all_files = _iter_session_files(session_dir)
     rels = {p: p.relative_to(session_dir).as_posix() for p in all_files}
 
@@ -265,24 +176,7 @@ def _select(session_dir: Path) -> tuple[list[Path], list[str], list[str]]:
 
 
 def _glob_match(rel: str, pattern: str) -> bool:
-    """fnmatch with ``**`` spanning ``/``.
-
-    ``fnmatch`` treats ``*`` as spanning ``/`` too, which is too loose
-    for single-segment patterns like ``reports/trace/*.jsonl``. Handle
-    the two cases explicitly:
-
-    * pattern contains ``**`` → collapse to a permissive regex-ish match
-      by replacing ``**`` with a sentinel that fnmatch's ``*`` covers.
-    * otherwise → require the path to have the same number of segments,
-      matching each segment with fnmatch so ``*`` stays within a segment.
-
-    Args:
-        rel: POSIX-style relative path to test.
-        pattern: Glob pattern, possibly containing ``**``.
-
-    Returns:
-        ``True`` when ``rel`` matches ``pattern``.
-    """
+    """fnmatch with ``**`` spanning ``/``."""
     if "**" in pattern:
         # fnmatch's '*' already spans '/', so '**' == '*' for our purpose.
         collapsed = pattern.replace("**/", "*/").replace("**", "*")
@@ -305,24 +199,7 @@ def _build_manifest(
     failed_files: list[str] | None = None,
     refused_files: list[str] | None = None,
 ) -> dict:
-    """Build the manifest dict describing a session package.
-
-    ``included_files`` names what was verified written, so a consumer can
-    treat it as the contents rather than the intent.
-
-    Args:
-        session_dir: Source session directory.
-        session_id: Identifier of the session.
-        included: ``(relative_path, size_bytes)`` pairs that were written.
-        missing_globs: Selection globs that matched no files.
-        truncated: Whether a size/count cap stopped the bundle short.
-        dropped_files: Files omitted due to truncation.
-        failed_files: Selected files whose write failed.
-        refused_files: Selected entries rejected by the session boundary.
-
-    Returns:
-        A JSON-serializable manifest mapping.
-    """
+    """Build the manifest dict describing a session package."""
     total = sum(sz for _, sz in included)
     dropped = list(dropped_files or [])
     failed = list(failed_files or [])
@@ -340,8 +217,8 @@ def _build_manifest(
         # True when a size/count cap stopped the bundle short (consult dropped_files).
         "truncated": truncated,
         "dropped_files": dropped,
-        # Selected but absent: writes that failed, and entries refused for
-        # resolving outside the session or not being regular files.
+        # Selected but absent: writes that failed, and entries refused for resolving outside the session or not being
+        # regular files.
         "failed_files": failed,
         "refused_files": refused,
         # One flag a consumer can gate on instead of checking each list.
@@ -350,14 +227,7 @@ def _build_manifest(
 
 
 def _manifest_text(manifest: dict) -> str:
-    """Render a manifest dict as a human-readable text summary.
-
-    Args:
-        manifest: Manifest mapping produced by :func:`_build_manifest`.
-
-    Returns:
-        A multi-line plain-text description of the package contents.
-    """
+    """Render a manifest dict as a human-readable text summary."""
     lines = [
         "Hyperloom session artifact package",
         f"  session_id   : {manifest.get('session_id') or '?'}",
@@ -406,21 +276,7 @@ def package_session_artifacts(
     session_id: str = "",
     dest_root: Path | str | None = None,
 ) -> Path | None:
-    """Bundle curated artifacts of ``session_dir`` into one zip under the
-    dest root (default ``/workspace/<PACKAGE_SUBDIR>/``).
-
-    Args:
-        session_dir: hyperloom session directory (the products live here).
-        session_id: used for the zip filename + manifest. Falls back to
-            the session dir basename when empty.
-        dest_root: override the destination root (defaults to
-            ``$HYPERLOOM_SESSION_PACKAGE_DEST`` or ``/workspace``).
-
-    Returns:
-        Absolute path to the written zip, or ``None`` on any failure /
-        no files matched. Never raises. A returned zip may still be
-        partial; its manifest's ``complete`` field says which.
-    """
+    """Bundle curated artifacts of ``session_dir`` into one zip under the"""
     try:
         sd = Path(session_dir).resolve()
         if not sd.is_dir():
@@ -433,8 +289,7 @@ def package_session_artifacts(
             log.warning("session package skipped: no artifacts matched in %s", sd)
             return None
 
-        # Apply safety caps. On hitting a cap, record what got dropped and
-        # flag the manifest as truncated.
+        # Apply safety caps.
         included: list[tuple[Path, str, int]] = []
         total = 0
         truncated = False
@@ -479,8 +334,7 @@ def package_session_artifacts(
                     except OSError:
                         write_failures.append(rel)
                         log.warning("session package: failed to add %s", rel)
-                # Built here so it describes the members that exist, not the
-                # ones that were selected.
+                # Built here so it describes the members that exist, not the ones that were selected.
                 manifest = _build_manifest(
                     sd,
                     sid,
@@ -507,10 +361,8 @@ def package_session_artifacts(
             manifest["complete"],
         )
 
-        # Also lay the same files down loose (uncompressed, original tree)
-        # straight under the dest root so a consumer can grab one file without
-        # unzip. It succeeds or fails independently of the zip, so it carries
-        # its own manifest.
+        # Also lay the same files down loose (uncompressed, original tree) straight under the dest root so a consumer
+        # can grab one file without unzip.
         if _loose_enabled():
             try:
                 copied, loose_failures = _copy_loose_tree(included, root)

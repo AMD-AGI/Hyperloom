@@ -87,8 +87,8 @@ def test_derive_openai_base_url_from_amd_anthropic_endpoint():
 
 
 def test_derive_openai_base_url_is_case_insensitive():
-    # AMD's default endpoint uses a capitalized "/Anthropic" segment (issue #929);
-    # match case-insensitively so the OpenAI base URL is still derived.
+    # AMD's default endpoint uses a capitalized "/Anthropic" segment (issue #929); match case-insensitively so the
+    # OpenAI base URL is still derived.
     assert derive_openai_base_url("https://llm-api.amd.com/Anthropic") == "https://llm-api.amd.com/Unified/v1"
     # A lowercase "/unified" segment is normalized to the canonical "/Unified/v1".
     assert derive_openai_base_url("https://llm-api.amd.com/unified") == "https://llm-api.amd.com/Unified/v1"
@@ -107,8 +107,7 @@ def test_openai_kwargs_reads_openai_custom_headers():
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers():
-    """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit
-    OpenAI-side config wins over the Anthropic host."""
+    """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit"""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
@@ -124,14 +123,13 @@ def test_openai_kwargs_ignores_anthropic_custom_headers():
     assert "default_headers" not in kwargs
 
 
-# ---- the three deployment shapes ----
-# Anthropic-only, codex-only (OpenAI-compatible only), and both configured.
+# ---- the three deployment shapes ---- Anthropic-only, codex-only (OpenAI-compatible only), and both configured.
 _ANTHROPIC_ONLY_ENV = {
     "_".join(("ANTHROPIC", "AUTH", "TOKEN")): "gateway-token",
     "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
     "ANTHROPIC_BASE_URL": "https://llm-api.amd.com/Anthropic",
-    # AMD's gateway rejects a call without this, and the setup skill only ever
-    # writes it here -- so the shape is not realistic without it.
+    # AMD's gateway rejects a call without this, and the setup skill only ever writes it here -- so the shape is not
+    # realistic without it.
     "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}",
 }
 _CODEX_ONLY_ENV = {
@@ -225,27 +223,18 @@ def test_any_openai_variable_alone_marks_that_side_configured(key):
 
 
 def test_shape_predicates_ignore_the_retired_deepseek_variables():
-    """DeepSeek is migrated onto the standard pair, so it is not a third side.
-
-    The forge kernel backend used to read these directly and would therefore disagree
-    with backend selection about a legacy-only configuration.
-    """
+    """DeepSeek is migrated onto the standard pair, so it is not a third side."""
     legacy = {_LEGACY_KEY: "dk", "DEEPSEEK_BASE_URL": "https://api.deepseek.com"}
     assert not has_anthropic_side(legacy)
     assert not has_openai_side(legacy)
     assert not is_anthropic_only(legacy)
-    # With DeepSeek ignored, an OpenAI side alongside it is still openai-only --
-    # the kernel backend previously read these keys and answered False here.
+    # With DeepSeek ignored, an OpenAI side alongside it is still openai-only -- the kernel backend previously read
+    # these keys and answered False here.
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 
 def test_derived_base_url_carries_the_anthropic_gateway_headers():
-    """An anthropic-only deployment must still send the gateway's subscription key.
-
-    The derived URL is the same host as ANTHROPIC_BASE_URL, so without this the
-    run resolves a client that the gateway rejects on every call -- worse than
-    the clean configuration error it used to raise.
-    """
+    """An anthropic-only deployment must still send the gateway's subscription key."""
     kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
     assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "ak-anthropic"}
@@ -344,21 +333,12 @@ def test_deepseek_compat_env_bare_known_host_gets_both_segments():
     ],
 )
 def test_deepseek_compat_env_ignores_leftovers_once_anthropic_side_exists(configured):
-    """A stale legacy key must never re-point an explicit Anthropic credential.
-
-    Half-adopting the gateway would put ANTHROPIC_BASE_URL on DeepSeek's host
-    while the operator's own key is what gets sent there, and would invent an
-    OpenAI side they never asked for.
-    """
+    """A stale legacy key must never re-point an explicit Anthropic credential."""
     assert deepseek_compat_env({**configured, _LEGACY_KEY: "sk-legacy"}) == {}
 
 
 def test_deepseek_compat_env_leaves_official_anthropic_endpoint_alone():
-    """Regression: an explicit key alone still implies the OFFICIAL endpoint.
-
-    ``_resolve_llm_endpoints`` fills ``ANTHROPIC_BASE_URL`` from an explicit
-    Anthropic key; the shim must not get there first with DeepSeek's host.
-    """
+    """Regression: an explicit key alone still implies the OFFICIAL endpoint."""
     env = {"_".join(("ANTHROPIC", "API", "KEY")): "sk-real-anthropic", _LEGACY_KEY: "sk-legacy"}
     updates = deepseek_compat_env(env)
     assert "ANTHROPIC_BASE_URL" not in updates
@@ -382,11 +362,7 @@ def test_claude_sdk_env_options_does_not_mix_legacy_and_explicit_keys():
 
 
 def test_provider_model_defaults_supplies_a_model_for_a_known_gateway():
-    """A gateway serving only its own models must not get the AMD Claude id.
-
-    This is the shape the docs now recommend: both sides pointed at DeepSeek
-    with the standard variables and no ``DEEPSEEK_*`` anywhere.
-    """
+    """A gateway serving only its own models must not get the AMD Claude id."""
     defaults = provider_model_defaults(
         {
             "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
@@ -457,11 +433,7 @@ def test_deepseek_compat_env_never_overrides_explicit_values():
 
 
 def test_deepseek_compat_env_leaves_a_foreign_openai_side_alone():
-    """Another gateway on the OpenAI side keeps its own key AND its own model.
-
-    Replacing only ``CODEX_MODEL`` would leave that gateway being asked for
-    ``deepseek-v4-pro``, which it does not serve.
-    """
+    """Another gateway on the OpenAI side keeps its own key AND its own model."""
     updates = deepseek_compat_env(
         {
             _LEGACY_KEY: "sk-legacy",
@@ -527,11 +499,7 @@ def test_claude_sdk_env_options_from_deepseek_key_only():
 
 
 def test_claude_sdk_env_options_never_synthesizes_api_keys_from_oauth_token():
-    """The subscription token must stay env-passthrough only.
-
-    Either API-key var switches the Claude CLI out of subscription mode, so
-    synthesizing one here would both re-bill the run and 401 it.
-    """
+    """The subscription token must stay env-passthrough only."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     opts = claude_sdk_env_options(env={oauth_env: "sk-ant-oat01-fake"})
     child_env = opts["env"]
@@ -593,8 +561,7 @@ def test_claude_sdk_env_options_expands_anthropic_custom_header_reference():
 
 
 def test_claude_sdk_env_options_no_header_auto_injection():
-    """A gateway without an explicit ANTHROPIC_CUSTOM_HEADERS gets NO
-    auto-injected subscription header."""
+    """A gateway without an explicit ANTHROPIC_CUSTOM_HEADERS gets NO"""
     opts = claude_sdk_env_options(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -606,8 +573,7 @@ def test_claude_sdk_env_options_no_header_auto_injection():
 
 
 def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
-    """OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude (Anthropic) side; the
-    claude path reads only ANTHROPIC_CUSTOM_HEADERS."""
+    """OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude (Anthropic) side; the"""
     opts = claude_sdk_env_options(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -1048,11 +1014,7 @@ def test_chat_completion_propagates_transport_errors():
 
 
 def test_chat_completion_does_not_request_a_stream():
-    """The non-streaming entry point must not turn into a streamed request.
-
-    Callers such as the breakdown reporter depend on the plain request shape,
-    which some gateways treat differently from a streamed one.
-    """
+    """The non-streaming entry point must not turn into a streamed request."""
     choice = types.SimpleNamespace(message=types.SimpleNamespace(content="x"))
     client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
     chat_completion(client, model="m", messages=[])
@@ -1303,8 +1265,8 @@ def fake_one_shot(monkeypatch: pytest.MonkeyPatch) -> type[_FakeOneShotClient]:
         ({_ANTHROPIC_KEY: "sk-ant-key"}, llm_config.ANTHROPIC_TRANSPORT_HTTP),
         ({_ANTHROPIC_TOKEN: "gateway-bearer"}, llm_config.ANTHROPIC_TRANSPORT_HTTP),
         ({_OAUTH_ENV: _OAUTH_VALUE}, llm_config.ANTHROPIC_TRANSPORT_SDK),
-        # The CLI prefers a key over the subscription token, so the transport
-        # that key authenticates must win here too.
+        # The CLI prefers a key over the subscription token, so the transport that key authenticates must win here
+        # too.
         ({_ANTHROPIC_KEY: "sk-ant-key", _OAUTH_ENV: _OAUTH_VALUE}, llm_config.ANTHROPIC_TRANSPORT_HTTP),
         ({}, ""),
         ({_OAUTH_ENV: "   "}, ""),
@@ -1330,9 +1292,7 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
 
 def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
-    """The SDK only spawns `claude`; an importable package with no reachable
-    binary still cannot serve a call, and failing here beats failing at the
-    first review."""
+    """The SDK only spawns `claude`; an importable package with no reachable"""
     from hyperloom.common import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
@@ -1353,9 +1313,7 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
 
 @pytest.mark.parametrize("binary_name", ["claude", "claude.exe"])
 def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_path, binary_name):
-    """The SDK ships the binary under a platform-dependent name. Matching one
-    spelling exactly would fail a host whose SDK is perfectly usable -- and
-    this probe is what refuses to build the critic at startup."""
+    """The SDK ships the binary under a platform-dependent name. Matching one"""
     from hyperloom.common import claude_oneshot
 
     bundled = tmp_path / "_bundled"
@@ -1425,8 +1383,7 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
 
 
 def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
-    """The Messages API accepts it, and callers that ask for a low temperature
-    to pin an output shape must keep getting one."""
+    """The Messages API accepts it, and callers that ask for a low temperature"""
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
@@ -1442,8 +1399,7 @@ def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
 
 
 def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
-    """Absent means absent: sending an explicit default would change the
-    sampling behaviour of every caller that never asked for one."""
+    """Absent means absent: sending an explicit default would change the"""
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
@@ -1458,8 +1414,7 @@ def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
 
 
 def test_anthropic_completion_drops_temperature_on_the_cli_path(fake_one_shot):
-    """The CLI has no temperature knob, so the argument is accepted and ignored
-    rather than raising -- one entry point, two transports, same signature."""
+    """The CLI has no temperature knob, so the argument is accepted and ignored"""
     llm_config.anthropic_completion(
         model="claude-opus-5",
         messages=[{"role": "user", "content": "hi"}],
@@ -1513,10 +1468,7 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
 
 
 def test_anthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
-    """The CLI resolves its own credential from the environment it is given, so
-    an explicit mapping must reach it instead of being dropped for the ambient
-    one — otherwise a caller that resolved credentials from provider-specific
-    variables silently authenticates as something else."""
+    """The CLI resolves its own credential from the environment it is given, so"""
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE, "ANTHROPIC_BASE_URL": "https://gw.example"}
 
     llm_config.anthropic_completion(
@@ -1627,8 +1579,7 @@ def test_anthropic_completion_reads_the_ambient_environment_by_default(monkeypat
 
 
 def test_claude_sdk_env_options_disables_advisor_tool_by_default():
-    """Claude Code's advisor-tool beta header (rejected by strict gateways) is
-    disabled by default; an operator preset is preserved."""
+    """Claude Code's advisor-tool beta header (rejected by strict gateways) is"""
     opts = claude_sdk_env_options(env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"})
     assert opts["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
 

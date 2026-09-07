@@ -1,20 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Alignment / credibility unit tests for the GEAK e2e gain path.
-
-Covers the three coupling points that keep Hyperloom's reported gain honest and
-consistent with GEAK's own e2e speedup:
-
-  * #3 — the same-harness (2b) revalidation DECISION only stamps ``validated``
-    when the ran config's identity matches AND the win actually engaged, else it
-    hands off to the GEAK-harness (2a) fallback.
-  * #5 — promote records a PROVISIONAL cross-harness gain that is internally
-    consistent with ``current_best.tput`` / ``baseline_tput`` (cold-to-cold),
-    never a hot-final-over-cold-baseline ratio, and never stamps ``validated``.
-  * 2a — the GEAK-harness fallback validates using GEAK's OWN reported speedup
-    (``throughput_speedup`` on the promoted basis), so Hyperloom's validated
-    number equals GEAK's headline instead of an inflated hot A/B.
-"""
+"""Alignment / credibility unit tests for the GEAK e2e gain path."""
 
 from __future__ import annotations
 
@@ -177,9 +163,7 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED
-    throughput (not a self-reported speedup), and it lifts current_best +
-    optimization_stack the same way the orchestrator (2b) path does."""
+    """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED"""
     base = 2844.209
     measured = base * 1.088  # what the GEAK-harness replay actually measured
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -215,8 +199,7 @@ async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, mo
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct, abs=1e-6)
     assert ss.cumulative_gain_validated != pytest.approx(13.29, abs=0.05)
     assert ss.resume_pending_revalidation is False
-    # Rebench-first writes the headline HERE: current_best.tput == measured, and
-    # the geak_e2e stack entry now exists.
+    # Rebench-first writes the headline HERE: current_best.tput == measured, and the geak_e2e stack entry now exists.
     assert ss.current_best["tput"] == pytest.approx(measured)
     assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
     assert not ss.geak_pending  # candidate cleared on promote
@@ -514,8 +497,7 @@ def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:
 
 
 def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
-    """`_record_geak_candidate` stores an audit-only pending candidate and
-    leaves current_best / optimization_stack / the gain ledger untouched."""
+    """`_record_geak_candidate` stores an audit-only pending candidate and"""
     base = 2844.209
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
     before_best = dict(coord.shared_state.current_best)
@@ -536,8 +518,7 @@ def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
 
 
 def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None:
-    """`_promote_geak_from_candidate` lifts the headline from a MEASURED
-    tput (never the self-reported number) and clears the pending candidate."""
+    """`_promote_geak_from_candidate` lifts the headline from a MEASURED"""
     base = 2844.209
     measured = 3270.0
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -558,9 +539,7 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
     assert ss.resume_pending_revalidation is False
     geak_entry = next(e for e in ss.optimization_stack if e.get("action") == "geak_e2e")
-    # A flags/env win with no proven overlay moved the CONFIG lever. Stamping
-    # ``kernel`` from the task kind alone would put ``lever_buckets`` in direct
-    # conflict with ``_geak_contribution``, which reads the same entry.
+    # A flags/env win with no proven overlay moved the CONFIG lever.
     assert geak_entry["lever_kind"] == "config"
     assert not ss.geak_pending
 
@@ -579,11 +558,7 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
 
 
 def _journey_with_validated_keeps(tmp_path: Path, ratios: list[float]) -> str:
-    """Write a journey whose KEEPs each carry a validated ``(base,new)`` pair.
-
-    Those are exactly the rows ``record_kernel_e2e`` sums into the GEAK column,
-    so they are the share the route-level attempt must NOT claim again.
-    """
+    """Write a journey whose KEEPs each carry a validated ``(base,new)`` pair."""
     path = tmp_path / "kernel_journey.json"
     path.write_text(
         json.dumps(
@@ -632,12 +607,7 @@ def _e2e_attempt_pair(session_dir: Path) -> tuple[float, float] | None:
 
 
 def test_route_attempt_starts_where_the_per_kernel_ledger_stops(tmp_path: Path) -> None:
-    """The residual, not the whole route delta, is what the attempt records.
-
-    Two KEEPs with validated pairs (+50 and +20 tok/s) are already summed into
-    the GEAK column by ``record_kernel_e2e``; recording the attempt from the
-    pre-GEAK tput would credit those 70 tok/s a second time.
-    """
+    """The residual, not the whole route delta, is what the attempt records."""
     base = 2844.209
     pre_geak = 3042.941
     measured = 3400.0
@@ -656,22 +626,16 @@ def test_route_attempt_starts_where_the_per_kernel_ledger_stops(tmp_path: Path) 
     assert before == pytest.approx(pre_geak + claimed)
     assert after == pytest.approx(measured)
 
-    # The point of holding back an ABSOLUTE tok/s rather than a speedup ratio:
-    # both records divide by the same session baseline, so the per-kernel
-    # credits and the route credit telescope to exactly the measured route
-    # lift, leaving nothing for ``unattributed_gain_pct`` to absorb.
+    # The point of holding back an ABSOLUTE tok/s rather than a speedup ratio: both records divide by the same session
+    # baseline, so the per-kernel credits and the route credit telescope to exactly the measured route lift, leaving
+    # nothing for ``unattributed_gain_pct`` to absorb.
     ledger_pct = claimed / base * 100.0
     route_pct = (after - before) / base * 100.0
     assert ledger_pct + route_pct == pytest.approx((measured - pre_geak) / base * 100.0)
 
 
 def test_route_attempt_survives_when_only_the_config_remainder_is_left(tmp_path: Path) -> None:
-    """A journey KEEP must not suppress the whole attempt.
-
-    The predicate this replaced was boolean: any attributable KEEP dropped the
-    route row entirely, so an env/flag win measured in the same promotion never
-    reached the ledger at all.
-    """
+    """A journey KEEP must not suppress the whole attempt."""
     coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
     result = _ok_result(final=3236.489)
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
@@ -696,12 +660,7 @@ def test_noise_sized_residual_is_not_recorded_as_an_attempt(tmp_path: Path) -> N
 
 
 def test_unproven_overlay_leaves_the_full_delta_to_the_route(tmp_path: Path) -> None:
-    """Without overlay proof the per-kernel ledger claims nothing.
-
-    ``_reject_geak_kernel_journey`` refuses to credit KEEPs whose overlay was
-    not proven loaded, so holding back their delta here would erase gain no
-    other record holds.
-    """
+    """Without overlay proof the per-kernel ledger claims nothing."""
     coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
     result = _ok_result(final=3236.489)
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
@@ -713,8 +672,7 @@ def test_unproven_overlay_leaves_the_full_delta_to_the_route(tmp_path: Path) -> 
 
 
 def test_report_shows_pending_candidate_excluded_from_headline() -> None:
-    """A pending GEAK candidate renders as an audit note + warning and is
-    NOT presented as a validated headline gain."""
+    """A pending GEAK candidate renders as an audit note + warning and is"""
     bd = {
         "session": {"image": ""},
         "baseline": {"throughput_tok_s_per_gpu": 2844.2},
@@ -739,9 +697,7 @@ def test_report_shows_pending_candidate_excluded_from_headline() -> None:
 
 @pytest.mark.asyncio
 async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None:
-    """GEAK returned no kernel/head/overlay/patch AND its accepted_config equals
-    the pre-KERNEL current_best (pure passthrough). A rebench that beats
-    current_best by measurement noise must NOT be recorded as a kernel gain."""
+    """GEAK returned no kernel/head/overlay/patch AND its accepted_config equals"""
     base, current_best, measured = 8668.5946, 8900.0, 9025.191
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
@@ -751,8 +707,8 @@ async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None
     ]
     coord.shared_state.resume_pending_revalidation = True
     coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
-    # geak_result is non-empty but ships NO material product; accepted_config is
-    # the pre-KERNEL current_best config verbatim (passthrough, zero delta).
+    # geak_result is non-empty but ships NO material product; accepted_config is the pre-KERNEL current_best config
+    # verbatim (passthrough, zero delta).
     coord.shared_state.geak_result = {
         "status": "ok",
         "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=1"},
@@ -784,9 +740,7 @@ async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
-    """GEAK shipped no overlay/patch/kernel list, but its accepted_config adds a
-    new flag vs the pre-KERNEL current_best (a kernel enabled via a config
-    switch). That is a real GEAK product and must still promote."""
+    """GEAK shipped no overlay/patch/kernel list, but its accepted_config adds a"""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
@@ -832,9 +786,7 @@ async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path: Path) -> None:
-    """A validated 2b decision with an EMPTY geak_result and NO pre-existing
-    geak_e2e stack entry has no material to validate: it is same-config noise
-    (geak_result lost / never populated), so it must NOT promote."""
+    """A validated 2b decision with an EMPTY geak_result and NO pre-existing"""
     base, current_best, measured = 8668.5946, 8900.0, 9025.191
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.optimization_stack = [
@@ -915,16 +867,15 @@ async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path:
             {"X": "1"},
             True,
         ),
-        # accepted_config MISSING while prev best is non-empty -> non-material
-        # (a bare mismatch must not promote and wipe the existing config).
+        # accepted_config MISSING while prev best is non-empty -> non-material (a bare mismatch must not promote and
+        # wipe the existing config).
         (
             {"status": "ok", "accepted_kernels": []},
             "--max-num-batched-tokens 24576",
             {"VLLM_ROCM_USE_AITER": "1"},
             False,
         ),
-        # accepted_config present but all-empty while prev best is non-empty ->
-        # non-material (same wipe hazard).
+        # accepted_config present but all-empty while prev best is non-empty -> non-material (same wipe hazard).
         (
             {"status": "ok", "accepted_config": {"flags": "", "env": ""}},
             "--max-num-batched-tokens 24576",
@@ -939,8 +890,7 @@ def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expe
 
 @pytest.mark.asyncio
 async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -> None:
-    """A passthrough 2b drop must REVERT a provisional kernel_journey KEEP and
-    tag it with the no-material reason (not the beat-current_best reason)."""
+    """A passthrough 2b drop must REVERT a provisional kernel_journey KEEP and"""
     base, current_best, measured = 8668.5946, 8900.0, 9025.191
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
@@ -1009,9 +959,7 @@ async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path) -> None:
-    """Resume revalidation: geak_result was lost (empty) but a geak_e2e stack
-    entry already recorded the win. The 2b validated decision must still promote
-    (the material was proven in the original KERNEL cycle)."""
+    """Resume revalidation: geak_result was lost (empty) but a geak_e2e stack"""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": current_best}]
@@ -1038,16 +986,12 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: Path) -> None:
-    """Regression: a resume revalidation of an ALREADY-promoted GEAK win must
-    not be judged no_material. On resume geak_result is persisted (non-empty)
-    and current_best already holds the GEAK accepted_config, so the fingerprint
-    matches by construction; the pre-existing geak_e2e stack entry is the escape
-    hatch and must short-circuit the material check."""
+    """Regression: a resume revalidation of an ALREADY-promoted GEAK win must"""
     base, measured = 8668.5946, 9800.0
     current_best = 9600.0  # current_best already holds the promoted GEAK win
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
-    # current_best carries the GEAK accepted_config (a later kernel integrate
-    # did not change server args), so a real revalidation fingerprint matches.
+    # current_best carries the GEAK accepted_config (a later kernel integrate did not change server args), so a real
+    # revalidation fingerprint matches.
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
     coord.shared_state.current_best["extra_envs"] = {"VLLM_ROCM_USE_AITER": "1"}
     coord.shared_state.optimization_stack = [
@@ -1090,15 +1034,7 @@ async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: 
 
 
 def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_path: Path) -> None:
-    """A promote whose overlay was proven NOT loaded is a config gain.
-
-    GEAK self-reports ``accepted_kernels`` / ``accepted_heads`` whether or not the
-    overlay carrying them survived to the measurement. The per-kernel ledger already
-    refuses to credit them without proof; the stack entry is the other reader, and
-    ``_geak_contribution`` classifies the dashboard row from those lanes alone. Both
-    must make the same call, or a rebench that stripped a dead overlay gets filed
-    under ``kernel``.
-    """
+    """A promote whose overlay was proven NOT loaded is a config gain."""
     base = 2844.209
     measured = 3270.0
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -1109,8 +1045,8 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     coord._promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
-    # ``_lift_to_current_best`` drops empty values, so "no proof" reads as no lane
-    # at all rather than an empty one -- either way there is no name to credit.
+    # ``_lift_to_current_best`` drops empty values, so "no proof" reads as no lane at all rather than an empty one --
+    # either way there is no name to credit.
     assert not entry.get("accepted_kernels")
     assert not entry.get("accepted_heads")
     assert entry["overlay_loaded"] is False

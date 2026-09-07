@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Supplemental coverage for kernel_request_handlers pure helpers: precision /
-budget / timeout resolution, backend order, tool-stdout shaping, roofline name
-lookup, artifact-path and in-flight scanning."""
+"""Supplemental coverage for kernel_request_handlers pure helpers: precision /"""
 
 from __future__ import annotations
 
@@ -112,12 +110,7 @@ _GEMM_CMD_BASE = {
 
 
 def test_the_gemm_ceiling_travels_as_a_tuner_count() -> None:
-    """The producer owns routing, so the lane supplies a count, not a name.
-
-    Naming one tuner was the only ceiling the wrapper could express before, so a
-    share paying for two of three routed tuners capped nothing at all and the
-    third ran anyway, bounded only by the wall clock.
-    """
+    """The producer owns routing, so the lane supplies a count, not a name."""
     from hyperloom.agents.kernel.tools import forge_gemm_tuning as fgt
 
     cmd = fgt._build_cmd({**_GEMM_CMD_BASE, "max_tuners": 2})
@@ -166,8 +159,8 @@ def test_gemm_tuning_script_disables_the_eval(tmp_path: Path) -> None:
     assert "RUN_EVAL:-" not in script
 
 
-# -- _optimization_budget_minutes / wrapper timeout -----------------------
-# -- backend selection -----------------------------------------------------
+# -- _optimization_budget_minutes / wrapper timeout ----------------------- -- backend selection
+# -----------------------------------------------------
 def test_backend_order_ignores_payload_forge_without_explicit_env(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
     assert krh._raw_kernel_backend_order({"backend_order": "FORGE,foo,unknown"}) == ["geak"]
@@ -233,8 +226,8 @@ def test_artifact_paths_other_type() -> None:
     assert krh._artifact_paths_from_payload({}) == []
 
 
-# -- _kernel_result_rank ---------------------------------------------------
-# -- _parse_tool_stdout / _shape_tool_result ------------------------------
+# -- _kernel_result_rank --------------------------------------------------- -- _parse_tool_stdout /
+# _shape_tool_result ------------------------------
 def test_parse_tool_stdout_whole_json() -> None:
     assert krh._parse_tool_stdout('{"status": "ok", "x": 1}') == {"status": "ok", "x": 1}
 
@@ -272,14 +265,7 @@ TraceLens SDK orchestrator produced 43 hot kernels
 
 
 def test_parse_tool_stdout_recovers_a_pretty_printed_result() -> None:
-    """The shape a tool with a lot to say actually emits.
-
-    A tool that indents its result spans many lines, so the whole-text parse
-    fails on the surrounding progress chatter and the per-line scan never sees a
-    complete object. ``tracelens_analysis`` returned a megabyte of hot-kernel
-    analysis exactly like this — the first time it ever succeeded — and every
-    field of it was dropped.
-    """
+    """The shape a tool with a lot to say actually emits."""
     out = krh._parse_tool_stdout(_PRETTY_TOOL_STDOUT)
 
     assert out["status"] == "ok"
@@ -288,9 +274,7 @@ def test_parse_tool_stdout_recovers_a_pretty_printed_result() -> None:
 
 
 def test_shape_tool_result_will_not_call_unreadable_output_a_success() -> None:
-    """Inferring ``ok`` from rc==0 made a tool whose output could not be read
-    indistinguishable from one that worked, so the caller recorded an empty
-    analysis over a real one and reported the leg as succeeded."""
+    """Inferring ``ok`` from rc==0 made a tool whose output could not be read"""
     out = krh._shape_tool_result(0, "progress chatter, no json at all", "")
 
     assert out["status"] == "failed"
@@ -316,8 +300,8 @@ def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
     assert out == {"status": "failed", "returncode": 2, "error": "the stderr"}
 
 
-# -- _in_flight_kernel_ids -------------------------------------------------
-# -- unattempted_skip_reason / gate-rejected dispatch ----------------------
+# -- _in_flight_kernel_ids ------------------------------------------------- -- unattempted_skip_reason /
+# gate-rejected dispatch ----------------------
 def _state_owing_one_attempt():
     """SharedState whose trace still owes ``k001`` a kernel_opt attempt."""
     from hyperloom.orchestrator.state.shared_state import SharedState

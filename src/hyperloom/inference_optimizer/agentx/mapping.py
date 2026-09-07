@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Map aiperf ``profile_export_aiperf.json`` metrics to the InferenceX result
-schema (``inferencex_result.json``).
-
-Emits exactly the keys Magpie's ``ResultParser.parse_inferencex_result`` reads.
-Each aiperf metric is a dict carrying at least ``avg``; latency metrics also
-carry ``p50``/``p99``/``std``. ``stat`` reads a sub-key, falling back to ``avg``
-then a numeric default so a missing metric never raises.
-
-``pct`` is the strict variant: no ``avg`` fallback. Use it for any axis where
-the percentile and the mean differ and grading depends on the result.
-"""
+"""Map aiperf ``profile_export_aiperf.json`` metrics to the InferenceX result"""
 
 from __future__ import annotations
 
@@ -22,8 +12,8 @@ def stat(m: Mapping[str, Any], key: str, sub: str = "avg", default: float = 0.0)
     """Read ``m[key][sub]`` with graceful fallbacks (avg, then ``default``)."""
     v = m.get(key)
     if isinstance(v, dict):
-        # Coalesce explicit None: a present-but-null sub-key (or avg) must fall
-        # back to avg then the numeric default, never emit None downstream.
+        # Coalesce explicit None: a present-but-null sub-key (or avg) must fall back to avg then the numeric default,
+        # never emit None downstream.
         sv = v.get(sub)
         if sv is not None:
             return sv
@@ -42,19 +32,7 @@ def pct(m: Mapping[str, Any], key: str, sub: str, default: float = 0.0) -> Any:
 
 
 def submission_outcome(export: Mapping[str, Any]) -> tuple[bool | None, list[str]]:
-    """Read the scenario's submission verdict from an aiperf export.
-
-    aiperf stamps ``metadata.submission_valid`` (and, only when non-empty,
-    ``metadata.submission_invalid_reasons``) whenever ``--scenario`` is set. It
-    goes False for a scenario-invariant violation, a cancelled run, or a
-    context-overflow rate above the scenario's limit.
-
-    Returns:
-        ``(verdict, reasons)`` where verdict is True/False, or **None when the
-        field is absent** -- which is NOT the same as valid: it means either no
-        scenario was requested or the aiperf build predates the field, and in
-        both cases the run's comparability is unknown.
-    """
+    """Read the scenario's submission verdict from an aiperf export."""
     md = export.get("metadata")
     if not isinstance(md, dict) or "submission_valid" not in md:
         return None, []
@@ -69,24 +47,7 @@ def map_aiperf(
     *,
     noncanonical_reasons: "Sequence[str] | None" = None,
 ) -> dict[str, Any]:
-    """Convert an aiperf export dict into the InferenceX result schema.
-
-    Also carries the scenario submission verdict through as
-    ``submission_valid`` / ``submission_invalid_reasons``. The *presence* of
-    ``submission_valid`` is what marks a result as AgentX-produced downstream;
-    synthetic results never carry it.
-
-    Args:
-        export: The parsed aiperf ``profile_export_aiperf.json``.
-        noncanonical_reasons: Workload deviations the *client* detected, which
-            the scenario cannot see. aiperf only judges what it was told to
-            enforce -- it has no concept of corpus size, and it stamps a verdict
-            of False only when ``--unsafe-override`` actually suppressed a
-            violation -- so a shrunken corpus, or the override forced at the
-            canonical duration, would otherwise come back submission_valid=True
-            on a workload nothing on the leaderboard ran. Any reason here forces
-            the verdict to False so ``is_valid_measurement`` refuses it.
-    """
+    """Convert an aiperf export dict into the InferenceX result schema."""
     d = export
     verdict, reasons = submission_outcome(d)
     extra = [str(r) for r in (noncanonical_reasons or []) if str(r).strip()]
@@ -102,12 +63,7 @@ def map_aiperf(
     rc = int(stat(m, "request_count") or 0)
     isl = stat(m, "input_sequence_length")
 
-    # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports at
-    # p90. ``output_token_throughput_per_user`` is 1/ITL and drops TTFT from the
-    # denominator, which on a ~114k-prompt replay is most of what a user waits
-    # for -- a candidate could double TTFT and leave that number untouched.
-    # pct() is used here (not stat()) because avg and p90 differ by >2x on
-    # this metric and grading against avg would make the veto gate meaningless.
+    # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports at p90.
     intvty_p90 = pct(m, "e2e_output_token_throughput", "p90")
 
     return {
@@ -138,9 +94,7 @@ def map_aiperf(
         "p99_e2el_ms": stat(m, "request_latency", "p99"),
         "std_e2el_ms": stat(m, "request_latency", "std"),
         "theoretical_prefix_cache_hit": stat(m, "theoretical_prefix_cache_hit"),
-        # Tri-state on purpose: True / False / None(unknown). Never coerce the
-        # unknown case to True -- that is exactly how an incomparable run would
-        # slip into the leaderboard-comparable set.
+        # Tri-state on purpose: True / False / None(unknown).
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
     }

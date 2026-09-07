@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-framework runtime dependency installation.
-
-Covers the manifest contract, the load-bearing torch guard, and -- most
-importantly -- that the pass actually runs in the documented flow: install.sh
-executes before ``--framework`` is known, so if only that side installed the
-deps a scriptable framework would reach baseline with nothing installed.
-"""
+"""Per-framework runtime dependency installation."""
 
 from __future__ import annotations
 
@@ -26,9 +20,7 @@ INSTALL_SH = ASSETS / "install.sh"
 PREFLIGHT_PY = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "cli" / "preflight.py"
 
 
-# --------------------------------------------------------------------------
 # manifest parsing
-# --------------------------------------------------------------------------
 
 
 def test_blank_lines_and_comments_are_ignored():
@@ -55,8 +47,7 @@ def test_version_specifier_stripped_from_default_import_name():
 
 
 def test_url_spec_without_an_import_name_is_rejected():
-    """No import name can be derived from a URL, and guessing would mean the
-    probe never resolves and the package reinstalls on every single run."""
+    """No import name can be derived from a URL, and guessing would mean the"""
     reqs, _, invalid = fd.parse_manifest("git+https://host/repo.git\n")
     assert reqs == []
     assert invalid == ["git+https://host/repo.git"]
@@ -76,9 +67,7 @@ def test_load_bearing_packages_are_refused(core):
     assert refused == [core]
 
 
-# --------------------------------------------------------------------------
 # install behaviour
-# --------------------------------------------------------------------------
 
 
 class FakePython:
@@ -199,18 +188,11 @@ def test_check_only_reports_without_installing(tmp_path, monkeypatch):
     assert fake.pip_calls == []
 
 
-# --------------------------------------------------------------------------
 # wiring: both entry points must actually run this
-# --------------------------------------------------------------------------
 
 
 def test_preflight_covers_a_framework_install_sh_could_not_see(monkeypatch):
-    """The regression that motivated the preflight pass.
-
-    install.sh runs before --framework exists, so its own attempt no-ops. If
-    preflight did not repeat the pass, an operator's baseline would start with
-    none of HY-World-2.0's imports installed.
-    """
+    """The regression that motivated the preflight pass."""
     from hyperloom.inference_optimizer.cli import preflight
 
     monkeypatch.delenv("FRAMEWORK", raising=False)  # as at install time
@@ -257,10 +239,7 @@ def test_install_sh_delegates_to_this_module():
 
 
 def test_pip_extra_keeps_every_dash_prefixed_flag(monkeypatch):
-    """Every pip flag starts with a dash, which argparse never takes as a value.
-
-    A variadic --pip-extra dropped them and exited 2, failing the whole install.
-    """
+    """Every pip flag starts with a dash, which argparse never takes as a value."""
     seen = {}
 
     def fake_ensure(framework, **kwargs):
@@ -292,6 +271,4 @@ def test_install_sh_passes_pip_extra_in_the_form_argparse_accepts():
     assert "--pip-extra=" in text, "install.sh must attach each pip flag with ="
 
 
-# --------------------------------------------------------------------------
 # the shipped manifest
-# --------------------------------------------------------------------------

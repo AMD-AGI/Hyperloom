@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""forge GEMM tuned-CSV durability: KEEP must persist the CSV into the serving
-aiter config dir + snapshot it (recipe-portable), not reference the ephemeral
-tuner workspace path.
-"""
+"""forge GEMM tuned-CSV durability: KEEP must persist the CSV into the serving"""
 
 from __future__ import annotations
 
@@ -27,11 +24,7 @@ def _fake_aiter(monkeypatch, tmp_path: Path) -> Path:
 
 
 def _durable(aiter_pkg: Path, name: str) -> Path:
-    """Where a persisted CSV lands: below model_configs/, not inside it.
-
-    aiter auto-merges everything its non-recursive ``model_configs/*.csv`` glob
-    finds when the env var is unset, so the copy has to sit one level down.
-    """
+    """Where a persisted CSV lands: below model_configs/, not inside it."""
     return aiter_pkg / "configs" / "model_configs" / "hyperloom" / name
 
 
@@ -51,26 +44,14 @@ def test_persist_copies_into_aiter_config_and_snapshots(tmp_path, monkeypatch):
     assert snap and Path(snap).is_dir()  # durable snapshot dir
     assert (Path(snap) / "manifest.json").is_file()
     assert (Path(snap) / "files" / "configs" / "model_configs" / "hyperloom" / dst.name).is_file()
-    # snapshot must live under the DURABLE optimization_stack/src (survives run
-    # cleanup), NOT the ephemeral runs/gemm_tuning workspace (#2 recipe-portable).
+    # snapshot must live under the DURABLE optimization_stack/src (survives run cleanup), NOT the ephemeral
+    # runs/gemm_tuning workspace (#2 recipe-portable).
     assert "optimization_stack" in Path(snap).parts and "src" in Path(snap).parts
     assert "runs" not in Path(snap).parts
 
 
 def test_persist_keeps_the_copy_out_of_aiters_auto_merge_scan(tmp_path, monkeypatch):
-    """The copy must be invisible to aiter's env-less table scan.
-
-    ``jit/core.py::get_config_file`` globs ``model_configs/*{table}*.csv`` and
-    merges everything it finds whenever the env var is unset -- which is the
-    common case for a plain server start. A candidate persisted before E2E has
-    ruled on it would reach every later server that way, so a REVERT would read
-    as reverted while the table stayed silently in effect. Observed for real: a
-    V4-Flash run merged dsv3's table, so the scan does not even discriminate by
-    model.
-
-    One level down is enough: the glob is not recursive, and the env var still
-    points at the file.
-    """
+    """The copy must be invisible to aiter's env-less table scan."""
     aiter_pkg = _fake_aiter(monkeypatch, tmp_path)
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -114,8 +95,8 @@ def test_persist_aiter_not_importable_falls_back(tmp_path, monkeypatch):
 
 
 def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
-    # A snapshot failure must NOT discard the durable copy + env repoint that
-    # were already committed (that is what makes the KEEP survive replay).
+    # A snapshot failure must NOT discard the durable copy + env repoint that were already committed (that is what
+    # makes the KEEP survive replay).
     aiter_pkg = _fake_aiter(monkeypatch, tmp_path)
     ws = tmp_path / "ws"
     ws.mkdir()

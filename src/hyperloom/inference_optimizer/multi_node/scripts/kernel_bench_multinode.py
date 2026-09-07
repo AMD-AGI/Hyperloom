@@ -2,14 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node-aware kernel micro-benchmark runner (runs inside the head pod, not the sandbox).
-
-Submitted via Ray Dashboard REST when ``nodes >= 2``: a single
-``num_gpus=1`` actor pinned to the head node stages the base64 bench
-files into the workspace, runs ``bash bench_command``, and reads back
-``result_glob`` artifacts (>1 MiB skipped). GPU=1 (not N) because kernel
-micro-benchmarks are single-rank. Emits one JSON summary on stdout.
-"""
+"""Multi-node-aware kernel micro-benchmark runner (runs inside the head pod, not the sandbox)."""
 
 from __future__ import annotations
 
@@ -35,27 +28,14 @@ _STREAM_TAIL_BYTES = 32 * 1024
 
 
 def _log(msg: str) -> None:
-    """Write a timestamped progress line to stderr and flush it.
-
-    Args:
-        msg (str): The message text to emit.
-    """
+    """Write a timestamped progress line to stderr and flush it."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kernel_bench_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _tail_bytes(s: str | None, limit: int) -> str:
-    """Return the trailing portion of a string up to a byte limit.
-
-    Args:
-        s (str | None): The source text, or ``None``.
-        limit (int): Maximum number of trailing characters to keep.
-
-    Returns:
-        str: The last ``limit`` characters of ``s`` (or all of it if
-        shorter); an empty string when ``s`` is falsy.
-    """
+    """Return the trailing portion of a string up to a byte limit."""
     if not s:
         return ""
     if len(s) <= limit:
@@ -64,18 +44,7 @@ def _tail_bytes(s: str | None, limit: int) -> str:
 
 
 def _stage_files(workspace: Path, files_b64: dict[str, str]) -> list[str]:
-    """Decode each ``{relative_path: base64_content}`` into the workspace (rejecting ``/`` or ``..`` paths).
-
-    Args:
-        workspace: Directory the files are decoded into.
-        files_b64: Mapping of relative path to base64-encoded content.
-
-    Returns:
-        list[str]: The absolute paths of the files written.
-
-    Raises:
-        ValueError: If a staging path is absolute or contains ``..``.
-    """
+    """Decode each ``{relative_path: base64_content}`` into the workspace (rejecting ``/`` or ``..`` paths)."""
     staged: list[str] = []
     for rel, b64 in (files_b64 or {}).items():
         if rel.startswith("/") or ".." in Path(rel).parts:
@@ -94,22 +63,7 @@ def _bench_remote(
     result_glob: str,
     timeout_sec: int,
 ) -> dict:
-    """Run a kernel micro-benchmark on this (head) pod; the caller already pinned us to a GPU node.
-
-    Args:
-        workspace: Absolute directory used as CWD for the bench command.
-        bench_command: Shell command run via ``bash -lc``.
-        files_b64_json: JSON ``{rel_path: base64_content}`` of files to stage.
-        result_glob: Glob (relative to workspace) of artifacts to read back.
-        timeout_sec: Hard timeout for the bench command.
-
-    Returns:
-        dict: Per-host result with return code, elapsed time, stdout/stderr
-        tails, staged files, and read-back artifacts.
-
-    Raises:
-        ValueError: If ``files_b64_json`` is not valid JSON.
-    """
+    """Run a kernel micro-benchmark on this (head) pod; the caller already pinned us to a GPU node."""
     host = socket.gethostname()
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -189,18 +143,7 @@ def _bench_remote(
 
 
 def _pick_gpu_node() -> str:
-    """Return the co-located head-pod node id, matched by IP; fall back to any alive node with GPU >= 1.
-
-    GPU capacity is not verified for the IP match, so a GPU-less head pod is
-    returned without error and the ``num_gpus=1`` actor is then unschedulable.
-
-    Returns:
-        str: The Ray ``NodeID`` to pin the bench actor to.
-
-    Raises:
-        RuntimeError: If there are no alive nodes, or if no node matches our IP
-            and no alive node has GPU >= 1.
-    """
+    """Return the co-located head-pod node id, matched by IP; fall back to any alive node with GPU >= 1."""
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
         raise RuntimeError("no alive Ray nodes for kernel bench")
@@ -221,16 +164,7 @@ def _pick_gpu_node() -> str:
 
 
 def _do_bench(args: argparse.Namespace) -> int:
-    """Schedule the bench actor on a GPU node and emit its JSON result.
-
-    Args:
-        args (argparse.Namespace): Parsed ``bench`` subcommand arguments
-            (``workspace``, ``bench_command``, ``files_b64_json``,
-            ``result_glob``, ``timeout_sec``).
-
-    Returns:
-        int: ``0`` if the bench command exited 0, otherwise ``1``.
-    """
+    """Schedule the bench actor on a GPU node and emit its JSON result."""
     ray.init(ignore_reinit_error=True, log_to_driver=True)
     node_id = _pick_gpu_node()
     _log(f"bench: node_id={node_id[:16]} workspace={args.workspace}")
@@ -271,12 +205,7 @@ def _do_bench(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    """Parse CLI arguments and dispatch the ``bench`` subcommand.
-
-    Returns:
-        int: Process exit code; the bench result code, or ``2`` if no
-        recognized subcommand was given.
-    """
+    """Parse CLI arguments and dispatch the ``bench`` subcommand."""
     p = argparse.ArgumentParser(
         prog="kernel_bench_multinode.py",
         description=(

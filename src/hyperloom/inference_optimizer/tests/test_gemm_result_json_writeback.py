@@ -1,11 +1,4 @@
-"""The GEMM workspace ``result.json`` must carry the E2E verdict, not the pre-E2E snapshot.
-
-forge's CLI writes ``result.json`` when micro tuning ends, so without a
-writeback the file stays at ``status=ok`` / ``requires_e2e_validation=true``
-forever while ``state.json`` already records a REVERT. The fusion and
-collective lanes treat ``result.json`` as the final verdict, so the two ledgers
-disagreeing is how a rejected candidate reads as "undecided" on disk.
-"""
+"""The GEMM workspace ``result.json`` must carry the E2E verdict, not the pre-E2E snapshot."""
 
 from __future__ import annotations
 
@@ -147,12 +140,7 @@ def test_writeback_is_a_noop_without_a_workspace(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_validation_exception_syncs_state_and_disk(tmp_path: Path, monkeypatch):
-    """The exception arm rewrote only its local dict; state kept the bridge's KEEP.
-
-    ``record_gemm_tuning`` stores a shallow copy, so mutating ``result``
-    afterwards does not update the recorded entry. An arm that was never
-    measured must read as REVERT in both ledgers.
-    """
+    """The exception arm rewrote only its local dict; state kept the bridge's KEEP."""
     ws = _workspace_with_pre_e2e_result(tmp_path)
     model = _moe_model(tmp_path / "Qwen3-30B-A3B")
     phase = _phase(tmp_path, model)

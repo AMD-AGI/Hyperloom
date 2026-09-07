@@ -2,72 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Backfill one hyperloom session's trace JSONL into Langfuse (offline).
-
-Sibling of the *live* emitter
-(:mod:`hyperloom.orchestrator.trace.langfuse_emitter`): the live
-path mirrors calls into Langfuse while a run is in flight, this CLI replays
-one finished session's ``reports/trace/`` after the fact. Both share the same
-projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`), so the spans
-this CLI does emit are shaped like the live ones. Not replayed here: ext token
-shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
-GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
-
-Mapping (trace -> phase span -> agent span -> generation)::
-
-    Trace                 = one session
-      phase span          = PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...
-        agent span        = component (orchestration / kernel_agent /
-                            specialist / critic / geak / forge /
-                            proposal_scorer / ...)
-          Generation      = one LLM call (llm_calls.jsonl; prompt/response
-                            paired from conversations.jsonl when available)
-      Score               = one decision (decision_trace.jsonl), attached to
-                            the agent span that produced it (trace-level
-                            fallback). Projected by
-                            ``langfuse_mapping.decision_to_scores``:
-                              - decision_outcome (CATEGORICAL:
-                                KEEP/REVERT/no_promote/skipped)
-                              - gain_pct / predicted_gain_pct /
-                                proposal_score (NUMERIC) when present
-
-Source files (under the session dir)
--------------------------------------
-* ``reports/trace/llm_calls.jsonl``      -- every LLM call (model + token
-                            usage + phase).
-* ``reports/trace/conversations.jsonl``  -- prompt+response text for the
-                            subset that recorded it; paired by
-                            :func:`langfuse_mapping.pair_key`.
-* ``reports/trace/decision_trace.jsonl`` -- per-action
-                            KEEP/REVERT/no_promote/skipped + gain_pct.
-* ``runtime/recipe_snapshot/.audit.jsonl`` -- recipe-KB read/write audit rows
-                            (rendered as the ``agent:recipe_kb`` span subtree).
-* ``manifest.json``                      -- trace-level metadata +
-                            claw_session_id.
-
-Usage
------
-::
-
-    # Dry run: parse + print the plan, no SDK / no network needed.
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
-        --session-dir <SD> --dry-run
-
-    # Real backfill (needs the langfuse SDK + env keys).
-    export LANGFUSE_HOST=https://langfuse.<your-domain>
-    export LANGFUSE_PUBLIC_KEY=pk-...
-    export LANGFUSE_SECRET_KEY=sk-...
-    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
-
-Notes
------
-* Correlation: ``trace_id`` and the Langfuse ``session_id`` grouping are
-  derived from ``claw_session_id`` (fallback the internal session id), so a
-  re-run, the live emitter, and this backfill of one PrimusClaw session all
-  update the same trace rather than duplicating it.
-* Historical backfill preserves original timestamps via explicit
-  ``start_time`` / ``end_time`` on every observation.
-"""
+"""Backfill one hyperloom session's trace JSONL into Langfuse (offline)."""
 
 from __future__ import annotations
 
@@ -108,15 +43,7 @@ UNPHASED = lfmap.UNPHASED
 
 # Plan building (pure -- no SDK, dry-run friendly)
 def build_plan(session_dir: Path) -> dict[str, Any]:
-    """Parse the trace files into a Langfuse-shaped plan dict (pure).
-
-    Args:
-        session_dir: The session directory holding trace and manifest files.
-
-    Returns:
-        A Langfuse-shaped plan dict with trace seed, session id, and phase
-        hierarchy.
-    """
+    """Parse the trace files into a Langfuse-shaped plan dict (pure)."""
     tdir = session_dir / TRACE_SUBDIR
     llm = read_jsonl(tdir / LLM_CALLS, require_dict=True, skip_malformed=True)
     conv = read_jsonl(tdir / CONVERSATIONS, require_dict=True, skip_malformed=True)
@@ -129,13 +56,12 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
         conv_by_key[lfmap.pair_key(c)] = c
 
     internal_id = str(manifest.get("session_id") or (llm[0].get("session_id") if llm else "") or session_dir.name)
-    # Correlate on claw_session_id so backfill and the live emitter land on one
-    # Langfuse trace.
+    # Correlate on claw_session_id so backfill and the live emitter land on one Langfuse trace.
     seed = lfmap.correlation_seed(manifest, internal_id)
     session_label = lfmap.langfuse_session_id(manifest, internal_id)
 
-    # phase -> agent -> [generation parts]; mirrors the live emitter's
-    # trace -> phase span -> agent span -> generation hierarchy.
+    # phase -> agent -> [generation parts]; mirrors the live emitter's trace -> phase span -> agent span -> generation
+    # hierarchy.
     phases: "OrderedDict[str, OrderedDict[str, list[dict]]]" = OrderedDict()
     paired = 0
     for row in llm:
@@ -179,15 +105,7 @@ def build_plan(session_dir: Path) -> dict[str, Any]:
 
 
 def _time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
-    """Return the earliest and latest timestamps across generations.
-
-    Args:
-        gens: Generation rows each carrying a ``ts`` field.
-
-    Returns:
-        A ``(min, max)`` datetime tuple, or ``(None, None)`` when no row has a
-        parseable timestamp.
-    """
+    """Return the earliest and latest timestamps across generations."""
     times = [lfmap.parse_ts(g["ts"]) for g in gens]
     times = [t for t in times if t is not None]
     if not times:
@@ -198,25 +116,14 @@ def _time_bounds(gens: list[dict]) -> tuple[datetime | None, datetime | None]:
 def _phase_time_bounds(
     agents: "OrderedDict[str, list[dict]]",
 ) -> tuple[datetime | None, datetime | None]:
-    """Return the time bounds across all agents in a phase.
-
-    Args:
-        agents: Mapping of agent name to its generation rows.
-
-    Returns:
-        A ``(min, max)`` datetime tuple over every generation in the phase.
-    """
+    """Return the time bounds across all agents in a phase."""
     flat = [g for gens in agents.values() for g in gens]
     return _time_bounds(flat)
 
 
 # Dry-run printer
 def print_plan(plan: dict[str, Any]) -> None:
-    """Print a human-readable dry-run summary of a backfill plan.
-
-    Args:
-        plan: The plan dict produced by the plan builder.
-    """
+    """Print a human-readable dry-run summary of a backfill plan."""
     s = plan["stats"]
     print(f"Trace: {plan['name']}  (session_id={plan['session_id']})")
     print(
@@ -257,18 +164,7 @@ def print_plan(plan: dict[str, Any]) -> None:
 
 # Real ingest (needs the langfuse SDK)
 def ingest(plan: dict[str, Any]) -> int:
-    """Emit a backfill plan to Langfuse as a full trace tree.
-
-    Recreates the trace -> phase -> agent -> generation hierarchy from a
-    completed session and attaches decision scores to the owning agent spans.
-
-    Args:
-        plan: The backfill plan produced by the plan builder.
-
-    Returns:
-        Process exit code: ``0`` on success, ``3`` when the Langfuse SDK is not
-        importable.
-    """
+    """Emit a backfill plan to Langfuse as a full trace tree."""
     try:
         from langfuse import get_client  # type: ignore
     except Exception as exc:  # noqa: BLE001
@@ -346,10 +242,7 @@ def ingest(plan: dict[str, Any]) -> int:
         if p_hi is not None:
             last_end = p_hi
 
-    # Recipe-KB reads + writes -> spans under a recipe_kb agent. Mirrors the
-    # live emitter's ``_flush_recipe_kb_audit`` (which projects each row via
-    # ``lfmap.recipe_read_span`` / ``lfmap.recipe_write_span`` and emits it
-    # through ``record_kb_span``) so a backfilled trace is shaped like a live one.
+    # Recipe-KB reads + writes -> spans under a recipe_kb agent.
     recipe_audit = plan.get("recipe_audit") or []
     if recipe_audit:
         ra_times = [lfmap.parse_ts(r.get("ts")) for r in recipe_audit]
@@ -422,11 +315,7 @@ def ingest(plan: dict[str, Any]) -> int:
 
 # CLI
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser.
-
-    Returns:
-        The configured :class:`argparse.ArgumentParser`.
-    """
+    """Build the CLI argument parser."""
     p = argparse.ArgumentParser(
         prog="backfill_langfuse",
         description=__doc__,
@@ -441,14 +330,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: build and (optionally) emit a backfill plan.
-
-    Args:
-        argv: Argument list to parse; defaults to ``sys.argv`` when ``None``.
-
-    Returns:
-        Process exit code from the plan/ingest path.
-    """
+    """CLI entry point: build and (optionally) emit a backfill plan."""
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
         level=(logging.DEBUG if args.verbose >= 2 else logging.INFO if args.verbose == 1 else logging.WARNING),

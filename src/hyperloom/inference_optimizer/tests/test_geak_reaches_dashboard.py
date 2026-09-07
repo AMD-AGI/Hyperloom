@@ -1,19 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""GEAK's kernel wins must reach the stream the dashboard reads.
-
-The TOP Model dashboard's GEAK column is
-``summary_by_source["kernel_agent"]["by_backend"]["geak"]``, which
-``collect_recorded_optimizations`` builds from the recorder's ``operations`` and
-``adoptions`` streams. ``_record_geak_kernel_journey`` used to replay every GEAK
-kernel with ``route_strategy="legacy_only"``, and all three recorder entry
-points return *before* writing either record on that route. A session therefore
-finished with a kept, validated, positive-gain kernel and no operation naming
-it, which is the same shape a session with no kernel agent at all leaves.
-
-These tests pin the path end to end so the column cannot silently go quiet
-again.
-"""
+"""GEAK's kernel wins must reach the stream the dashboard reads."""
 
 from __future__ import annotations
 
@@ -83,9 +70,7 @@ def _kernel(kid: str, *, gain: float, before: float, after: float) -> dict:
             "e2e_gain_pct": gain,
             "validated": True,
             "decision": "KEEP",
-            # The pair the delta was judged against. GEAK publishes these so
-            # the collector can state each win in percentage points of the one
-            # session baseline instead of summing percentages of moving ones.
+            # The pair the delta was judged against.
             "base_tput": before,
             "new_tput": after,
         },
@@ -93,8 +78,7 @@ def _kernel(kid: str, *, gain: float, before: float, after: float) -> dict:
 
 
 def _column(session_dir: Path) -> dict:
-    """Run the real assembler and the real collector, and return the row the
-    dashboard renders for the kernel agent."""
+    """Run the real assembler and the real collector, and return the row the"""
     warnings: list[str] = []
     parts = assemble_parts(session_dir, warnings=warnings)
     out = collectors.collect_recorded_optimizations(
@@ -111,8 +95,9 @@ def _column(session_dir: Path) -> dict:
 
 
 def _record_baseline(session_dir: Path) -> None:
-    """Every real session measures its baseline before the kernel agent runs;
-    it is the denominator every gain below is stated against."""
+    """Every real session measures its baseline before the kernel agent runs; it is the denominator every gain below is
+    stated against.
+    """
     instrument.record_action_operation(
         session_dir,
         action="baseline",
@@ -138,8 +123,8 @@ def test_kept_geak_kernel_reaches_the_kernel_agent_column(tmp_path: Path) -> Non
 
     parts = assemble_parts(tmp_path)
     operations = [r for r in parts.get("operations") or [] if isinstance(r, dict)]
-    # The regression itself: on the legacy route this list was empty, which is
-    # indistinguishable from a session whose records were lost.
+    # The regression itself: on the legacy route this list was empty, which is indistinguishable from a session whose
+    # records were lost.
     assert operations, "GEAK wrote no operation; the dashboard cannot see it"
 
     column = _column(tmp_path)
@@ -152,13 +137,7 @@ def test_kept_geak_kernel_reaches_the_kernel_agent_column(tmp_path: Path) -> Non
 
 
 def test_gain_is_stated_in_points_of_the_session_baseline(tmp_path: Path) -> None:
-    """Two stacked wins sum to the total the workload actually moved.
-
-    Each kernel's own percentage is measured against wherever the previous one
-    left off, so the percentages do not compose. Published with their
-    throughput pair they are converted to points of the one session baseline,
-    and those do.
-    """
+    """Two stacked wins sum to the total the workload actually moved."""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     coord._record_geak_kernel_journey(
@@ -167,8 +146,7 @@ def test_gain_is_stated_in_points_of_the_session_baseline(tmp_path: Path) -> Non
             "kernel_journey_path": _journey(
                 tmp_path,
                 [
-                    # +10% of 1000, then +10% of 1100. Naively summed that reads
-                    # as 20%; the workload actually moved 21 points.
+                    # +10% of 1000, then +10% of 1100.
                     _kernel("k1", gain=10.0, before=1000.0, after=1100.0),
                     _kernel("k2", gain=10.0, before=1100.0, after=1210.0),
                 ],
@@ -181,8 +159,7 @@ def test_gain_is_stated_in_points_of_the_session_baseline(tmp_path: Path) -> Non
 
 
 def test_reverted_geak_kernel_is_not_credited(tmp_path: Path) -> None:
-    """The revert path is on the canonical stream too, so a kernel that was
-    taken back out does not keep the credit it was given."""
+    """The revert path is on the canonical stream too, so a kernel that was"""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     kernel = _kernel("regressed", gain=-3.0, before=1000.0, after=970.0)
@@ -219,13 +196,7 @@ def test_config_only_promotion_revokes_journey_kernel_and_credits_final_route(tm
 
 
 def _kernel_without_throughput_pair(kid: str, *, gain: float) -> dict:
-    """The shape every real campaign artifact has today.
-
-    All 36 KEEP blocks under ``/shared_nfs/hyperloom-claw`` publish
-    ``e2e_gain_pct`` and no ``base_tput``/``new_tput``. The fixture above adds the
-    pair, so it exercises the contract GEAK is moving to rather than the files on
-    disk — and the difference decides whether a number may be summed.
-    """
+    """The shape every real campaign artifact has today."""
     kernel = _kernel(kid, gain=gain, before=0.0, after=0.0)
     kernel["e2e"].pop("base_tput", None)
     kernel["e2e"].pop("new_tput", None)
@@ -233,15 +204,7 @@ def _kernel_without_throughput_pair(kid: str, *, gain: float) -> dict:
 
 
 def test_keep_without_a_throughput_pair_is_visible_but_not_summed(tmp_path: Path) -> None:
-    """Visible as a keep, absent from the total.
-
-    A local ``e2e_gain_pct`` is measured against whatever baseline the executor
-    held at the time. Projecting it as points of the session baseline is a unit
-    error: replaying the real journeys that way summed 36 local deltas into
-    +348.6 pp of a session that never moved that far. Withholding the gain must
-    not also withhold the keep, or the column reads zero again — which is the
-    bug the canonical-stream change was written to fix.
-    """
+    """Visible as a keep, absent from the total."""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     result = {"kernel_journey_path": _journey(tmp_path, [_kernel_without_throughput_pair("k_nopair", gain=29.994)])}
@@ -268,15 +231,7 @@ def test_keep_without_a_throughput_pair_is_visible_but_not_summed(tmp_path: Path
 
 
 def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Path) -> None:
-    """The tree must not assert a GEAK kernel ran beneath Forge.
-
-    Dropping ``legacy_only`` alone leaves the default route, which names the
-    parent operation ``kernel_agent_forge``. The per-kernel strategy is corrected
-    to ``geak`` afterwards, so the dashboard column fills either way — but a
-    reader walking parents to answer "which optimizer produced this kernel?"
-    gets Forge, and a replay after a process restart can mint further Forge route
-    operations for kernels Forge never dispatched.
-    """
+    """The tree must not assert a GEAK kernel ran beneath Forge."""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     result = {"kernel_journey_path": _journey(tmp_path, [_kernel("k_route", gain=5.0, before=1000.0, after=1050.0)])}
@@ -312,25 +267,13 @@ def _route_ops(session_dir: Path) -> tuple[set[str], set[str]]:
 
 
 def test_reverting_a_geak_kernel_stays_on_the_geak_route(tmp_path: Path) -> None:
-    """Withdrawing a kernel must not re-file it under another optimizer.
-
-    HONEST SCOPE: this passes with and without the route argument on the revert
-    call, because `record_kernel_e2e` mints no route operation on that path —
-    checked both after a KEEP replay and standalone, as a restart would do. The
-    review reported the revert falling back to Forge; the call did, but the
-    fallback is inert today. The argument is still passed, because a call that
-    does not name its route is one change inside the recorder away from being
-    wrong, and this pins the outcome so that change cannot land quietly.
-
-    The load-bearing check for the route argument itself is
-    ``test_every_journey_replay_call_names_its_route``, which reads the source.
-    """
+    """Withdrawing a kernel must not re-file it under another optimizer."""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     kernel = _kernel("k_revert_route", gain=5.0, before=1000.0, after=1050.0)
     coord._record_geak_kernel_journey({"status": "ok", "kernel_journey_path": _journey(tmp_path, [kernel])})
-    # `_reject_*` lives on KernelPhase and is not among the methods Coordinator
-    # delegates, so bind it directly rather than reaching through the facade.
+    # `_reject_*` lives on KernelPhase and is not among the methods Coordinator delegates, so bind it directly rather
+    # than reaching through the facade.
     from hyperloom.orchestrator.phases.kernel import KernelPhase
 
     KernelPhase._reject_geak_kernel_journey(
@@ -348,14 +291,7 @@ def test_reverting_a_geak_kernel_stays_on_the_geak_route(tmp_path: Path) -> None
 
 
 def test_the_geak_route_subject_names_geak(tmp_path: Path) -> None:
-    """Operation and subject must name the same optimizer.
-
-    ``record_native_kernel_run_start`` derives the operation's name and strategy
-    from the route, but the subject payload kept a literal ``kernel_agent_forge``.
-    A GEAK replay then wrote ``operation.name=geak`` beside
-    ``subject.name=kernel_agent_forge`` — one record naming two optimizers, and
-    the subject is what identity lookups resolve against.
-    """
+    """Operation and subject must name the same optimizer."""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     coord._record_geak_kernel_journey(
@@ -416,13 +352,7 @@ def test_geak_route_residual_anchor_is_not_a_validated_measurement(tmp_path: Pat
 
 
 def test_two_promotions_in_one_macro_cycle_are_two_attempts(tmp_path: Path) -> None:
-    """The attempt id keyed only by macro cycle merged re-promotions.
-
-    GEAK can promote twice inside one macro cycle (an env win, then an overlay
-    win on top of it). With the id derived from ``macro_cycle`` alone both rows
-    collapsed onto one stable id, and ``_deep_merge`` kept the last writer — the
-    first promotion's gain vanished from the ledger.
-    """
+    """The attempt id keyed only by macro cycle merged re-promotions."""
     _record_baseline(tmp_path)
     for before, after in ((BASELINE_TPUT, BASELINE_TPUT * 1.02), (BASELINE_TPUT * 1.02, BASELINE_TPUT * 1.05)):
         instrument.record_geak_e2e_attempt(
@@ -477,12 +407,7 @@ def test_geak_route_context_does_not_emit_an_off_ledger_adoption(tmp_path: Path)
 
 
 def test_only_a_validated_pair_is_withheld_from_the_route_attempt(tmp_path: Path) -> None:
-    """The route residual holds back exactly what the per-kernel ledger sums.
-
-    A KEEP with a validated ``(base,new)`` pair is credited per-kernel, so its
-    tok/s must not reach the route attempt too. A KEEP without one is credited
-    nowhere else, so withholding it would erase the gain entirely.
-    """
+    """The route residual holds back exactly what the per-kernel ledger sums."""
     from hyperloom.orchestrator.phases.kernel import KernelPhase
 
     with_pair = _journey(tmp_path, [_kernel("k", gain=12.0, before=1000.0, after=1120.0)])
@@ -495,13 +420,7 @@ def test_only_a_validated_pair_is_withheld_from_the_route_attempt(tmp_path: Path
 
 
 def test_every_journey_replay_call_names_its_route() -> None:
-    """Derived from the source, not from a list a seventh call site can miss.
-
-    Both route defects were the same shape: a recorder call that did not name its
-    route and silently took Forge. Six call sites carry ``route_strategy="geak"``
-    today; this fails if one is added without it, rather than waiting for a
-    reviewer to notice the provenance is wrong.
-    """
+    """Derived from the source, not from a list a seventh call site can miss."""
     import re
 
     source = Path(__file__).resolve().parents[3] / "hyperloom" / "orchestrator" / "phases" / "kernel.py"

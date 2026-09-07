@@ -1,12 +1,7 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the enablement_launch_only bench-only mode of IntegratePatchExecutor.
-
-Validates that _stage_resolve skips the specialist/Critic gate, _stage_apply skips
-the no-patches early return, and the gate produces kept/advanced/reverted without
-any real bench or specialist workspace.
-"""
+"""Unit tests for the enablement_launch_only bench-only mode of IntegratePatchExecutor."""
 
 from __future__ import annotations
 
@@ -51,9 +46,7 @@ def _write_minimal_config(path: Path) -> None:
     path.write_text("benchmark:\n  model: /tmp/m\n", encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
 # _stage_resolve: launch-only bypasses specialist/Critic checks
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -124,9 +117,7 @@ async def test_launch_only_rejects_mutation_fields(tmp_path, field, value):
     assert field in res["error"]
 
 
-# ---------------------------------------------------------------------------
 # _stage_apply: launch-only falls through to bench when no patches exist
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -148,9 +139,7 @@ async def test_launch_only_does_not_return_no_patches(tmp_path):
     assert res.get("enablement") is True
 
 
-# ---------------------------------------------------------------------------
 # Gate routing: kept / reverted / advanced
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

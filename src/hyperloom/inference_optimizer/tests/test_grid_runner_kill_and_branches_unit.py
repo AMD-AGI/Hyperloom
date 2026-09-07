@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``_grid_runner`` process-reaping (``_kill_stale_servers``) and
-the ``run_grid`` per-variant failure branches (yaml build error, magpie
-timeout, server-dead / overtime sentinels, missing workspace, invalid
-measurement)."""
+"""Coverage for ``_grid_runner`` process-reaping (``_kill_stale_servers``) and"""
 
 from __future__ import annotations
 
@@ -110,15 +107,12 @@ def _clear_gpu_mask_envs(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GPU-scoped reaping (AMD-AGI/Hyperloom#1354)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── GPU-scoped reaping
+# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_kill_stale_servers_skips_candidate_outside_our_gpu_mask(monkeypatch):
-    """When we have our own visible-GPU mask (an operator carved us a subset
-    of the machine), a matching candidate whose own mask is disjoint from
-    ours must be left alone -- it belongs to someone else's GPU allocation."""
+    """When we have our own visible-GPU mask (an operator carved us a subset"""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -144,8 +138,7 @@ def test_kill_stale_servers_skips_candidate_outside_our_gpu_mask(monkeypatch):
 
 
 def test_kill_stale_servers_kills_candidate_overlapping_our_gpu_mask(monkeypatch):
-    """A matching candidate whose mask overlaps ours (same GPU allocation)
-    is reaped, same as with no mask at all."""
+    """A matching candidate whose mask overlaps ours (same GPU allocation)"""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -171,9 +164,9 @@ def test_kill_stale_servers_kills_candidate_overlapping_our_gpu_mask(monkeypatch
 
 
 def test_kill_stale_servers_skips_candidate_with_unreadable_environ(monkeypatch):
-    """A candidate whose /proc/<pid>/environ cannot be read (permission,
-    already exited) is skipped, not reaped -- unknown scope is never treated
-    as safe to kill."""
+    """A candidate whose /proc/<pid>/environ cannot be read (permission, already exited) is skipped, not reaped --
+    unknown scope is never treated as safe to kill.
+    """
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -197,8 +190,7 @@ def test_kill_stale_servers_skips_candidate_with_unreadable_environ(monkeypatch)
 
 
 def test_kill_stale_servers_skips_candidate_declaring_no_mask(monkeypatch):
-    """A candidate with a readable but empty environ (no GPU-mask var set at
-    all) is skipped -- its GPU scope is unknown, not "the whole machine"."""
+    """A candidate with a readable but empty environ (no GPU-mask var set at"""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -222,10 +214,7 @@ def test_kill_stale_servers_skips_candidate_declaring_no_mask(monkeypatch):
 
 
 def test_kill_stale_servers_skips_shm_wipe_when_we_have_a_gpu_mask(monkeypatch):
-    """The /dev/shm wipe carries no GPU/owner tag to scope by, so with a mask
-    of our own it must not run at all: it could otherwise crash a correctly
-    spared co-tenant's server by pulling its shared-memory segments out from
-    under it, even though the per-pid reap above left it alone."""
+    """The /dev/shm wipe carries no GPU/owner tag to scope by, so with a mask"""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -247,9 +236,7 @@ def test_kill_stale_servers_skips_shm_wipe_when_we_have_a_gpu_mask(monkeypatch):
 
 
 def test_kill_stale_servers_reaps_everything_when_we_have_no_mask(monkeypatch):
-    """With no mask on our own side (whole machine is ours, or nothing is
-    scoping either side), every match is reaped regardless of the
-    candidate's own mask -- this is the pre-existing, unscoped behavior."""
+    """With no mask on our own side (whole machine is ours, or nothing is"""
     _clear_gpu_mask_envs(monkeypatch)
 
     kill_calls: list[int] = []
@@ -272,12 +259,7 @@ def test_kill_stale_servers_reaps_everything_when_we_have_no_mask(monkeypatch):
 
 
 def test_kill_stale_servers_skips_sleep_when_nothing_was_killed(monkeypatch):
-    """The KFD-release pause must not be paid on the common case where the
-    /proc scan finds nothing to reap. This function now runs at 4 call sites
-    (was 1) instead of just before every Magpie launch, so paying an
-    unconditional sleep here on the "GPU was already clean" case adds up
-    fast (e.g. conc_sweep's own reap immediately followed by baseline's),
-    per review on AMD-AGI/Hyperloom#1354."""
+    """The KFD-release pause must not be paid on the common case where the"""
     _clear_gpu_mask_envs(monkeypatch)
     slept: list[int] = []
 
@@ -447,8 +429,7 @@ async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
     tmp_path,
     monkeypatch,
 ):
-    """A killed-overtime variant salvages a rough output tput from the engine's
-    partial ``server.log`` decode-throughput logs."""
+    """A killed-overtime variant salvages a rough output tput from the engine's"""
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
@@ -505,14 +486,7 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkeypatch):
-    """An AgentX preflight abort must not be filed as a missing workspace.
-
-    Of course no workspace exists -- Magpie never ran. But the generic class
-    erases the one fact that decides what to do next: this is an environment
-    gap, not a launch failure. Measured: with the cause gone, a missing pinned
-    dependency read as a framework problem and opened an enablement round that
-    burned the run's budget re-deriving an install this repository owns.
-    """
+    """An AgentX preflight abort must not be filed as a missing workspace."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_ERROR_CLASS,
         AGENTX_PREFLIGHT_RETURNCODE,
@@ -539,13 +513,7 @@ async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, monkeypatch):
-    """The client is missing for the whole grid, not for one variant.
-
-    The runtime repair has already run and memoized its outcome, so every
-    remaining point fails identically -- and `keep_going_on_failure` would walk
-    all of them to find that out. Nothing downstream stops it either: the
-    writeback gate that halts a run is baseline-scoped.
-    """
+    """The client is missing for the whole grid, not for one variant."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_RETURNCODE,
     )
@@ -571,8 +539,7 @@ async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, monkeypatch):
-    """A blank stderr must not become a blank `error`, the way the sibling
-    branch's non-empty fallback already prevents."""
+    """A blank stderr must not become a blank `error`, the way the sibling"""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_RETURNCODE,
     )

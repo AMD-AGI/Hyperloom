@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic robustness renderer — surfaces recorded critic decisions and their
-pass/fail counts for the session.
-"""
+"""Critic robustness renderer — surfaces recorded critic decisions and their"""
 
 from __future__ import annotations
 
@@ -16,20 +14,7 @@ _MAX_ROWS = 20
 
 @register_renderer("critic_robustness")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the critic-robustness section: recorded critic decisions and
-    pass/fail counts.
-
-    Normalizes both legacy (prompt-only string) and structured entry
-    shapes, surfaces a pass/fail table when verdicts exist, and marks the
-    section skipped (with a warning) when entries carry no actionable
-    payload.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered critic-robustness section.
-    """
+    """Render the critic-robustness section: recorded critic decisions and"""
     cr = breakdown.get("critic_robustness") or []
     if not cr:
         return RenderedSection(

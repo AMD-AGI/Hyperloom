@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Failure-isolation contracts in the orchestrator bus layer.
-
-A connection that fails midway through setup must not be left open, one lease
-row with an unparseable ``expires_at`` must not abort an unrelated acquire, and
-a resume replay must not load an unbounded number of events.
-"""
+"""Failure-isolation contracts in the orchestrator bus layer."""
 
 from __future__ import annotations
 

@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Codex orchestration runs as one conversation, not 256 cold starts.
-
-The Coordinator decides between a full SEED push and a thin DELTA push from
-``backend.conversational``. The Codex backend never had that attribute, so
-``push_full`` was permanently True: an 8-hour OpenAI-only run re-pushed shared
-state, resource pools, the policy-denial summary, warm start, the gaps ledger
-and the cycle strategy on every one of 256 calls -- 5,053,654 prompt chars,
-0 DELTA turns. The Anthropic-only run of the same shape sent 270,261 chars over
-15 calls (7 SEED + 8 DELTA). The ``orchestration prompt mode=`` log line is
-itself gated on ``conversational``, so the degradation left no trace.
-
-The same attribute gates checkpoint compaction, which means the conversation
-also grew without bound, and the checkpoint turn passes ``allow_no_intent``,
-which the Codex backend did not accept -- enabling it would have raised
-TypeError on the first compaction.
-"""
+"""Codex orchestration runs as one conversation, not 256 cold starts."""
 
 from __future__ import annotations
 
@@ -134,7 +119,6 @@ def _stub_session(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return calls
 
 
-# ---------------------------------------------------------------------------
 # The attribute the whole delta-gating decision hangs on.
 
 
@@ -147,7 +131,6 @@ def test_coordinator_sees_the_codex_backend_as_conversational(session_dir: Path,
     assert _coordinator(session_dir, tmp_path)._orchestration_conversational() is True
 
 
-# ---------------------------------------------------------------------------
 # Prompt-mode gating across ticks.
 
 
@@ -262,7 +245,6 @@ async def test_the_coordinator_closes_the_held_session(
     assert calls.count("close") == 1
 
 
-# ---------------------------------------------------------------------------
 # The checkpoint turn the conversational gate unlocks.
 
 
@@ -274,8 +256,7 @@ async def test_backend_accepts_allow_no_intent(tmp_path: Path, monkeypatch: pyte
 
     assert result.intents == []
     assert "current_plan" in result.raw_text
-    # A free-form summary cannot satisfy the intent envelope, so that turn must
-    # not be schema-constrained.
+    # A free-form summary cannot satisfy the intent envelope, so that turn must not be schema-constrained.
     assert calls[0]["output_schema"] is None
 
 
@@ -312,16 +293,7 @@ async def test_the_seed_gate_answers_for_the_turn_that_is_about_to_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A re-scope empties the thread inside the turn the gate is asked about.
-
-    ``needs_seed`` can only describe the thread as it stands, but the Coordinator
-    chooses SEED or DELTA before the turn. At a phase seam the new system prompt
-    replaces the thread inside ``run()``, so a gate answering for the old thread
-    sends a thin delta into a thread holding none of the state that delta omits
-    -- and ``run()`` marks it seeded again, so every later tick of the phase is a
-    delta too. The omitted state is never pushed, while the delta note tells the
-    model it was.
-    """
+    """A re-scope empties the thread inside the turn the gate is asked about."""
     _stub_turn(monkeypatch, _HEARTBEAT_ENVELOPE)
     backend = _codex_backend(tmp_path)
 
@@ -355,13 +327,7 @@ async def test_the_coordinator_asks_the_gate_about_the_pending_prompt(
 
 
 async def test_an_empty_intents_list_is_not_a_decided_turn(tmp_path: Path) -> None:
-    """Reject the envelope that decides nothing instead of counting it a success.
-
-    An empty list satisfies every structural check, so the tick was recorded as
-    a success and reset the backend's error streak. The schema's ``minItems`` is
-    the provider-side belt; this is the braces, because a gateway that drops the
-    keyword must not go unnoticed.
-    """
+    """Reject the envelope that decides nothing instead of counting it a success."""
     with pytest.raises(NoIntentEmitted):
         decode_intent_envelope(json.dumps({"intents": []}))
 
@@ -370,14 +336,7 @@ async def test_a_schema_less_turn_overrides_the_standing_output_format(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dropping the schema cannot reach instructions fixed for the thread's life.
-
-    The OUTPUT FORMAT block lives in the thread's developer instructions, set at
-    ``thread_start``, so a checkpoint turn asking for a different JSON shape was
-    answered with an intent envelope anyway. The compaction parser reads that as
-    degenerate and skips the compaction, leaving the conversation growing -- the
-    very failure the checkpoint exists to prevent.
-    """
+    """Dropping the schema cannot reach instructions fixed for the thread's life."""
     checkpoint = _stub_turn(monkeypatch, json.dumps({"current_plan": "keep tuning attention"}))
     backend = _codex_backend(tmp_path)
     await backend.run("checkpoint please", allow_no_intent=True)
@@ -395,15 +354,7 @@ async def test_turn_reports_a_context_size_the_checkpoint_policy_can_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Growth is tracked from the per-request context size, not the char count.
-
-    The cached tokens are part of the input count, not an addition to it: Codex
-    reports ``inputTokens: 5152, cachedInputTokens: 3072, outputTokens: 16,
-    totalTokens: 5168``, and 5152 + 16 is the total. Adding the cached half back
-    inflated the water level by the cache hit rate -- 60% in that sample -- so
-    the checkpoint policy compacted early, and compaction resets the very
-    conversation this backend keeps alive.
-    """
+    """Growth is tracked from the per-request context size, not the char count."""
 
     async def _start(session: CodexSession) -> None:
         return None
@@ -427,16 +378,7 @@ async def test_a_transient_session_start_failure_is_retried(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Opening the client is part of the turn, so it retries like the turn does.
-
-    ``retry_with_backoff`` is told to retry ``CodexSessionError``, but
-    ``_session_for`` caught it and raised ``LLMCallFailed`` from inside the
-    attempt, so the wrapper never saw one. A gateway that refused the first
-    connection ended the turn, while the identical error from ``turn()`` was
-    retried -- the parity this backend claims, missing on the leg that runs
-    first. A configuration fault still fails immediately, through
-    ``CodexSessionUnavailableError`` and ``BackendError``.
-    """
+    """Opening the client is part of the turn, so it retries like the turn does."""
     starts: list[int] = []
 
     async def _start(session: CodexSession) -> None:

@@ -49,9 +49,7 @@ def file_reader(refs_dir):
     return ContextProvider(shared_state=None, reference_reader=_read)
 
 
-# ---------------------------------------------------------------------------
 # Reference directory contract
-# ---------------------------------------------------------------------------
 
 
 def test_all_reference_files_have_when_tag(refs_dir):
@@ -86,9 +84,7 @@ def test_empty_refs_dir_produces_no_section(tmp_path):
     assert _section_reference_index(references_dir=tmp_path, phase="") == []
 
 
-# ---------------------------------------------------------------------------
 # Phase filtering
-# ---------------------------------------------------------------------------
 
 
 def test_specialist_rescue_only_in_explore_and_framework(refs_dir):
@@ -113,9 +109,7 @@ def test_failure_recovery_present_in_every_phase(refs_dir):
         assert "failure_recovery" in index, f"failure_recovery missing from index in {phase}"
 
 
-# ---------------------------------------------------------------------------
 # Orchestration prompt integration
-# ---------------------------------------------------------------------------
 
 
 def test_reference_index_present_in_prompt(registry, refs_dir):
@@ -136,9 +130,7 @@ def test_reference_index_present_in_prompt(registry, refs_dir):
         assert "## 8. ON-DEMAND REFERENCE INDEX" in text, f"reference index missing from {phase} prompt"
 
 
-# ---------------------------------------------------------------------------
 # read_reference tool
-# ---------------------------------------------------------------------------
 
 
 def test_read_reference_in_context_tool_names():

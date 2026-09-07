@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for non-diff tuned-artifact integration:
-``_resolve_artifact_specs`` sandbox validation and the
-``_apply_artifacts`` / ``_revert_artifacts`` backup-restore round-trip."""
+"""Unit coverage for non-diff tuned-artifact integration: ``_resolve_artifact_specs`` sandbox validation and the
+``_apply_artifacts`` / ``_revert_artifacts`` backup-restore round-trip.
+"""
 
 from __future__ import annotations
 
@@ -222,8 +222,7 @@ def test_apply_keeps_artifact_when_not_reverted(tmp_path):
 
 # ---- _resolve_artifact_target: absolute-within-allowlist (Option A) --------
 def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch):
-    """An ABSOLUTE target pointing inside an allowlisted framework root (e.g.
-    the installed aiter package dir) must resolve."""
+    """An ABSOLUTE target pointing inside an allowlisted framework root (e.g."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
@@ -277,8 +276,7 @@ def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
 
 
 def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeypatch):
-    """An absolute target containing ``..`` is rejected even if it would
-    normalise inside a root."""
+    """An absolute target containing ``..`` is rejected even if it would"""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
@@ -286,10 +284,7 @@ def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeyp
 
 
 def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_path, monkeypatch):
-    """An absolute target inside an allowlisted root must be recorded with a
-    FRAMEWORK-RELATIVE ``rel_target`` so the KEEP source-snapshot (which treats
-    rel_target as framework-relative via ``snapshot_source_layer``) captures the
-    installed artifact."""
+    """An absolute target inside an allowlisted root must be recorded with a"""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
     ws = tmp_path / "ws"
@@ -435,12 +430,7 @@ def test_replay_base_artifacts_noop_for_non_enablement(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stash_bookkeeping_is_published_before_the_replay_writes(tmp_path, monkeypatch):
-    """The undo can only restore a stash it can see, so the replay must run after the publish.
-
-    The replay install is unguarded on purpose, so an OSError from it unwinds through
-    ``__call__``. That unwind reads the framework root off the context and skips the
-    stash restore entirely when it is absent.
-    """
+    """The undo can only restore a stash it can see, so the replay must run after the publish."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "repo"

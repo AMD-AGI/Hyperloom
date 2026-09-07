@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the scriptable/diffusion (xDiT) latency-domain surfacing:
-
-* ``framework_registry.primary_metric_name`` (which field is the result).
-* ``collect_roofline_progress`` independent latency ceiling + ``ceiling_kind``.
-* ``_normalize_roofline_snapshot`` preserving the latency siblings.
-* ``collect_final`` emitting e2el / unit / primary_metric.
-* ``SharedState._backfill_scriptable_latency`` deriving e2el from tput.
-"""
+"""Unit coverage for the scriptable/diffusion (xDiT) latency-domain surfacing."""
 
 from __future__ import annotations
 
@@ -117,11 +110,7 @@ class TestCollectFinalEmitsLatency:
         }
 
     def test_scriptable_final_surfaces_the_derived_e2el(self, tmp_path):
-        """``save`` derives the latency; the collector surfaces what it wrote.
-
-        ``_backfill_scriptable_latency`` runs before ``state.json`` is written,
-        so ``current_best`` already carries ``e2el_mean_ms`` when read back.
-        """
+        """``save`` derives the latency; the collector surfaces what it wrote."""
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         st = SharedState(session_id="s", model_name="m", model_path="/m")

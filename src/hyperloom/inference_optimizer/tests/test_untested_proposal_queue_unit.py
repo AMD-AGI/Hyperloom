@@ -204,9 +204,7 @@ def test_overflow_is_truncated_and_counted():
 @pytest.mark.parametrize("phase", PHASE_NAMES)
 @pytest.mark.asyncio
 async def test_the_block_is_injected_only_in_the_optimisation_phase(coord, phase):
-    """Untested proposals feed explore grids, so only the phase that runs them
-    is shown the queue. Parameterised over the live chain: a phase added
-    without a decision here fails rather than silently inheriting ``False``."""
+    """Untested proposals feed explore grids, so only the phase that runs them"""
     expected = phase == PHASE_FRAMEWORK_AGENT
     coord.shared_state.phase = phase
     coord.shared_state.macro_cycle = 0

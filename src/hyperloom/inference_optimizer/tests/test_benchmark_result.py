@@ -571,9 +571,7 @@ def test_harvest_explicit_leak_root_overrides_env(tmp_path, monkeypatch):
 
 
 def test_harvest_default_roots_include_inferencex_and_result_dir(tmp_path, monkeypatch):
-    """Without an env override, the default scan roots also cover
-    ``$INFERENCEX_PATH`` (eval ``mv ./`` lands in the checkout) and
-    ``$RESULT_DIR``, not just ``/workspace``."""
+    """Without an env override, the default scan roots also cover"""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", raising=False)
     ix_root = tmp_path / "InferenceX@abc123"
     result_dir = tmp_path / "session" / "runs"
@@ -590,10 +588,7 @@ def test_harvest_default_roots_include_inferencex_and_result_dir(tmp_path, monke
 
 
 def test_harvest_salvages_leaked_eval_results_json(tmp_path, monkeypatch):
-    """#927: eval ``results*.json`` that leaked to ``$INFERENCEX_PATH`` (via
-    ``append_lm_eval_summary``'s ``mv ./``) is harvested back into the session,
-    so ``parse_eval_results`` (globs ``**/results*.json``) can still find it
-    even when the patcher-based redirect missed."""
+    """#927: eval ``results*.json`` that leaked to ``$INFERENCEX_PATH`` (via"""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", raising=False)
     monkeypatch.delenv("RESULT_DIR", raising=False)
     ix_root = tmp_path / "InferenceX@abc123"
@@ -616,8 +611,7 @@ def test_harvest_salvages_leaked_eval_results_json(tmp_path, monkeypatch):
 
 
 def test_rescue_candidate_paths_scan_inferencex_checkout(tmp_path, monkeypatch):
-    """A leaked ``inferencex_result.json`` in the InferenceX checkout is a
-    rescue candidate via the ``$INFERENCEX_PATH``-derived root."""
+    """A leaked ``inferencex_result.json`` in the InferenceX checkout is a"""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", raising=False)
     ix_root = tmp_path / "InferenceX@abc123"
     ix_root.mkdir()
@@ -703,8 +697,7 @@ def test_estimate_returns_none_for_missing_file(tmp_path):
 
 
 def test_estimate_killed_variant_prefers_richest_log(tmp_path):
-    """``estimate_killed_variant_throughput`` scans the slot recursively and
-    uses the largest server.log (the engine's full decode trace)."""
+    """``estimate_killed_variant_throughput`` scans the slot recursively and"""
     slot = tmp_path / "variant_00_vA"
     (slot / "benchmark_sglang_x").mkdir(parents=True)
     # A tiny stub plus the full in-slot log; the larger one wins.
@@ -727,8 +720,7 @@ def test_estimate_killed_variant_none_when_no_logs(tmp_path):
 def test_explicitly_invalid_agentx_submission_is_always_rejected(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
-    # submission_valid=False means the scenario explicitly rejected it; the
-    # escape hatch must not exempt this case.
+    # submission_valid=False means the scenario explicitly rejected it; the escape hatch must not exempt this case.
     assert (
         br.is_valid_measurement(
             {

@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the data-provenance and kernel-lifecycle breakdown
-renderers."""
+"""Unit tests for the data-provenance and kernel-lifecycle breakdown"""
 
 from __future__ import annotations
 
@@ -58,12 +57,7 @@ def test_the_table_says_what_it_does_not_add_up_to():
 
 
 def test_a_gain_with_no_owner_says_whether_it_is_really_ownerless():
-    """The unattributed figure is only trustworthy if nothing went missing.
-
-    A change recorded as integrated with no adoption behind it puts its gain in
-    the same bucket, so the reader has to be told the bucket is overstated
-    rather than left to read it as drift.
-    """
+    """The unattributed figure is only trustworthy if nothing went missing."""
     out = opt.render(
         {
             "optimizations": {

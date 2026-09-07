@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for framework git/subprocess helpers: rev-parse error+success
-branches, repo-id normalization, and same-repo gating."""
+"""Coverage for framework git/subprocess helpers: rev-parse error+success"""
 
 from __future__ import annotations
 

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic-driven specialist re-author loop.
-
-A ``needs_review`` verdict carrying non-empty ``required_evidence`` for a
-framework_agent candidate / authoring proposal triggers one re-authoring round,
-seeded with that evidence and dispatched under an idempotency key with a
-``reauthor:{n}`` suffix. ``advise`` proceeds and never re-authors; the
-per-candidate cap is the loop guard.
-"""
+"""Critic-driven specialist re-author loop."""
 
 from __future__ import annotations
 
@@ -124,8 +117,7 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
-    """The first 3 needs_review verdicts re-author with incrementing
-    ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
+    """The first 3 needs_review verdicts re-author with incrementing"""
     from types import SimpleNamespace
     from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
 
@@ -201,8 +193,7 @@ async def test_reauthor_skipped_when_candidate_already_materializing(
 async def test_authoring_integrate_patch_reauthors_and_records_old_task(
     coord: Coordinator,
 ) -> None:
-    """An authored-patch integrate_patch sent back for evidence re-authors via
-    the originating specialist; the observation carries old + new task ids."""
+    """An authored-patch integrate_patch sent back for evidence re-authors via"""
     from types import SimpleNamespace
 
     calls = _record_reauthor_calls(coord)

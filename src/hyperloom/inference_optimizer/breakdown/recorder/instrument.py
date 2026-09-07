@@ -1,32 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Author-time instrumentation for ``session_breakdown.json``.
-
-These helpers are called from the producing code (the Coordinator's
-``SharedState``) to record breakdown facts where they are born, instead of
-having the exporter re-walk artifacts later.
-
-Every helper is best-effort: all failures are swallowed (logged at debug).
-Payloads are shaped to the matching ``schema.py`` TypedDict.
-
-Coverage in this module, in four groups:
-
-* Coordinator state snapshots -- ``session`` / ``workload`` / ``final`` /
-  ``explore_search`` / ``sweep`` singletons, plus ``optimization_stack`` /
-  ``roofline`` items keyed by a stable id and one ``phase_timeline`` event
-  per recorded action attempt.
-* Kernel-agent lifecycle (``PRODUCER_KERNEL_AGENT``) -- discovery ->
-  dispatch -> backend result -> micro/E2E, plus GEAK and GEMM-tuning
-  invocations.
-* Critic / robustness items (producers ``critic`` / ``robustness``), read
-  from the agent workdir before pruning.
-* The canonical v4 entity/event streams (subject / operation / measurement /
-  adoption / artifact / trace_event / phase_transition / run_snapshot).
-
-Several recorders here read just-written agent artifacts from disk. The
-authoritative public surface is the re-export list in ``recorder/__init__``.
-"""
+"""Author-time instrumentation for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -63,8 +38,7 @@ _FORGE_BACKENDS = frozenset({"forge"})
 _FAILED_STATUSES = frozenset({"failed", "error", "crashed", "timeout"})
 _VALID_PRODUCER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# Statuses an action executor uses to state an adoption verdict itself. These
-# outrank a caller-supplied routing label when the two disagree.
+# Statuses an action executor uses to state an adoption verdict itself.
 _EXECUTOR_ADOPTION_VERDICTS = frozenset(
     {
         "KEPT",
@@ -77,12 +51,7 @@ _EXECUTOR_ADOPTION_VERDICTS = frozenset(
 
 
 def _now_iso_safe() -> str:
-    """Return the current UTC time as an ISO-8601 string (``""`` on failure).
-
-    Returns:
-        The current UTC time as a microsecond-precision ISO-8601 string, or
-        ``""`` if the clock read fails.
-    """
+    """Return the current UTC time as an ISO-8601 string (``\"\"`` on failure)."""
     try:
         return now_iso(timespec="microseconds")
     except Exception:  # noqa: BLE001
@@ -90,31 +59,14 @@ def _now_iso_safe() -> str:
 
 
 def _recorder(session_dir: Path | str, producer: str):
-    """Return the process-cached recorder for ``session_dir`` and ``producer``.
-
-    Args:
-        session_dir (Path | str): the session directory backing the recorder.
-        producer (str): the breakdown producer label owning the fragments.
-
-    Returns:
-        The process-cached recorder for the ``(session_dir, producer)`` pair.
-    """
+    """Return the process-cached recorder for ``session_dir`` and ``producer``."""
     from .recorder import recorder_for
 
     return recorder_for(session_dir, producer=producer)
 
 
 def _rel(path: Path, session_dir: Path | str) -> str:
-    """Render ``path`` relative to ``session_dir`` (falls back to str).
-
-    Args:
-        path (Path): the path to render.
-        session_dir (Path | str): the session directory to relativize against.
-
-    Returns:
-        str: ``path`` relative to ``session_dir``, or the plain string form when
-            it is not under the session dir.
-    """
+    """Render ``path`` relative to ``session_dir`` (falls back to str)."""
     try:
         return str(Path(path).relative_to(Path(session_dir)))
     except (ValueError, TypeError):
@@ -138,34 +90,7 @@ def _stable_id(prefix: str, *parts: Any) -> str:
 
 
 def _measurement_occurrence(*run_identity: Any, value: Any = None) -> str:
-    """Tell measuring something again apart from measuring it once.
-
-    A measurement id is derived from its operation, and an operation is
-    deliberately stable across a subject's retries -- one kernel, one
-    operation, however many times it is tried. Measurements inherited that
-    collapsing, so re-measuring a kernel wrote over the very numbers an
-    earlier adoption had been decided on, leaving the adoption citing evidence
-    that no longer agreed with it.
-
-    ``run_identity`` names the run that produced the reading -- an attempt id,
-    a benchmark report path, the timestamp the producer stamped on the entry.
-    That is what should be passed. Readings taken by one run share a key, which
-    is correct: they are one act of measuring, and a key drawn from the run is
-    unmoved when one of its metrics is later filled in or corrected. A key
-    drawn from the values is not, and re-recording a run to add its end-to-end
-    numbers used to re-id the untouched micro reading beside them, splitting
-    one reading into two and reporting a re-measure that never happened.
-
-    ``value`` is a last resort for callers with no run to name, and only ever
-    this metric's own reading -- never a sibling's, which is what made the key
-    move. It can only tell apart readings that differ.
-
-    Neither form may be a counter the recorder keeps: several producers replay
-    their records from state after a resume, so an id has to be reproducible
-    from what is being recorded rather than from how many parts already exist.
-    The plain ordinal a reader wants is assigned at assembly instead, where the
-    whole set is in hand at once.
-    """
+    """Tell measuring something again apart from measuring it once."""
     parts = [str(part).strip() for part in run_identity if part is not None and str(part).strip()]
     if not parts:
         numeric = to_float(value)
@@ -211,13 +136,7 @@ def _resolve_agent(
     result: Mapping[str, Any] | None = None,
     phase: str = "",
 ) -> str:
-    """Name the agent that owns this unit of work, at the moment it settles.
-
-    Ownership is a fact the producer knows and the exporter cannot recover: by
-    the time a delayed ``integrate_patch`` lands, the active phase has usually
-    moved on. Returning ``unattributed`` means the producer genuinely has no
-    evidence of an owner, which is a reportable data gap rather than a guess.
-    """
+    """Name the agent that owns this unit of work, at the moment it settles."""
     name = str(action or "").strip().lower()
     result = result or {}
 
@@ -370,9 +289,8 @@ def _record_action_measurements(
         "samples": list(result.get("samples") or []) if isinstance(result.get("samples"), (list, tuple)) else [],
         "aggregation": result.get("aggregation") or "result_scalar",
     }
-    # Every metric below is read from one execution of the action, so they share
-    # the stamp that execution carries: a later pass that fills in one of them
-    # must not re-id the ones it did not touch.
+    # Every metric below is read from one execution of the action, so they share the stamp that execution carries: a
+    # later pass that fills in one of them must not re-id the ones it did not touch.
     occurrence_run = str(common["measured_at"] or "")
     seen_names: set[str] = set()
     for field, name, unit in metric_fields:
@@ -627,8 +545,8 @@ def _mirror_action_v4(
         )
     gates: list[dict[str, Any]] = []
     agent = _resolve_agent(action, result=result, phase=phase)
-    # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured
-    # zero is a verdict, not a missing value.
+    # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured zero is a verdict, not a missing
+    # value.
     _raw_gain = result.get("delta_pct")
     if _raw_gain is None:
         _raw_gain = result.get("best_gain_pct")
@@ -636,8 +554,8 @@ def _mirror_action_v4(
     keep_threshold_pct = to_float(result.get("keep_threshold_pct"))
     decision_reason = str(result.get("decision_reason") or result.get("reason") or "")
     if keep_threshold_pct is not None:
-        # Without the threshold the verdict is unfalsifiable after the fact:
-        # "+0.55%" alone never explains why the run declined to keep it.
+        # Without the threshold the verdict is unfalsifiable after the fact: "+0.55%" alone never explains why the run
+        # declined to keep it.
         gates.append(
             {
                 "gate_id": _stable_id("gate", operation_id, "keep_threshold"),
@@ -664,8 +582,7 @@ def _mirror_action_v4(
         )
     adoption_ids: list[str] = []
     verdict = str(entry.get("decision") or result.get("decision") or result.get("status") or "").strip().upper()
-    # The executor owns the adoption verdict. A caller's coarse routing label
-    # ("discarded") must never overwrite a KEEP the executor already committed.
+    # The executor owns the adoption verdict.
     executor_verdict = str(result.get("status") or "").strip().upper()
     if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
         verdict = executor_verdict
@@ -686,18 +603,15 @@ def _mirror_action_v4(
         "ACCURACY_UNAVAILABLE_REJECT",
     }
     validated = result.get("validated", result.get("accuracy_pass"))
-    # An accuracy gate that ran but returned no verdict is a first-class
-    # outcome, not a failure: a session with no eval configured, or a baseline
-    # accuracy of zero, reaches here with ``None``. Reading that as "did not
-    # pass" would zero out the whole ledger for such a run. The KEEP stands;
-    # what gets recorded alongside it is that nothing checked the accuracy.
+    # An accuracy gate that ran but returned no verdict is a first-class outcome, not a failure: a session with no
+    # eval configured, or a baseline accuracy of zero, reaches here with ``None``.
     validation_passed = keep_verdict if validated is None else bool(validated)
     validation_basis = "keep_verdict_unscored" if validated is None else "accuracy_pass"
     if action in adoptable_actions and ((keep_verdict and validation_passed) or revert_verdict):
         adoption_id = _stable_id("adoption", operation_id)
         adoption_ids.append(adoption_id)
-        # Enablement and inert keeps are genuine adoptions that must not be
-        # counted as gain: the code lands, the measured delta is not its own.
+        # Enablement and inert keeps are genuine adoptions that must not be counted as gain: the code lands, the
+        # measured delta is not its own.
         attribution_eligible = result.get("attribution_eligible")
         if attribution_eligible is None:
             attribution_eligible = not (
@@ -821,26 +735,7 @@ def record_phase_event(
     tick: int = 0,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Record one ``phase_timeline`` event from a ``record_action_attempt``
-    entry, and mirror the same attempt into the canonical v4 streams via
-    ``_mirror_action_v4``.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        action (str): the action name the event is keyed by.
-        entry (dict[str, Any]): the ``record_action_attempt`` entry to project
-            into a phase_timeline payload.
-        result (Mapping[str, Any] | None): the settled action result, mirrored
-            into v4 only.
-        phase (str): phase label for the v4 mirror; falls back to
-            ``entry["phase"]`` when empty.
-        macro_cycle (int): macro cycle for the v4 mirror.
-        tick (int): used to synthesize an operation identity when the entry
-            carries no task_id or round key.
-        producer (str): the breakdown producer label (defaults to the
-            Coordinator).
-    """
+    """Record one ``phase_timeline`` event from a ``record_action_attempt``"""
     if not session_dir or not isinstance(entry, dict):
         trace_skip(reason="no session_dir" if not session_dir else "entry is not a dict", section="phase_transitions")
         return
@@ -926,19 +821,7 @@ def snapshot_state_sections(
     *,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Snapshot every state-owned breakdown section from a live ``SharedState``.
-
-    Singletons overwrite the producer's own file; event-stream items are keyed
-    by a stable id so repeated snapshots are idempotent. Best-effort per
-    section: one failing section never blocks the others.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        state (Any): the live ``SharedState`` snapshotted into each section.
-        producer (str): the breakdown producer label (defaults to the
-            Coordinator).
-    """
+    """Snapshot every state-owned breakdown section from a live ``SharedState``."""
     if not session_dir or state is None:
         trace_skip(reason="no session_dir" if not session_dir else "no state", section="run_snapshot")
         return
@@ -1039,21 +922,7 @@ def _snapshot_v4_run(rec, st: Any) -> None:
 
 
 def _snapshot_session(rec, st: Any) -> None:
-    """Snapshot the ``session`` singleton from ``st`` (no-op without a session id).
-
-    A session that has stopped carries ``ended_at_utc``, taken from the state's
-    own stop timestamp: without it the exporter has no end to measure against
-    and reports the run as still going. ``start_ts`` is what the exported
-    elapsed time is measured from; a resume re-anchors it on the new leg only
-    when the previous one crashed or stopped for a recorded reason, so after a
-    clean stop it still names the original start. The manifest-derived fields
-    the live state cannot know (image, host, pid) are filled in by the
-    collector at export.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
+    """Snapshot the ``session`` singleton from ``st`` (no-op without a session id)."""
     session_id = str(getattr(st, "session_id", "") or "")
     if not session_id:
         return
@@ -1065,8 +934,8 @@ def _snapshot_session(rec, st: Any) -> None:
             "claw_session_id": getattr(st, "claw_session_id", "") or "",
             "sandbox_user_id": getattr(st, "sandbox_user_id", "") or "",
             "start_ts": str(getattr(st, "start_ts", "") or ""),
-            # A resumed run clears its reason but not necessarily the stale
-            # timestamp, so the pair is only ever emitted together.
+            # A resumed run clears its reason but not necessarily the stale timestamp, so the pair is only ever
+            # emitted together.
             "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
             "stop_reason": stop_reason,
             "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
@@ -1077,15 +946,7 @@ def _snapshot_session(rec, st: Any) -> None:
 
 
 def _snapshot_explore_search(rec, st: Any) -> None:
-    """Snapshot the ``explore_search`` singleton from ``st`` (no-op when empty).
-
-    Augments the base search dict with the no-promote streak, discovered
-    flags, and the ledger-owned synergy list.
-
-    Args:
-        rec: the recorder used to write the singleton.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
+    """Snapshot the ``explore_search`` singleton from ``st`` (no-op when empty)."""
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
@@ -1096,15 +957,7 @@ def _snapshot_explore_search(rec, st: Any) -> None:
 
 
 def _snapshot_optimization_stack(rec, st: Any) -> None:
-    """Snapshot each ``optimization_stack`` entry from ``st`` as a keyed item.
-
-    Backfills a missing per-entry ``gain_pct`` from ``st.gain_per_stack_entry``
-    when available; each item is keyed by its stack index for idempotency.
-
-    Args:
-        rec: the recorder used to write the items.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
+    """Snapshot each ``optimization_stack`` entry from ``st`` as a keyed item."""
     stack = getattr(st, "optimization_stack", None) or []
     gains = getattr(st, "gain_per_stack_entry", None) or []
     for i, entry in enumerate(stack):
@@ -1117,15 +970,7 @@ def _snapshot_optimization_stack(rec, st: Any) -> None:
 
 
 def _snapshot_roofline(rec, st: Any) -> None:
-    """Snapshot each ``roofline`` snapshot from ``st`` as a keyed item.
-
-    Each item is keyed by its snapshot id (falling back to the list index) for
-    idempotency.
-
-    Args:
-        rec: the recorder used to write the items.
-        st (Any): the live ``SharedState`` to snapshot.
-    """
+    """Snapshot each ``roofline`` snapshot from ``st`` as a keyed item."""
     snapshots = getattr(st, "roofline_snapshots", None) or []
     for idx, snap in enumerate(snapshots):
         if not isinstance(snap, dict):
@@ -1138,20 +983,7 @@ def _best_attempt_id(
     attempts: list[Any],
     verification: dict[str, Any],
 ) -> str:
-    """Pick the adopted attempt id: verification hint, else highest speedup.
-
-    Mirrors the collector's selection so the kernel-level decision lands on the
-    same attempt the breakdown would attribute it to.
-
-    Args:
-        attempts (list[Any]): the per-backend attempt rows.
-        verification (dict[str, Any]): the verification block carrying the
-            ``best_attempt_id`` / ``best_backend`` hints.
-
-    Returns:
-        str: the adopted attempt id (verification hint, else highest speedup),
-            or ``""`` when there are no attempt rows.
-    """
+    """Pick the adopted attempt id: verification hint, else highest speedup."""
     rows = [a for a in attempts if isinstance(a, dict)]
     if not rows:
         return ""
@@ -1166,15 +998,7 @@ def _best_attempt_id(
             candidates = backend_rows
 
     def _spd(a: dict[str, Any]) -> float:
-        """Return an attempt's micro/plain speedup (``-inf`` when absent).
-
-        Args:
-            a: An attempt record mapping.
-
-        Returns:
-            The attempt's ``micro_speedup`` (or ``speedup``) as a float, or
-            ``-inf`` when neither is present.
-        """
+        """Return an attempt's micro/plain speedup (``-inf`` when absent)."""
         v = to_float(a.get("micro_speedup") or a.get("speedup"))
         return v if v is not None else float("-inf")
 
@@ -1183,15 +1007,7 @@ def _best_attempt_id(
 
 
 def _invocation_section(backend: str) -> str | None:
-    """Map a kernel-agent backend to its invocation section name.
-
-    Args:
-        backend (str): the backend name (geak / forge / ...).
-
-    Returns:
-        str | None: the matching invocation section, or ``None`` when the backend
-            has no invocation lane.
-    """
+    """Map a kernel-agent backend to its invocation section name."""
     b = str(backend or "").lower()
     if b in _GEAK_BACKENDS:
         return "geak_invocations"
@@ -1233,15 +1049,8 @@ def _kernel_selection_operation_id(
     return _stable_id("op", "kernel_optimizer_selection", context_key, discriminator)
 
 
-# Canonical kernel routes: the route operation every kernel record hangs under, and the strategy
-# stamped on the kernel operation itself. Two entries today, and the pair is derived rather than
-# written at each call site because the forge identity used to be a literal in nine places — a tenth
-# reader was one edit away from silently parenting somebody else's kernels under Forge.
-#
-# A GEAK kernel replayed from its kernel_journey must NOT hang under the Forge route: the tree would
-# then assert it ran beneath a route that never dispatched it, and a reader walking parents to answer
-# "which optimizer produced this?" gets the wrong answer. The `geak` route operation already exists
-# (see the GEAK dispatch writer below); this makes the replay reachable to it.
+# Canonical kernel routes: the route operation every kernel record hangs under, and the strategy stamped on the kernel
+# operation itself.
 CANONICAL_KERNEL_ROUTES: dict[str, tuple[str, str]] = {
     # route_strategy -> (route operation name, strategy stamped on the kernel operation)
     "kernel_agent_forge": ("kernel_agent_forge", "forge"),
@@ -1250,11 +1059,7 @@ CANONICAL_KERNEL_ROUTES: dict[str, tuple[str, str]] = {
 
 
 def _canonical_route(route_strategy: str | None) -> tuple[str, str]:
-    """(route operation name, kernel strategy) for a canonical route.
-
-    Unknown values fall back to the forge pair, which is what every caller got before routes were
-    named, so an unrecognised string cannot silently drop a kernel off the streams.
-    """
+    """(route operation name, kernel strategy) for a canonical route."""
     return CANONICAL_KERNEL_ROUTES.get(str(route_strategy or ""), CANONICAL_KERNEL_ROUTES["kernel_agent_forge"])
 
 
@@ -1539,9 +1344,7 @@ def record_native_kernel_run_start(
             ),
             "subject_type": "kernel_optimizer_route",
             "role": "selected",
-            # From route_name, like the operation above it. Left literal, a GEAK replay produced
-            # operation.name=geak next to subject.name=kernel_agent_forge — one record naming two
-            # different optimizers, and the subject is what identity lookups resolve against.
+            # From route_name, like the operation above it.
             "name": route_name,
         },
     )
@@ -1686,9 +1489,7 @@ def record_geak_operation(
         },
     }
     measurement_refs: list[str] = []
-    # The bench run these numbers were read from. A rebench of the same route
-    # writes a new report and so is kept as its own reading, while re-recording
-    # a stage that already reported lands back on the reading it first wrote.
+    # The bench run these numbers were read from.
     occurrence_run = str(
         value.get("report_path") or value.get("eval_dir") or value.get("run_id") or value.get("task_id") or ""
     )
@@ -1845,12 +1646,7 @@ def record_geak_operation(
         error=value.get("error") or value.get("error_class"),
         **timing_fields,
     )
-    # A route is execution context, not an optimization attempt. Its final
-    # validation belongs in the gates/measurements above; a KEEP adoption is
-    # emitted by ``record_geak_e2e_attempt`` (aggregate route win) or
-    # ``record_kernel_e2e`` (an attributable per-kernel win). Attaching an
-    # adoption here creates an orphan from the optimization ledger because
-    # ``kernel_optimizer_run`` is intentionally not an attempt kind.
+    # A route is execution context, not an optimization attempt.
 
 
 def record_geak_e2e_attempt(
@@ -1869,20 +1665,7 @@ def record_geak_e2e_attempt(
     result: Mapping[str, Any] | None = None,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Record one validated GEAK route-level win as a countable attempt.
-
-    ``record_geak_operation`` describes the GEAK route, but route operations
-    are intentionally excluded from the canonical optimization ledger.  This
-    companion record carries the validated before/after pair on an attempt kind
-    the ledger counts, so the GEAK dashboard bucket receives the gain without
-    relying on per-kernel attribution.
-
-    Args:
-        result: GEAK's ``result.json`` payload, read only for the artifact
-            paths (report, eval dir, journey, patch) attached to the adoption.
-            Without them the ledger's keep names a gain with nothing on disk
-            to audit it against.
-    """
+    """Record one validated GEAK route-level win as a countable attempt."""
     if not session_dir:
         trace_skip(reason="no session_dir", section="operations")
         return
@@ -1897,11 +1680,9 @@ def record_geak_e2e_attempt(
         now = _now_iso_safe()
         route_id = _kernel_route_operation_id(session_dir, "geak", macro_cycle=macro_cycle)
         recorded_occurrence = occurrence if occurrence is not None else f"{before}->{after}"
-        # The measured pair is part of the identity: one macro cycle can promote
-        # twice (a rebench that beats an earlier promotion), and keying on the
-        # cycle alone would merge the second win onto the first and lose its
-        # gain. Re-writing the SAME pair still collapses, which is what keeps
-        # the writer idempotent.
+        # The measured pair is part of the identity: one macro cycle can promote twice (a rebench that beats an
+        # earlier promotion), and keying on the cycle alone would merge the second win onto the first and lose its
+        # gain.
         operation_id = _stable_id(
             "op",
             "geak_e2e_attempt",
@@ -1934,10 +1715,7 @@ def record_geak_e2e_attempt(
                 name=name,
                 value=numeric,
                 unit="tok/s",
-                # ``before`` is the residual ledger anchor, not a throughput
-                # sample taken by the GEAK harness.  It can be synthesized as
-                # ``pre_geak + claimed_kernel_delta`` so calling it validated
-                # would put a fictitious measurement on the canonical stream.
+                # ``before`` is the residual ledger anchor, not a throughput sample taken by the GEAK harness.
                 status="derived" if is_accounting_anchor else "validated",
                 measured_at=now,
                 metric_basis="output",
@@ -2111,10 +1889,8 @@ def record_gemm_tuning_operation(
             }
         )
     measurement_refs: list[str] = []
-    # The tuning attempt reads the kernel-time ratio once; the end-to-end
-    # numbers beside it are filled in later, by a validation run of its own.
-    # Keying each to the run it came from is what keeps that second pass from
-    # re-issuing the ratio it never re-measured.
+    # The tuning attempt reads the kernel-time ratio once; the end-to-end numbers beside it are filled in later, by a
+    # validation run of its own.
     e2e_run = str(value.get("final_report_path") or value.get("workspace") or "")
     for name, raw, basis, unit, occurrence_run in (
         ("best_speedup", value.get("best_speedup"), "kernel_time_ratio", "ratio", attempt_key),
@@ -2216,9 +1992,7 @@ def record_gemm_tuning_operation(
         return
     e2e_keep = decision == "KEEP" and value.get("e2e_validated") is True
     if not e2e_keep and decision not in {"REVERT", "REJECTED"}:
-        # A KEEP that end-to-end validation has not confirmed is not an
-        # adoption. The operation is on the ledger either way, so without this
-        # the missing adoption reads exactly like one that failed to write.
+        # A KEEP that end-to-end validation has not confirmed is not an adoption.
         trace_skip(
             reason=f"decision {decision!r} is not an e2e-validated keep or a revert",
             section="adoptions",
@@ -2262,33 +2036,7 @@ def record_collective_promotion(
     ts: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record an end-to-end validated collective KEEP as it is promoted.
-
-    The collective lane reaches its verdict through its own recovery path
-    rather than the kernel integrate queue, so none of the kernel recorders
-    fire for it. Left unrecorded, the read model cannot see the change at all:
-    the patch lands, the workload moves, and the whole gain reports as
-    belonging to no step. Recorded here, it is one attempt of kind
-    ``kernel_collective`` with the adoption that credits it.
-
-    Args:
-        session_dir: The session directory; a falsy value is a no-op.
-        integration_id: The integrate this promotion settled, which is what
-            keeps two promotions of the same kernel apart.
-        kernel_id: The kernel the collective change targets.
-        baseline_tput: Session baseline throughput the gain is stated against.
-        new_tput: Throughput measured after the change landed.
-        gain_pct: The end-to-end gain the integrate measured.
-        patch_path: The applied patch.
-        target_file: The file the patch changed.
-        backend: The engine that produced the change.
-        collective_op: The collective operation optimized, for evidence.
-        world_size: The world size it was measured at, for evidence.
-        kernel_speedup: The kernel-time ratio behind the end-to-end figure.
-        configuration: Environment carried by the change.
-        ts: Author-time stamp the caller already minted for this promotion.
-        producer: The breakdown producer label.
-    """
+    """Record an end-to-end validated collective KEEP as it is promoted."""
     if not session_dir or not integration_id:
         trace_skip(
             reason="no session_dir" if not session_dir else "no integration_id",
@@ -2320,8 +2068,8 @@ def record_collective_promotion(
             numeric = to_float(raw)
             if numeric is None:
                 continue
-            # Keyed by the integrate these came off, so re-running the lane
-            # measures beside these rather than over them.
+            # Keyed by the integrate these came off, so re-running the lane measures beside these rather than over
+            # them.
             occurrence = _measurement_occurrence(integration_id, value=numeric)
             measurement_id = _stable_id("measurement", operation_id, name, occurrence)
             record_measurement(
@@ -2415,22 +2163,7 @@ def record_kernel_invocations(
     *,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record kernel backend invocations from an in-process kernel-agent result.
-
-    Reads ``result['attempts']`` (per-backend ladder) so backend-level failures
-    are captured even when the kernel-agent crashed before persisting the
-    on-disk source. When the whole invocation failed before any backend ran
-    (pre-dispatch gating), a single ``FAILED`` marker is recorded so the failure
-    stays visible in the invocation view.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        result (dict[str, Any]): the in-process kernel-agent result carrying the
-            per-backend ``attempts`` ladder, verification, and proposal.
-        producer (str): the breakdown producer label (defaults to the
-            kernel-agent).
-    """
+    """Record kernel backend invocations from an in-process kernel-agent result."""
     if not session_dir or not isinstance(result, dict):
         trace_skip(reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_invocations")
         return
@@ -2497,8 +2230,8 @@ def record_kernel_invocations(
         if recorded_any:
             return
 
-        # No per-backend attempts: capture a pre-dispatch / infra failure so
-        # the invocation view still shows it (root cause of invisible failures).
+        # No per-backend attempts: capture a pre-dispatch / infra failure so the invocation view still shows it (root
+        # cause of invisible failures).
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         decision = str((result.get("proposal") or {}).get("decision") or "").upper()
@@ -2508,11 +2241,7 @@ def record_kernel_invocations(
         backend = str(result.get("backend") or "").lower()
         section = _invocation_section(backend)
         if section is None:
-            # The backend could not be determined; do not fabricate a GEAK
-            # invocation. The failure stays visible via the kernel_dispatch /
-            # kernel_backend_result journey lanes, and this says which lane to
-            # go looking in rather than leaving the invocation view short by
-            # one with no explanation.
+            # The backend could not be determined; do not fabricate a GEAK invocation.
             trace_skip(
                 reason=f"backend {backend!r} names no invocation stream",
                 section="kernel_invocations",
@@ -2539,16 +2268,7 @@ def record_kernel_invocations(
 
 
 def _to_bool(value: Any) -> bool | None:
-    """Coerce a loosely-typed truthy/falsy value to ``bool``.
-
-    Args:
-        value (Any): the value to interpret (a bool, or a string like
-            ``"true"`` / ``"failed"`` / ``"ok"``).
-
-    Returns:
-        bool | None: the interpreted boolean, or ``None`` when ``value`` is
-            None or not a recognized truthy/falsy token.
-    """
+    """Coerce a loosely-typed truthy/falsy value to ``bool``."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -2564,25 +2284,16 @@ def _to_bool(value: Any) -> bool | None:
 # Cache of resolved tool metadata, keyed by ``tool:root_dir`` (one-shot probe per key).
 _TOOL_META_CACHE: dict[str, dict[str, Any]] = {}
 
-# Per-tool "authoritative version" recipe. ``root_env`` holds the install root
-# (used for the commit probe and git-based version strategies). ``version``
-# picks how the human version is derived:
-#   * "git_describe" -> ``git describe --tags --always --dirty`` of the root
-#   * "git_short"    -> ``git rev-parse --short HEAD`` of the root (== commit)
-#   * ("cmd", argv)  -> first line of ``argv --version`` style CLI output
-#   * ("dist", names)-> importlib.metadata version of the first matching dist
+# Per-tool "authoritative version" recipe.
 _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     "tracelens": {"root_env": "TRACELENS_ROOT", "version": "git_describe"},
-    # The bypass trace reader ships inside this distribution, like forge below:
-    # there is no checkout to ``git rev-parse``, so its version is Hyperloom's.
-    # Without this entry a bypass run mints an all-empty ``versions["bypass"]``.
+    # The bypass trace reader ships inside this distribution, like forge below: there is no checkout to ``git
+    # rev-parse``, so its version is Hyperloom's.
     "bypass": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
-    # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
-    # and its version is that repo's git SHA.
+    # The whole-pipeline GEAK e2e optimizer.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # forge (the Kernel-Forge autonomous loop) ships inside this distribution,
-    # so there is no checkout to ``git rev-parse``: its version is Hyperloom's.
-    # The "forge" key stays -- downstream provenance JSON reads it by name.
+    # forge (the Kernel-Forge autonomous loop) ships inside this distribution, so there is no checkout to ``git
+    # rev-parse``: its version is Hyperloom's.
     "forge": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
     "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
@@ -2592,15 +2303,7 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
 
 
 def _run_first_line(argv: list[str]) -> str:
-    """Run ``argv`` and return the trimmed first output line (never raises).
-
-    Args:
-        argv (list[str]): the command argv to run.
-
-    Returns:
-        str: the trimmed first line of output (capped at 120 chars), or ``""``
-            on failure / non-zero exit.
-    """
+    """Run ``argv`` and return the trimmed first output line (never raises)."""
     import subprocess  # local: keep module import cost off the common path
 
     try:
@@ -2620,44 +2323,21 @@ def _run_first_line(argv: list[str]) -> str:
 
 
 def _git_short_commit(root: Path) -> str:
-    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises).
-
-    Args:
-        root (Path): the repo root to inspect.
-
-    Returns:
-        str: the short commit hash, or ``""`` when it cannot be resolved.
-    """
+    """Best-effort ``git rev-parse --short HEAD`` for ``root`` (never raises)."""
     return _run_first_line(
         ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
     )
 
 
 def _git_describe(root: Path) -> str:
-    """Best-effort ``git describe --tags --always --dirty`` (never raises).
-
-    Args:
-        root (Path): the repo root to inspect.
-
-    Returns:
-        str: the ``git describe`` output, or ``""`` when it cannot be resolved.
-    """
+    """Best-effort ``git describe --tags --always --dirty`` (never raises)."""
     return _run_first_line(
         ["git", "-C", str(root), "describe", "--tags", "--always", "--dirty"],
     )
 
 
 def _dist_version(names: tuple[str, ...]) -> str:
-    """First resolvable ``importlib.metadata`` version among ``names`` ("" if none).
-
-    Args:
-        names (tuple[str, ...]): candidate distribution names to resolve in
-            order.
-
-    Returns:
-        str: the first resolvable distribution version (rejecting a stale
-            ``0.0.0``), or ``""`` when none resolve.
-    """
+    """First resolvable ``importlib.metadata`` version among ``names`` (\"\" if none)."""
     try:
         from importlib.metadata import version as _dist_ver
     except Exception:  # noqa: BLE001
@@ -2674,16 +2354,7 @@ def _dist_version(names: tuple[str, ...]) -> str:
 
 
 def _probe_tool_version(strategy: Any, root_dir: str) -> str:
-    """Resolve a tool's human version per its provenance ``strategy``.
-
-    Args:
-        strategy (Any): the provenance strategy (``"git_describe"`` /
-            ``"git_short"`` / a ``("cmd", argv)`` or ``("dist", names)`` tuple).
-        root_dir (str): the tool install root for git-based strategies.
-
-    Returns:
-        str: the resolved version string, or ``""`` when it cannot be derived.
-    """
+    """Resolve a tool's human version per its provenance ``strategy``."""
     try:
         if strategy == "git_describe":
             return _git_describe(Path(root_dir)) if root_dir else ""
@@ -2707,24 +2378,7 @@ def _tool_metadata(
     root_env: str | None = None,
     version: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve ``{tool, root_dir, commit, version}`` for an external tool.
-
-    Root resolution: explicit ``root`` > caller ``root_env`` > the tool's
-    registered ``root_env``. ``commit`` is a cached ``git rev-parse`` of the
-    root. ``version`` is the caller-supplied value, else a cached per-tool probe
-    following ``_TOOL_PROVENANCE``. Best-effort: never raises into the optimizer.
-
-    Args:
-        tool (str): the external tool name (keys into ``_TOOL_PROVENANCE``).
-        root (str | None): an explicit install root, highest precedence.
-        root_env (str | None): a caller-supplied env var naming the root.
-        version (str | None): a caller-supplied version, preferred over the
-            probe.
-
-    Returns:
-        dict[str, Any]: the resolved ``{tool, root_dir, commit, version}``
-            metadata.
-    """
+    """Resolve ``{tool, root_dir, commit, version}`` for an external tool."""
     import os
 
     key = str(tool or "").lower()
@@ -2760,15 +2414,7 @@ def _tool_metadata(
 
 
 def _normalize_hot_kernel(k: dict[str, Any]) -> dict[str, Any]:
-    """Project a raw hot-kernel candidate onto the discovery shape.
-
-    Args:
-        k (dict[str, Any]): the raw hot-kernel candidate dict.
-
-    Returns:
-        dict[str, Any]: the candidate projected onto the normalized discovery
-            shape.
-    """
+    """Project a raw hot-kernel candidate onto the discovery shape."""
     return {
         "kernel_id": str(k.get("kernel_id") or k.get("id") or ""),
         "name": str(k.get("name") or k.get("kernel_name") or ""),
@@ -2801,37 +2447,7 @@ def record_kernel_discovery(
     route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``).
-
-    One item per discovery invocation, keyed by the candidates/report path so a
-    re-run with the same artifact overwrites rather than duplicates. Carries the
-    full hot-kernel list the run surfaced.
-
-    ``source`` is the discovery *route* label the dashboard groups by. ``tool``
-    is the underlying tool whose authoritative version lands in the top-level
-    ``versions`` map; it defaults to ``source`` but is decoupled because a route
-    can run on a different toolchain (e.g. the GEAK backend reports
-    ``source="bypass"`` with ``tool="geak"``).
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        source (str): the discovery route label the dashboard groups by.
-        status (str): the discovery run status.
-        hot_kernels (list[Any] | None): the hot-kernel candidates the run
-            surfaced.
-        scan (dict[str, Any] | None): scan metadata (carries the
-            candidates/report path used as the idempotency key).
-        tool (str | None): the underlying tool whose version is recorded
-            (defaults to ``source``).
-        tool_root (str | None): an explicit tool install root.
-        tool_root_env (str | None): an env var naming the tool root.
-        tool_version (str | None): a caller-supplied tool version.
-        duration_sec (Any): the run duration in seconds.
-        error (str | None): an error string when the run failed.
-        producer (str): the breakdown producer label (defaults to the
-            kernel-agent).
-    """
+    """Record one hot-kernel discovery run (stage 1 of ``kernel_journey``)."""
     if not session_dir:
         trace_skip(reason="no session_dir", section="kernel_discovery")
         return
@@ -2854,8 +2470,8 @@ def record_kernel_discovery(
             payload,
             key=key,
         )
-        # The discovery tool's authoritative version lands in the top-level
-        # ``versions`` map, following the underlying ``tool``.
+        # The discovery tool's authoritative version lands in the top-level ``versions`` map, following the underlying
+        # ``tool``.
         record_tool_version(
             session_dir,
             tool=(tool or source),
@@ -2866,10 +2482,8 @@ def record_kernel_discovery(
         )
         route = str(route_strategy or "kernel_agent_forge")
         if route == "legacy_only":
-            # The legacy route stays out of the canonical streams by design, so
-            # a session run on it has no operations at all. That is the same
-            # shape as a session whose records were lost, and this is what
-            # tells the two apart.
+            # The legacy route stays out of the canonical streams by design, so a session run on it has no operations
+            # at all.
             trace_skip(
                 reason="legacy_only route is not on the canonical streams",
                 section="operations",
@@ -2930,24 +2544,7 @@ def record_tool_version(
     version: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record one external tool's authoritative version into ``versions``.
-
-    Idempotent per tool name (last write wins). Resolves ``{tool, root_dir,
-    commit, version}`` via the tool provenance registry and spools it as one
-    ``versions`` item; the assembler folds the substream into the top-level
-    ``versions`` map. Best-effort: never raises into the optimizer.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        tool (str): the external tool name; a falsy value is a no-op.
-        root (str | None): an explicit tool install root.
-        root_env (str | None): an env var naming the tool root.
-        version (str | None): a caller-supplied version, preferred over the
-            probe.
-        producer (str): the breakdown producer label (defaults to the
-            kernel-agent).
-    """
+    """Record one external tool's authoritative version into ``versions``."""
     if not session_dir or not tool:
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section="versions")
         return
@@ -2980,26 +2577,7 @@ def record_kernel_dispatch(
     route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record the dispatch decision for one kernel (stage 2 of ``kernel_journey``).
-
-    Idempotent per ``kernel_id`` (last decision wins). ``dispatched`` is False
-    for kernels gated out before any backend ran, with ``skip_reason`` holding
-    the gate (non_reusable_kernel / missing_source / budget_exhausted / ...).
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        kernel_id (str): the kernel id the decision is keyed by; a falsy value
-            is a no-op.
-        dispatched (bool): whether the kernel was dispatched to a backend.
-        backends (list[str] | None): the backends the kernel was dispatched to.
-        skip_reason (str): the gate that blocked dispatch when ``dispatched`` is
-            False.
-        orchestration_commit (str): the orchestration commit at dispatch time.
-        task_group (str | None): the task group label.
-        producer (str): the breakdown producer label (defaults to the
-            kernel-agent).
-    """
+    """Record the dispatch decision for one kernel (stage 2 of ``kernel_journey``)."""
     if not session_dir or not kernel_id:
         trace_skip(reason="no session_dir" if not session_dir else "no kernel_id", section="kernel_dispatch")
         return
@@ -3034,9 +2612,8 @@ def record_kernel_dispatch(
                 payload=payload,
                 producer=producer,
             )
-            # Recorded, but on the GEAK-internal reference stream rather than
-            # as an operation, so this kernel is absent from the ledger by
-            # routing rather than by loss.
+            # Recorded, but on the GEAK-internal reference stream rather than as an operation, so this kernel is
+            # absent from the ledger by routing rather than by loss.
             trace_skip(
                 reason="geak_internal route recorded as an internal reference",
                 section="operations",
@@ -3100,30 +2677,7 @@ def record_kernel_backend_result(
     route_strategy: str = "kernel_agent_forge",
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record per-backend attempts for one kernel (stage 3 of ``kernel_journey``).
-
-    One item per attempt, keyed by ``attempt_id`` (falls back to
-    ``run_id-backend``) so retries across runs are preserved rather than
-    collapsed. Mirrors the attempt ladder in ``result['attempts']`` and carries
-    the per-attempt timing + tool metadata when the kernel-agent surfaced them.
-
-    An attempt row as the backend writes it holds only how the run went --
-    ``status`` / ``optimized_path`` / ``error``. The verdict
-    (``proposal.decision``), the compile/correctness gates and the source
-    artifact are computed once per kernel and live beside ``attempts`` on the
-    result, so they are folded onto the attempt ``verification`` adopted and
-    onto no other. A losing backend keeps its own status, an unknown gate
-    stays unknown, and a failed attempt with no verdict of its own is recorded
-    as ``FAILED``.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        result (dict[str, Any]): the kernel-agent result carrying the
-            per-backend ``attempts`` ladder, verification, and metadata.
-        producer (str): the breakdown producer label (defaults to the
-            kernel-agent).
-    """
+    """Record per-backend attempts for one kernel (stage 3 of ``kernel_journey``)."""
     if not session_dir or not isinstance(result, dict):
         trace_skip(
             reason="no session_dir" if not session_dir else "result is not a dict", section="kernel_backend_result"
@@ -3136,21 +2690,14 @@ def record_kernel_backend_result(
         attempts = result.get("attempts")
         attempts = attempts if isinstance(attempts, list) else []
         result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        # The kernel-level micro_speedup (best across attempts) lives in
-        # ``verification``; stamp it onto the adopted (best) attempt.
+        # The kernel-level micro_speedup (best across attempts) lives in ``verification``; stamp it onto the adopted
+        # (best) attempt.
         verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
         kernel_micro_speedup = to_float(verification.get("micro_speedup"))
-        # The verdict and the verification evidence are kernel-level facts: a
-        # backend attempt carries only status/optimized_path/error, while
-        # ``proposal.decision``, the compile/correctness gates and the source
-        # artifact all live beside ``attempts`` on the result. They belong to
-        # the attempt verification actually adopted, so they are stamped onto
-        # that one and no other -- the same rule
-        # :func:`record_kernel_invocations` applies to the invocation lanes.
-        # Without an explicit ``best_attempt_id`` nothing was adopted, so no
-        # attempt inherits them (``_best_attempt_id``'s speedup fallback would
-        # otherwise hand a failed kernel's REVERT to an arbitrary row).
+        # The verdict and the verification evidence are kernel-level facts: a backend attempt carries only
+        # status/optimized_path/error, while ``proposal.decision``, the compile/correctness gates and the source
+        # artifact all live beside ``attempts`` on the result.
         proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
         kernel_decision = str(proposal.get("decision") or "").upper()
         adopted_attempt_id = str(verification.get("best_attempt_id") or "")
@@ -3232,8 +2779,6 @@ def record_kernel_backend_result(
                 "correctness_passed": correctness_passed,
                 "correctness_source": str(correctness_source) if correctness_source else None,
                 # The source artifact the kernel was carried to integrate with.
-                # ``optimized_files`` is the attempt's own output path, which
-                # for a real backend run is its stdout log -- not the rewrite.
                 "best_artifact_path": kernel_artifact_path if is_adopted else "",
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
@@ -3245,9 +2790,8 @@ def record_kernel_backend_result(
             recorded_any = True
             if operation_id:
                 canonical_attempt_id = attempt_id or _stable_id("attempt", operation_id, run_id, backend)
-                # Resolved above: kernel-level evidence only reaches the
-                # adopted attempt, so a losing backend's gates stay unknown
-                # rather than inheriting the winner's.
+                # Resolved above: kernel-level evidence only reaches the adopted attempt, so a losing backend's gates
+                # stay unknown rather than inheriting the winner's.
                 canonical_correctness_source = correctness_source or "partial:not_provided"
                 canonical_attempts.append(
                     {
@@ -3401,16 +2945,16 @@ def record_kernel_backend_result(
         if recorded_any or not kid:
             return
 
-        # No per-backend attempts: capture a pre-dispatch / infra failure as a
-        # synthetic FAILED attempt so kernel_journey shows the failure too.
+        # No per-backend attempts: capture a pre-dispatch / infra failure as a synthetic FAILED attempt so
+        # kernel_journey shows the failure too.
         status = str(result.get("status") or "").lower()
         err_class = str(result.get("error_class") or "")
         decision = str((result.get("proposal") or {}).get("decision") or "").upper()
         failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
         if not failed:
             return
-        # Never default an unattributable failure to GEAK; record it as
-        # "unknown" so GEAK's failure count is not inflated.
+        # Never default an unattributable failure to GEAK; record it as "unknown" so GEAK's failure count is not
+        # inflated.
         backend = str(result.get("backend") or "").lower() or "unknown"
         payload = {
             "kernel_id": kid,
@@ -3493,45 +3037,13 @@ def record_kernel_e2e(
     occurrence: Any = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
-    """Record the latest end-to-end integrate outcome for one kernel (stage 4).
-
-    Idempotent per ``kernel_id`` using overwrite-on-rewrite semantics: a later
-    final-validation verdict replaces the provisional candidate verdict rather
-    than appending a duplicate. ``e2e_gain_pct`` is the validated end-to-end
-    gain at integrate (negative => regressed and reverted).
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        kernel_id (str): the kernel id the outcome is keyed by; a falsy value is
-            a no-op.
-        integrated (bool): whether the kernel change was integrated.
-        e2e_gain_pct (Any): the validated end-to-end gain percent at integrate.
-        validated (bool | None): whether the gain was validated.
-        decision (str): the integrate decision (KEEP / REVERT / ...).
-        patch_path (str | None): the applied patch path.
-        target_file (str | None): the integrated target file.
-        extra_server_args (str): extra server args carried by the change.
-        occurrence (Any): which integrate of this kernel these numbers were read
-            from, as named by the caller; defaults to the integration id, then
-            to the benchmark the integrate was graded on. Keeps a later
-            re-measure from landing on the readings an earlier KEEP was decided
-            on, and is recorded so a replay after resume reproduces the ids.
-        producer (str): the breakdown producer label (defaults to the
-            kernel-agent).
-    """
+    """Record the latest end-to-end integrate outcome for one kernel (stage 4)."""
     if not session_dir or not kernel_id:
         trace_skip(reason="no session_dir" if not session_dir else "no kernel_id", section="kernel_e2e")
         return
     try:
         evidence = dict(result or {})
-        # Which integrate these numbers were read from. ``integration_id`` names
-        # it whenever the kernel-patch queue issued one, but an env-only
-        # integrate carries no artifact, so it never enters that queue and never
-        # gets an id -- it is graded on its runtime bundle alone. Naming those by
-        # the benchmark they were graded on keeps them apart, and a replay hands
-        # back the same report path rather than a fresh count. Relative, since
-        # this is recorded: the run is what identifies it, not where it ran.
+        # Which integrate these numbers were read from.
         graded_on = str(evidence.get("report_path") or evidence.get("workspace") or "")
         recorded_occurrence = (
             occurrence
@@ -3549,10 +3061,8 @@ def record_kernel_e2e(
             "patch_path": patch_path,
             "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
-            # The deploy/apply root the integrated kernel landed in, the kernel
-            # analogue of the framework column's apply root. Absolute; empty when
-            # the integrate named no repo (e.g. an env-only adoption). Read off
-            # the integrate result, falling back to the deploy-root ledger keys.
+            # The deploy/apply root the integrated kernel landed in, the kernel analogue of the framework column's
+            # apply root.
             "kernel_repo": str(
                 evidence.get("kernel_repo")
                 or evidence.get("deploy_repo_root")
@@ -3561,9 +3071,8 @@ def record_kernel_e2e(
             )
             or None,
             "ts": _now_iso_safe(),
-            # Carried on the record so the replay paths that re-record this
-            # outcome from state pass the same value back instead of counting
-            # a fresh occurrence on every pass.
+            # Carried on the record so the replay paths that re-record this outcome from state pass the same value
+            # back instead of counting a fresh occurrence on every pass.
             "occurrence": recorded_occurrence,
         }
         for field in (
@@ -3583,9 +3092,7 @@ def record_kernel_e2e(
             key=str(kernel_id),
         )
         if str(route_strategy or "") == "legacy_only":
-            # No operation and no adoption for this integrate. On a KEEP that
-            # is a change the workload carries with nothing on the ledger
-            # claiming it, which is precisely the shape a lost write leaves.
+            # No operation and no adoption for this integrate.
             trace_skip(
                 reason="legacy_only route is not on the canonical streams",
                 section="adoptions",
@@ -3617,10 +3124,7 @@ def record_kernel_e2e(
         }
         decision_value = str(decision or "").upper()
         measurement_refs: list[str] = []
-        # One integrate of one kernel is one occurrence. Re-integrating the
-        # same kernel later measures it again, and those numbers must not
-        # displace the ones an earlier KEEP was decided on. All three readings
-        # below come off that single benchmark, so they share its key.
+        # One integrate of one kernel is one occurrence.
         for name, raw, role in (
             ("baseline_throughput", evidence.get("base_tput"), "baseline"),
             ("final_throughput", evidence.get("new_tput"), "final"),
@@ -3710,15 +3214,7 @@ def record_kernel_e2e(
         adoption_refs: list[str] = []
         if final_validated or decision_value in {"REVERT", "REJECTED"}:
             adoption_id = _stable_id("adoption", operation_id, "integrate")
-            # ATTRIBUTABLE ONLY WITH A THROUGHPUT PAIR. `e2e_gain_pct` is a percentage the executor
-            # measured against whatever baseline it happened to hold at the time. The collector
-            # turns an adoption into points of the ONE session baseline by walking the throughput
-            # chain; with no pair to anchor it, it can only sum the local percentages, and
-            # percentages taken against different denominators do not add. Replaying real GEAK
-            # journeys showed the cost of pretending otherwise: 36 keeps whose local deltas summed
-            # to +348.6 pp of a session that did not move that far.
-            # The adoption is still written, so the keep stays visible and countable; only its
-            # contribution to any total is withheld.
+            # ATTRIBUTABLE ONLY WITH A THROUGHPUT PAIR.
             before_tput = to_float(evidence.get("base_tput"))
             after_tput = to_float(evidence.get("new_tput"))
             has_pair = bool(before_tput and after_tput and before_tput > 0 and after_tput > 0)
@@ -3735,9 +3231,8 @@ def record_kernel_e2e(
                 measurement_ids=measurement_refs,
                 kind="kernel_optimization",
                 gain_pct=to_float(e2e_gain_pct),
-                # Frozen inline, not just referenced: measurement ids are stable
-                # per kernel, so a later attempt on the same kernel overwrites
-                # the very numbers this adoption was decided on.
+                # Frozen inline, not just referenced: measurement ids are stable per kernel, so a later attempt on the
+                # same kernel overwrites the very numbers this adoption was decided on.
                 throughput_before=before_tput,
                 throughput_after=after_tput,
                 configuration={
@@ -3799,19 +3294,7 @@ def record_specialist_round(
     phase: str = "",
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Record one ``specialist_runs`` round (idempotent by ``round_id``).
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        entry (dict[str, Any]): the specialist round entry (keyed by
-            ``round_id``); an empty/non-dict value is a no-op.
-        phase (str): the runtime phase used when the entry does not already
-            declare ``source_phase``. A specialist runs in more than one phase,
-            so this cannot be a constant.
-        producer (str): the breakdown producer label (defaults to the
-            Coordinator).
-    """
+    """Record one ``specialist_runs`` round (idempotent by ``round_id``)."""
     if not session_dir or not isinstance(entry, dict) or not entry:
         trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
@@ -3927,32 +3410,7 @@ def record_critic_iteration(
     kb_priors: dict[str, Any] | None = None,
     producer: str = "critic",
 ) -> None:
-    """Record one ``critic_robustness.critic_iterations`` item.
-
-    Recorded per-iteration under a session-unique identity so workdir pruning
-    and resume-time turn-index reuse never erase history; payload mirrors
-    ``collectors.collect_critic_robustness`` and retains normalized Framework
-    review rows for the V6 timeline.
-
-    ``kb_priors`` (when provided) carries the per-iteration KB integration
-    trace: whether the historical priors were used, the request, the response,
-    and whether the final verdict referenced them. Omitted from the payload
-    when empty so historical items are unchanged.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        iter_n (int): the process-local critic iteration number.
-        request (dict[str, Any] | None): the critic request payload.
-        judge_bundle (dict[str, Any] | None): the proposal bundle reviewed.
-        review (dict[str, Any] | None): the critic review payload.
-        emit (dict[str, Any] | None): the critic emit payload.
-        workdir (Path | str | None): the critic backend workdir holding the
-            per-iteration artifact files.
-        kb_priors (dict[str, Any] | None): the per-iteration historical KB
-            priors trace; omitted when empty.
-        producer (str): the breakdown producer label (defaults to ``critic``).
-    """
+    """Record one ``critic_robustness.critic_iterations`` item."""
     if not session_dir:
         trace_skip(reason="no session_dir", section="critic_iterations")
         return
@@ -4117,21 +3575,7 @@ def record_robustness_signal(
     workdir: Path | str | None,
     producer: str = "robustness",
 ) -> None:
-    """Record one ``critic_robustness.robustness_signals`` item.
-
-    Reads ``signal.json`` / ``action.json`` from the just-written ``workdir``
-    (idempotent on the workdir name) so the signal is captured before the
-    robustness backend prunes old workdirs; payload mirrors the collector.
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        workdir (Path | str | None): the just-written robustness workdir holding
-            ``signal.json`` / ``action.json`` (idempotency key); a falsy value
-            is a no-op.
-        producer (str): the breakdown producer label (defaults to
-            ``robustness``).
-    """
+    """Record one ``critic_robustness.robustness_signals`` item."""
     if not session_dir or not workdir:
         trace_skip(reason="no session_dir" if not session_dir else "no workdir", section="robustness_signals")
         return
@@ -4188,16 +3632,7 @@ def record_singleton_section(
     *,
     producer: str,
 ) -> None:
-    """Record a producer-owned singleton section (report summaries, etc.).
-
-    Args:
-        session_dir (Path | str | None): the session directory; a falsy value is
-            a no-op.
-        section (str): the singleton section name to record.
-        payload (dict[str, Any]): the section payload; an empty/non-dict value
-            is a no-op.
-        producer (str): the breakdown producer label that owns the section.
-    """
+    """Record a producer-owned singleton section (report summaries, etc.)."""
     if not session_dir or not isinstance(payload, dict) or not payload:
         trace_skip(reason="no session_dir" if not session_dir else "empty payload", section=section)
         return
@@ -4254,12 +3689,7 @@ def _valid_v4_call(
     *,
     section: str = "",
 ) -> bool:
-    """Return whether a v4 helper call has usable routing metadata.
-
-    A caller that fails this is asking to record something and getting
-    nothing, which is the shape of gap the export can only report as an
-    absence, so say which of the three requirements was missing.
-    """
+    """Return whether a v4 helper call has usable routing metadata."""
     if not session_dir:
         reason = "no session_dir"
     elif not payload:
@@ -4290,8 +3720,8 @@ def _record_v4_entity(
     if not _valid_v4_call(session_dir, producer, value, section=section):
         return
     if not stable_id:
-        # An entity is merged by its id, so one without an id has nothing to
-        # be merged into and cannot be written at all.
+        # An entity is merged by its id, so one without an id has nothing to be merged into and cannot be written at
+        # all.
         trace_skip(reason=f"no {id_field}", section=section, producer=producer)
         return
     try:
@@ -4428,8 +3858,8 @@ _AGENT_BY_OPERATION_KIND = {
     "kernel_optimizer_selection": "kernel_agent",
     "strategy_selection": "kernel_agent",
     "gemm_tuning": "kernel_agent",
-    # A specialist round is discovery, not an attempt: it carries no gain and
-    # no adoption, so this names the agent whose activity it was.
+    # A specialist round is discovery, not an attempt: it carries no gain and no adoption, so this names the agent
+    # whose activity it was.
     "specialist": "explore",
     "critic": "critic",
     "kb_write": "critic",
@@ -4441,11 +3871,7 @@ def _default_operation_agent(
     value: Mapping[str, Any],
     producer: str,
 ) -> str:
-    """Fall back to the owning agent implied by the producer and work kind.
-
-    Explicit ``agent=`` at the call site always wins; this only keeps operations
-    recorded by paths that predate the field from landing without an owner.
-    """
+    """Fall back to the owning agent implied by the producer and work kind."""
     kind = str(value.get("kind") or "").strip().lower()
     by_kind = _AGENT_BY_OPERATION_KIND.get(kind)
     if by_kind:
@@ -4470,9 +3896,8 @@ def record_operation(
 ) -> None:
     """Upsert one v4 operation by stable ``operation_id``."""
     value = _v4_payload(operation, fields)
-    # Only stamp an owner when this call actually defines the operation; a
-    # partial upsert that just patches one field must not overwrite the agent
-    # its defining call already recorded.
+    # Only stamp an owner when this call actually defines the operation; a partial upsert that just patches one field
+    # must not overwrite the agent its defining call already recorded.
     if not value.get("agent") and (value.get("kind") or value.get("name")):
         value["agent"] = _default_operation_agent(value, producer)
     _record_v4_entity(
@@ -4573,37 +3998,7 @@ def record_session_validation(
     ts: str | None = None,
     producer: str = PRODUCER_COORDINATOR,
 ) -> str | None:
-    """Record what the session was measured to have gained, as it was decided.
-
-    Without this the breakdown's session total is the sum of its own ledger,
-    so the ledger can never be found to disagree with the end-to-end
-    measurement the run actually promoted -- the two numbers come from the
-    same addition. Recording the promoted figure at the moment it is promoted
-    gives the export something independent to reconcile against.
-
-    Each promotion is its own record rather than an overwrite of one, so a
-    session leaves behind the checkpoints it passed through. The id is drawn
-    from the stack length and the timestamp, never from the value: two
-    checkpoints that happen to measure the same number are still two
-    checkpoints.
-
-    Args:
-        session_dir: The hyperloom session directory.
-        baseline_tput: Throughput the gain is measured against.
-        validated_tput: Throughput just measured.
-        validated_gain_pct: The promoted gain, in percent of baseline.
-        stack_len: Adopted-stack length this figure was validated at.
-        source: The path that promoted it, e.g. ``integrate_patch``.
-        measurement_basis: ``e2e_rebench`` when the throughput was measured
-            end to end, ``e2e_decision_round`` when it is an explore round's own
-            grading measurement, ``derived_speedup`` when it was inferred from a
-            micro-benchmark's speedup.
-        ts: Author-time stamp; defaults to now.
-        producer: Recorder producer label.
-
-    Returns:
-        The operation id, or ``None`` when nothing could be recorded.
-    """
+    """Record what the session was measured to have gained, as it was decided."""
     if not session_dir or validated_gain_pct is None:
         return None
     stamp = str(ts or _now_iso_safe())

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage-gap unit tests for the external baseline comparison layer.
-
-Covers the fail-soft branches in ``_row_to_point``: a non-positive throughput
-or a missing ``metrics`` block yields no point rather than raising.
-"""
+"""Coverage-gap unit tests for the external baseline comparison layer."""
 
 from __future__ import annotations
 

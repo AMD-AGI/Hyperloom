@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PolicyGate accepts a ``source_file`` in the shape a profile trace records it.
-
-TraceLens names a frame as ``<relative path>(<line>): <function>``. The path is
-relative to the tree under optimization and the suffix is not part of it, so a
-verbatim allowlist check resolves it against the process CWD and rejects every
-one of them.
-
-This is not cosmetic: once the roofline evidence actually reaches the
-orchestration prompt, the model cites those frames when it dispatches a
-specialist, and the gate cancels the task before it runs. A whole session
-plateaued that way with 13 of 20 specialists cancelled and no work done.
-"""
+"""PolicyGate accepts a ``source_file`` in the shape a profile trace records it."""
 
 from __future__ import annotations
 
@@ -115,10 +104,9 @@ def test_absolute_path_outside_every_scope_is_still_denied(tmp_path, monkeypatch
     assert exc.value.rule == "source_file_outside_trusted_scope"
 
 
-# Placeholder/vendor-label forms TraceLens can leave in source_file instead of
-# an empty string (test_source_resolution_guards.py _SENTINELS covers the
-# producer side; this covers the gate degrading them to an omitted field
-# rather than denying the whole delegate as a bogus path).
+# Placeholder/vendor-label forms TraceLens can leave in source_file instead of an empty string
+# (test_source_resolution_guards.py _SENTINELS covers the producer side; this covers the gate degrading them to an
+# omitted field rather than denying the whole delegate as a bogus path).
 _ABSENT_SENTINELS = (
     "Not found",
     "N/A",
@@ -144,19 +132,15 @@ def test_sentinel_match_is_case_insensitive(tmp_path, monkeypatch):
 
 
 def test_sentinel_pass_through_is_logged(tmp_path, monkeypatch, caplog):
-    """A sentinel-driven accept must be visible in logs, not indistinguishable
-    from a normal accept -- previously this branch returned silently.
-    """
+    """A sentinel-driven accept must be visible in logs, not indistinguishable"""
     _framework_tree(tmp_path, monkeypatch)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.policy.gate"):
         _gate(tmp_path).validate_intent("orchestration", _dispatch_intent("Not found"))
     assert any("absent-value sentinel" in record.message and "Not found" in record.message for record in caplog.records)
 
 
-# A pip-installed framework has no checkout, so resolve_session_framework_root()
-# is empty and the join above never fires -- yet the frame's file really does sit
-# under an allowlist root. The package name is synthetic so a host that ships the
-# real package cannot make these pass for the wrong reason.
+# A pip-installed framework has no checkout, so resolve_session_framework_root() is empty and the join above never
+# fires -- yet the frame's file really does sit under an allowlist root.
 INSTALLED_FRAME = "hlfixture_aiter/ops/gemm_op_a8w8.py"
 
 

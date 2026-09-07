@@ -2,18 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Print action / proposal / kernel counts from a session's coordinator.db.
-
-Usage:
-    event_counts.py [SESSION_DIR] [--all] [--limit N]
-
-SESSION_DIR defaults to $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR (the per-run
-pin set by the launcher), else $USER_DATA_PATH, else /workspace/hyperloom. The
-latter two are the workspace root, not a per-session dir, so they will normally
-not contain storage/coordinator.db — pass SESSION_DIR explicitly in that case.
-Reads the last 500 events by default; pass ``--all`` for full history or
-``--limit N`` for a custom window.
-"""
+"""Print action / proposal / kernel counts from a session's coordinator.db."""
 
 from __future__ import annotations
 
@@ -26,15 +15,7 @@ from collections import Counter
 
 
 def main() -> int:
-    """Count and print coordinator event topics for a session.
-
-    Resolves the session directory, opens its ``coordinator.db``, tallies
-    proposal/delegated/kernel-request/kernel-response events over the selected
-    window, and prints the counts as JSON.
-
-    Returns:
-        int: ``0`` on success, or ``2`` when ``coordinator.db`` is not found.
-    """
+    """Count and print coordinator event topics for a session."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "session_dir",

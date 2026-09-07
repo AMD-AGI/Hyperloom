@@ -193,14 +193,7 @@ def _migrate_legacy_recipe_kb_once(*, destination: Path, source: Path) -> bool:
 
 
 def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
-    """Resolve the shared local knowledge root without creating it.
-
-    Args:
-        args: Parsed CLI arguments; ``local_kb_root`` is consulted first.
-
-    Returns:
-        Path: The resolved local KB root directory.
-    """
+    """Resolve the shared local knowledge root without creating it."""
     from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
 
     explicit = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
@@ -215,13 +208,7 @@ def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
 
 
 def _publish_section_dirs(session_dir: Path, warm_start_dir: Path) -> None:
-    """Point this run's agents at the shared draft and warm-start directories.
-
-    Agents run out of process, so the handoff is two paths in the environment
-    rather than an object. Both are exported before T0 because a child may
-    start before the warm-start download lands; a reader treats a directory
-    that is not there yet as a cold start.
-    """
+    """Point this run's agents at the shared draft and warm-start directories."""
     draft_dir = session_dir / "runtime" / "kb_draft"
     draft_dir.mkdir(parents=True, exist_ok=True)
     os.environ["KB_DRAFT_DIR"] = str(draft_dir)
@@ -229,18 +216,7 @@ def _publish_section_dirs(session_dir: Path, warm_start_dir: Path) -> None:
 
 
 def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
-    """Wire ``RecipeKB.audit_hook`` to append local Recipe trace events.
-
-    Each recipe-snapshot read/write is appended to
-    ``recipe_snapshot/.audit.jsonl`` so the trace records the request and how
-    the local store resolved it.
-    Best-effort and never raises into the KB op. No-op without a session dir
-    or when the dispatcher predates ``audit_hook``.
-
-    Args:
-        kb (Any): The RecipeKB dispatcher (or a mirroring wrapper around it).
-        session_dir (Path | None): Session dir hosting the audit log.
-    """
+    """Wire ``RecipeKB.audit_hook`` to append local Recipe trace events."""
     if session_dir is None:
         return
     target = getattr(kb, "_inner", kb)
@@ -254,11 +230,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
     audit_path = recipe_snapshot_audit_jsonl(Path(session_dir))
 
     def _hook(event: dict[str, Any]) -> None:
-        """Append a timestamped recipe-snapshot read event to the audit log.
-
-        Args:
-            event (dict[str, Any]): The remote-read trace event to record.
-        """
+        """Append a timestamped recipe-snapshot read event to the audit log."""
         try:
             row = {
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -274,15 +246,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
 def _build_recipe_kb_dispatcher(
     args: argparse.Namespace,
 ) -> Any:
-    """Build the local RecipeKB dispatcher, or validate remote mode.
-
-    Args:
-        args: Parsed CLI arguments (``degraded_kb`` etc.).
-
-    Returns:
-        Any: A configured local ``RecipeKB``. Remote and degraded modes return
-        ``None`` because remote Recipe writes use KB Store at CLOSE only.
-    """
+    """Build the local RecipeKB dispatcher, or validate remote mode."""
     from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
     from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 
@@ -293,8 +257,7 @@ def _build_recipe_kb_dispatcher(
     if config.mode is KnowledgeStoreMode.REMOTE:
         return None
 
-    # No remote client is constructed in local mode, even when ambient
-    # KB Store or GBrain credentials are present.
+    # No remote client is constructed in local mode, even when ambient KB Store or GBrain credentials are present.
     explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
     explicit_knowledge_root = str(os.environ.get("KNOWLEDGE_LOCAL_ROOT") or "").strip()
     if not explicit_knowledge_root and explicit_compatibility_root:
@@ -321,22 +284,7 @@ def _bootstrap_recipe_kb(
     manifest: dict[str, Any],
     resume: bool,
 ):
-    """Boot the recipe-snapshot KB integration, run the T0 anchor, and return
-    the dispatcher. KB unavailability never aborts the launch; a hard T0
-    failure warns and continues warm-start-empty.
-
-    Returns ``None`` when ``--degraded-kb`` is set (T0/T2/T3/T4 become no-ops).
-
-    Args:
-        args: Parsed CLI arguments.
-        session_dir: The current session directory.
-        manifest: The session manifest dict (model, framework, fingerprint).
-        resume: Whether this launch is resuming an existing session.
-
-    Returns:
-        Any | None: The configured ``RecipeKB`` dispatcher, or ``None`` when
-        KB hooks are disabled.
-    """
+    """Boot the recipe-snapshot KB integration, run the T0 anchor, and return"""
     if bool(getattr(args, "degraded_kb", False)):
         print("Recipe KB       : DISABLED (--degraded-kb)")
         return None
@@ -353,8 +301,7 @@ def _bootstrap_recipe_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    # Mirror version + image fingerprint onto SharedState for the CLOSE-time
-    # recipe write.
+    # Mirror version + image fingerprint onto SharedState for the CLOSE-time recipe write.
     if isinstance(stack_fp, dict) and stack_fp:
         merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
         for key, value in stack_fp.items():
@@ -429,21 +376,7 @@ def _bootstrap_knowledge_plane(
     recipe_kb_client: Any = None,
     session_dir: Path | None = None,
 ) -> "KnowledgePlane":
-    """Construct the :class:`KnowledgePlane` facade. Wires the PR Monitor MCP
-    URL and the PRMonitorClient enablement stub (KB reads go through RecipeKB).
-    Fail-soft; --degraded-pr yields a disabled PRMonitorClient.
-
-    Args:
-        args: Parsed CLI arguments carrying ``pr_monitor_enabled`` and
-            ``pr_degraded_reason``. The endpoint is derived from
-            ``KB_STORE_URL``.
-        recipe_kb_client: Optional recipe KB client; unused (KB reads go via RecipeKB).
-        session_dir: Optional session directory; when set a status marker is
-            written for breakdown warnings.
-
-    Returns:
-        KnowledgePlane: The wired KnowledgePlane facade.
-    """
+    """Construct the :class:`KnowledgePlane` facade. Wires the PR Monitor MCP"""
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
     from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
     from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
@@ -467,8 +400,7 @@ def _bootstrap_knowledge_plane(
         print(f"PR Monitor       : {pr_mcp_url}")
         pr_reachable = True
 
-    # One-shot status marker so breakdown.warnings can surface pr_monitor:*
-    # without scraping logs.
+    # One-shot status marker so breakdown.warnings can surface pr_monitor:* without scraping logs.
     if session_dir is not None:
         try:
             from ..session.session_paths import pr_monitor_status_json
@@ -497,8 +429,7 @@ def _bootstrap_knowledge_plane(
 
     kb_disabled = bool(getattr(args, "degraded_kb", False))
     if kb_disabled:
-        # A complete KB opt-out must not validate or activate an ambient remote
-        # configuration. Keep a local-shaped config only for status plumbing.
+        # A complete KB opt-out must not validate or activate an ambient remote configuration.
         degraded_env = dict(os.environ)
         degraded_env["KNOWLEDGE_STORE_MODE"] = "local"
         config = KnowledgeConfig.from_env(degraded_env)

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel decision-path renderer — per-kid causal chain grouped per kernel id.
-
-Fail-soft: skips when ``kernel_decision_path`` is absent. No producer in this
-tree emits that field today, so the section is skipped unless an external tool
-injects it.
-"""
+"""Kernel decision-path renderer — per-kid causal chain grouped per kernel id."""
 
 from __future__ import annotations
 
@@ -19,16 +14,7 @@ _MAX_STEPS_PER_KID = 12
 
 
 def _fmt_duration(v: Any) -> str:
-    """Format a duration in seconds as a human-readable string.
-
-    Args:
-        v (Any): The duration in seconds; non-numeric or ``None`` yields an
-            em dash.
-
-    Returns:
-        str: ``"<n>s"`` for sub-minute durations, ``"<n>min"`` otherwise, or
-            ``"—"`` when the value is missing or non-numeric.
-    """
+    """Format a duration in seconds as a human-readable string."""
     if v is None:
         return "—"
     try:
@@ -42,19 +28,7 @@ def _fmt_duration(v: Any) -> str:
 
 @register_renderer("kernel_decision_path")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the per-kernel causal decision path as grouped blocks.
-
-    Each kernel id gets a block showing its ``trace_analyze →
-    kernel_opt → integrate`` step chain plus a funnel summary fact. Skipped
-    when the field is absent, which is currently every session.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered section, or a skipped placeholder when
-            there is no decision-path data.
-    """
+    """Render the per-kernel causal decision path as grouped blocks."""
     raw = breakdown.get("kernel_decision_path")
     if raw is None:
         return RenderedSection(

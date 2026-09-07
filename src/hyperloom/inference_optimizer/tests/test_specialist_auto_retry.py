@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Failure classification + auto-retry prompt + freeform-patch coverage.
-
-Covers the decision core behind the specialist's bounded transient-failure
-auto-retry:
-
-* ``classify_specialist_failure`` — runner-status/error -> failure-type +
-  retry-eligibility taxonomy (only infra flakes are retry-eligible);
-* the prompt builder's auto-retry notice block (injected on a re-dispatch);
-* the freeform + ``mode=patch`` prompt path;
-* ``_maybe_auto_retry_specialist`` lane assignment — GPU specialists that set
-  ``needs_gpu=true`` must acquire ``gpu_research_lane`` on retry.
-"""
+"""Failure classification + auto-retry prompt + freeform-patch coverage."""
 
 from __future__ import annotations
 
@@ -78,8 +67,7 @@ def test_classify_is_case_and_whitespace_insensitive():
 
 
 def test_retry_eligibility_matches_membership():
-    """Every retry-eligible classification must be a member of the set, and
-    every non-eligible one must not be — the two sources of truth agree."""
+    """Every retry-eligible classification must be a member of the set, and"""
     cases = [
         ("succeeded", ""),
         ("tool_violation", "x"),
@@ -129,8 +117,7 @@ def test_auto_retry_notice_blank_reason_is_noop():
 
 # Freeform + mode=patch prompt path
 def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
-    """A freeform specialist dispatched with ``mode=patch`` still gets the
-    free-form mandate AND the worktree patch-authoring protocol."""
+    """A freeform specialist dispatched with ``mode=patch`` still gets the"""
     system, _user = build_specialist_prompts(_freeform_inputs(mode="patch"))
     assert "Free-form mandate (scope = freeform)" in system
     assert "prefill blocks decode" in system
@@ -143,11 +130,7 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
 
 
 def _make_explore_phase_stub(registry_lanes, registry_ttl, gpu_ttl, captured_tasks):
-    """Return a minimal ExplorePhase-like stub with a fake TaskRegistry.
-
-    ``captured_tasks`` is a list populated with each ``create_or_return_existing``
-    call's ``(kind, params, requires_lanes, lease_ttl_sec)`` tuple.
-    """
+    """Return a minimal ExplorePhase-like stub with a fake TaskRegistry."""
     from hyperloom.orchestrator.phases.explore import ExplorePhase
 
     # Fake Task returned by create_or_return_existing.
@@ -197,10 +180,7 @@ def _make_stale_result(runner_status="stale", error="subprocess_timeout"):
 
 @pytest.mark.asyncio
 async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
-    """A specialist with needs_gpu=true must include gpu_research_lane in retry lanes.
-
-    Mirrors the first-dispatch logic in intent_router._handle_delegate.
-    """
+    """A specialist with needs_gpu=true must include gpu_research_lane in retry lanes."""
     captured = []
     phase = _make_explore_phase_stub(
         registry_lanes=["research_lane"],
@@ -223,8 +203,7 @@ async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
 
 @pytest.mark.asyncio
 async def test_auto_retry_bench_specialist_acquires_both_lanes():
-    """A bench-capable specialist (mode=patch & bench=true, needs_gpu defaulted)
-    must hold both benchmark_lane and gpu_research_lane on retry."""
+    """A bench-capable specialist (mode=patch & bench=true, needs_gpu defaulted)"""
     captured = []
     phase = _make_explore_phase_stub(
         registry_lanes=["research_lane"],

@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch-coverage tests for shared workload-env materialization: GPU-count
-detection, profile-window math, per-model work-arounds, and NUM_PROMPTS
-sizing."""
+"""Branch-coverage tests for shared workload-env materialization: GPU-count"""
 
 from __future__ import annotations
 
@@ -18,14 +16,7 @@ from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 @pytest.fixture(autouse=True)
 def _restore_environ():
-    """Roll back direct ``os.environ`` writes between tests in this module.
-
-    Materialization deliberately publishes the resolved checkout into the
-    orchestrator's own environment (that is how PolicyGate sees a scriptable
-    framework's source root), and monkeypatch cannot undo a direct write. Without
-    this, one test's published ``MYFW_DIR`` satisfies the next test's
-    resolution and the repo-URL fallback silently never runs.
-    """
+    """Roll back direct ``os.environ`` writes between tests in this module."""
     import os
 
     snapshot = dict(os.environ)
@@ -136,8 +127,8 @@ def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch
 
 
 def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch):
-    # PD-disaggregated: force lm_eval string prompts so the sglang_router's
-    # /v1/completions (StringOrArray) does not 422 on token-id prompts.
+    # PD-disaggregated: force lm_eval string prompts so the sglang_router's /v1/completions (StringOrArray) does not
+    # 422 on token-id prompts.
     _clear_env(monkeypatch)
     monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -150,8 +141,8 @@ def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch)
 
 
 def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
-    # Aggregated hits the sglang server directly (accepts token-id prompts), so
-    # the env is left unset and the default tokenized path is preserved.
+    # Aggregated hits the sglang server directly (accepts token-id prompts), so the env is left unset and the default
+    # tokenized path is preserved.
     _clear_env(monkeypatch)
     monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -415,13 +406,7 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
 
 
 def test_the_iters_override_keeps_the_delay_an_agentx_run_needs_at_zero(monkeypatch, tmp_path):
-    """Raising the capture bound must not reintroduce an iteration delay.
-
-    AgentX brackets a wall-clock profiling window, so a delay counted in decode
-    iterations is never reached inside it and the trace comes back empty. Both
-    knobs are documented together, so the override path is exactly where an
-    operator reintroduces the delay the AgentX branch just zeroed.
-    """
+    """Raising the capture bound must not reintroduce an iteration delay."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -511,8 +496,8 @@ def test_profile_steps_cap_env_override(monkeypatch, tmp_path):
 
 
 def test_profile_high_osl_low_conc_auto_lowers_osl(monkeypatch, tmp_path, caplog):
-    # Low CONC pushes the steady-state floor above the cap, so the auto path
-    # lowers the profile OSL until the floor fits the 128-step cap.
+    # Low CONC pushes the steady-state floor above the cap, so the auto path lowers the profile OSL until the floor
+    # fits the 128-step cap.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "8192")
@@ -541,8 +526,7 @@ def test_profile_manual_max_iters_below_floor_warns(monkeypatch, tmp_path, caplo
 
 
 def test_profile_explicit_osl_over_cap_warns_not_lowered(monkeypatch, tmp_path, caplog):
-    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is,
-    # but a warning is emitted.
+    # Explicit PROFILE_OSL whose steady floor exceeds the cap is honored as-is, but a warning is emitted.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("OSL", "1024")
@@ -571,8 +555,7 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
 
 
 def test_quality_ref_variant_compares(monkeypatch, tmp_path):
-    # A non-baseline scriptable variant must COMPARE against the operator
-    # reference and must NOT write.
+    # A non-baseline scriptable variant must COMPARE against the operator reference and must NOT write.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
@@ -597,10 +580,9 @@ _XDIT_ONLY_ENVS = ("XDIT_MODEL_ARG", "XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND"
 
 
 def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
-    # An operator-supplied workload declares its own contract, so nothing that
-    # only the xDiT runner reads may reach it -- least of all an attention
-    # backend on the BASELINE, which would make the reference measurement
-    # something the operator never asked for.
+    # An operator-supplied workload declares its own contract, so nothing that only the xDiT runner reads may reach it
+    # -- least of all an attention backend on the BASELINE, which would make the reference measurement something the
+    # operator never asked for.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
@@ -623,8 +605,7 @@ def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
 
 
 def test_quality_ref_emitted_under_both_names(monkeypatch, tmp_path):
-    # The gate itself IS generic, so a custom workload keeps it. Both names are
-    # written so operator bench scripts reading either one resolve the same file.
+    # The gate itself IS generic, so a custom workload keeps it.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_QUALITY_REF", "/ref/q.png")
@@ -637,8 +618,8 @@ def test_quality_ref_emitted_under_both_names(monkeypatch, tmp_path):
 
 
 def test_quality_ref_legacy_name_still_resolves(monkeypatch, tmp_path):
-    # Operator scripts that predate the rename set only the XDIT_ name; it must
-    # still select the reference until they migrate.
+    # Operator scripts that predate the rename set only the XDIT_ name; it must still select the reference until they
+    # migrate.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/legacy.png")
@@ -683,8 +664,7 @@ def test_quality_ref_untouched_for_serving_framework(monkeypatch, tmp_path):
 
 
 def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tmp_path):
-    # No operator reference: a stable per-session reference is derived so the
-    # gate stays active. A variant COMPAREs against it, never writes.
+    # No operator reference: a stable per-session reference is derived so the gate stays active.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
@@ -697,8 +677,8 @@ def test_quality_ref_zero_config_variant_defaults_to_session_ref(monkeypatch, tm
 
 
 def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_path):
-    # The baseline writes the derived per-session reference (compare off) so a
-    # subsequent variant has something to gate against.
+    # The baseline writes the derived per-session reference (compare off) so a subsequent variant has something to
+    # gate against.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     sess = tmp_path / "sess"
@@ -710,9 +690,7 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
 
 
-# ---------------------------------------------------------------------------
 # agentx_active: persisted benchmark_mode as a fallback for a missing env var
-# ---------------------------------------------------------------------------
 
 
 def test_agentx_active_true_from_env_var(monkeypatch):
@@ -728,8 +706,8 @@ def test_agentx_active_false_with_neither_signal(monkeypatch):
 
 
 def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
-    # A subprocess/SDK caller that never inherited HYPERLOOM_AGENTX must still
-    # be recognized as AgentX-active from the session's persisted mode.
+    # A subprocess/SDK caller that never inherited HYPERLOOM_AGENTX must still be recognized as AgentX-active from the
+    # session's persisted mode.
     _clear_env(monkeypatch)
     assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
 
@@ -744,6 +722,4 @@ def test_agentx_kb_write_blocked_matches_agentx_active(monkeypatch):
     assert we.agentx_kb_write_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
-# ---------------------------------------------------------------------------
 # Scriptable baseline sampling cost (measurement contract values)
-# ---------------------------------------------------------------------------

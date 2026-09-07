@@ -1,16 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""The accuracy gate must not spend a KEEP attempt on an eval that cannot run.
-
-Observed on 195 sessions: the parameter search picks ``--max-model-len 2048``
-for throughput, the gsm8k harness asks for a 2048-token completion on top of a
-~1k-token five-shot prompt, and every request comes back HTTP 400. No verdict is
-ever produced, so ``accuracy_pass`` stays ``None``. Because a positive baseline
-accuracy (measured earlier, under the larger context the run started with) is
-read as proof that eval works here, the missing verdict blocks the KEEP and the
-round is recorded as a fair attempt. Three of those and the kernel is discarded
-for a reason that has nothing to do with the kernel.
-"""
+"""The accuracy gate must not spend a KEEP attempt on an eval that cannot run."""
 
 import pytest
 
@@ -34,8 +24,7 @@ class TestServedContextHostsEval:
         assert "2048" in reason
 
     def test_the_real_session_configuration_is_rejected(self):
-        """The exact shape seen in session e268b0be: env asks 6144, the server
-        args override it to 2048, and the override is what the server honours."""
+        """The exact shape seen in session e268b0be: env asks 6144, the server"""
         served = ag.resolve_served_context(
             server_args=("--kv-cache-dtype fp8 --max-num-batched-tokens 32768 --max-model-len 2048 --async-scheduling"),
             env_max_model_len=6144,
@@ -102,8 +91,7 @@ class TestInfeasibleEvalIsAFault:
 
 
 class TestGradeMarksTheRoundInfeasible:
-    """``_grade_integrate_accuracy`` must separate "eval broke" from "eval
-    cannot run here"."""
+    """``_grade_integrate_accuracy`` must separate \"eval broke\" from \"eval"""
 
     @staticmethod
     def _grade(monkeypatch, tmp_path, server_args):

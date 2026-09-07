@@ -43,9 +43,7 @@ _PY_DIFF = (
 _CUDA_DIFF = "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ b/csrc/attn.cu\n@@ -1 +1 @@\n-a\n+b\n"
 
 
-# ---------------------------------------------------------------------------
 # no-op / skip paths
-# ---------------------------------------------------------------------------
 
 
 async def test_no_candidate_is_noop(_executor):
@@ -65,9 +63,7 @@ async def test_multi_node_skips(_executor, monkeypatch):
     assert ctx._ip_localization_patches == []
 
 
-# ---------------------------------------------------------------------------
 # python-only -> patch written + staged
-# ---------------------------------------------------------------------------
 
 
 async def test_python_only_writes_patch(_executor, monkeypatch):
@@ -86,9 +82,7 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
     assert ctx._ip_localization_touched == ["vllm/model/deepseek_v4.py"]
 
 
-# ---------------------------------------------------------------------------
 # compiled-closure deferral: reverted, no patch
-# ---------------------------------------------------------------------------
 
 
 async def test_compiled_closure_defers_rung5(_executor, monkeypatch):
@@ -114,9 +108,7 @@ async def test_fetch_failure_reverts(_executor, monkeypatch):
     assert out["error_class"] == "localization_fetch_failed"
 
 
-# ---------------------------------------------------------------------------
 # allowlist gate: path outside allowlist -> reverted (no global env mutation)
-# ---------------------------------------------------------------------------
 
 
 async def test_path_outside_allowlist_reverts(_executor, monkeypatch):

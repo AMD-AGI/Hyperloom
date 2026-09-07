@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
-"""Pod-side launcher for the Infera multi-node backend (idle-pod SSH mode).
-
-Runs INSIDE one LeaderWorkerSet (LWS) worker pod, shipped + invoked over SSH by
-``inference_optimizer.multi_node restart-server --backend infera``. Each pod
-self-determines its rank from the LWS-injected env, so the sandbox controller
-issues the SAME command to every worker pod.
-
-Why this script (vs the RayJob ``launch_multinode.py``):
-  * No Ray. sglang multi-node uses torch.distributed
-    (``--dist-init-addr <leader>:5000 --nnodes N --node-rank K``); the LWS
-    controller already injects ``$LWS_LEADER_ADDRESS`` / ``$LWS_WORKER_INDEX``
-    into every pod, so this script just reads them and launches one rank.
-  * We launch ``infera.engine.sglang`` (not raw ``sglang.launch_server``) so the
-    worker registers with the Infera frontend over NATS — benchmarks then hit
-    ``infera.frontend`` (:8000), never sglang rank-0 :8888.
-
-Responsibilities:
-  1. Recover the container env from ``/proc/1/environ`` (an sshd session starts
-     with a minimal env and would otherwise miss LWS_* / NATS_SERVER / INFERA_* /
-     NCCL_* / SGLANG_* / PATH).
-  2. PID-file kill of any prior server (IR-5: never ``pkill -f``).
-  3. Launch ``infera.engine.sglang`` (or ``infera.engine.vllm``) detached via
-     nohup+setsid, wired with ``--nnodes/--node-rank/--dist-init-addr``.
-  4. Optional readiness wait on the leader (``LWS_WORKER_INDEX == 0``).
-
-Stdlib only — this runs in the framework pod, not the optimizer venv.
-"""
+"""Pod-side launcher for the Infera multi-node backend (idle-pod SSH mode)."""
 
 from __future__ import annotations
 
@@ -39,13 +13,12 @@ import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
-# Rendezvous port for torch.distributed (matches SaFE
-# common.InferaMultinodeDistInitPort = 5000). Override via --dist-init-port.
+# Rendezvous port for torch.distributed (matches SaFE common.InferaMultinodeDistInitPort = 5000).
 _DEFAULT_DIST_INIT_PORT = 5000
 # Ray GCS port for the vllm multi-node bootstrap.
 _RAY_GCS_PORT = 6379
-# Default HTTP port the infera engine binds via --port (no CLI override is
-# declared); the rank-0 readiness probe uses --health-port (default 8000).
+# Default HTTP port the infera engine binds via --port (no CLI override is declared); the rank-0 readiness probe uses
+# --health-port (default 8000).
 _DEFAULT_ENGINE_PORT = 30000
 
 # Keep in sync with multi_node/_internal/server_args_safety.py
@@ -74,8 +47,7 @@ _DENIED_SERVER_FLAGS = frozenset(
     }
 )
 _DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
-# Tuning knobs exempt from the suffix rule by name only; their values stay
-# constrained by _unsafe_path_value_reason.
+# Tuning knobs exempt from the suffix rule by name only; their values stay constrained by _unsafe_path_value_reason.
 _SUFFIX_EXEMPT_SERVER_FLAGS = frozenset({"--speculative-draft-model-path"})
 
 
@@ -119,15 +91,7 @@ def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
 
 
 def _denied_extra_args(raw: str) -> list[str]:
-    """Return rejected CLI flags in a pod-side extra-args string.
-
-    Args:
-        raw: Whitespace-separated server flags.
-
-    Returns:
-        list[str]: Denied flag names, plus ``"flag: reason"`` entries for exempt
-        flags whose value is outside the allowed path shape (empty when clean).
-    """
+    """Return rejected CLI flags in a pod-side extra-args string."""
     text = (raw or "").strip()
     if not text:
         return []
@@ -151,19 +115,14 @@ def _denied_extra_args(raw: str) -> list[str]:
 
 
 def _log(msg: str) -> None:
-    """Write a timestamped launcher log line to stderr.
-
-    Args:
-        msg: The message to log.
-    """
+    """Write a timestamped launcher log line to stderr."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_infera_node {ts}] {msg}\n")
     sys.stderr.flush()
 
 
-# Env-var prefixes/names worth recovering from pid1 so the framework child sees
-# the same rendezvous / discovery / tuning config the container was started
-# with. An sshd session would otherwise launch with a bare login env.
+# Env-var prefixes/names worth recovering from pid1 so the framework child sees the same rendezvous / discovery /
+# tuning config the container was started with.
 _ENV_RECOVER_PREFIXES = (
     "LWS_",
     "POD_",
@@ -182,32 +141,18 @@ _ENV_RECOVER_PREFIXES = (
     "UCX_",
     "NIXL_",
     "MC_",
-    # KUBERNETES_* must propagate too, otherwise infera's kubernetes discovery
-    # backend fails with
-    #   "Failed to create Kubernetes client: failed to infer config:
-    #    in-cluster: (environment variable not found)"
-    # immediately on infera.engine.sglang/infera.engine.vllm start, and the
-    # SSH-launched server exits in <1s while the Infera frontend (always-up) keeps
-    # returning /health 200 — causing baseline_failed with 0 completed
-    # requests and no obvious sandbox-side log evidence.
+    # KUBERNETES_* must propagate too, otherwise infera's kubernetes discovery backend fails with "Failed to create
+    # Kubernetes client: failed to infer config: in-cluster: (environment variable not found)" immediately on
+    # infera.engine.sglang/infera.engine.vllm start, and the SSH-launched server exits in <1s while the Infera
+    # frontend (always-up) keeps returning /health 200 — causing baseline_failed with 0 completed requests and no
+    # obvious sandbox-side log evidence.
     "KUBERNETES_",
 )
 _ENV_RECOVER_NAMES = ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "VIRTUAL_ENV")
 
 
 def _recover_container_env() -> dict[str, str]:
-    """Merge the current env with pid1's env for the recovered keys.
-
-    sshd sessions get a minimal env; the LWS rendezvous vars
-    (``LWS_LEADER_ADDRESS`` / ``LWS_WORKER_INDEX``) and discovery vars
-    (``NATS_SERVER`` / ``INFERA_*``) live only in the container's pid1 env. We
-    read ``/proc/1/environ`` (same uid — we SSH as root, pid1 is root) and
-    overlay the relevant keys onto ``os.environ``.
-
-    Returns:
-        The current environment merged with pid1's recovered keys, with
-        ``/opt/venv/bin`` ensured at the front of ``PATH``.
-    """
+    """Merge the current env with pid1's env for the recovered keys."""
     env = dict(os.environ)
     try:
         raw = Path("/proc/1/environ").read_bytes()
@@ -221,8 +166,8 @@ def _recover_container_env() -> dict[str, str]:
         key = k.decode("utf-8", "ignore")
         val = v.decode("utf-8", "ignore")
         if key in _ENV_RECOVER_NAMES or any(key.startswith(p) for p in _ENV_RECOVER_PREFIXES):
-            # pid1 wins for rendezvous/discovery; but keep sshd's PATH augmented
-            # with /opt/venv/bin so python3 resolves to the framework venv.
+            # pid1 wins for rendezvous/discovery; but keep sshd's PATH augmented with /opt/venv/bin so python3
+            # resolves to the framework venv.
             env[key] = val
     venv_bin = "/opt/venv/bin"
     parts = env.get("PATH", "").split(":") if env.get("PATH") else []
@@ -232,33 +177,14 @@ def _recover_container_env() -> dict[str, str]:
 
 
 def _resolve_pod_ip(env: dict[str, str]) -> str:
-    """Return this pod's routable IP (never a loopback address).
-
-    Single-pod PD-disaggregation roles (prefill / decode, nnodes=1) are NOT a
-    LeaderWorkerSet, so ``$LWS_LEADER_ADDRESS`` is unset and the caller would
-    otherwise fall back to ``127.0.0.1``. sglang derives the disaggregation
-    bootstrap host it advertises to peers from ``--dist-init-addr``; a loopback
-    value makes the cross-pod decode->prefill KV handshake fail with
-    ``NIXL KVReceiver Exception`` (decode dials its own localhost). Resolve the
-    real pod IP so the advertised bootstrap host is reachable across pods.
-
-    Resolution order: ``$POD_IP`` (downward API) -> egress-route probe ->
-    hostname lookup. Falls back to ``127.0.0.1`` only if every method yields a
-    loopback / fails (single-pod aggregated runs still work in that case).
-
-    Args:
-        env: The (recovered) environment, consulted for ``$POD_IP``.
-
-    Returns:
-        The pod's routable IP, or ``127.0.0.1`` when none can be resolved.
-    """
+    """Return this pod's routable IP (never a loopback address)."""
     import socket
 
     cand = (env.get("POD_IP") or "").strip()
     if cand and not cand.startswith("127."):
         return cand
-    # Egress-route probe: connecting a UDP socket sends no packets but makes the
-    # kernel pick the source IP of the default-route interface.
+    # Egress-route probe: connecting a UDP socket sends no packets but makes the kernel pick the source IP of the
+    # default-route interface.
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -291,12 +217,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _proc_tree(root: int) -> list[int]:
-    """Return ``root`` plus all descendant PIDs via /proc ppid links.
-
-    Collected in a single pass so a child that later re-parents to init (e.g. the
-    sglang scheduler subprocess, which escapes the wrapper's process group) is
-    still captured as long as it is a descendant at collection time.
-    """
+    """Return ``root`` plus all descendant PIDs via /proc ppid links."""
     children: dict[int, list[int]] = {}
     try:
         entries = os.listdir("/proc")
@@ -327,17 +248,7 @@ def _proc_tree(root: int) -> list[int]:
 
 
 def _reap_stale_engines_by_cmdline() -> None:
-    """SIGKILL any residual sglang / infera engine process matched by cmdline via
-    /proc, before a fresh launch.
-
-    Catches an orphaned ``sglang.launch_server`` (re-parented to init) that still
-    holds ``port_base`` but which neither the process-tree kill (no longer a
-    descendant) nor the ss-based port sweep can find -- sglang binds port_base in
-    a way ``ss``/``fuser`` do not surface, yet it blocks the next launch with
-    "port_base not available" -> engine exit(1) -> /v1/completions 503. Runs
-    before launch, so every matching engine is stale by definition. Scoped to our
-    own engine cmdlines (IR-5: we only kill processes we launched). Never raises.
-    """
+    """SIGKILL any residual sglang / infera engine process matched by cmdline via"""
     import signal as _sig
 
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
@@ -384,29 +295,7 @@ def _reap_stale_engines_by_cmdline() -> None:
 
 
 def _kill_prior(pid_file: Path) -> None:
-    """SIGTERM then SIGKILL the prior server's whole process tree, then sweep any
-    residual holder of the managed sglang engine ports.
-
-    IR-5: only the PID we launched and its descendants (plus the managed-port
-    sweep). Missing / stale PID files are a no-op so callers can use this
-    idempotently before launch.
-
-    Why the tree (not just ``killpg``): the sglang engine (``sglang.launch_server``)
-    spawns scheduler subprocesses that escape the wrapper's process group. A bare
-    ``killpg`` leaves one holding ``port_base``, so the next launch dies with
-    "port_base not available" -> engine exits(1) -> worker deregisters ->
-    /v1/completions 503 -> every restarted candidate REVERTs. We collect the full
-    descendant set BEFORE signalling (escaped children are still reachable then)
-    and SIGKILL all of them, then always sweep the managed ports as a backstop.
-
-    Args:
-        pid_file: Path to the pid file recording the prior server's PID.
-
-    Raises:
-        RuntimeError: If any target is still alive after the kill window (wedged,
-            e.g. D-state on slow weight I/O), so the caller aborts the relaunch
-            instead of double-stacking a second server and leaking VRAM.
-    """
+    """SIGTERM then SIGKILL the prior server's whole process tree, then sweep any"""
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     pid = None
     if pid_file.is_file():
@@ -453,31 +342,21 @@ def _kill_prior(pid_file: Path) -> None:
             )
         _log("killed prior server tree pid=" + str(pid) + " (" + str(len(targets)) + " procs)")
     pid_file.unlink(missing_ok=True)
-    # Kill residual engine processes by cmdline (catches an orphaned
-    # launch_server holding port_base that ss/tree-kill miss), then sweep ports.
+    # Kill residual engine processes by cmdline (catches an orphaned launch_server holding port_base that ss/tree-kill
+    # miss), then sweep ports.
     _reap_stale_engines_by_cmdline()
     _reap_stale_engine_ports()
 
 
-# The infera decode/prefill restart records the infera.engine wrapper PID in
-# the pid-file, but the real sglang.launch_server it spawns becomes its own
-# process-group leader and holds the engine ports (30000 HTTP, 30234 dist
-# port_base, 30001 bootstrap, 32760 kv-events). _kill_prior's pgid kill
-# therefore misses it, so the NEXT restart crashes with "port_base at 30234 is
-# not available" and every explore variant aborts at the health timeout. This
-# reaper kills any residual process that still holds those specific ports right
-# before we relaunch. It targets only the exact port owners we manage (not
-# `pkill -f`), preserving IR-5's "only kill what we launched" intent.
+# The infera decode/prefill restart records the infera.engine wrapper PID in the pid-file, but the real
+# sglang.launch_server it spawns becomes its own process-group leader and holds the engine ports (30000 HTTP, 30234
+# dist port_base, 30001 bootstrap, 32760 kv-events). _kill_prior's pgid kill therefore misses it, so the NEXT restart
+# crashes with "port_base at 30234 is not available" and every explore variant aborts at the health timeout.
 _REAP_PORTS = (30000, 30001, 30234, 32760)
 
 
 def _reap_stale_engine_ports() -> None:
-    """Kill any residual process still holding the sglang engine ports.
-
-    Uses ``ss -ltnp`` to map each managed port to its owning PID and SIGKILLs
-    that process group. Best-effort and idempotent: absent ports or missing
-    tooling are a no-op.
-    """
+    """Kill any residual process still holding the sglang engine ports."""
     try:
         import re as _re
         import signal as _signal
@@ -539,17 +418,7 @@ def _build_sglang_cmd(
     *,
     advertise_host: str,
 ) -> list[str]:
-    """infera.engine.sglang multi-node command for this pod's rank.
-
-    Args:
-        a: Parsed launcher arguments.
-        node_rank: This pod's node rank.
-        leader: torch.distributed rendezvous leader address.
-        advertise_host: Routable pod IP for worker registration.
-
-    Returns:
-        The ``infera.engine.sglang`` command argv for this pod's rank.
-    """
+    """infera.engine.sglang multi-node command for this pod's rank."""
     cmd = [
         "python3",
         "-m",
@@ -570,10 +439,8 @@ def _build_sglang_cmd(
         "--request-transport",
         "nats",
     ]
-    # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the
-    # SaFE native infera.engine.sglang launch. Passing them for an nnodes=1 disaggregated
-    # PD role made decode emit 0 output tokens (finish_reason=stop), while the
-    # SaFE deploy (which omits them for single node) generates normally.
+    # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the SaFE native infera.engine.sglang
+    # launch.
     if int(a.nnodes) > 1:
         cmd.extend(
             [
@@ -589,36 +456,20 @@ def _build_sglang_cmd(
         cmd.extend(["--ep-size", str(a.ep)])
     if a.extra_args:
         extra_tokens = shlex.split(a.extra_args)
-        # infera.engine.sglang enables expert-parallel via --ep-size (added just
-        # above). The vllm-style --enable-expert-parallel is NOT a recognized
-        # infera.engine.sglang arg: its argparse aborts with "unrecognized
-        # arguments: --enable-expert-parallel", so the server exits on launch and
-        # /health never comes up (EP explore variants then score 0 tok/s or burn
-        # the full restart timeout). Upstream (explore atom_ep) injects it
-        # framework-blind, so strip it here at the infera-sglang boundary; EP
-        # stays enabled through --ep-size.
+        # infera.engine.sglang enables expert-parallel via --ep-size (added just above).
         _ep_flag = "--enable-expert-parallel"
         if _ep_flag in extra_tokens:
             extra_tokens = [t for t in extra_tokens if t != _ep_flag]
             _log(f"dropped vllm-only {_ep_flag} from sglang extra-args (EP via --ep-size)")
         cmd.extend(extra_tokens)
-        # sglang ServerArgs.__post_init__ force-disables enable_dp_attention /
-        # enable_dp_lm_head when dp_size == 1 (its default). If the caller asked
-        # for either DP-attention flag but omitted --dp-size, set it to tp so the
-        # flags actually take effect (full DP-attention; tp % dp == 0 holds).
+        # sglang ServerArgs.__post_init__ force-disables enable_dp_attention / enable_dp_lm_head when dp_size == 1
+        # (its default).
         _dp_enable_flags = ("--enable-dp-attention", "--enable-dp-lm-head")
         has_dp_enable = any(tok in _dp_enable_flags for tok in extra_tokens)
         has_dp_size = any(tok == "--dp-size" or tok.startswith("--dp-size=") for tok in extra_tokens)
         if has_dp_enable and not has_dp_size and int(a.tp) > 1:
             cmd.extend(["--dp-size", str(a.tp)])
-    # Skip sglang's post-load warmup ONLY for PD-disaggregated legs. In PD the
-    # warmup generate needs the prefill<->decode pair fully wired, which is not
-    # guaranteed during a restart window, so it blocks until SGLANG_WARMUP_TIMEOUT
-    # (default 1800s) then kill_process_tree()s the engine -> the leg goes 0/1 and
-    # the frontend returns 503, failing the round on a 30-min timeout. Readiness
-    # is validated by the optimizer's /v1/completions probe instead. Aggregated
-    # (one shared server, no PD dependency) keeps warmup ON for parity with the
-    # single-node path. Respect an explicit --skip-server-warmup in extra-args.
+    # Skip sglang's post-load warmup ONLY for PD-disaggregated legs.
     _extra_for_warmup = shlex.split(a.extra_args) if a.extra_args else []
     _is_pd_leg = "--disaggregation-mode" in _extra_for_warmup or any(
         tok.startswith("--disaggregation-mode=") for tok in _extra_for_warmup
@@ -629,15 +480,7 @@ def _build_sglang_cmd(
 
 
 def _build_vllm_cmd(a: argparse.Namespace, *, advertise_host: str) -> list[str]:
-    """infera.engine.vllm command (rank 0 only; workers just join the ray cluster).
-
-    Args:
-        a: Parsed launcher arguments.
-        advertise_host: Routable pod IP for worker registration.
-
-    Returns:
-        The ``infera.engine.vllm`` command argv for rank 0.
-    """
+    """infera.engine.vllm command (rank 0 only; workers just join the ray cluster)."""
     cmd = [
         "python3",
         "-m",
@@ -665,24 +508,7 @@ def _build_vllm_cmd(a: argparse.Namespace, *, advertise_host: str) -> list[str]:
 
 
 def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path, env: dict[str, str]) -> int:
-    """Start ``cmd`` detached (nohup+setsid) and record its PID.
-
-    Reparents the server under init so it survives the SSH session closing,
-    and fails fast (with a log tail) if the child dies within 0.5s.
-
-    Args:
-        cmd: The server command argv to launch.
-        log_file: Path the detached server's stdout/stderr is written to.
-        pid_file: Path the launched PID is recorded in.
-        env: Environment for the launched process.
-
-    Returns:
-        The PID of the launched server.
-
-    Raises:
-        RuntimeError: If the detach spawn fails or the child exits within
-            0.5s of launch.
-    """
+    """Start ``cmd`` detached (nohup+setsid) and record its PID."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     env = dict(env)
@@ -722,17 +548,7 @@ def _detach_launch(cmd: list[str], log_file: Path, pid_file: Path, env: dict[str
 
 
 def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
-    """Bootstrap a Ray cluster across the LWS pods for vllm multi-node.
-
-    rank 0 -> ``ray start --head``; workers -> ``ray start --address``. vllm
-    on rank 0 then discovers the workers via the GCS
-    (``--distributed-executor-backend ray``).
-
-    Args:
-        role: ``"head"`` for rank 0, otherwise a worker that joins the leader.
-        leader: Leader address workers connect to.
-        env: Environment for the ``ray start`` subprocess.
-    """
+    """Bootstrap a Ray cluster across the LWS pods for vllm multi-node."""
     if role == "head":
         ray_cmd = f"ray start --head --port {_RAY_GCS_PORT} --disable-usage-stats"
     else:
@@ -748,17 +564,7 @@ def _ray_start(role: str, leader: str, env: dict[str, str]) -> None:
 
 
 def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
-    """Poll http://127.0.0.1:<port>/health until 200 or the pid dies.
-
-    Args:
-        port: Local health endpoint port to poll.
-        timeout_s: Maximum seconds to wait for a healthy response.
-        pid: Optional server PID; polling stops early if the process dies.
-
-    Returns:
-        ``True`` when the endpoint returned a 2xx status before the timeout,
-        else ``False``.
-    """
+    """Poll http://127.0.0.1:<port>/health until 200 or the pid dies."""
     import urllib.error
     import urllib.request
 
@@ -786,13 +592,7 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
 
 
 def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
-    """Start a detached rocm-smi sampler for this pod's GPUs.
-
-    Mirrors the single-node Magpie GPUMonitor fields (temp / power / util /
-    VRAM) but runs on the GPU pod itself, appending timestamped per-card rows
-    to ``out_csv`` on shared storage so the client can harvest them. Runs until
-    the next restart kills it. No-op if rocm-smi is unavailable.
-    """
+    """Start a detached rocm-smi sampler for this pod's GPUs."""
     import shutil
 
     rocm = shutil.which("rocm-smi") or "/opt/rocm/bin/rocm-smi"
@@ -847,19 +647,7 @@ def _kill_gpu_sampler(pid_file: Path) -> None:
 
 
 def main() -> int:
-    """Launch (or kill) this pod's Infera multi-node server rank.
-
-    Recovers the container env, resolves this pod's rank and rendezvous
-    leader, kills any prior server, then launches ``infera.engine.sglang`` /
-    ``infera.engine.vllm`` for this rank (optionally waiting for leader
-    readiness). With ``--kill-only`` it just tears down the prior server and
-    exits.
-
-    Returns:
-        ``0`` on success, ``2`` when required ``--model`` / ``--tp`` are
-        missing or ``--extra-args`` carries a denied server flag, ``3`` when
-        the prior server could not be killed (relaunch aborted).
-    """
+    """Launch (or kill) this pod's Infera multi-node server rank."""
     p = argparse.ArgumentParser(prog="launch_infera_node.py")
     p.add_argument("--framework", required=True, choices=("sglang", "vllm"))
     p.add_argument("--model", default="")
@@ -881,18 +669,15 @@ def main() -> int:
     node_rank = int(env.get("LWS_WORKER_INDEX", "0") or "0")
     lws_leader = (env.get("LWS_LEADER_ADDRESS", "") or "").strip()
     if lws_leader:
-        # Multi-pod LWS role (TP > one pod's GPUs): the controller-injected
-        # leader address is the torch.distributed rendezvous host.
+        # Multi-pod LWS role (TP > one pod's GPUs): the controller-injected leader address is the torch.distributed
+        # rendezvous host.
         leader = lws_leader
     else:
-        # Single-pod role (no LWS rendezvous). Use this pod's routable IP rather
-        # than 127.0.0.1 so PD-disaggregation advertises a cross-pod-reachable
-        # bootstrap host (see _resolve_pod_ip).
+        # Single-pod role (no LWS rendezvous).
         leader = _resolve_pod_ip(env)
     pid_file = Path(args.pid_file)
     log_file = Path(args.log_file)
-    # GPU metrics sampler paths (shared-FS, per-pod). Empty when no
-    # shared server-log dir is forwarded.
+    # GPU metrics sampler paths (shared-FS, per-pod).
     _samp_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
     _samp_csv = ""
     _samp_pid_file = ""
@@ -933,9 +718,8 @@ def main() -> int:
     )
 
     advertise_host = _resolve_pod_ip(env)
-    # When a shared-FS (WekaFS) server-log dir is forwarded, write server.log
-    # there with a per-pod suffix so the client can read it and prefill/decode
-    # do not collide. Falls back to the passed --log-file (pod-local /tmp).
+    # When a shared-FS (WekaFS) server-log dir is forwarded, write server.log there with a per-pod suffix so the
+    # client can read it and prefill/decode do not collide.
     _shared_log_dir = os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip()
     if _shared_log_dir.startswith("/") and "$" not in _shared_log_dir:
         log_file = Path(_shared_log_dir) / f"mn_infera_server_{advertise_host}_r{node_rank}.log"
@@ -962,9 +746,8 @@ def main() -> int:
         "log_file": str(log_file),
     }
 
-    # Self-contained GPU metrics: run rocm-smi sampling on this GPU pod
-    # (same fields as the single-node Magpie GPUMonitor) and stream to
-    # shared FS for the client to harvest. Never fail launch on metrics.
+    # Self-contained GPU metrics: run rocm-smi sampling on this GPU pod (same fields as the single-node Magpie
+    # GPUMonitor) and stream to shared FS for the client to harvest.
     if _samp_csv:
         try:
             _start_gpu_sampler(

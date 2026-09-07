@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Baseline one-shot fallback when the injected MoE runner backend kills the server.
-
-Hyperloom injects ``--moe-runner-backend triton`` for MoE sglang models on AMD.
-Quant schemes without a triton MoE runner (e.g. Quark MXFP4) crash on the first
-forward pass; the executor retries once with the flag dropped.
-"""
+"""Baseline one-shot fallback when the injected MoE runner backend kills the server."""
 
 from __future__ import annotations
 
@@ -160,8 +155,8 @@ def test_unrelated_missing_runner_attribute_is_not_a_moe_failure():
 
 
 def test_moe_failure_detected_for_non_quark_scheme():
-    # Detection is keyed on the MoE runner, not on Quark: sglang's int4fp8 and
-    # mxfp4 dynamic-quant MoE methods fail the same way.
+    # Detection is keyed on the MoE runner, not on Quark: sglang's int4fp8 and mxfp4 dynamic-quant MoE methods fail
+    # the same way.
     result = {
         "status": "failed",
         "error": (
@@ -266,9 +261,7 @@ def test_operator_pinned_backend_is_also_dropped_on_retry(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("source", ["operator_env", "reference_recipe"])
 def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatch, source):
-    """The flag can also arrive via $INFERENCE_OPTIMIZER_SERVER_ARGS or the
-    reference recipe; both are merged after the task params, so the retry must
-    strip the merged result rather than only the params."""
+    """The flag can also arrive via $INFERENCE_OPTIMIZER_SERVER_ARGS or the"""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     model = _moe_model_dir(tmp_path)
     base = tmp_path / "base.yaml"
@@ -316,8 +309,7 @@ def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatc
 
 
 def test_moe_fallback_keeps_eval_disabled_by_earlier_fallback(tmp_path, monkeypatch):
-    """An eval-rooted failure turns eval off; a MoE failure on that retry must
-    keep it off instead of resurrecting the eval that already broke."""
+    """An eval-rooted failure turns eval off; a MoE failure on that retry must"""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     model = _moe_model_dir(tmp_path)
     base = tmp_path / "base.yaml"
@@ -366,9 +358,7 @@ def test_moe_fallback_keeps_eval_disabled_by_earlier_fallback(tmp_path, monkeypa
 
 
 def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkeypatch):
-    """The original bug shape: on a Quark MX-FP4 checkpoint the gate skips
-    injection, but an operator pin still reaches the server on attempt 1. The
-    fallback must strip it."""
+    """The original bug shape: on a Quark MX-FP4 checkpoint the gate skips"""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     model = _quark_mxfp4_moe_model_dir(tmp_path)
     base = tmp_path / "base.yaml"
@@ -411,8 +401,7 @@ def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkey
 
 
 def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch):
-    """With the gate in place a Quark MX-FP4 checkpoint launches clean on the
-    first attempt -- no crash, no retry."""
+    """With the gate in place a Quark MX-FP4 checkpoint launches clean on the"""
     monkeypatch.setenv("GPU_TYPE", "mi300x")
     model = _quark_mxfp4_moe_model_dir(tmp_path)
     base = tmp_path / "base.yaml"

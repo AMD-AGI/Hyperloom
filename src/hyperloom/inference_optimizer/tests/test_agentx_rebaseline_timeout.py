@@ -5,20 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The producer side of the AgentX timeout defect.
-
-Raising the variant cap was necessary and not sufficient. Integrate passes an
-explicit ``timeout_sec`` into the re-baseline task, and ``_resolve_timeout``
-deliberately lets an explicit param outrank the AgentX derivation -- a contract
-with its own test. So the raise belongs where the param is produced, next to
-the existing cold-start raise, which exists for exactly the same reason: an
-explicit param suppresses the executor's own sizing branch.
-
-Measured on Qwen3.8: a round whose server answered all 685 chat/completions
-with 200 was cut at exactly its 7200s param, mid-warmup, after which the client
-could no longer connect. aiperf reports the cancelled warmup credit as
-``warmup_failure``, so nothing in the abort reason names the timeout.
-"""
+"""The producer side of the AgentX timeout defect."""
 
 from types import SimpleNamespace
 
@@ -75,11 +62,7 @@ def test_tracks_the_baseline_derivation(monkeypatch):
 
 
 def test_persisted_benchmark_mode_raises_without_the_env_var(monkeypatch):
-    """A re-baseline driven from a subprocess that never inherited
-    ``HYPERLOOM_AGENTX`` must still get the raise from the session's
-    persisted ``benchmark_mode`` -- otherwise it reproduces the exact
-    mid-warmup kill this function exists to prevent.
-    """
+    """A re-baseline driven from a subprocess that never inherited"""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv("AGENTX_DURATION", "3600")
     monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "28800")

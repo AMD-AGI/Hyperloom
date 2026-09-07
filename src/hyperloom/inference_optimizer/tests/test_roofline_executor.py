@@ -282,11 +282,7 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
 
 @pytest.mark.asyncio
 async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
-    """failed + no trace fields must stay profile_failed, never analyze a trace.
-
-    Asserts trace_analyze is never reached and the canonical profile_failed
-    shape is returned.
-    """
+    """failed + no trace fields must stay profile_failed, never analyze a trace."""
     state = _state()
     state.last_profile_trace = "/old/trace.gz"
     ctx = _ctx(tmp_path)
@@ -936,8 +932,7 @@ def test_strip_keeps_surrounding_markdown_intact():
     assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in out
 
 
-# N26: RooflineExecutor auto-retries trace_analyze on
-# steady_state_chunk_{empty,missing} with an alternate mode.
+# N26: RooflineExecutor auto-retries trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.
 from hyperloom.orchestrator.actions.executors.roofline import (
     _extract_steady_state_retry_mode,
 )
@@ -1030,8 +1025,7 @@ def _ta_ok(*, report_md: Path) -> dict:
 
 
 def _run_roofline_captured_payload(tmp_path, *, reason: str) -> dict:
-    """Run RooflineExecutor with stubbed profile/trace_analyze; return the
-    payload passed to record_trace_analyze."""
+    """Run RooflineExecutor with stubbed profile/trace_analyze; return the"""
     import asyncio
 
     md = tmp_path / "analysis.md"
@@ -1091,8 +1085,7 @@ def test_prelude_roofline_records_baseline_arm(tmp_path):
 
 
 def test_watermark_roofline_tags_current_best_arm(tmp_path):
-    """A non-prelude roofline explicitly tags arm=current_best (no reliance on
-    transient recorder inference)."""
+    """A non-prelude roofline explicitly tags arm=current_best (no reliance on"""
     payload = _run_roofline_captured_payload(
         tmp_path,
         reason="explore_keep_watermark",
@@ -1412,10 +1405,7 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
 # cuda-graph folding -> trace_analyze ok but 0 hot kernels
 @pytest.mark.asyncio
 async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
-    """trace_analyze succeeds but returns 0 hot kernels because cuda-graph
-    capture folded per-kernel activity; the executor appends a
-    ``cuda_graph_attribution_degraded`` trace_health_warnings entry so the LLM
-    re-profiles eager instead of reading top=[] as 'no optimizable kernels'."""
+    """trace_analyze succeeds but returns 0 hot kernels because cuda-graph"""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"
@@ -1447,8 +1437,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
 
 @pytest.mark.asyncio
 async def test_431_zero_hot_without_degraded_health_no_warning(tmp_path):
-    """Healthy trace (per_kernel_attribution_degraded=False) that genuinely
-    finds 0 hot kernels must NOT be mislabeled as cuda-graph degradation."""
+    """Healthy trace (per_kernel_attribution_degraded=False) that genuinely"""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"
@@ -1540,12 +1529,7 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path, monkeypatch):
-    """An attempt that raises must still appear in the event's ``runs``.
-
-    The fail-soft handler wrapping this branch only narrates the outcome into a
-    reason string, so an unrowed attempt leaves ``attempt_count`` short of what
-    actually ran -- and the main retry loop does row its raising attempts.
-    """
+    """An attempt that raises must still appear in the event's ``runs``."""
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import PROFILE_ATTEMPT_COMPUTE_BOUND
 
@@ -1595,8 +1579,7 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
 
 @pytest.mark.asyncio
 async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
-    """Even if trace_health says degraded, a non-empty hot_kernels list
-    proves attribution worked — do NOT append the warning."""
+    """Even if trace_health says degraded, a non-empty hot_kernels list"""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"

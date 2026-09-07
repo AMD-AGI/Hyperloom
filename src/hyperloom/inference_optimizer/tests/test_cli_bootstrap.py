@@ -178,13 +178,7 @@ def test_seed_records_the_launch_verdict_for_the_partition_shape(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The verdict carries provenance the published env cannot express.
-
-    ``published_shape()`` reads back mode, count, CU and streams, but nothing
-    that says the CU count was probed from the device rather than derived from
-    the board table. Re-reading the env therefore reported a fresh launch's
-    probed count as a table guess, which is the one thing the section is for.
-    """
+    """The verdict carries provenance the published env cannot express."""
     _neutralize_seed_io(monkeypatch)
     monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "CPX", "cu_per_partition": 32})
 
@@ -259,9 +253,9 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Regression: after the quantize prelude pins ``args.model_display_name``,
-    ``SharedState.model_name`` must use it rather than the collapsed
-    ``<...>/quantized`` path basename."""
+    """Regression: after the quantize prelude pins ``args.model_display_name``, ``SharedState.model_name`` must use it
+    rather than the collapsed ``<...>/quantized`` path basename.
+    """
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -291,8 +285,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Without a pinned display name (the common, non-quantized path) the model
-    name is still the plain model-path basename."""
+    """Without a pinned display name (the common, non-quantized path) the model"""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -315,8 +308,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
 
 
 def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
-    """Regression: ``manifest.json`` ``model_name`` must honor the pinned
-    display name from the quantize prelude, not the collapsed path basename."""
+    """Regression: ``manifest.json`` ``model_name`` must honor the pinned"""
     from hyperloom.inference_optimizer.session import manifest as m
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"

@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Behavioral tests for geak_runner's graceful-stop / flush contract.
-
-Drive the real call_geak() against a fake runner script so the process-group
-signalling and soft/hard timeout split are exercised end to end.
-"""
+"""Behavioral tests for geak_runner's graceful-stop / flush contract."""
 
 from __future__ import annotations
 
@@ -142,8 +138,7 @@ def test_call_geak_uses_current_python_when_path_is_polluted(tmp_path, monkeypat
 
 
 def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
-    """On the hard-timeout path, SIGTERM gives the child time to flush; the
-    flushed result.json is then read back (not discarded as no_result_json)."""
+    """On the hard-timeout path, SIGTERM gives the child time to flush; the"""
     runner = _write_fake_runner(
         tmp_path,
         """
@@ -171,8 +166,7 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
 
 
 def test_sigkill_escalation_when_child_ignores_sigterm(tmp_path, monkeypatch):
-    """A child that ignores SIGTERM and never flushes is SIGKILLed; the runner
-    reports a no-result error rather than hanging forever."""
+    """A child that ignores SIGTERM and never flushes is SIGKILLed; the runner"""
     runner = _write_fake_runner(
         tmp_path,
         """

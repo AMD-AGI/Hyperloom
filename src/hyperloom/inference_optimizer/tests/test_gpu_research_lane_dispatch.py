@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A ``needs_gpu`` specialist delegate acquires gpu_research_lane and gets a
-budget-sourced lease TTL (so the lane never expires mid-run and lets serving
-grab the cards). CPU specialists are unchanged (research_lane only)."""
+"""A ``needs_gpu`` specialist delegate acquires gpu_research_lane and gets a"""
 
 from __future__ import annotations
 

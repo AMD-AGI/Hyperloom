@@ -1,39 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the lm-eval generation-pathology probe and the per-request bounds.
-
-Both ship as one source string in ``_inferencex_patcher`` (it is appended to
-lm-eval's ``lm_eval_sitecustomize.py``), so no linter or import ever type-checks
-it. These tests exec it against stub lm-eval modules — hermetic, so they pin the
-contract whether or not lm-eval is installed.
-
-The two answer different failures and must not be conflated. The probe handles a
-model that never terminates at all, and pays for it by voiding the whole eval
-(~0 score). The bounds handle a healthy model whose hardest samples do not
-converge: those are truncated one at a time so the rest of the measurement
-survives — which is why the probe's ratio threshold cannot be lowered to cover
-them.
-
-What the probe must guarantee:
-
-* a model whose answers terminate is never short-circuited;
-* once a decisive share of responses hit the ``max_tokens`` cap, the remaining
-  generate requests are answered with an empty string so lm-eval still writes a
-  ``results*.json`` scoring ~0 instead of running for hours;
-* loglikelihood requests are never short-circuited (they have no EOS to emit);
-* a malformed response degrades to "eval runs as before", never a crash.
-
-What the bounds must guarantee:
-
-* every generate request carries a ceiling, with no cooperation from the caller
-  — the accuracy gate is differential, so a ceiling only one arm has is worse
-  than none;
-* an existing lower ceiling is never raised;
-* loglikelihood payloads are left alone;
-* caller-supplied stop strings outrank upstream's, which sends at most four;
-* the run reports how often the ceiling was hit, so it can be falsified.
-"""
+"""Tests for the lm-eval generation-pathology probe and the per-request bounds."""
 
 from __future__ import annotations
 
@@ -81,12 +49,7 @@ class _StubLocalChatCompletion:
     _max_gen_toks = 256
 
     def _create_payload(self, messages, generate=False, gen_kwargs=None, seed=1234, eos=None, **kwargs):
-        """Reproduce the pinned upstream payload builder.
-
-        Faithful in the two respects the bounds shim depends on: ``stop`` is
-        truncated to four entries (so ordering decides which terminators
-        survive), and the loglikelihood branch carries ``max_tokens=1``.
-        """
+        """Reproduce the pinned upstream payload builder."""
         gen_kwargs = dict(gen_kwargs or {})
         if not generate:
             return {"model": self.model, "prompt": messages, "max_tokens": 1, "logprobs": 1, "seed": seed}
@@ -108,17 +71,7 @@ class _StubLocalChatCompletion:
 
 
 def _install_stub_lm_eval(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
-    """Put stub ``lm_eval`` modules on ``sys.modules`` for the probe to patch.
-
-    The injected block patches by class attribute assignment, so each install
-    gets throwaway subclasses. Handing out the shared classes instead makes the
-    wrappers accumulate across tests: ``monkeypatch`` would record the previous
-    test's wrapper as the value to "restore", so the leak outlives every attempt
-    to undo it.
-
-    Returns:
-        The stub ``api_models`` and ``openai_completions`` modules.
-    """
+    """Put stub ``lm_eval`` modules on ``sys.modules`` for the probe to patch."""
     pkg = types.ModuleType("lm_eval")
     models = types.ModuleType("lm_eval.models")
     api_models = types.ModuleType("lm_eval.models.api_models")
@@ -139,16 +92,10 @@ def _install_stub_lm_eval(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **env: str | None):
-    """Install the injected block with an explicit env; ``None`` unsets a variable.
-
-    Returns a namespace whose ``flush()`` runs only the exit hooks this install
-    registered. Interpreter-wide ``atexit`` is left alone on purpose: the hooks
-    resolve ``RESULT_DIR`` when they fire, so a real registration would have
-    every past test's hook write into the current test's directory.
-    """
+    """Install the injected block with an explicit env; ``None`` unsets a variable."""
     env.setdefault("RESULT_DIR", str(tmp_path))
-    # Clear the whole family first: the block reads all of these, and a developer
-    # machine that happens to export one would silently change what is tested.
+    # Clear the whole family first: the block reads all of these, and a developer machine that happens to export one
+    # would silently change what is tested.
     for key in (
         "HYPERLOOM_EVAL_PROBE",
         "HYPERLOOM_EVAL_MAX_TOKENS",
@@ -207,8 +154,7 @@ async def _call(probe, obj: _StubTemplateAPI, *, generate: bool = True, cache_ke
 
 
 def test_probe_installs_over_upstream_patches(probe):
-    """The probe wraps rather than replaces, so InferenceX's own
-    parse_generations fix (appended just above it) stays in effect."""
+    """The probe wraps rather than replaces, so InferenceX's own"""
     out = probe.openai_completions.LocalChatCompletion.parse_generations(outputs=_response("stop"))
     assert out == ["upstream"]
 
@@ -229,8 +175,7 @@ def test_trips_and_short_circuits_once_decisive(probe):
 
 
 def test_terminating_model_is_never_short_circuited(probe):
-    """The whole point: a model that emits EOS must be graded normally even
-    though some answers legitimately hit the cap."""
+    """The whole point: a model that emits EOS must be graded normally even"""
     obj = _StubTemplateAPI()
     _feed(probe, "stop", 8)
     _feed(probe, "length", 1)
@@ -247,8 +192,7 @@ def test_loglikelihood_requests_are_never_short_circuited(probe):
 
 
 def test_short_circuit_still_populates_the_harness_cache(probe):
-    """lm-eval reconciles answers against cache_keys; skipping the hook would
-    desync the run it is supposed to let finish cleanly."""
+    """lm-eval reconciles answers against cache_keys; skipping the hook would"""
     obj = _StubTemplateAPI()
     _feed(probe, "length", 8)
     asyncio.run(_call(probe, obj, cache_keys=[("ctx", "kwargs")]))
@@ -256,8 +200,7 @@ def test_short_circuit_still_populates_the_harness_cache(probe):
 
 
 def test_gate_survives_a_fresh_event_loop(probe):
-    """lm-eval calls asyncio.run() once per batch. A semaphore binds to the
-    first loop that awaits it, so a non-loop-keyed gate would raise here."""
+    """lm-eval calls asyncio.run() once per batch. A semaphore binds to the"""
     obj = _StubTemplateAPI()
     asyncio.run(_call(probe, obj))
     _feed(probe, "length", 8)
@@ -273,14 +216,13 @@ def test_sidecar_records_the_evidence(probe):
     assert record["finish_reason_length"] == 8
     assert record["cap_hits"] == 8
     assert record["max_completion_tokens_seen"] == 16384
-    # parse_eval_results globs results*.json for the score; a probe sidecar
-    # matching that name would be read as an lm-eval result file.
+    # parse_eval_results globs results*.json for the score; a probe sidecar matching that name would be read as an
+    # lm-eval result file.
     assert not sidecar.name.startswith("results")
 
 
 def test_sidecar_is_written_once(probe):
-    """Every subsequent response would otherwise rewrite it with a diluted
-    ratio, since short-circuited requests never report a finish_reason."""
+    """Every subsequent response would otherwise rewrite it with a diluted"""
     _feed(probe, "length", 8)
     first = (probe.result_dir / EVAL_PROBE_FILENAME).read_text(encoding="utf-8")
     _feed(probe, "length", 20)
@@ -288,9 +230,7 @@ def test_sidecar_is_written_once(probe):
 
 
 def test_probe_can_be_disabled(monkeypatch, tmp_path):
-    """Only the probe's own hooks come off. The bounds shim shares this block and
-    installs regardless, so ``parse_generations`` stays wrapped — it just has to
-    keep chaining through to upstream's."""
+    """Only the probe's own hooks come off. The bounds shim shares this block and"""
     monkeypatch.setenv("RESULT_DIR", str(tmp_path))
     monkeypatch.setenv("HYPERLOOM_EVAL_PROBE", "0")
     api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
@@ -303,9 +243,7 @@ def test_probe_can_be_disabled(monkeypatch, tmp_path):
 
 
 def test_probe_surfaces_import_failure_when_lm_eval_absent(monkeypatch):
-    """A missing lm-eval must raise, not be swallowed: CPython's
-    ``site.execsitecustomize()`` prints it to stderr and keeps the interpreter
-    alive, so the failure is visible in the benchmark log."""
+    """A missing lm-eval must raise, not be swallowed: CPython's"""
     import pytest
 
     for name in ("lm_eval", "lm_eval.models", "lm_eval.models.api_models"):
@@ -315,8 +253,7 @@ def test_probe_surfaces_import_failure_when_lm_eval_absent(monkeypatch):
 
 
 def test_probe_survives_malformed_responses(probe):
-    """A server that answers with something unexpected must not take the eval
-    down with it."""
+    """A server that answers with something unexpected must not take the eval"""
     obj = _StubTemplateAPI()
     for junk in (None, [], {"choices": "not-a-list"}, {"choices": [None]}, {"usage": "nope"}):
         probe.openai_completions.LocalChatCompletion.parse_generations(outputs=junk)
@@ -324,8 +261,7 @@ def test_probe_survives_malformed_responses(probe):
 
 
 def test_read_eval_probe_finds_a_nested_sidecar(probe, tmp_path):
-    """The baseline double-run evaluates in the warmup round, whose RESULT_DIR
-    nests under the task workspace."""
+    """The baseline double-run evaluates in the warmup round, whose RESULT_DIR"""
     nested = tmp_path / "warmup_round"
     nested.mkdir()
     (nested / EVAL_PROBE_FILENAME).write_text(json.dumps({"reason": "model_not_terminating"}), encoding="utf-8")
@@ -338,10 +274,7 @@ def test_read_eval_probe_finds_a_nested_sidecar(probe, tmp_path):
 
 
 def test_long_answers_below_the_ceiling_do_not_trip(probe):
-    """``finish_reason=length`` alone is not the pathology. lm-eval sizes
-    max_tokens per request from the remaining context, so a truncated-but-
-    terminating model produces capped responses at several different lengths;
-    only the ones piled on the ceiling are evidence of a runaway loop."""
+    """``finish_reason=length`` alone is not the pathology. lm-eval sizes"""
     obj = _StubTemplateAPI()
     for tokens in (1024,) * 4 + (2048,) * 4:
         probe.openai_completions.LocalChatCompletion.parse_generations(outputs=_response("length", tokens))
@@ -350,9 +283,7 @@ def test_long_answers_below_the_ceiling_do_not_trip(probe):
 
 
 def test_length_ratio_zero_falls_back_to_the_default(monkeypatch, tmp_path):
-    """0 is exactly what an operator reaches for to disable the probe. Taken
-    literally it makes the ratio test vacuously true and guillotines every eval,
-    so an out-of-range value must fall back to the default, not be clamped."""
+    """0 is exactly what an operator reaches for to disable the probe. Taken"""
     p = _install(
         monkeypatch,
         tmp_path,
@@ -379,9 +310,7 @@ def test_min_samples_below_the_floor_falls_back_to_the_default(monkeypatch, tmp_
 
 
 def test_no_result_dir_keeps_the_sidecar_out_of_the_cwd(monkeypatch, tmp_path):
-    """Without ``$RESULT_DIR`` the cwd is InferenceX's checkout, and writing
-    there is the artifact escape the _EVAL_DEST_* patch exists to prevent. The
-    record still reaches stderr, and the eval is still cut short."""
+    """Without ``$RESULT_DIR`` the cwd is InferenceX's checkout, and writing"""
     monkeypatch.chdir(tmp_path)
     p = _install(monkeypatch, tmp_path, RESULT_DIR=None, HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8")
     obj = _StubTemplateAPI()
@@ -391,8 +320,7 @@ def test_no_result_dir_keeps_the_sidecar_out_of_the_cwd(monkeypatch, tmp_path):
 
 
 def test_install_drops_a_stale_sidecar(monkeypatch, tmp_path):
-    """The eval-failure retry reuses ``$RESULT_DIR``, so a sidecar left by the
-    previous attempt would be read as this run's verdict."""
+    """The eval-failure retry reuses ``$RESULT_DIR``, so a sidecar left by the"""
     stale = tmp_path / EVAL_PROBE_FILENAME
     stale.write_text(json.dumps({"reason": "model_not_terminating"}), encoding="utf-8")
 
@@ -402,9 +330,7 @@ def test_install_drops_a_stale_sidecar(monkeypatch, tmp_path):
 
 
 def test_read_eval_probe_prefers_the_newest_sidecar(tmp_path):
-    """``integrate_patch`` searches the grid slot, where sibling variants each
-    own a sidecar, and attempt dirs are hash-named — so path order says nothing
-    about which eval ran last."""
+    """``integrate_patch`` searches the grid slot, where sibling variants each"""
     older = tmp_path / "zzz_first" / EVAL_PROBE_FILENAME
     newer = tmp_path / "aaa_second" / EVAL_PROBE_FILENAME
     for path, hits in ((older, 11), (newer, 22)):
@@ -451,10 +377,7 @@ def test_eval_probe_summary_names_the_kind_and_the_evidence():
 
 
 def test_probe_record_reaches_session_breakdown(tmp_path):
-    """End of the traceability chain: the writeback audit stores the record in
-    the attempt's ``extras``, and the collector must carry it into
-    ``session_breakdown.json``. Without this, a baseline accuracy of 0 gives a
-    reader no way to tell a broken generation loop from wrong answers."""
+    """End of the traceability chain: the writeback audit stores the record in"""
     from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_baseline
 
     probe_record = {
@@ -495,9 +418,7 @@ def test_breakdown_attempt_extras_default_to_empty(tmp_path):
     assert section["attempts_history"][0]["extras"] == {}
 
 
-# ---------------------------------------------------------------------------
 # Per-request bounds
-# ---------------------------------------------------------------------------
 
 BOUNDS_FILENAME = "hyperloom_eval_bounds.json"
 
@@ -508,9 +429,9 @@ def bounds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     return _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0")
 
 
-# Verbatim shape of the real Qwen3 metadata, which is the case that motivates
-# deriving at all: generation_config declares two terminators and eos_token is
-# only the first, so <|endoftext|> is invisible to anything reading eos_token.
+# Verbatim shape of the real Qwen3 metadata, which is the case that motivates deriving at all: generation_config
+# declares two terminators and eos_token is only the first, so <|endoftext|> is invisible to anything reading
+# eos_token.
 _QWEN3_GENERATION_CONFIG = {"bos_token_id": 151643, "eos_token_id": [151645, 151643]}
 _QWEN3_TOKENIZER_CONFIG = {
     "eos_token": "<|im_end|>",
@@ -544,9 +465,7 @@ def _payload(env, generate=True, **kwargs):
 
 
 def test_bounds_clamp_max_tokens_with_no_env_set(bounds):
-    """The ceiling cannot depend on the caller remembering to set it: InferenceX
-    passes ``max_tokens=min(16384, ctx-4096)`` and both gate arms must share
-    whatever bound applies."""
+    """The ceiling cannot depend on the caller remembering to set it: InferenceX"""
     assert _payload(bounds, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
 
 
@@ -557,8 +476,7 @@ def test_bounds_env_overrides_the_default(monkeypatch, tmp_path):
 
 
 def test_bounds_never_raise_an_existing_lower_ceiling(bounds):
-    """Clamping is one-directional. A task that asked for less knows something we
-    do not, and granting it more would change what is being measured."""
+    """Clamping is one-directional. A task that asked for less knows something we"""
     assert _payload(bounds, gen_kwargs={"max_tokens": 64})["max_tokens"] == 64
 
 
@@ -571,8 +489,7 @@ def test_bounds_zero_disables_the_clamp(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("raw", ["", "   ", "lots", "4096.5", "-1"])
 def test_bounds_fall_back_to_the_default_when_the_env_is_unusable(monkeypatch, tmp_path, raw):
-    """A typo must not silently mean "unbounded" — that is the failure this
-    exists to prevent. Only an explicit 0 disables it."""
+    """A typo must not silently mean \"unbounded\" — that is the failure this"""
     env = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS=raw)
 
     assert _payload(env, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
@@ -587,8 +504,7 @@ def test_bounds_leave_loglikelihood_payloads_untouched(bounds):
 
 
 def test_bounds_prepend_stop_strings_ahead_of_upstreams(monkeypatch, tmp_path):
-    """Upstream keeps only the first four, so the caller's terminators — the ones
-    derived from the model actually under test — have to go first."""
+    """Upstream keeps only the first four, so the caller's terminators — the ones"""
     env = _install(
         monkeypatch,
         tmp_path,
@@ -609,9 +525,7 @@ def test_bounds_do_not_duplicate_a_stop_string_upstream_already_sent(monkeypatch
 
 
 def test_bounds_summary_reports_how_often_the_ceiling_was_hit(bounds):
-    """Truncation is only defensible while it is rare, so the run has to say how
-    rare it was: too low a ceiling depresses both arms' scores and nothing else
-    would show it."""
+    """Truncation is only defensible while it is rare, so the run has to say how"""
     cls = bounds.cls
     cls.parse_generations(outputs=[{"choices": [{"finish_reason": "length"}, {"finish_reason": "stop"}]}])
     cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}])
@@ -638,15 +552,12 @@ def test_bounds_counting_survives_a_response_it_cannot_read(bounds):
 
 
 def test_bounds_and_probe_coexist(probe):
-    """Both wrap ``parse_generations``; the chain has to reach upstream's, and
-    the probe still has to trip."""
+    """Both wrap ``parse_generations``; the chain has to reach upstream's, and"""
     assert probe.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}]) == ["upstream"]
     assert _payload(probe, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
 
 
-# ---------------------------------------------------------------------------
 # Model-derived terminators
-# ---------------------------------------------------------------------------
 
 
 def _derive(monkeypatch, tmp_path, **kwargs):
@@ -656,8 +567,7 @@ def _derive(monkeypatch, tmp_path, **kwargs):
 
 
 def test_derives_every_terminator_the_model_declares(monkeypatch, tmp_path):
-    """The gap this closes: eos_token is <|im_end|> alone, while the model stops
-    on <|endoftext|> too."""
+    """The gap this closes: eos_token is <|im_end|> alone, while the model stops"""
     payload = _payload(_derive(monkeypatch, tmp_path), gen_kwargs={"until": ["Question:"]})
 
     assert payload["stop_token_ids"] == [151645, 151643]
@@ -665,9 +575,7 @@ def test_derives_every_terminator_the_model_declares(monkeypatch, tmp_path):
 
 
 def test_derived_ids_do_not_displace_the_tasks_own_stop_list(monkeypatch, tmp_path):
-    """Upstream keeps only 4 stop strings and the task's list is what its answer
-    extraction depends on, so the derived strings yield to it. stop_token_ids has
-    no such limit, which is why nothing is actually lost on vLLM/SGLang."""
+    """Upstream keeps only 4 stop strings and the task's list is what its answer"""
     payload = _payload(
         _derive(monkeypatch, tmp_path),
         gen_kwargs={"until": ["Question:", "\n\n", "Q:", "A:"]},
@@ -692,8 +600,7 @@ def test_operator_stop_strings_outrank_derived_ones(monkeypatch, tmp_path):
 
 
 def test_falls_back_to_tokenizer_eos_when_generation_config_is_absent(monkeypatch, tmp_path):
-    """generation_config is optional; without it there are no ids to send, but
-    the one terminator tokenizer_config names is still worth sending."""
+    """generation_config is optional; without it there are no ids to send, but"""
     payload = _payload(_derive(monkeypatch, tmp_path, generation=None), gen_kwargs={"until": ["Q:"]})
 
     assert "stop_token_ids" not in payload
@@ -735,8 +642,7 @@ def test_derives_nothing_when_model_path_is_unset(bounds):
     ],
 )
 def test_unreadable_or_odd_metadata_never_breaks_the_eval(monkeypatch, tmp_path, generation, tokenizer):
-    """Metadata is not a contract we control, so every shape has to degrade to
-    'run as before' rather than take the eval down."""
+    """Metadata is not a contract we control, so every shape has to degrade to"""
     env = _derive(monkeypatch, tmp_path, generation=generation, tokenizer=tokenizer)
 
     payload = _payload(env, gen_kwargs={"until": ["Q:"], "max_tokens": 16384})
@@ -755,8 +661,7 @@ def test_a_single_eos_token_id_is_accepted(monkeypatch, tmp_path):
 
 
 def test_derivation_can_be_switched_off(monkeypatch, tmp_path):
-    """Escape hatch for reproducing an upstream number, or for a server that
-    rejects stop_token_ids."""
+    """Escape hatch for reproducing an upstream number, or for a server that"""
     model_dir = _write_model_dir(tmp_path)
     env = _install(
         monkeypatch,
@@ -780,8 +685,7 @@ def test_derived_terminators_leave_loglikelihood_payloads_untouched(monkeypatch,
 
 
 def test_summary_records_the_terminators_the_run_actually_used(monkeypatch, tmp_path):
-    """A stored score is only comparable against another run under the same
-    terminators, so the run has to state them."""
+    """A stored score is only comparable against another run under the same"""
     env = _derive(monkeypatch, tmp_path)
     _payload(env, gen_kwargs={"until": ["Q:"]})
     env.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}])
@@ -793,8 +697,7 @@ def test_summary_records_the_terminators_the_run_actually_used(monkeypatch, tmp_
 
 
 def test_an_uncached_repo_id_derives_nothing_rather_than_downloading(monkeypatch, tmp_path):
-    """MODEL_PATH may be a repo id. Resolution is cache-only by design; the eval
-    must never be the thing that starts a multi-GB download."""
+    """MODEL_PATH may be a repo id. Resolution is cache-only by design; the eval"""
     env = _install(
         monkeypatch,
         tmp_path,

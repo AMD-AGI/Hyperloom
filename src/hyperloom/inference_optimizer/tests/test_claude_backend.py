@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ClaudeBackend + emit_intent MCP server tests.
-
-All tests use SDK test seams so no real Claude API calls are made and no
-``ANTHROPIC_API_KEY`` is required.
-"""
+"""ClaudeBackend + emit_intent MCP server tests."""
 
 from __future__ import annotations
 
@@ -91,14 +87,7 @@ def _make_raising_query_factory(exc: BaseException):
 
 @pytest.mark.asyncio
 async def test_stream_api_error_is_marked_as_llm_call_failed():
-    """A non-timeout gateway error must be countable, not just a timeout.
-
-    The failure that motivated this telemetry is a gateway 400
-    (``litellm.BadRequestError: AnthropicException``) surfacing out of the SDK
-    stream. Left unmarked it reaches the Coordinator's "unexpected crash" path
-    and no error row is written, so the LLM error rate silently misses exactly
-    the case it was added for.
-    """
+    """A non-timeout gateway error must be countable, not just a timeout."""
     backend = ClaudeBackend(
         sdk_query_factory=_make_raising_query_factory(RuntimeError("litellm.BadRequestError: AnthropicException")),
         sdk_options_cls=FakeOptions,
@@ -556,13 +545,7 @@ async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
 async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
-    """A wrapper block and a native block are two tool_use events.
-
-    The coordinator executes every intent with no merge. After the MCP
-    handler acks the wrapper, the model should not retry; if both still
-    appear in one query they are kept rather than dropping a real second
-    emit.
-    """
+    """A wrapper block and a native block are two tool_use events."""
     raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
     wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
     native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
@@ -692,9 +675,8 @@ async def test_options_includes_system_prompt_and_max_turns():
     )
     with pytest.raises(NoIntentEmitted):
         await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
-    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode:
-    # Claude Code counts its own messages as turns, so a literal max_turns=3
-    # would trip before the model can emit an intent.
+    # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
+    # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]

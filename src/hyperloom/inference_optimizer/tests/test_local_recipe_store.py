@@ -28,8 +28,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _list_jsonl, 
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
-    """``from_dict`` must hydrate ``framework_name`` from the legacy ``framework``
-    key and must not leak the legacy key into ``extras``."""
+    """``from_dict`` must hydrate ``framework_name`` from the legacy ``framework``"""
     legacy = {
         "canonical_id": "inference:m:mi300x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8",
         "model": "m",
@@ -50,8 +49,7 @@ def test_from_dict_prefers_new_framework_name_over_legacy() -> None:
 
 
 def test_matches_labels_matches_legacy_framework_payload() -> None:
-    """A search filtered by ``framework_name`` must still match recipe rows
-    persisted with the legacy ``framework`` key."""
+    """A search filtered by ``framework_name`` must still match recipe rows"""
     legacy_payload = {"model": "m", "hardware": "mi300x", "framework": "sglang"}
     assert _matches_labels(legacy_payload, {"framework_name": "sglang"}) is True
     assert _matches_labels(legacy_payload, {"framework_name": "vllm"}) is False
@@ -230,8 +228,7 @@ def test_put_recipe_second_call_archives_prior_and_bumps_version(
 def test_put_recipe_keeps_existing_history_envelope_when_snapshot_matches(
     tmp_path: Path,
 ) -> None:
-    """A leftover ``history/v{live}`` from a crash between the two renames
-    must not be overwritten by the next successful put."""
+    """A leftover ``history/v{live}`` from a crash between the two renames"""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(
@@ -318,12 +315,7 @@ def test_put_recipe_rewrites_unreadable_history_and_still_advances(
 def test_put_recipe_counts_report_pre_and_post_write_sizes(
     tmp_path: Path,
 ) -> None:
-    """``prior_counts``/``counts`` let a caller derive what a write contributed.
-
-    ``put_recipe`` rewrites the whole row, so absolute sizes alone cannot tell
-    an amend that appended a lesson from a read-modify-write that round-trips
-    the existing lists untouched (what the T0 anchor does).
-    """
+    """``prior_counts``/``counts`` let a caller derive what a write contributed."""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(
@@ -651,8 +643,7 @@ def test_append_attempt_id_is_monotonic_per_cid(tmp_path: Path) -> None:
 def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     tmp_path: Path,
 ) -> None:
-    """Concurrent put_recipe calls under the cid lock must produce
-    contiguous monotonic versions and a complete history chain."""
+    """Concurrent put_recipe calls under the cid lock must produce"""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
 
@@ -778,8 +769,7 @@ def test_recipe_payload_carries_canonical_id_and_version(tmp_path: Path) -> None
 
 
 def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
-    """``history/`` is the only directory that may sit below the 7-level recipe
-    dir; the walker MUST NOT recurse into it."""
+    """``history/`` is the only directory that may sit below the 7-level recipe"""
     store = LocalRecipeStore(root=tmp_path)
     cid = _cid()
     store.put_recipe(canonical_id=cid)

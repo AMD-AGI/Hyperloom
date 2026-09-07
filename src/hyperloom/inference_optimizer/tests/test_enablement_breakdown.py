@@ -234,8 +234,7 @@ def test_collect_enablement_succeeded_flag():
 
 
 def test_collect_enablement_boot_origin_round_surfaced():
-    """A boot-origin round repaired by a source patch provisions no runtime and
-    builds nothing; it must still be visible."""
+    """A boot-origin round repaired by a source patch provisions no runtime and"""
     out = collect_enablement(
         Path("/tmp"),
         _state(
@@ -262,8 +261,7 @@ def test_collect_enablement_boot_origin_round_surfaced():
 
 
 def test_collect_enablement_opt_out_recorded_but_armed_idle_hidden():
-    """``all`` is the default, so an armed lane that never fired is not worth a
-    block; an explicit opt-out is, since it explains why nothing self-healed."""
+    """``all`` is the default, so an armed lane that never fired is not worth a"""
     off_out = collect_enablement(Path("/tmp"), _state(enablement_mode="off"), [])
     assert off_out["mode"] == "off"
     assert off_out["engaged"] is False

@@ -251,9 +251,7 @@ class TestProfileWorkloadContext:
             "isl": 1024,
             "osl": 512,
             "max_model_len": 4096,
-            # The context also carries the runtime identity. This payload sets
-            # none of it, so these normalize to their empty forms -- asserted
-            # explicitly so a silent change to the identity shape fails here.
+            # The context also carries the runtime identity.
             "server_args": "",
             "extra_envs": {},
             "remove_args": [],
@@ -399,9 +397,8 @@ class TestApplyChanges:
         assert s.cumulative_gain_validated == before  # core write dropped
 
     def test_a_stop_time_cannot_be_written_apart_from_its_reason(self):
-        # stop_reason is a core field, so a changes dict that carries both must
-        # not land the timestamp half either: the pair is what the export reads
-        # as "the session ended then, for this reason".
+        # stop_reason is a core field, so a changes dict that carries both must not land the timestamp half either:
+        # the pair is what the export reads as "the session ended then, for this reason".
         s = SharedState()
         s.set_stop_reason("time_exhausted")
         pinned = s.stop_ts
@@ -555,16 +552,15 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     assert last["error_excerpt"].startswith("boom!")
     assert last["reported_success"] is False
     assert last["key_metric"] is None
-    # stderr_tail is now captured for EVERY failure carrying an error blob
-    # (no error_class whitelist), so orchestration/RCA see the actionable tail.
+    # stderr_tail is now captured for EVERY failure carrying an error blob (no error_class whitelist), so
+    # orchestration/RCA see the actionable tail.
     assert last["stderr_tail"] is not None
     assert len(last["stderr_tail"]) == 1000
     assert "boom!" in last["stderr_tail"]
 
 
 def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
-    """A subprocess_nonzero baseline attempt records stderr_tail into the
-    attempts history so the breakdown exporter can surface the raw crash."""
+    """A subprocess_nonzero baseline attempt records stderr_tail into the"""
     s = SharedState()
     big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
     s.record_action_attempt(
@@ -589,11 +585,7 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
 
 def test_record_action_attempt_redacts_secrets_from_persisted_errors():
     s = SharedState()
-    # Named for what it is -- a value planted to be found missing -- rather
-    # than for what it imitates. A test-local holding a credential-shaped
-    # literal reads to the clear-text-logging analysis as a live credential,
-    # and it then reports every diagnostic path this value could reach as a
-    # leak of it.
+    # Named for what it is -- a value planted to be found missing -- rather than for what it imitates.
     planted = "ak-sensitive-value"
     s.record_action_attempt(
         action="baseline",
@@ -776,12 +768,7 @@ def test_baseline_current_best_reuses_recorded_profile_runtime():
 
 
 def test_profile_trace_matches_workload_with_server_args():
-    """Regression (H1): profile_trace_matches_workload() with no explicit target
-    must compare the recorded profile against the *current-best* runtime identity,
-    not the bare profile_workload_context() (which reports server_args="" and
-    skips the current_best backfill). Otherwise any workload carrying server
-    args/extra envs reads its own fresh profile as stale on every run and the
-    forge shape resolvers discard a perfectly good TraceLens profile."""
+    """Regression (H1): profile_trace_matches_workload() with no explicit target"""
     state = SharedState(
         framework="vllm",
         precision="fp8",
@@ -801,12 +788,11 @@ def test_profile_trace_matches_workload_with_server_args():
         }
     )
 
-    # The recorded profile matches the active current-best runtime, so freshness
-    # with no explicit target must hold.
+    # The recorded profile matches the active current-best runtime, so freshness with no explicit target must hold.
     assert state.current_profile_workload_context() == state.last_profile_workload
     assert state.profile_trace_matches_workload() is True
-    # The bare context really does disagree (server_args=""), which is exactly why
-    # defaulting to it would falsely flag this fresh profile as stale.
+    # The bare context really does disagree (server_args=""), which is exactly why defaulting to it would falsely flag
+    # this fresh profile as stale.
     assert state.last_profile_workload != state.profile_workload_context()
 
 
@@ -830,8 +816,8 @@ def test_baseline_current_best_ignores_tuned_arm_profile_runtime():
     )
     assert state.last_profile_workload_action == "gemm_tuning"
 
-    # Reverting to a bare baseline drops the tuned runtime, so the fingerprint
-    # must no longer claim the tuned arm's args are in effect.
+    # Reverting to a bare baseline drops the tuned runtime, so the fingerprint must no longer claim the tuned arm's
+    # args are in effect.
     state.current_best = {"action": "baseline", "tput": 100.0}
     context = state.current_profile_workload_context()
 

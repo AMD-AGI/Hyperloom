@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session manifest writer — the first file written after
-``make_session_dir()`` and the canonical session-resume tag (atomic write
-via tmp + ``os.replace``).
-
-Records identity, host/image, model + workload + objective, code_revision,
-``dependencies``, and ``stack_fingerprint``. All provenance fields degrade to
-empty/null on lookup failure — manifest writing never fails on missing
-provenance.
-"""
+"""Session manifest writer — the first file written after"""
 
 from __future__ import annotations
 
@@ -37,16 +29,7 @@ SCHEMA_VERSION = 4
 
 
 def _git_revision() -> str:
-    """Best-effort source revision of the repo containing this package.
-
-    Prefers the live git SHA (dev checkouts). Falls back to a build-time-baked
-    revision from the environment (``HYPERLOOM_CODE_REVISION`` /
-    ``HYPERLOOM_GIT_SHA``) so the field identifies the source commit even in a
-    deployed image with no ``.git`` tree.
-
-    Returns:
-        str: Short HEAD SHA, else the baked env revision, else ``""``.
-    """
+    """Best-effort source revision of the repo containing this package."""
     here = Path(__file__).resolve().parent
     rev = _git_revision_at(here)
     if rev:
@@ -59,17 +42,7 @@ def _git_revision() -> str:
 
 
 def _git_capture(path: Path, args: list[str]) -> str:
-    """Best-effort ``git -C <path> <args>`` returning trimmed stdout.
-
-    Args:
-        path (Path): Directory expected to be (within) a git checkout.
-        args (list[str]): The git subcommand + flags (without the leading
-            ``git -C <path>`` prefix).
-
-    Returns:
-        str: Trimmed stdout, or an empty string when ``path`` is not a checkout,
-        git returns non-zero, or the invocation fails.
-    """
+    """Best-effort ``git -C <path> <args>`` returning trimmed stdout."""
     try:
         out = subprocess.run(
             ["git", "-C", str(path), *args],
@@ -94,20 +67,12 @@ def _git_remote_at(path: Path) -> str:
     return _git_capture(path, ["config", "--get", "remote.origin.url"])
 
 
-# Pod-local, non-persistent roots: a dependency checkout under one of these is
-# erased on pod recycle. A shared checkout elsewhere is legitimate.
+# Pod-local, non-persistent roots: a dependency checkout under one of these is erased on pod recycle.
 _POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")  # nosec B108 - path-prefix heuristic only.
 
 
 def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
-    """Warn when a dependency checkout points at a pod-local, non-persistent
-    path (erased on pod recycle); a shared checkout outside USER_DATA_PATH is
-    legitimate and does not warn.
-
-    Args:
-        env_var: Name of the env var holding the dependency checkout path.
-        raw: The raw checkout path value.
-    """
+    """Warn when a dependency checkout points at a pod-local, non-persistent"""
     user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
     if not user_data:
         return
@@ -136,15 +101,7 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
 
 
 def _describe_dep(*env_vars: str) -> dict[str, str]:
-    """Build a ``{path, commit, remote}`` provenance dict for one dependency
-    pointed at by the first set env var among ``env_vars`` (in priority order).
-    All fields default to empty string when no env var is set, the directory is
-    missing, or git is unhappy — we never raise out of here.
-
-    Returns:
-        dict[str, str]: Mapping with ``path``, ``commit``, and ``remote`` keys;
-        any unresolved field is an empty string.
-    """
+    """Build a ``{path, commit, remote}`` provenance dict for one dependency"""
     raw = ""
     for env_var in env_vars:
         raw = (os.environ.get(env_var) or "").strip()
@@ -164,12 +121,7 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
 
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
-    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this
-    session executes against, so debuggers can answer "which upstream?" later.
-
-    Returns:
-        Mapping of dependency name to its ``{path, commit, remote}`` block.
-    """
+    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this"""
     return {
         "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
@@ -177,12 +129,7 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
 
 
 def _detect_image() -> str | None:
-    """Best-effort container image detection: env vars -> known mount points
-    -> cgroup probe. Returns None when nothing matches (never raises).
-
-    Returns:
-        The detected container image string, or ``None`` when none matches.
-    """
+    """Best-effort container image detection: env vars -> known mount points"""
     for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         val = (os.environ.get(var) or "").strip()
         if val:
@@ -215,22 +162,7 @@ def _detect_image() -> str | None:
 
 
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
-    """Mirror cli._run_optimize's objective derivation, without importing it.
-
-    ``kind`` / ``value`` keep naming one target because every consumer reads
-    that pair. A run with a roofline target alongside it carries the full set in
-    ``objectives`` as well.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args; checked for
-            ``target_gain``, ``target_tput``, ``target_baseline_dir``, and
-            ``target_roofline``.
-
-    Returns:
-        dict[str, Any]: Objective mapping with ``kind`` (one of ``gain_pct``,
-        ``tput``, ``baseline``, ``roofline_pct``, ``time_only``), an associated
-        ``value``, and ``objectives`` when more than one target is set.
-    """
+    """Mirror cli._run_optimize's objective derivation, without importing it."""
     targets: list[dict[str, Any]] = []
     if getattr(args, "target_gain", None):
         targets.append({"kind": "gain_pct", "value": float(args.target_gain)})
@@ -248,26 +180,13 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_session_id(model_name: str = "") -> str:
-    """Derive an internal session_id label for manifest / SharedState / report
-    metadata (not used for path computation).
-
-    Args:
-        model_name: Model name used as the id stem; defaults to ``session``.
-
-    Returns:
-        The derived internal session-id label.
-    """
+    """Derive an internal session_id label for manifest / SharedState / report"""
     stem = (model_name or "session").strip().replace("/", "_") or "session"
     return f"{stem}_{utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
 
 def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
-    """Return the session-locked GPU specialist capacity.
-
-    Defaults GPU specialists to whole-machine capacity. The parsed CLI arg
-    normally carries that detected value; manifest helpers are also used in
-    tests and direct-call paths where ``args`` can be missing or incomplete.
-    """
+    """Return the session-locked GPU specialist capacity."""
     raw = getattr(args, "gpu_specialist_capacity", None) if args is not None else None
     if raw is not None:
         try:
@@ -285,22 +204,7 @@ def build_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``).
-
-    Merges environment variables and (optional) parsed CLI args into the
-    canonical resume tag, including workload, objective, dependency
-    provenance, stack fingerprint, image, and warm-replay settings.
-
-    Args:
-        session_dir (Path): Session directory the manifest describes.
-        args (argparse.Namespace | None): Parsed CLI args overriding env-based
-            defaults; ``None`` uses environment/defaults only.
-        session_id (str | None): Explicit session-id label; derived from the
-            model name when ``None``.
-
-    Returns:
-        dict[str, Any]: JSON-serializable manifest mapping.
-    """
+    """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
     model_path = ""
     model_name = ""
     framework = os.environ.get("FRAMEWORK", "")
@@ -318,8 +222,7 @@ def build_manifest(
     if args is not None:
         if getattr(args, "model", None):
             model_path = str(args.model)
-            # Prefer the quantize prelude's pinned source identity over the
-            # generic "quantized" export-dir basename.
+            # Prefer the quantize prelude's pinned source identity over the generic "quantized" export-dir basename.
             model_name = (getattr(args, "model_display_name", "") or "").strip() or Path(model_path).name
         if getattr(args, "framework", None):
             framework = str(args.framework)
@@ -333,9 +236,8 @@ def build_manifest(
             workload["precision"] = str(args.precision)
     claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
     sandbox_user_id = (os.environ.get("SANDBOX_USER_ID") or "").strip() or None
-    # Shared provenance builder (WP-0): single source of truth for gfx/EP/
-    # graph-mode/server-args, kept in lockstep with the TraceShapeManifest's
-    # provenance block so the two never drift.
+    # Shared provenance builder (WP-0): single source of truth for gfx/EP/ graph-mode/server-args, kept in lockstep
+    # with the TraceShapeManifest's provenance block so the two never drift.
     _prov = build_provenance(args, env=os.environ)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -344,16 +246,15 @@ def build_manifest(
         "sandbox_user_id": sandbox_user_id,
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
-        # USER_DATA_PATH root snapshotted so a trace-based consumer can locate
-        # the on-disk artifacts.
+        # USER_DATA_PATH root snapshotted so a trace-based consumer can locate the on-disk artifacts.
         "user_data_path": str(_paths.workspace_root()),
         "model_path": model_path,
         "model_name": model_name,
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
         "tp": tp,
-        # Added provenance (schema v4) via the shared WP-0 builder so a trace
-        # consumer can pin gfx arch / expert-parallel / graph mode / server args.
+        # Added provenance (schema v4) via the shared WP-0 builder so a trace consumer can pin gfx arch /
+        # expert-parallel / graph mode / server args.
         "gfx_arch": _prov.get("gfx_arch"),
         "ep": _prov.get("ep"),
         "graph_mode": _prov.get("graph_mode"),
@@ -367,21 +268,16 @@ def build_manifest(
         "pid": os.getpid(),
         "host": platform.node() or socket.gethostname() or "",
         "image": _detect_image(),
-        # Snapshotted so resume-after-redeploy can detect drift. Taken from the
-        # shared builder because the manifest is what the KB row, the specialist
-        # prompt and resume all read, and each of them drops "unknown": a
-        # detector that only sees this interpreter leaves an isolated framework
-        # venv missing from every one of them.
+        # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
-        # Locked at session start; resume reads it back so a restart can't
-        # change concurrency semantics.
+        # Locked at session start; resume reads it back so a restart can't change concurrency semantics.
         "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
         "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
         "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
-        # Operator-supplied reference recipe source (audit only); the resolved
-        # server_args / envs / model are authoritative in state.json.
+        # Operator-supplied reference recipe source (audit only); the resolved server_args / envs / model are
+        # authoritative in state.json.
         "reference_script": (getattr(args, "reference_script", None) if args is not None else None),
     }
 
@@ -392,17 +288,7 @@ def write_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically write ``manifest.json`` under session_dir; returns the
-    manifest dict.
-
-    Args:
-        session_dir: Session directory to write the manifest into.
-        args: Parsed CLI args overriding env-based defaults, or ``None``.
-        session_id: Explicit session-id label, or ``None`` to derive one.
-
-    Returns:
-        The manifest dict that was written.
-    """
+    """Atomically write ``manifest.json`` under session_dir; returns the"""
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
     target = manifest_path(sd)
@@ -419,19 +305,7 @@ def write_manifest(
 
 
 def load_manifest(session_dir: Path) -> dict[str, Any]:
-    """Read ``manifest.json`` for an existing session. Raises
-    ``FileNotFoundError`` if missing (the signal ``--resume-from`` uses to refuse a
-    fresh sandbox).
-
-    Args:
-        session_dir: Session directory to read the manifest from.
-
-    Returns:
-        The parsed manifest dict.
-
-    Raises:
-        FileNotFoundError: If ``manifest.json`` does not exist.
-    """
+    """Read ``manifest.json`` for an existing session. Raises"""
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(

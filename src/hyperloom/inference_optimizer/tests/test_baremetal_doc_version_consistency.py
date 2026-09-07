@@ -1,12 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Guard: install_baremetal.sh defaults stay in sync with docs/compatibility.rst.
-
-Cheap, no-network consistency check. It does NOT verify that the
-(version, variant) tuple actually exists on wheels.vllm.ai -- it only ensures
-the script defaults and the documented recommendation do not silently drift
-apart (the failure mode behind the 0.24.0 rocm722->rocm723 regression).
-"""
+"""Guard: install_baremetal.sh defaults stay in sync with docs/compatibility.rst."""
 
 from __future__ import annotations
 
@@ -33,8 +27,8 @@ def test_baremetal_defaults_match_compat_doc():
     sglang_ref = _default("SGLANG_REF", sh)  # e.g. v0.5.17
     sglang_rocm_extra = _default("SGLANG_ROCM_EXTRA", sh)  # e.g. rocm724
 
-    # compatibility.rst documents e.g. "v0.27.1 (rocm723)" and the pip spec
-    # "vllm==0.27.1+rocm723"; keep both in lockstep with the script defaults.
+    # compatibility.rst documents e.g. "v0.27.1 (rocm723)" and the pip spec "vllm==0.27.1+rocm723"; keep both in
+    # lockstep with the script defaults.
     assert "v%s (%s)" % (vllm_version, vllm_variant) in doc, (
         "docs/compatibility.rst must document vLLM 'v%s (%s)' to match "
         "install_baremetal.sh defaults" % (vllm_version, vllm_variant)

@@ -16,8 +16,8 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
 
 
-# Derived, not copied: a hand-maintained list goes stale silently when a domain
-# is added, and fails en masse when one is removed.
+# Derived, not copied: a hand-maintained list goes stale silently when a domain is added, and fails en masse when one
+# is removed.
 _DOMAIN_KEYS = tuple(sorted(d.key for d in SPECIALIST_DOMAINS))
 
 
@@ -168,9 +168,7 @@ def test_cold_start_directive():
 
 
 def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
-    """It used to direct the fallback proposals to carry ``confidence: low`` --
-    a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped
-    the guard on exactly the round where it was the only source of ideas."""
+    """It used to direct the fallback proposals to carry ``confidence: low`` --"""
     inp = SpecialistPromptInputs(
         task_id="t",
         domain=get_domain("serving_specialist"),

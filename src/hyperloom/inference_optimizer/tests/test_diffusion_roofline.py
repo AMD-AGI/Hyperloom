@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the diffusion workload-level roofline aggregator.
-
-``diffusion_roofline`` aggregates a per-kernel TraceLens CSV dir into a single
-workload roofline (kernel efficiency, gpu busy ratio, per denoise-step timings).
-"""
+"""Tests for the diffusion workload-level roofline aggregator."""
 
 from __future__ import annotations
 
@@ -70,8 +66,7 @@ def test_diffusion_roofline_missing_unified_raises(tmp_path):
 
 
 def test_dit_analytic_flops_formula():
-    # 1 layer, 1 token, 1 step, h=2, ffn=4 -> linear = 2*(4+8)*4 = 96;
-    # attention = 2*(2*1*2) = 8; total = 104.
+    # 1 layer, 1 token, 1 step, h=2, ffn=4 -> linear = 2*(4+8)*4 = 96; attention = 2*(2*1*2) = 8; total = 104.
     flops = dr.dit_analytic_flops(hidden_size=2, num_layers=1, num_tokens=1, num_denoise_steps=1, ffn_ratio=4.0)
     assert flops["linear_flops"] == pytest.approx(96.0)
     assert flops["attention_flops"] == pytest.approx(8.0)
@@ -115,8 +110,7 @@ def test_build_report_no_geometry_skips_analytic(tmp_path):
 
 
 def test_print_summary_full_report_smoke(tmp_path, capsys):
-    """A report with every optional section (per-step + analytic ceiling +
-    reconciliation) must render without raising."""
+    """A report with every optional section (per-step + analytic ceiling +"""
     _write_csvs(tmp_path)
     report = dr.build_report(
         tmp_path,
@@ -134,8 +128,7 @@ def test_print_summary_full_report_smoke(tmp_path, capsys):
 
 
 def test_print_summary_minimal_report_smoke(tmp_path, capsys):
-    """No timeline -> ``gpu_busy_ratio`` None exercises the ``_fmt_pct`` n/a
-    branch; no geometry -> optional sections are omitted."""
+    """No timeline -> ``gpu_busy_ratio`` None exercises the ``_fmt_pct`` n/a"""
     _write_csvs(tmp_path, with_timeline=False)
     report = dr.build_report(tmp_path, num_denoise_steps=None, top_k=3)
     dr.print_summary(report)
@@ -179,8 +172,7 @@ def test_aggregate_unified_memory_bound_split():
 
 
 def test_build_report_analytic_geometry_missing_key_is_fail_soft(tmp_path):
-    """A dit_geometry dict missing a required key hits the guarded
-    ``except (KeyError, TypeError, ValueError)`` path without raising."""
+    """A dit_geometry dict missing a required key hits the guarded"""
     _write_csvs(tmp_path)
     report = dr.build_report(
         tmp_path,
@@ -306,8 +298,7 @@ def test_main_with_dit_geometry_flags(tmp_path, monkeypatch, capsys):
 
 
 def test_main_target_platform_resolves_achievable(tmp_path, monkeypatch, capsys):
-    """``--target-platform`` (without an explicit --achievable-tflops) exercises
-    the HW_SPECS_ACHIEVABLE resolution branch (fail-soft on any import error)."""
+    """``--target-platform`` (without an explicit --achievable-tflops) exercises"""
     csv_dir = tmp_path / "csvs"
     csv_dir.mkdir()
     _write_csvs(csv_dir)

@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Section renderer + LLM compose layer that turns a
-``session_breakdown.json`` dict into a user-facing markdown report.
-
-Public API:
-
-* :func:`render_session_report` — main entry. Returns
-  :class:`ComposeResult` whose ``markdown`` attribute is the report
-  text.
-
-* :class:`RenderedSection`, :class:`Decision`, :class:`GlobalFacts` —
-  surfaced for callers that want their own composer or the structured
-  facts directly (UI, dashboards).
-"""
+"""Section renderer + LLM compose layer that turns a"""
 
 from .base import Decision, RenderedSection
 from .compose import ComposeResult, LLMClient, render_session_report
