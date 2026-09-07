@@ -572,7 +572,7 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert "--enforce-eager" in ctx.task.params["extra_server_args"]
+    assert "--compilation-config.cudagraph_mode NONE" in ctx.task.params["extra_server_args"]
     assert shared_state.baseline_eager_fallback is False
 
 

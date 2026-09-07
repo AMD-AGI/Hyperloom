@@ -1496,7 +1496,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
     assert "cuda_graph_attribution_degraded" in codes, warnings
     w = next(w for w in warnings if w.get("code") == "cuda_graph_attribution_degraded")
     assert w["capture_traces_present"] is True
-    assert "--enforce-eager" in w["message"]
+    assert "--compilation-config.cudagraph_mode NONE" in w["message"]
 
 
 @pytest.mark.asyncio
