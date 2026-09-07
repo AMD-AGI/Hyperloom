@@ -249,6 +249,7 @@ def test_a_configured_path_in_no_repository_is_dropped(tmp_path: Path) -> None:
 
 def test_a_package_that_cannot_be_imported_names_no_repository(monkeypatch) -> None:
     """A broken install is not a repository, and must not raise on the way out."""
+
     def _raise(_name):
         raise ImportError("boom")
 

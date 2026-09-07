@@ -65,11 +65,17 @@ def _scan_editable_roots() -> tuple[str, ...]:
     try:
         scan_dirs.extend(site.getsitepackages())
     except Exception:
+        # Absent under a virtualenv built without the site module's framework
+        # support, and raising rather than returning empty on some builds. The
+        # prefix probing below reaches the same directories, so this is one of
+        # several ways to find them rather than the only one.
         pass
     if hasattr(site, "getusersitepackages"):
         try:
             scan_dirs.append(site.getusersitepackages())
         except Exception:
+            # Same: a user site directory is optional, and its absence says
+            # nothing about the roots the rest of the scan will find.
             pass
     # Venv / conda site-packages may not appear in sys.path; probe conventional
     # locations for sys.prefix, VIRTUAL_ENV, CONDA_PREFIX, and the interpreter.

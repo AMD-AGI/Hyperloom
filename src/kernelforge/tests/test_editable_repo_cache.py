@@ -86,9 +86,7 @@ def test_the_scan_finds_a_quoted_path_and_a_finder_mapping(tmp_path, only_these_
         root.mkdir()
     (site_dir / "__editable__.bare-1.0.pth").write_text(f"{bare}\n", encoding="utf-8")
     (site_dir / "__editable__.quoted-1.0.pth").write_text(f'x = "{quoted}"\n', encoding="utf-8")
-    (site_dir / "__editable__.mapped-1.0.pth").write_text(
-        "import __editable___mapped_1_0_finder\n", encoding="utf-8"
-    )
+    (site_dir / "__editable__.mapped-1.0.pth").write_text("import __editable___mapped_1_0_finder\n", encoding="utf-8")
     (site_dir / "__editable___mapped_1_0_finder.py").write_text(
         f'MAPPING = {{"mapped": "{mapped}"}}\n', encoding="utf-8"
     )
