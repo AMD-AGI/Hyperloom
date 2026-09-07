@@ -23,7 +23,10 @@ BLOCKS_ASSERTION = "assertion_validation"
 BLOCKS_BOTH = "both"
 
 #: The closed code set, each with what it blocks. A code outside this table is
-#: itself insufficient.
+#: itself insufficient. ``setup_inputs_incomplete`` is the one member the
+#: published vocabulary did not carry: an allowlisted installer consumes local
+#: files and moving VCS refs that no other code names, and without it such an
+#: install would be reported replayable on the strength of its command string.
 REASON_BLOCKS: dict[str, str] = {
     "not_evaluated": BLOCKS_BOTH,
     "activation_incomplete": BLOCKS_BOTH,
@@ -161,8 +164,10 @@ def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
         reasons.append(_reason("activation_incomplete", "config_path"))
     evidence = section.get("launch_evidence")
     if not isinstance(evidence, Mapping) or not evidence:
-        if accepted_config:
-            reasons.append(_reason("activation_incomplete", "launch_evidence"))
+        # Judged whether or not a configuration projected: an empty
+        # ``accepted_config`` is one more thing no launch confirmed, not a
+        # reason to stop asking whether a launch was observed at all.
+        reasons.append(_reason("activation_incomplete", "launch_evidence"))
         return reasons
     binding = evidence.get("observed_model_binding")
     binding = binding if isinstance(binding, Mapping) else {}
@@ -362,12 +367,13 @@ def _setup_reasons(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
         stranded = not row.get("present_at_final_launch") and not row.get("replayed_at_final_launch")
         if outcome == "failed" or (outcome == "applied" and stranded):
             reasons.append(_reason("setup_effect_outside_verified_launch", scope))
-        if outcome != "applied":
-            continue
-        if row.get("unresolved_inputs"):
-            reasons.append(_reason("setup_inputs_incomplete", scope))
-        if str(row.get("installer") or "") not in ("", "pip"):
+        # Scope is decided by what ran, not by whether it succeeded: a failed
+        # apt or conda install has already written outside the Python
+        # distribution set the closure enumerates. A skipped one never ran.
+        if outcome != "skipped" and str(row.get("installer") or "") not in ("", "pip"):
             reasons.append(_reason("closure_scope_incomplete", scope))
+        if outcome == "applied" and row.get("unresolved_inputs"):
+            reasons.append(_reason("setup_inputs_incomplete", scope))
     reasons.extend(_truncation_reasons(commands, ledger))
     return reasons
 
@@ -383,11 +389,14 @@ def _truncation_reasons(
     cap -- which distinguishes "capped out of the validated run" from "no round
     proposed it".
     """
-    accepted = [row for row in ledger if row.get("present_at_final_launch")]
-    if not accepted:
+    rounds = {str(row.get("round_task_id") or "") for row in ledger if row.get("present_at_final_launch")}
+    if not rounds:
         return []
-    replayed = {str(row.get("cmd_digest") or "") for row in accepted}
-    missing = [cmd for cmd in commands if command_digest(cmd) not in replayed]
+    # Every row of that round, not only its applied ones: a command it resolved
+    # and then failed or refused was reached by the replay, and its own reason
+    # is that its effect stands outside the verified launch.
+    reached = {str(row.get("cmd_digest") or "") for row in ledger if str(row.get("round_task_id") or "") in rounds}
+    missing = [cmd for cmd in commands if command_digest(cmd) not in reached]
     return [_reason("setup_ledger_truncated", "setup_commands")] if missing else []
 
 
@@ -473,10 +482,9 @@ def _delivery_reasons(section: Mapping[str, Any], delivered: Iterable[str]) -> l
     the consumer never receives, and its own manifest travels in this section
     rather than in the bundle.
 
-    The patch steps are judged through their root's snapshot rather than through
-    their own ``path``, which names the authoring workspace the bundle does not
-    ship: the content those patches produced is the snapshot's payload, so a
-    delivered snapshot is what makes a patch step replayable.
+    A patch step is judged through its root's snapshot, which carries the
+    content that patch produced; its own ``path`` names the authoring workspace,
+    which no bundle ships.
     """
     packaged = {str(p).strip("/") for p in delivered}
     reasons: list[dict[str, Any]] = []
