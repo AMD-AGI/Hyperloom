@@ -7,14 +7,12 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 
 **ROCm™ Hyperloom** is a multi-agent harness that autonomously optimizes inference
-on AMD Instinct™ GPUs. In extensive unattended evaluation it delivered a **median
-1.73×** throughput gain, with validated speedups from **1.35× to 7.31×**.
+on AMD Instinct™ GPUs. It profiles each workload, searches framework and kernel
+optimizations, validates every candidate end to end, and carries proven results
+into a recipe knowledge base — without per-model human tuning.
 
-It profiles each workload, searches framework and kernel optimizations, validates
-every candidate end to end, and carries proven results into a recipe knowledge
-base — without per-model human tuning. More than 14,000 models have been
-optimized this way, across text generation, image generation, and custom
-pipelines on vLLM, SGLang, and xDiT.
+It supports text generation, image generation, and custom pipelines on vLLM,
+SGLang, and xDiT.
 
 <p align="center"><img width="700" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
 
@@ -96,46 +94,6 @@ Profiling and bottleneck analysis are backed by
 [IntelliKit](https://github.com/AMDResearch/intellikit). Long-horizon search and
 the knowledge base are described further in
 [Arbor](https://arxiv.org/abs/2606.12563).
-
-## Results
-
-Gains below are **validated end-to-end stack throughput**, not a sum of isolated
-kernel wins. Every run profiled its own workload, searched, applied, and
-re-measured with no human in the loop.
-
-One example: Llama-3.1-8B-Instruct on a single MI355X under vLLM (bf16, 1024
-tokens in and out, concurrency 64) went from 7,677 to **26,682 tokens/s per GPU
-(3.48×)**. Framework changes (attention backend, FP8 KV cache and weights,
-speculative decoding) drove most of that gain; a second cycle and a rewritten
-cache kernel added the rest. Warm replay's direct lift was small, but it enabled
-the attention backend the large framework gain depended on.
-
-| Model | Type | Size | Serving stack | Gain |
-|-------|------|------|---------------|------|
-| DeepSeek-V4-Flash-0731 | MoE, text | 304B | SGLang · bf16 · TP 4 | +631.5% |
-| GLM-5.2-MXFP4 | MoE, text | 743B | vLLM · MXFP4 · TP 8 | +390.3% |
-| Llama-3.1-8B-Instruct | Dense, text | 8B | vLLM · bf16 · TP 1 | +247.6% |
-| gpt-oss-120b | MoE, text | 120B | vLLM · MXFP4 · TP 2 | +172.1% |
-| Qwen3-0.6B | Dense, text | 752M | vLLM · bf16 · TP 1 | +102.7% |
-| Qwen3-8B | Dense, text | 8B | vLLM · bf16 · TP 1 | +97.0% |
-| Qwen3-14B-FP8 | Dense, text | 15B | vLLM · FP8 · TP 1 | +88.3% |
-| FLUX.1-schnell | MoE, multimodal | 12B | xDiT · bf16 · TP 1 | +83.0% |
-| gemma-4-26B-A4B-it | MoE, multimodal | 27B | vLLM · FP8 · TP 2 | +62.3% |
-| Mixtral-8x7B-Instruct-v0.1 | MoE, text | 47B | SGLang · FP8 · TP 8 | +62.1% |
-| Qwen-Image | MoE, multimodal | 29B | xDiT · bf16 · TP 1 | +55.6% |
-| DeepSeek-V4-Pro | MoE, text | 862B | vLLM · MXFP4 · TP 8 | +53.2% |
-| Z-Image-Turbo | MoE, multimodal | 10B | xDiT · bf16 · TP 1 | +47.2% |
-| Qwen3.5-397B-A17B-MXFP4 | MoE, multimodal | 222B | vLLM · MXFP4 · TP 4 | +46.9% |
-| Nucleus-Image | MoE, multimodal | 17B | xDiT · bf16 · TP 1 | +41.5% |
-| ERNIE-Image-Turbo | MoE, multimodal | 8B | xDiT · bf16 · TP 1 | +35.2% |
-
-Median **1.73×** (range **1.35×–7.31×**) across these workloads: dense and MoE,
-text and image, from under 1B to 862B parameters, on vLLM, SGLang, and xDiT.
-
-On isolated kernels, GEAK and KernelForge both outpaced a Claude Code baseline
-(mean 2.45× / 2.97× vs 1.95×). How much kernel work contributes to the *stack*
-gain depends on the workload — for example 29.8 percentage points on
-Qwen3-14B-FP8 and more than half of the validated gain on DeepSeek-V4-Pro.
 
 ## Supported features
 
