@@ -6,57 +6,117 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 
-ROCm™ Hyperloom is an autonomous agentic system designed to optimize end-to-end inference workloads
-(targeting both host code and GPU kernels) on AMD GPUs. Using advanced AI agents and profiling tools,
-Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
-and validates the performance and correctness of the optimizations without requiring manual intervention.
- 
-The system operates through a sophisticated multi-stage pipeline. First TraceLens, the profiling brain of
-the workload understanding stage, consumes traces collected by Magpie (which in turn relies on IntelliKit
-for some low-level GPU profiling tools), captures bottlenecks, and derives the roofline targets that seed
-the optimization search tree.
+**ROCm™ Hyperloom** is a multi-agent harness that autonomously optimizes inference
+on AMD Instinct™ GPUs. It profiles each workload, searches framework and kernel
+optimizations, validates every candidate end to end, and carries proven results
+into a recipe knowledge base — without per-model human tuning.
 
-Next, Hyperloom employs a self-evolving code optimization engine following an iterative agentic loop (Think
-→ Decide → Implement → Benchmark). Arbor intelligently explores the optimization space using a Dynamic
-Specialist Agent and Knowledge Base. In parallel to Arbor, GEAK, a multi-agent GPU performance optimizer,
-optimizes hot kernels. Once optimizations are identified and validated, Hyperloom prepares
-the optimized code and generates a report with all proposed changes and expected performance improvements.
-This end-to-end automation enables developers to achieve significant performance improvements while
-maintaining code quality and reducing the manual effort traditionally required for GPU optimization.
+It supports text generation, image generation, and custom pipelines on vLLM,
+SGLang, and xDiT.
 
-<p align="center"><img width="600" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
+<p align="center"><img width="700" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
 
-Hyperloom combines:
+## Why Hyperloom
 
-- Trace analysis, identifying bottleneck kernels and bridge planning through
-  [TraceLens](https://github.com/AMD-AGI/TraceLens) Agent (backend support
-   from [Magpie](https://github.com/AMD-AGI/Magpie) and
-   [IntelliKit](https://github.com/AMDResearch/intellikit))
-- Kernel optimization through the
-  [GEAK](https://github.com/AMD-AGI/GEAK) backend.
-- Agentic search space exploration through
-  [Arbor](https://arxiv.org/abs/2606.12563), a tree-based cognition layer
-  with dynamic agents, long-horizon campaigns, and self-evolving optimization
-  guided by a curated knowledge base of hardware learnings, pitfalls, and
-  prior campaign artifacts.
+Serving efficiency determines hardware capacity, latency, and operating cost.
+Tuning a workload across serving configuration, framework source, and GPU kernels
+has traditionally taken weeks from a scarce specialist pool, and that work
+repeats for every new model, framework release, and accelerator generation.
 
-## Supported Features
+Handing the same loop to an LLM is not enough. A real session runs for hundreds
+of turns, starts and stops many inference servers, and edits a serving
+framework's source tree. Left as the only source of truth, the model drifts from
+the original goal, rediscovers the same dead ends on every run, and can apply
+unsafe patches. Hyperloom is the harness around that loop: it keeps the mission
+grounded, reuses what earlier sessions already learned, and bounds what an agent
+is allowed to change.
+
+## How it works
+
+A session is a closed loop: **input → optimize → validate → learn**.
+
+```text
+PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE
+```
+
+After Sweep, the coordinator either closes or starts another cycle when budget
+remains, the run has not converged, and roofline analysis still shows headroom.
+A hard cycle ceiling prevents unbounded looping. A new cycle resumes at the
+framework layer from the established baseline, rather than starting over.
+
+| Phase | What it does |
+|-------|----------------|
+| **Prelude** | Measures a stock baseline (the anchor for every later comparison), optionally replays the closest recipe from the knowledge base, then profiles and builds a roofline so later phases know where the headroom is. |
+| **Framework optimization** | First makes the model run (enablement, from serving flags up through targeted rebuilds). Then searches serving flags, precision, attention, batching, and ranked upstream diffs. |
+| **Kernel optimization** | Delegates hot kernels to one AMD backend — [GEAK](https://github.com/AMD-AGI/GEAK) or [KernelForge](https://github.com/AMD-AGI/KernelForge) — then re-measures every accepted change end to end. Only one backend runs per phase. |
+| **Sweep** | Re-measures the accumulated stack across concurrency and sequence-length operating points. Skips itself when the validated gain has not moved. |
+| **Close** | Records why the run stopped, writes the recipe knowledge base, final report, and machine-readable session artifacts. |
+
+Benchmarks are run by the coordinator, not by the model. A gain an agent predicts
+is logged for calibration and never decides a keep. A kernel backend's claimed
+speedup is held as unverified until Hyperloom re-measures it under the session
+protocol. Changes that fail validation are reverted; successful changes become
+the new baseline.
+
+See the [optimization loop](docs/conceptual/optimization-loop.md) for the runtime
+contracts, enablement ladder, and phase allowlists.
+
+### Multi-agent harness
+
+Four roles run a session. Orchestration stays alive as one conversation so the
+plan is never rebuilt from a cold prompt. The other three are spun up when
+needed and discarded:
+
+| Role | When it runs | How it keeps the run on-goal |
+|------|----------------|------------------------------|
+| **Orchestration** | Every tick | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
+| **Critic** | Every keep-or-revert | Rules on whether a change served the mission; the learning record is written from that verdict |
+| **Robustness** | Stall, crash, or circular search | Circuit breaker: forces recovery instead of another lap |
+| **Specialist** | Authoring only | Ephemeral. Returns a reviewed diff, not a decision |
+
+Risky source edits go through an isolated worktree, a unified-diff gate, a
+policy check, a Critic sign-off, and a coordinator benchmark. A rejection names
+the rule it broke so the next attempt is a fix, not a repeat.
+
+### Recipe knowledge base
+
+Every session reads the recipe knowledge base (Recipe KB) before it starts and
+writes back when it finishes. A row stores the winning configuration, measured
+throughput, useful lessons, and failures worth remembering. Lookup relaxes one
+field at a time (model, hardware, framework, model type, architecture, framework
+version, precision) so a close match can warm-start the next run. Past failures
+are evidence in prompt context, not hard disqualifiers; what *enters* the KB is
+strict, because a bad entry outlives the run that created it.
+
+Profiling and bottleneck analysis are backed by
+[TraceLens](https://github.com/AMD-AGI/TraceLens), with trace collection from
+[Magpie](https://github.com/AMD-AGI/Magpie) and low-level GPU tooling from
+[IntelliKit](https://github.com/AMDResearch/intellikit). Long-horizon search and
+the knowledge base are described further in
+[Arbor](https://arxiv.org/abs/2606.12563).
+
+## Supported features
 
 | Feature | Options |
 |------|-------|
-| Workload | Inference serving |
+| Workload | Text generation, image generation, and custom / scriptable pipelines |
 | Platform | MI300X, MI325X, MI355X |
-| Framework | SGLang, vLLM |
-| Kernel Language | HIP, Triton, FlyDSL |
-| LLM Backend | Claude |
+| Framework | SGLang, vLLM, xDiT |
+| Kernel language | HIP, Triton, FlyDSL |
+| Kernel backends | GEAK, KernelForge |
+| LLM backend | Claude |
 
-## Get Started
+## Get started
 
 | Goal | Guide |
 |------|-------|
 | Set up Hyperloom and run a demo | [Quickstart](examples/README.md) |
 | Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
 | Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
+
+```bash
+python -m hyperloom.inference_optimizer.cli optimize
+```
 
 ## Documentation
 
@@ -71,16 +131,16 @@ Hyperloom combines:
 | Operations | [Operations & self-hosting](docs/reference/operations.md) |
 | Session output schema | [`session_breakdown.json`](docs/reference/session-breakdown.md) |
 
-## File Issues and Feedback
+## File issues and feedback
 
-If you encounter any problem or bugs while running Hyperloom, feel free to open an
-[issue](https://github.com/AMD-AGI/Hyperloom/issues/new/choose), or provide us with
-feedback on how to improve Hyperloom by completing the
+If you encounter problems or bugs while running Hyperloom, open an
+[issue](https://github.com/AMD-AGI/Hyperloom/issues/new/choose), or send
+feedback through the
 [beta survey](https://www.feedback.amd.com/se/5A1E27D2004A9E15).
 
 ---
 
-## Developer Entry Points
+## Developer entry points
 
 - Runtime package: `src/hyperloom/`
 - Contributor & AI authoring contract: [`AGENTS.md`](AGENTS.md)
@@ -141,4 +201,3 @@ They keep their own licences; [`THIRD_PARTY.md`](THIRD_PARTY.md) lists them and
 
 For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
 contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
