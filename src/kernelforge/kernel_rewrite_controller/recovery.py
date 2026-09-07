@@ -210,13 +210,7 @@ def recover_task_result(
     except Exception as error:
         # A validated best commit that cannot be shipped is the one recovery outcome that says something went wrong
         # rather than that nothing was found, so it is worth a line of its own.
-        log.warning(
-            "could not publish %s for %s at %s: %s",
-            source,
-            task.operator_id,
-            best_commit,
-            error,
-        )
+        log.warning("could not publish recovered kernel result")
         return RecoveryResult(
             operator_id=task.operator_id,
             published=False,

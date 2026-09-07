@@ -332,3 +332,27 @@ def test_a_task_with_no_forge_output_at_all_publishes_nothing(tmp_path: Path) ->
     assert recovered.published is False
     assert recovered.reason == "no trusted forge-loop best result"
     assert not published_operator_dirs(layout)
+
+
+def test_publish_failure_does_not_log_result_details(tmp_path: Path, monkeypatch, caplog) -> None:
+    layout, task_dir, _worktree, best_commit = _prepared_workspace(tmp_path)
+    (task_dir / "forge-result.json").write_text(
+        json.dumps({"improved": True, "best_commit": best_commit}),
+        encoding="utf-8",
+    )
+    secret = "sensitive-publish-error"
+
+    def fail_publish(*_args, **_kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(
+        "kernelforge.kernel_rewrite_controller.recovery.publish_operator_result",
+        fail_publish,
+    )
+
+    recovered = recover_task_result(layout, task_dir)
+
+    assert recovered.published is False
+    assert "could not publish recovered kernel result" in caplog.text
+    assert secret not in caplog.text
+    assert best_commit not in caplog.text
