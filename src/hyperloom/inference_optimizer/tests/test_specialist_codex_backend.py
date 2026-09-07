@@ -345,10 +345,12 @@ def test_openai_only_deployment_builds_a_codex_exec_argv(
     assert "SYSTEM_INSTRUCTION_SENTINEL" not in rendered_argv
 
     workspace = tmp_path / "workspace"
-    # ``-C`` is the write-isolated worktree; workspace + framework roots are added.
+    # ``-C`` is the write-isolated worktree; only the workspace joins it. The
+    # framework trees stay out: integrate_patch is the only writer of source.
     assert cmd[cmd.index("-C") + 1] == str(workspace / "worktree")
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
-    assert add_dirs == [str(workspace), str(tmp_path / "framework")]
+    assert add_dirs == [str(workspace)]
+    assert str(tmp_path / "framework") not in cmd
     codex_config = workspace / ".codex" / "config.toml"
     assert codex_config.stat().st_mode & 0o777 == 0o600
     config_text = codex_config.read_text(encoding="utf-8")
@@ -462,8 +464,9 @@ def test_claude_argv_is_unchanged_for_every_non_openai_only_shape(
     assert "exec" not in cmd and "--json" not in cmd
     workspace = tmp_path / "workspace"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
-    # Unchanged order: worktree (writes), workspace (done.json), framework roots.
-    assert add_dirs == [str(workspace / "worktree"), str(workspace), str(tmp_path / "framework")]
+    # Unchanged order: worktree (writes), then workspace (done.json).
+    assert add_dirs == [str(workspace / "worktree"), str(workspace)]
+    assert str(tmp_path / "framework") not in cmd
 
 
 @pytest.mark.parametrize(
