@@ -712,6 +712,37 @@ class TestKillStaleOwnersNoneSignalled:
         assert sent == [(222, signal.SIGTERM)]
         assert out[0]["signal"] == "TERM"
 
+    def test_an_atom_server_group_is_signalled(self, monkeypatch):
+        """An ATOM server recorded by this session is reaped, not skipped.
+
+        ``python3 -m atom.entrypoints.openai_server`` matched none of the owner
+        patterns, so recover logged "not a recognized session owner", declined to
+        signal a server it had recorded itself, AND removed the pidfile -- losing
+        the only handle on a tree that was still holding every GPU.
+        """
+        exe = RecoverExecutor()
+        monkeypatch.setattr(
+            exe,
+            "_discover_stale_pids",
+            lambda: [
+                {
+                    "pid": 111,
+                    "pgid": 222,
+                    "cmd": "python3 -m atom.entrypoints.openai_server --model /m -tp 8",
+                    "pattern": "session_pidfile",
+                }
+            ],
+        )
+        sent: list[tuple[int, signal.Signals]] = []
+        monkeypatch.setattr(exe, "_send_group_signal", lambda pgid, sig: sent.append((pgid, sig)) or True)
+        monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: False)
+        monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
+
+        out = exe._kill_stale_owners()
+
+        assert sent == [(222, signal.SIGTERM)]
+        assert out[0]["signal"] == "TERM"
+
     def test_unrecognized_pidfile_owner_is_not_signalled(self, monkeypatch):
         """A recycled PID with an unrelated cmdline is ignored."""
         exe = RecoverExecutor()

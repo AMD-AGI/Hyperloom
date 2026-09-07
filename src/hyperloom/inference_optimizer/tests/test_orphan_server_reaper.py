@@ -134,6 +134,36 @@ def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
         proc.wait(timeout=5)
 
 
+def test_reap_kills_an_atom_server_orphan(tmp_path):
+    """An orphaned ATOM server is reaped like any other serving process.
+
+    ``--framework atom`` is a first-class framework (``atom_mi*x.sh`` is in
+    ``MAGPIE_BUILTIN_SCRIPTS``, so ATOM is admitted to the server_lifecycle reuse
+    protocol), but its cmdline -- ``python3 -m atom.entrypoints.openai_server`` --
+    matched none of the serving markers, so the reaper classified its own
+    session's server as "not a server" and left the whole tree running.
+    """
+    proc = _spawn_marker_process("atom.entrypoints.openai_server")
+    pidfile = _write_pidfile(tmp_path, "atom_8888", proc.pid)
+    try:
+        reaped = reap_orphaned_servers(tmp_path)
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+        assert proc.pid in reaped
+        assert not _pid_alive(proc.pid)
+        assert not pidfile.exists()
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait(timeout=5)
+
+
 def test_reap_spares_pid_whose_cmdline_does_not_match(tmp_path):
     """A recycled pid running an unrelated process must NOT be killed."""
     proc = _spawn_marker_process("totally-unrelated-process")

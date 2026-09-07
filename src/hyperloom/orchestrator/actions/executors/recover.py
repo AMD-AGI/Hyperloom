@@ -60,6 +60,12 @@ _OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.srt",
     "vllm.entrypoints",
     "vllm serve",
+    # ATOM serves through ``python3 -m atom.entrypoints.openai_server``. Without a
+    # marker of its own the gate below rejected a server this session had recorded
+    # itself -- logging "not a recognized session owner", declining to signal it,
+    # and then removing the pidfile, which is the only handle on a tree that is
+    # still holding every GPU.
+    "atom.entrypoints",
     "EngineCore",
     "Magpie",
     "benchmark_serving",
