@@ -142,7 +142,7 @@ def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
     """
     try:
         cp = run(["git", "-C", str(checkout), "rev-parse", "HEAD"], dict(os.environ), None)
-    except Exception:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError):
         return ""
     if getattr(cp, "returncode", 1) != 0:
         return ""
@@ -179,7 +179,7 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
     )
     try:
         cp = run([python_path, "-c", probe, *names], dict(os.environ), None)
-    except Exception:  # noqa: BLE001
+    except (OSError, subprocess.SubprocessError):
         return {}
     if getattr(cp, "returncode", 1) != 0:
         return {}
