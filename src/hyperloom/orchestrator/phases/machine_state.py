@@ -549,6 +549,26 @@ def target_was_reached(state: Any) -> bool:
     return bool(str(getattr(state, "target_reached_at", "") or "").strip())
 
 
+def _cycle_reloop_min_remaining_sec(
+    state: Any,
+    min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
+) -> float:
+    """Session-scaled floor on the seconds that must remain to justify a new cycle.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``max_minutes``.
+        min_remaining_sec (float): Absolute floor before session scaling.
+
+    Returns:
+        float: The effective floor in seconds.
+    """
+    effective = float(min_remaining_sec)
+    max_minutes = _max_minutes(state)
+    if max_minutes > 0:
+        effective = min(effective, max_minutes * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO)
+    return effective
+
+
 def should_reloop_to_explore(
     state: Any,
     *,
@@ -631,13 +651,7 @@ def should_reloop_to_explore(
 
     # Budget remaining must justify a fresh cycle. A bounded session scales the
     # floor to its own length so it is never blocked by an unreachable bar.
-    effective_min_remaining = float(min_remaining_sec)
-    max_minutes = _max_minutes(state)
-    if max_minutes > 0:
-        effective_min_remaining = min(
-            effective_min_remaining,
-            max_minutes * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO,
-        )
+    effective_min_remaining = _cycle_reloop_min_remaining_sec(state, min_remaining_sec)
     evidence["min_remaining_sec_effective"] = round(effective_min_remaining, 2)
     remaining = session_remaining_seconds(state, now_unix=now_unix)
     if remaining is not None and remaining < effective_min_remaining:
@@ -1688,9 +1702,10 @@ def _sweep_has_recorded_closeout(state: Any) -> bool:
 def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
-    Priority: 1. ``skip_to_close`` → ``robustness_escalated``, except in SWEEP
-    when a sweep/conc_sweep closeout is already recorded (the honest SWEEP
-    exit wins); 2. Coordinator ``stop_reason``.
+    Priority: 1. ``skip_to_close`` → ``time_exhausted`` when too little session
+    budget remains for another macro-cycle, else ``robustness_escalated``;
+    skipped entirely in SWEEP when a sweep/conc_sweep closeout is already
+    recorded (the honest SWEEP exit wins); 2. Coordinator ``stop_reason``.
 
     Args:
         state (Any): Frozen SharedState view exposing ``stop_reason`` and any
@@ -1705,10 +1720,17 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
         current = (getattr(state, "phase", "") or "").strip().upper()
         if current == PHASE_SWEEP and _sweep_has_recorded_closeout(state):
             return None
-        return "robustness_escalated", {
-            "evidence": "llm_escalation",
-            "hint": hint,
-        }
+        evidence: dict[str, Any] = {"evidence": "llm_escalation", "hint": hint}
+        floor = _cycle_reloop_min_remaining_sec(state)
+        evidence["min_remaining_sec_effective"] = round(floor, 2)
+        remaining = session_remaining_seconds(state)
+        if remaining is not None:
+            evidence["session_remaining_seconds"] = round(remaining, 2)
+            # Too little left for another cycle means the budget ran out; that is
+            # the honest terminal, not a robustness abort.
+            if remaining < floor:
+                return "time_exhausted", evidence
+        return "robustness_escalated", evidence
     sr = (getattr(state, "stop_reason", "") or "").strip()
     if sr:
         # Coordinator-set stop_reason takes precedence over phase exits.

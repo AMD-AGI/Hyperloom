@@ -121,6 +121,43 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     assert reason == "robustness_escalated"
 
 
+def _framework_state(*, max_minutes: int = 180, started_hours_ago: float = 1.0) -> SharedState:
+    now = datetime.now(timezone.utc)
+    return SharedState(
+        session_id="t",
+        phase=ps.PHASE_FRAMEWORK_AGENT,
+        start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
+        max_minutes=max_minutes,
+        cumulative_gain_validated=5.0,
+    )
+
+
+def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
+    """A budget-driven close is time_exhausted, not a robustness abort."""
+    # 3h budget, ~2h39m spent -> ~1260s left, under the 1620s reloop floor.
+    st = _framework_state(max_minutes=180, started_hours_ago=2.65)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "time_exhausted"
+    assert evidence["min_remaining_sec_effective"] == 1620.0
+    assert evidence["session_remaining_seconds"] < 1620.0
+
+
+def test_framework_skip_to_close_with_budget_left_stays_escalated():
+    """With budget to spare, skip_to_close is still a genuine early abandonment."""
+    st = _framework_state(max_minutes=180, started_hours_ago=1.0)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "robustness_escalated"
+    assert evidence["session_remaining_seconds"] >= 1620.0
+
+
 def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
     """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
