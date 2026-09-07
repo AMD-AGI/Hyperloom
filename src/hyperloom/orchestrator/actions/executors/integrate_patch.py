@@ -535,6 +535,41 @@ def _git_head_sha(framework_root: Path | None) -> str:
     return (getattr(cp, "stdout", "") or "").strip()
 
 
+def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[str]:
+    """Return every tree this round could mutate, before it mutates any of them.
+
+    Read from the payload alone -- the session apply root, the roots the
+    authoring stage bound per patch, and the root each artifact target resolves
+    into -- because the resolvers that return them run after the setup commands
+    have already installed into those same trees.
+    """
+    roots: list[str] = [str(resolve_session_framework_root() or "")]
+    roots.extend(str(v) for v in ((done_payload or {}).get("patch_roots") or {}).values())
+    entries = params.get("artifacts")
+    if not isinstance(entries, list) or not entries:
+        entries = (done_payload or {}).get("artifacts_written") or []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        resolved = _resolve_artifact_target(str(entry.get("target") or "").strip())
+        if resolved is not None:
+            roots.append(str(resolved[2]))
+    return list(dict.fromkeys(r for r in roots if r))
+
+
+def _note_pre_mutation_head(ctx: Any, root: str | Path | None) -> None:
+    """Record ``root``'s HEAD once, the first time the round is about to touch it.
+
+    Never replaced: a later read would name a tree this round has already
+    changed, and every patch the recipe carries would replay onto its own result.
+    """
+    heads: dict[str, str] = getattr(ctx, "_ip_base_sha_by_root", None) or {}
+    key = str(root or "")
+    if key and key not in heads:
+        heads[key] = _git_head_sha(Path(key))
+    ctx._ip_base_sha_by_root = heads
+
+
 def _durable_execution_seq(shared_state: Any) -> int:
     """Return the highest ``seq`` already in the durable setup ledger."""
     ledger = getattr(getattr(shared_state, "enablement", None), "setup_executions", None) or []
@@ -551,7 +586,8 @@ def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *,
     shared_state.enablement.setup_executions = ledger
     try:
         shared_state.save(session_dir)
-    except Exception:  # noqa: BLE001 — the ledger is written again at the rearm
+    except OSError:
+        # The rows are on the in-memory state either way, and the rearm saves again.
         log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
 
 
@@ -2361,6 +2397,10 @@ class IntegratePatchExecutor:
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
         self._ip_base_artifact_replayed = False
+        # Before the setup commands, which are the round's first mutation: an
+        # install writes into the same trees the patches and artifacts land in.
+        for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
+            _note_pre_mutation_head(ctx, candidate)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -2730,9 +2770,9 @@ class IntegratePatchExecutor:
             except Exception:  # noqa: BLE001 — sentinel is best-effort
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
-        # Captured before the stash and before any apply: this is the tree the
-        # patches are about to be applied to.
-        ctx._ip_base_sha = _git_head_sha(framework_root)  # type: ignore[attr-defined]
+        # Normally already recorded before the setup commands; a root that
+        # resolved only here is still recorded before the stash and the apply.
+        _note_pre_mutation_head(ctx, framework_root)
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -3338,7 +3378,10 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except Exception:  # noqa: BLE001 — an absent record reads as insufficient, never as sufficient
+        except (OSError, subprocess.SubprocessError):
+            # Every field this fills is one the decision refuses the replay for
+            # when absent, so a capture that cannot read the tree or spawn the
+            # probe leaves the recipe insufficient rather than failing the round.
             log.exception("integrate_patch: enablement KEEP record capture failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
 
@@ -3381,12 +3424,12 @@ class IntegratePatchExecutor:
         upserted, deleted = (
             _patch_touched_paths_split(framework_root, applied) if framework_root is not None else ([], [])
         )
-        base_sha = str(getattr(ctx, "_ip_base_sha", "") or "")
         git_roots = [r for r in contributions if r and _is_git_tree(Path(r))]
-        # The apply root's HEAD was read before the stash; every other tree is
-        # read here, which names the same commit because enablement commits into
-        # none of them.
-        base_sha_by_root = {r: (base_sha if r == root and base_sha else _git_head_sha(Path(r))) for r in git_roots}
+        # Only what was captured before this round touched each tree. A root with
+        # no capture keeps no sha, which the decision refuses rather than
+        # answering with a HEAD that has moved since.
+        captured: dict[str, str] = getattr(ctx, "_ip_base_sha_by_root", None) or {}
+        base_sha_by_root = {r: captured.get(r, "") for r in git_roots}
         records = build_root_records(
             contributions=contributions,
             base_sha_by_root=base_sha_by_root,
@@ -3414,7 +3457,7 @@ class IntegratePatchExecutor:
         return {
             "enablement_roots": records,
             "enablement_patch_roots": patch_roots,
-            "enablement_base_sha": base_sha,
+            "enablement_base_sha": captured.get(root, ""),
             "enablement_source_snapshots": snapshots,
             "enablement_accepted_stack_targets": {
                 str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
