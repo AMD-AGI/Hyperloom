@@ -155,16 +155,33 @@ def _setup_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
             continue
         cmd = by_digest.get(str(row.get("cmd_digest") or ""))
         if cmd is not None:
-            steps.append(_setup_step(cmd, occurrence=occurrences.get(id(row))))
+            steps.append(_setup_step(cmd, occurrence=occurrences.get(id(row)), row=row))
     return steps
 
 
-def _setup_step(cmd: str, *, occurrence: int | None) -> dict[str, Any]:
+def _setup_step(cmd: str, *, occurrence: int | None, row: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Project one applied execution, carrying the identity of what it installed.
+
+    An allowlisted installer runs verbatim, so a local wheel, a requirements
+    file or a branch-pinned VCS ref decides what gets installed while the
+    command string names none of those bytes. ``input_identity`` is that naming,
+    and it is delivered here because a consumer replaying the step is the party
+    that has to reproduce it: replay each entry by supplying, where the command
+    looks for it, content whose ``sha256`` equals the recorded one, and each
+    ``vcs_url`` entry at its recorded ``resolved_ref``. ``unresolved_inputs``
+    names the kinds that identity could not be taken for, which is the same set
+    the decision refuses the replay over.
+
+    Both are ``None`` -- never an empty list -- for a step projected from durable
+    state written before the ledger existed, where no identity was ever taken.
+    """
     return {
         "kind": SETUP_KIND,
         "cmd": cmd,
         "occurrence": occurrence,
         "credential_class": classify_credential_class(cmd),
+        "input_identity": None if row is None else [dict(i) for i in (row.get("input_identity") or [])],
+        "unresolved_inputs": None if row is None else [str(k) for k in (row.get("unresolved_inputs") or [])],
     }
 
 
