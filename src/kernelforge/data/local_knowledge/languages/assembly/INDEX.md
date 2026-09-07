@@ -1,0 +1,104 @@
+---
+title: AMDGPU assembly workflow
+kind: index
+scope: languages/assembly
+---
+
+<!--
+SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+SPDX-License-Identifier: MIT
+-->
+
+# AMDGPU assembly workflow
+
+Use assembly to test a specific compiler limitation: instruction scheduling,
+register pressure, spills, barriers, or waits. Structural changes belong first
+in FlyDSL, Triton/Gluon, or HIP; compile a fresh assembly baseline after each
+such change. Read the actual GPU's ISA and memory-ordering documentation from
+the hardware knowledge map before changing synchronization or register usage.
+
+## Source and toolchain
+
+An editable AMDHSA assembly file contains `.amdgcn_target`, device symbols,
+`.amdhsa_kernel` descriptors, and `.amdgpu_metadata`. Preserve the complete
+file. `llvm-objdump -d` is useful for inspection but its instruction listing
+alone is not a reassemblable source or a launch ABI description.
+
+FlyDSL 0.2.4's embedded compiler can emit this file with `FLYDSL_DUMP_IR=1` and
+`FLYDSL_DUMP_DIR=/path/to/attempt/dumps`. Run the original kernel in a fresh
+process with a private `FLYDSL_RUNTIME_CACHE_DIR` so an old disk cache does not
+bypass compilation. Find the matching `*_final_isa.s` under the device-symbol
+directory. Dump one specialization per directory: shape, dtype, compile-time
+constants, target features, and compiler options are part of its identity.
+External LLVM mode can skip the ISA dump; do not substitute disassembly or a
+different specialization when the compiler did not emit assembly.
+
+Reassemble with the same ROCm LLVM toolchain and target ID as the compiler:
+
+```bash
+python -m kernelforge.assembly assemble \
+  --source kernel.s --output build/kernel.hsaco \
+  --gpu-target gfx950 --toolchain-dir /opt/rocm/llvm/bin
+```
+
+The target is an example. Copy the exact target ID from `.amdgcn_target`,
+including `xnack`/`sramecc` features if present. The helper invokes `llvm-mc`
+and `ld.lld`, retaining descriptors and metadata. It assembles the current
+bytes each time and publishes the output only after both commands succeed.
+Propagate errors; a previous output at the same path is not a new candidate.
+
+## FlyDSL launcher adapter
+
+The first adapter supports self-contained FlyDSL kernels using the
+`CompiledFunction`/`CompiledArtifact` interfaces shipped in 0.2.4. It clones the
+compiled host module and replaces one GPU code object while retaining the
+original argument packing, device symbol, grid, block, shared-memory setup,
+and stream. It rejects extern-linked kernels and multi-target objects. For
+multiple GPU modules, pass the explicit `binary_name` to choose one.
+
+```python
+from pathlib import Path
+import flydsl.compiler as flyc
+from kernelforge.assembly.flydsl import with_assembly
+
+# example_args contains all original positional arguments, including stream.
+reference = flyc.compile(launch_fn, *example_args)
+candidate = with_assembly(
+    reference,
+    Path(__file__).with_name("kernel.s"),
+    gpu_target="gfx950",
+    toolchain_dir=Path("/opt/rocm/llvm/bin"),
+)
+candidate(*example_args)
+```
+
+Construct the candidate once before timing or graph capture. The returned
+callable takes positional arguments, just like `flyc.compile`'s result;
+preserve any keyword-based public wrapper the driver already uses. Forward
+the stream provided at every invocation. Both reference and candidate remain
+independently usable; the adapter never modifies a global compiler hook or
+FlyDSL cache entry. Rebuild the candidate after an assembly edit; an existing
+callable retains its own previous code object.
+
+Other frontends can use the assembler helper, but require their own verified
+code-object loader and ABI adapter. Selecting Assembly expertise does not
+automatically make the FlyDSL adapter work with Triton or HIP callables.
+
+## Evidence and artifacts
+
+1. Measure the original high-level implementation with the protected driver.
+2. Run the unmodified assembly through the same callable contract. Require the
+   complete correctness suite and timing parity before optimizing.
+3. Make one instruction change and rerun correctness, graph-capture
+   verification, per-case timing, and relevant counters. Keep the same inputs,
+   dtype, tolerances, stream, launch dimensions, and measurement method.
+4. Before trusting the route, use a disposable negative control that changes
+   the output and confirm the unchanged oracle rejects it. Restore that edit.
+5. Keep the launcher and `.s` in source control together. Use explicit
+   `--commit-new-path` entries for files created during a campaign; pretracked
+   files use the existing KEEP/REVERT path. Do not commit temporary `.o`,
+   `.hsaco`, IR dumps, compiler caches, or benchmark logs.
+
+Assembly does not guarantee a speedup. Report parity, regression, and variance
+as measured. When the limiting factor is an algorithm or layout, return to
+the high-level language, regenerate assembly, and repeat the parity check.
