@@ -806,10 +806,10 @@ def _flag_attribution_degraded(ta_result: dict[str, Any], profile_result: dict[s
             "trace_analyze returned 0 hot kernels: the profile trace "
             "has no execute_*/user_annotation events, so per-kernel "
             "device time is folded into hipGraphLaunch wrappers under "
-            "cuda-graph capture (#431). Re-profile in eager mode "
-            "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
-            "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
-            "a capture-fold fallback over capture_traces/."
+            "cuda-graph capture (#431). Re-profile without capture (append "
+            "--disable-cuda-graph to EXTRA_SGLANG_ARGS, or "
+            "--compilation-config.cudagraph_mode NONE to EXTRA_VLLM_ARGS) so "
+            "per-step annotations fire, or enable a capture-fold fallback over capture_traces/."
         ),
         "capture_traces_present": bool(trace_health.get("capture_traces_present")),
     }
