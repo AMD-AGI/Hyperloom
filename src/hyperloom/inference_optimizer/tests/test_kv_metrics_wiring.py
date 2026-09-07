@@ -231,6 +231,36 @@ def test_recorder_is_closed_on_the_normal_return_path():
     )
 
     assert rec.closed_aborted is False
+
+
+def test_no_scraping_before_the_server_is_up():
+    """The scrape blocks, and before the engine binds its port every attempt is
+    a refused connection paid for inside the watchdog loop -- during boot, when
+    the ready marker and the death gate most need it responsive. Boot has no
+    traffic to measure anyway."""
+    rec = _Recorder()
+    sk._communicate_with_soft_deadline(
+        _DoneProc(),
+        hard_timeout=5,
+        soft_deadline_sec=5,
+        kv_recorder=rec,
+    )
+
+    assert rec.ticks == 0
+
+
+def test_warm_reuse_rounds_scrape_immediately():
+    """A round re-attaching to a live server writes no ready marker, so gating on
+    that marker alone would collect nothing for the entire round."""
+    rec = _Recorder()
+    sk._communicate_with_soft_deadline(
+        _DoneProc(),
+        hard_timeout=5,
+        soft_deadline_sec=5,
+        server_already_ready=True,
+        kv_recorder=rec,
+    )
+
     assert rec.ticks >= 1
 
 
@@ -300,3 +330,64 @@ def test_no_recorder_leaves_the_loop_unchanged():
 
 def test_artifact_name_is_stable():
     assert Path(KV_ARTIFACT_NAME).suffix == ".json"
+
+
+# ── call-site wiring ───────────────────────────────────────────────────────
+def test_no_recorder_without_a_server_log_path():
+    """A helper subprocess has no engine to scrape and no round to scope to."""
+    assert sk._build_kv_recorder(None, {}) is None
+    assert sk._build_kv_recorder("", {}) is None
+
+
+def test_kill_switch_disables_collection(tmp_path, monkeypatch):
+    """A loop this central needs a way out that does not require a redeploy."""
+    log_path = str(tmp_path / "server.log")
+    assert sk._build_kv_recorder(log_path, {}) is not None
+
+    monkeypatch.setenv(sk._KV_METRICS_ENV, "0")
+    assert sk._build_kv_recorder(log_path, {}) is None
+
+
+def test_recorder_targets_the_round_workspace_and_the_bound_port(tmp_path):
+    """The port is the per-session ephemeral one the config pinned, not 8888."""
+    rec = sk._build_kv_recorder(str(tmp_path / "server.log"), {"PORT": "31234"})
+
+    assert rec._output_path == str(tmp_path / KV_ARTIFACT_NAME)
+    assert ":31234/metrics" in rec._poller.url
+
+
+def test_run_with_session_kill_produces_the_artifact(tmp_path):
+    """End to end: the artifact has to exist on disk after a real round.
+
+    The wiring this covers was the gap between "the loop accepts a recorder" and
+    "a recorder is ever built" -- with it missing, every piece below had tests
+    that passed while nothing was ever collected.
+    """
+    import sys
+
+    log_path = tmp_path / "server.log"
+    log_path.write_text("Application startup complete\n", encoding="utf-8")
+
+    sk.run_with_session_kill(
+        [sys.executable, "-c", "import time; time.sleep(1.2)"],
+        timeout=30,
+        server_log_path=str(log_path),
+        server_dead_grace_sec=30.0,
+    )
+
+    artifact = tmp_path / KV_ARTIFACT_NAME
+    assert artifact.is_file()
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    # No engine was listening, and that is recorded rather than reported as an
+    # idle pool: every metric stays absent instead of reading zero.
+    assert payload["available"] is not True
+    assert payload["capacity_tokens"] is None
+    assert payload["retract_delta"] is None
+
+
+def test_artifact_is_in_the_package_globs():
+    """It lives in the round workspace, which the bundle does not otherwise reach."""
+    from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_GLOBS
+
+    assert "runs/**/kv_metrics.json" in PACKAGE_GLOBS

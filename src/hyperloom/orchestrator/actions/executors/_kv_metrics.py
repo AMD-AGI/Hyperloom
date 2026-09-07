@@ -62,8 +62,15 @@ DEFAULT_METRICS_PORT = 8888
 
 #: Scrape timeout. Deliberately well under the 0.5s poll interval of the loop
 #: this runs inside: a slow endpoint must not stretch the interval that the
-#: stall and soft-deadline gates are measured on.
-_SCRAPE_TIMEOUT_SEC = 1.5
+#: stall and soft-deadline gates are measured on. The engine is on loopback, so
+#: anything approaching this budget is already pathological.
+_SCRAPE_TIMEOUT_SEC = 0.4
+
+#: Opener that ignores the ambient proxy configuration. ``urlopen`` honours
+#: ``http_proxy`` by default, which on a corporate host routes a loopback scrape
+#: through an external proxy: wrong by construction, and slow enough that the
+#: blocking call visibly delays the watchdog loop it runs inside.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 #: Consecutive failures after which the poller stops trying. A server that
 #: never exposes ``/metrics`` (SGLang without ``--enable-metrics``) would
@@ -522,7 +529,7 @@ class KvMetricsPoller:
         if self._gave_up:
             return None
         try:
-            with urllib.request.urlopen(self.url, timeout=self.timeout_sec) as response:  # noqa: S310
+            with _OPENER.open(self.url, timeout=self.timeout_sec) as response:
                 body = response.read().decode("utf-8", "ignore")
         except (urllib.error.URLError, OSError, ValueError) as exc:
             self._failures += 1

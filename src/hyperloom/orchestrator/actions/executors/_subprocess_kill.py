@@ -1012,6 +1012,50 @@ def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> fl
     return time.monotonic() + float(session_remaining_sec)
 
 
+#: Kill switch for KV sampling. Collection is best-effort and cannot fail a
+#: round by construction, but a loop this central needs a way out of the path
+#: that does not require a redeploy. Set to ``0`` to disable.
+_KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
+
+
+def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
+    """Create the KV sampler for one round, or ``None`` when it does not apply.
+
+    Gated on ``server_log_path`` because that is what marks a call as a served
+    benchmark rather than an arbitrary subprocess: a scriptable workload or a
+    helper command has no engine to scrape and no round-scoped place to put an
+    artifact.
+
+    Args:
+        server_log_path (str | None): The round's ``<output_dir>/server.log``.
+            Its parent is the round workspace and receives the artifact.
+        env (dict[str, str] | None): The child's environment. This is the
+            materialized config's ``benchmark.envs``, so it carries the
+            per-session ephemeral ``PORT`` the server actually bound -- the
+            default 8888 is only correct when nothing pinned one.
+
+    Returns:
+        Any: A recorder, or ``None`` when collection is off, inapplicable, or
+        could not be constructed. Never raises: a sampler that cannot be built
+        must not stop the benchmark it was going to watch.
+    """
+    if not server_log_path:
+        return None
+    if os.environ.get(_KV_METRICS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    try:
+        from ._kv_metrics import KV_ARTIFACT_NAME, KvMetricsPoller, KvMetricsRecorder
+
+        return KvMetricsRecorder(
+            poller=KvMetricsPoller(config_envs=dict(env or {})),
+            output_path=str(Path(server_log_path).parent / KV_ARTIFACT_NAME),
+            scope={"server_log_path": str(server_log_path)},
+        )
+    except Exception:  # noqa: BLE001 - collection is never worth a failed round
+        log.debug("kv_metrics: recorder unavailable", exc_info=True)
+        return None
+
+
 def run_with_session_kill(
     cmd: list[str],
     *,
@@ -1099,6 +1143,7 @@ def run_with_session_kill(
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
+                    kv_recorder=_build_kv_recorder(server_log_path, env),
                 )
             except subprocess.TimeoutExpired:
                 kill_my_spawned_server(proc)
@@ -1465,7 +1510,14 @@ def _communicate_with_soft_deadline(
             # monotonic clock: this loop's slice shrinks below its nominal 0.5s
             # whenever a deadline bounds it, so counting passes would sample
             # faster exactly when the run is closest to its limits.
-            if kv_recorder is not None:
+            #
+            # Held off until the server is up. The scrape is a blocking call, and
+            # before the engine binds its port every attempt is a refused
+            # connection paid for inside the loop -- during boot, which is
+            # precisely when the ready marker and the death watchdog need this
+            # loop to be responsive. Boot carries no traffic to measure anyway,
+            # and pool capacity is readable the moment the server answers.
+            if kv_recorder is not None and (server_ready_since is not None or server_already_ready):
                 kv_recorder.tick(now)
             # Soft deadline. With ``soft_from_ready`` the overtime clock is measured
             # from the server-ready marker and stays dormant until ready; otherwise
