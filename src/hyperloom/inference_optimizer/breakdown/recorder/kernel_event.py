@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar, Token
 from typing import Any
 
 from .assembler import EVENT_SECTIONS, event_parts
@@ -80,6 +81,11 @@ SECTION_TRACE_ANALYZE = "kernel_trace_analyze"
 SECTION_GEAK_ATTEMPT = "kernel_geak_attempt"
 SECTION_GEAK_DISCOVERY = "kernel_geak_discovery"
 SECTION_GEAK_ACCEPTANCE = "kernel_geak_acceptance"
+#: One row per kernel the trace attributed during this visit, with the profiling
+#: fields the hot-kernel summary deliberately drops. Kept apart from the lane
+#: rows because discovery is a snapshot of what the analysis found, not an
+#: optimization attempt.
+SECTION_DISCOVERED = "kernel_discovered"
 
 ROW_LANE_RUN = "lane_run"
 ROW_REBENCH = "rebench"
@@ -87,6 +93,9 @@ ROW_TRACE_ANALYZE = "trace_analyze"
 ROW_GEAK_ATTEMPT = "geak_attempt"
 ROW_GEAK_DISCOVERY = "geak_discovery"
 ROW_GEAK_ACCEPTANCE = "geak_acceptance"
+ROW_DISCOVERED = "discovered"
+
+_ACTIVE: ContextVar["KernelEventRecorder | None"] = ContextVar("kernel_event_active", default=None)
 
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
@@ -190,10 +199,16 @@ __all__ = [
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
     "KernelEventRecorder",
+    "active_kernel_recorder",
     "assemble_kernel_ext",
     "kernel_event_id",
     "make_kernel_recorder",
 ]
+
+
+def active_kernel_recorder() -> "KernelEventRecorder | None":
+    """Return the KERNEL visit recorder currently open in this context, if any."""
+    return _ACTIVE.get()
 
 
 def kernel_event_id(macro_cycle: Any) -> str:
@@ -209,6 +224,76 @@ def kernel_event_id(macro_cycle: Any) -> str:
         ValueError: If ``macro_cycle`` is not a non-negative integer.
     """
     return event_id(EVENT_PHASE, macro_cycle, EVENT_COMPONENT)
+
+
+def _discovered_kernel_row(
+    entry: Mapping[str, Any],
+    *,
+    rank: int,
+    snapshot_id: int | None,
+    provenance: str,
+    reusable_ids: set[str],
+) -> dict[str, Any] | None:
+    """Normalize one hot-kernel row into the discovered-kernel view.
+
+    Args:
+        entry (Mapping[str, Any]): One row from ``hot_kernels_top15`` or the
+            roofline sidecar merge.
+        rank (int): Position in the discovery ordering.
+        snapshot_id (int | None): The analysis snapshot this row came from.
+        provenance (str): Why this snapshot was recorded.
+        reusable_ids (set[str]): Kernel ids the analysis admitted as targets.
+
+    Returns:
+        dict[str, Any] | None: The normalized row, or ``None`` without identity.
+    """
+    kernel_id = _text(entry.get("kernel_id"))
+    name = _text(entry.get("name"))
+    if not kernel_id and not name:
+        return None
+    duration = entry.get("duration_us")
+    if duration is None:
+        duration = entry.get("gpu_time_us")
+    call_count = entry.get("call_count")
+    if call_count is None:
+        call_count = entry.get("count")
+    bandwidth = entry.get("bandwidth_utilization_pct")
+    if bandwidth is None:
+        bandwidth = entry.get("bandwidth_util_pct")
+    compute = entry.get("compute_utilization_pct")
+    if compute is None:
+        compute = entry.get("compute_util_pct")
+    intensity = entry.get("arithmetic_intensity")
+    if intensity is None:
+        intensity = entry.get("flops_per_byte")
+    kid = str(kernel_id or "")
+    reusable = bool(entry.get("reusable_native_kernel")) or (kid and kid in reusable_ids)
+    recommended_backends = [str(item) for item in _as_list(entry.get("recommended_backends"))]
+    recommended_actions = [str(item) for item in _as_list(entry.get("recommended_actions"))]
+    return {
+        "kernel_id": kid,
+        "name": _clip(name or ""),
+        "rank": int(rank),
+        "snapshot_id": snapshot_id,
+        "provenance": str(provenance or ""),
+        "gpu_pct": _float_or_none(entry.get("gpu_pct")),
+        "duration_us": _float_or_none(duration),
+        "call_count": _int_or_none(call_count),
+        "kernel_category": str(entry.get("kernel_category") or ""),
+        "bottleneck": _text(entry.get("bottleneck")),
+        "bound_type": _text(entry.get("bound_type")),
+        "arithmetic_intensity": _float_or_none(intensity),
+        "flops_per_byte": _float_or_none(entry.get("flops_per_byte")),
+        "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
+        "bandwidth_util_pct": _float_or_none(bandwidth),
+        "compute_util_pct": _float_or_none(compute),
+        "source_file": _text(entry.get("source_file")),
+        "optimization_notes": _clip(entry.get("optimization_notes") or entry.get("suggestion") or ""),
+        "recommended_backends": recommended_backends,
+        "recommended_actions": recommended_actions,
+        "reusable_native_kernel": reusable,
+        "selected": reusable or bool(recommended_backends) or bool(recommended_actions),
+    }
 
 
 def _empty_by_source() -> dict[str, dict[str, int]]:
@@ -457,6 +542,7 @@ class KernelEventRecorder:
         self._start_time = _now_iso()
         self._sequence: int | None = None
         self._closed = False
+        self._active_token: Token | None = None
         self._route = str(route or "")
         self._stage = "entry"
         self._sink.record(
@@ -536,6 +622,60 @@ class KernelEventRecorder:
             start_time=self._start_time,
             ext={"route": self._route, "in_flight_stage": self._stage},
         )
+        self._active_token = _ACTIVE.set(self)
+
+    def _clear_active(self) -> None:
+        """Drop this recorder from the attribution window."""
+        token = self._active_token
+        if token is not None:
+            _ACTIVE.reset(token)
+            self._active_token = None
+
+    def record_discovered_kernels(
+        self,
+        snapshot: Mapping[str, Any] | None,
+        *,
+        provenance: str = "trace_analyze",
+    ) -> None:
+        """Record the profiling-rich kernel table this visit is targeting.
+
+        The hot-kernel summary on a roofline event is intentionally thin; the
+        KERNEL visit needs the per-kernel profiling fields that decide which
+        targets are worth rewriting. This is recorded as its own table rather
+        than folded into ``trace_analyze_runs`` so a reader does not have to
+        join against a capped top-15 summary missing ``kernel_id``.
+
+        Args:
+            snapshot (Mapping[str, Any] | None): A ``last_trace_analyze``-shaped
+                cache, or any dict carrying ``hot_kernels_top15``.
+            provenance (str): Why this snapshot was taken.
+        """
+        produced = _as_dict(snapshot)
+        rows = _as_list(produced.get("hot_kernels_top15"))
+        if not rows:
+            rows = _as_list(produced.get("kernel_roofline_top15"))
+        if not rows:
+            return
+        snapshot_id = _int_or_none(produced.get("roofline_snapshot_id"))
+        reusable = {str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))}
+        for rank, entry in enumerate(rows):
+            if not isinstance(entry, Mapping):
+                continue
+            row = _discovered_kernel_row(
+                entry,
+                rank=rank,
+                snapshot_id=snapshot_id,
+                provenance=provenance,
+                reusable_ids=reusable,
+            )
+            if row is None:
+                continue
+            self._sink.record(
+                SECTION_DISCOVERED,
+                row,
+                row_type=ROW_DISCOVERED,
+                natural_ids=(str(snapshot_id or 0), str(row.get("kernel_id") or f"rank:{rank}")),
+            )
 
     def enter_stage(self, stage: str) -> None:
         """Name the stage now in flight so a kill leaves it identifiable.
@@ -676,6 +816,8 @@ class KernelEventRecorder:
             row_type=ROW_TRACE_ANALYZE,
             natural_ids=str(run_id or ""),
         )
+        if produced:
+            self.record_discovered_kernels(produced, provenance="trace_analyze_run")
 
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
         """Write one lane row, keyed by the run it describes.
@@ -1381,6 +1523,7 @@ class KernelEventRecorder:
             start_time=self._start_time,
             end_time=end_time,
         )
+        self._clear_active()
 
     def finish_failed(self, *, stage: str, error_class: str = "", message: Any = "") -> None:
         """Close the event as failed, naming the stage that failed.
@@ -1610,6 +1753,14 @@ def assemble_kernel_ext(
         rows_for_event(parts.get(SECTION_GEAK_ACCEPTANCE) or [], event),
         keys=("ordinal", "kernel_id", "selection"),
     )
+    discovered_rows = wire_rows(
+        sort_rows(
+            rows_for_event(parts.get(SECTION_DISCOVERED) or [], event),
+            keys=("snapshot_id", "rank"),
+        ),
+        drop=("event_id", "rank"),
+    )
+    recommended_rows = [row for row in discovered_rows if row.get("selected")]
 
     lanes: dict[str, list[dict[str, Any]]] = {lane: [] for lane in LANE_BY_SOURCE.values()}
     for source, rows in group_rows(lane_rows, "source_kind").items():
@@ -1647,13 +1798,15 @@ def assemble_kernel_ext(
             **reprofile,
             "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
         }
-    forge_engaged = bool(reprofile or trace_runs or forge_ledger or any(lanes.values()))
+    forge_engaged = bool(reprofile or trace_runs or forge_ledger or any(lanes.values()) or discovered_rows)
     forge: dict[str, Any] | None = None
     if forge_engaged:
         forge = {
             "engaged": True,
             "reprofile": reprofile,
             "trace_analyze_runs": trace_runs,
+            "discovered_kernels": discovered_rows,
+            "recommended_kernels": recommended_rows,
             "lanes": {lane: wire_rows(rows) for lane, rows in lanes.items()},
             "rebench_ledger": wire_rows(forge_ledger),
         }

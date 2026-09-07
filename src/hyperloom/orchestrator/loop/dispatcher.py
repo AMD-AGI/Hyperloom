@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from collections.abc import Callable, Collection
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -908,6 +909,24 @@ class DispatcherCollaborator:
             handle = asyncio.current_task()
             if handle is not None:
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
+        # Put the dispatch on its phase's event here, where the ordering phase
+        # is what state says it is. Recording it at settle instead is what
+        # forced the export-time attribution to guess: an action can outlive the
+        # phase that ordered it, and the phase in scope when the result lands is
+        # then the wrong owner.
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+            phase_event.record_dispatch(
+                action=str(task.kind or ""),
+                task_id=str(task.task_id or ""),
+                phase=str(getattr(self.shared_state, "phase", "") or ""),
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                dispatched_unix=time.time(),
+            )
+        except Exception:  # noqa: BLE001 — an action outranks its own record
+            log.debug("dispatcher: phase dispatch record failed", exc_info=True)
         try:
             # Every LLM call this action makes, in-process or in a child, is
             # labelled with its kind from here.
@@ -1316,6 +1335,25 @@ class DispatcherCollaborator:
             kept = (result.state == "succeeded" or replay_needs_cleanup) and self._is_promotable_result(
                 task.kind, result_payload
             )
+            # Settle the dispatch row on the phase that ordered it. Here rather
+            # than inside the two branches below: both of them return early on
+            # some paths, and the verdict is the same fact either way.
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+                phase_event.record_settle(
+                    task_id=str(task.task_id or ""),
+                    status=str(result.state or ""),
+                    decision="promoted" if kept else "no_promote",
+                    error_class=result_payload.get("error_class") or result.error_class,
+                    workspace=result_payload.get("workspace"),
+                    settled_unix=time.time(),
+                    phase=str(getattr(self.shared_state, "phase", "") or ""),
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    action=str(task.kind or ""),
+                )
+            except Exception:  # noqa: BLE001 — a verdict outranks its own record
+                log.debug("dispatcher: phase settle record failed", exc_info=True)
             try:
                 if kept:
                     await self._promote_to_shared_state(

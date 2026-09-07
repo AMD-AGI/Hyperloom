@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.kb_timeline import (
-    collect_kb_events,
     collect_kb_write_back_event,
     collect_warm_replay_event,
-    collect_warm_start_event,
 )
 
 
@@ -61,145 +58,6 @@ def _matched_state(*, tier: str = "exact", **overrides) -> dict:
     )
     state.update(overrides)
     return state
-
-
-# ---------------------------------------------------------------------------
-# warm_start
-# ---------------------------------------------------------------------------
-
-
-def test_warm_start_absent_emits_no_event():
-    """A session that never reached T0 must not get an empty stage."""
-    assert collect_warm_start_event(_scope_state()) is None
-
-
-def test_warm_start_exact_hit_reports_identity_gain_and_origin():
-    event = collect_warm_start_event(_matched_state())
-    assert event["type"] == "warm_start"
-    assert event["status"] == "matched"
-    assert event["start_time"] == event["end_time"] == "2026-08-20T07:25:00+00:00"
-
-    matched = event["ext"]["matched"]
-    assert matched["match_type"] == "exact"
-    assert matched["tier"] == "exact"
-    assert matched["confidence"] == pytest.approx(1.0)
-    assert matched["source"] == "kb-store"
-    assert matched["optimized_throughput"] == pytest.approx(3239.9)
-    assert matched["validated_gain_pct"] == pytest.approx(36.16)
-    assert matched["expected_gain_pct"] == pytest.approx(36.23)
-    assert matched["replay_material_available"] is True
-    assert matched["origin"] == {"session_id": "20260818T063226Z", "gain_pct": pytest.approx(36.23)}
-    assert matched["experience"] == {"lessons_count": 2, "pitfalls_count": 1}
-    assert event["ext"]["requested"]["scope"] == {
-        "kernel_optimizer": "geak",
-        "tp": 1,
-        "conc": 64,
-        "isl": 8192,
-        "osl": 1024,
-    }
-
-
-def test_warm_start_degraded_tier_is_not_reported_as_exact():
-    """A hit that relaxed framework version must stay distinguishable."""
-    event = collect_warm_start_event(_matched_state(tier="compatible_framework_version"))
-    matched = event["ext"]["matched"]
-    assert matched["match_type"] == "degraded"
-    assert matched["tier"] == "compatible_framework_version"
-    assert matched["confidence"] == pytest.approx(0.72)
-
-
-def test_warm_start_requested_id_prefers_recorded_close_identity():
-    """CLOSE derives the session's own identity; a degraded hit must not stand in for it."""
-    state = _matched_state(
-        tier="same_gpu_isa",
-        recipe_finalize_outcome={"canonical_id": "inference:asked-for:mi355x:sglang:a:b:0.5.17:bf16"},
-    )
-    event = collect_warm_start_event(state)
-    assert event["ext"]["requested"]["canonical_id"] == "inference:asked-for:mi355x:sglang:a:b:0.5.17:bf16"
-    assert event["ext"]["matched"]["canonical_id"] == CID
-
-
-def test_warm_start_degraded_hit_without_close_leaves_requested_blank():
-    """Guessing the asked-for identity from a relaxed match would be wrong."""
-    event = collect_warm_start_event(_matched_state(tier="same_arch_class"))
-    assert event["ext"]["requested"]["canonical_id"] == ""
-
-
-def test_warm_start_miss_carries_no_matched_block():
-    state = _scope_state(
-        warm_start_ts="2026-08-20T07:25:00+00:00",
-        warm_start_context={"status": "miss", "match": {"tier": "miss", "confidence": 0.0}},
-    )
-    event = collect_warm_start_event(state)
-    assert event["status"] == "not_matched"
-    assert "matched" not in event["ext"]
-    assert event["ext"]["match_status"] == "miss"
-
-
-def test_warm_start_seed_only_keeps_its_raw_status():
-    """``seed_only`` is a hit that could not be executed, not a plain miss."""
-    state = _scope_state(
-        warm_start_ts="2026-08-20T07:25:00+00:00",
-        warm_start_context={"status": "seed_only", "match": {"tier": "exact"}},
-    )
-    event = collect_warm_start_event(state)
-    assert event["status"] == "not_matched"
-    assert event["ext"]["match_status"] == "seed_only"
-
-
-def test_warm_start_error_status_maps_to_failed():
-    state = _scope_state(
-        warm_start_ts="2026-08-20T07:25:00+00:00",
-        warm_start_context={"status": "error"},
-    )
-    assert collect_warm_start_event(state)["status"] == "failed"
-
-
-def _write_recipe_audit(session_dir: Path, rows: list[dict]) -> None:
-    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
-
-    audit = recipe_snapshot_audit_jsonl(session_dir)
-    audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-
-
-def test_warm_start_reads_attribution_migrated_from_recipe_audit(tmp_path: Path):
-    """The retired ``kb_provenance.recipe_snapshot_reads`` now rides warm_start.ext."""
-    _write_recipe_audit(
-        tmp_path,
-        [
-            {
-                "method": "get_recipe",
-                "remote": "kb-store",
-                "resolution": "remote",
-                "hit": True,
-                "result": {"sources": ["kb-store", "recipe_kb"], "best_config_source": "kb-store"},
-            },
-            {
-                "method": "get_recipe",
-                "remote": "recipe_kb",
-                "resolution": "local",
-                "hit": False,
-                "result": {"sources": ["recipe_kb"]},
-            },
-        ],
-    )
-    events = collect_kb_events(tmp_path, _matched_state(), [])
-    warm_start = next(event for event in events if event["type"] == "warm_start")
-    reads = warm_start["ext"]["reads"]
-    assert reads["count"] == 2
-    assert reads["hits"] == 1
-    assert reads["by_remote"] == {"kb-store": 1, "recipe_kb": 1}
-    assert reads["by_resolution"] == {"remote": 1, "local": 1}
-    assert reads["by_source"] == {"kb-store": 1, "recipe_kb": 2}
-    assert reads["best_config_by_source"] == {"kb-store": 1}
-    assert len(reads["tail"]) == 2
-
-
-def test_warm_start_reads_absent_when_no_audit(tmp_path: Path):
-    events = collect_kb_events(tmp_path, _matched_state(), [])
-    warm_start = next(event for event in events if event["type"] == "warm_start")
-    assert "reads" not in warm_start["ext"]
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +375,14 @@ def test_kb_write_back_pending_marker_is_not_reported_as_written(tmp_path: Path)
 
 
 def test_kb_events_join_the_timeline_in_execution_order(tmp_path: Path):
+    """Only the warm replay is still projected here.
+
+    The T0 lookup is recorded by T0 (see
+    ``test_sbd_v6_warm_start_recording.py``), and the Recipe publication moved
+    to the ``close`` key, because the session publishes on its way out no
+    matter what and a timeline event cannot say that it did not happen -- it
+    would simply be missing. See ``test_sbd_v6_close_recording.py``.
+    """
     state = _matched_state(
         warm_replay_outcome={
             "status": "reproduced",
@@ -530,9 +396,9 @@ def test_kb_events_join_the_timeline_in_execution_order(tmp_path: Path):
             "updated_at": "2026-08-20T17:34:00+00:00",
         },
     )
-    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])
-    assert [event["type"] for event in timeline] == ["warm_start", "warm_replay", "kb_write_back"]
+    timeline = collect_v6_timeline(tmp_path, [], state=state)
+    assert [event["type"] for event in timeline] == ["warm_replay"]
 
 
 def test_timeline_stays_empty_for_a_session_that_touched_no_kb(tmp_path: Path):
-    assert collect_v6_timeline(tmp_path, [], state={}, recorded_operations=[]) == []
+    assert collect_v6_timeline(tmp_path, [], state={}) == []

@@ -20,15 +20,13 @@ rejected replay has already rolled its material back.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from hyperloom.common.jsonio import read_jsonl
 
 from ..session.session_paths import (
     recipe_kb_dead_letter_ndjson,
     recipe_kb_flushed_ndjson,
     recipe_kb_pending_ndjson,
-    recipe_snapshot_audit_jsonl,
 )
 from .collectors._common import (
     _dict_rows,
@@ -43,24 +41,7 @@ from .schema import (
     V6KBWriteBackExt,
     V6WarmReplayApplied,
     V6WarmReplayExt,
-    V6WarmStartExt,
-    V6WarmStartMatched,
-    V6WarmStartReads,
 )
-
-
-# ---------------------------------------------------------------------------
-# warm_start
-# ---------------------------------------------------------------------------
-
-# recipe_kb_t0 publishes one of these four; anything else is treated as a miss.
-_WARM_START_STATUS = {
-    "hit": "matched",
-    "seed_only": "not_matched",
-    "miss": "not_matched",
-    "error": "failed",
-}
-_EXACT_TIERS = frozenset({"exact"})
 
 
 def _scope(state: dict[str, Any]) -> dict[str, Any]:
@@ -71,177 +52,6 @@ def _scope(state: dict[str, Any]) -> dict[str, Any]:
         "conc": _optional_int(state.get("conc")),
         "isl": _optional_int(state.get("isl")),
         "osl": _optional_int(state.get("osl")),
-    }
-
-
-def _matched_scope(recipe: dict[str, Any]) -> dict[str, Any] | None:
-    """The matched record's own workload shape, when it published one."""
-    shape = _mapping(recipe.get("workload_shape"))
-    if not shape:
-        return None
-    return {
-        "tp": _optional_int(shape.get("tp")),
-        "conc": _optional_int(shape.get("conc")),
-        "isl": _optional_int(shape.get("isl")),
-        "osl": _optional_int(shape.get("osl")),
-    }
-
-
-def _requested_canonical_id(state: dict[str, Any], matched_id: str) -> str:
-    """Resolve the identity this session asked the KB for.
-
-    Read rather than rebuilt: the hardware dimension is topology-aware and
-    resolved from the runtime environment, so recomputing it at export time
-    could disagree with what the run actually queried. CLOSE derives the
-    session's own identity through the same helper T0 used, which makes
-    ``recipe_finalize`` the authority; an exact match is the same string.
-    """
-    finalize = _mapping(state.get("recipe_finalize_outcome"))
-    recorded = str(finalize.get("canonical_id") or "").strip()
-    if recorded:
-        return recorded
-    tier = str(_mapping(state.get("warm_start_recipe")).get("tier") or "").strip().lower()
-    return matched_id if tier in _EXACT_TIERS else ""
-
-
-def _warm_start_origin(recipe: dict[str, Any]) -> dict[str, Any] | None:
-    """Which session wrote the matched record, and what it gained."""
-    provenance = _mapping(recipe.get("provenance"))
-    session_id = str(_first(recipe.get("remote_session_id"), provenance.get("session_id")) or "")
-    sessions = _dict_rows(recipe.get("sessions"))
-    gain = _optional_float(sessions[0].get("gain_pct")) if sessions else None
-    if not session_id and gain is None:
-        return None
-    return {"session_id": session_id or None, "gain_pct": gain}
-
-
-def _recipe_snapshot_reads(session_dir: Path, warnings: list[str]) -> V6WarmStartReads | None:
-    """Per-source attribution of this session's Recipe KB reads.
-
-    Read back from the recipe-snapshot audit log: how each T0 lookup resolved,
-    which backend served it, and which source supplied the champion config.
-    ``None`` when the session recorded no readable read, so the block is only
-    attached to ``warm_start`` when it carries something.
-    """
-    path = recipe_snapshot_audit_jsonl(session_dir)
-    if not path.exists():
-        return None
-    try:
-        rows = [row for row in read_jsonl(path) if isinstance(row, dict)]
-    except (OSError, ValueError) as exc:  # noqa: BLE001 — an unreadable audit is "no reads"
-        warnings.append(f"timeline.warm_start.reads: failed to read audit {path}: {exc!r}"[:240])
-        return None
-    if not rows:
-        return None
-    rows = rows[-50:]
-
-    by_resolution: dict[str, int] = {}
-    by_remote: dict[str, int] = {}
-    by_source: dict[str, int] = {}
-    best_config_by_source: dict[str, int] = {}
-    hits = 0
-    for row in rows:
-        resolution = str(row.get("resolution") or "unknown")
-        by_resolution[resolution] = by_resolution.get(resolution, 0) + 1
-        remote = str(row.get("remote") or "unknown")
-        by_remote[remote] = by_remote.get(remote, 0) + 1
-        if row.get("hit"):
-            hits += 1
-        result = row.get("result") if isinstance(row.get("result"), dict) else {}
-        for src in result.get("sources") or []:
-            by_source[str(src)] = by_source.get(str(src), 0) + 1
-        best = result.get("best_config_source")
-        for src in best if isinstance(best, list) else [best] if best else []:
-            best_config_by_source[str(src)] = best_config_by_source.get(str(src), 0) + 1
-
-    return {
-        "count": len(rows),
-        "hits": hits,
-        "by_resolution": by_resolution,
-        "by_remote": by_remote,
-        "by_source": by_source,
-        "best_config_by_source": best_config_by_source,
-        # A short tail of the raw rows: downstream champion-config and donor
-        # resolution read the most recent hit's own result off these.
-        "tail": rows[-10:],
-    }
-
-
-def collect_warm_start_event(
-    state: dict[str, Any],
-    reads: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Project the PRELUDE Recipe KB lookup, or ``None`` when it never ran."""
-    warm = _mapping(state.get("warm_start_recipe"))
-    context = _mapping(state.get("warm_start_context"))
-    ts = str(state.get("warm_start_ts") or "")
-    if not (warm or context or ts):
-        return None
-
-    raw_status = str(context.get("status") or "").strip().lower()
-    tier = str(warm.get("tier") or "").strip()
-    recipe = _mapping(warm.get("recipe"))
-    if raw_status in _WARM_START_STATUS:
-        status = _WARM_START_STATUS[raw_status]
-    else:
-        status = "matched" if recipe and tier and tier.lower() != "miss" else "not_matched"
-
-    match = _mapping(context.get("match"))
-    matched_id = str(_first(match.get("canonical_id"), recipe.get("canonical_id")) or "")
-    ext: V6WarmStartExt = {
-        "requested": {
-            "canonical_id": _requested_canonical_id(state, matched_id),
-            "scope": _scope(state),
-        },
-    }
-    if raw_status and raw_status not in {"hit"}:
-        # ``seed_only`` is a hit that could not be executed; keeping the raw
-        # value stops it reading as a plain miss.
-        ext["match_status"] = raw_status
-
-    if status == "matched":
-        lessons = state.get("warm_start_lessons")
-        pitfalls = state.get("warm_start_pitfalls")
-        match_type: Literal["exact", "degraded"] = "exact" if tier.lower() in _EXACT_TIERS else "degraded"
-        matched: V6WarmStartMatched = {
-            "match_type": match_type,
-            "tier": tier,
-            "confidence": _optional_float(_first(warm.get("confidence"), match.get("confidence"))),
-            "source": str(match.get("source") or ""),
-            "canonical_id": matched_id,
-            "optimized_throughput": _optional_float(recipe.get("best_throughput")),
-            "validated_gain_pct": _optional_float(recipe.get("validated_gain_pct")),
-            "expected_gain_pct": _optional_float(_mapping(context.get("recommended_replay")).get("expected_gain_pct")),
-            "replayable": _optional_bool(recipe.get("replayable")),
-            "replay_disabled_reason": str(recipe.get("replay_disabled_reason") or "") or None,
-            "replay_material_available": _optional_bool(recipe.get("replay_material_available")),
-            "view_source": str(recipe.get("view_source") or "") or None,
-            "experience": {
-                "lessons_count": len(lessons) if isinstance(lessons, list) else 0,
-                "pitfalls_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
-            },
-        }
-        scope = _matched_scope(recipe)
-        if scope is not None:
-            matched["scope"] = scope
-        origin = _warm_start_origin(recipe)
-        if origin is not None:
-            matched["origin"] = origin
-        ext["matched"] = matched
-
-    # Read attribution belongs to the T0 read regardless of whether it matched:
-    # a miss still records which backends were consulted and how each resolved.
-    if reads:
-        ext["reads"] = reads
-
-    return {
-        "type": "warm_start",
-        "kind": "warm_start",
-        "status": status,
-        # A T0 anchor is a single read; it has no measurable duration.
-        "start_time": ts,
-        "end_time": ts,
-        "ext": ext,
     }
 
 
@@ -578,12 +388,23 @@ def collect_kb_events(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Every KB timeline event this session produced, in execution order."""
-    events = [
-        collect_warm_start_event(state, _recipe_snapshot_reads(session_dir, warnings)),
-        collect_warm_replay_event(state),
-        collect_kb_write_back_event(session_dir, state, warnings),
-    ]
+    """Every KB timeline event this session produced, in execution order.
+
+    Two of the three KB events are no longer projected here.
+
+    The T0 lookup is recorded by T0 itself (see
+    :mod:`..recorder.warm_start_event`), which is the only place that can say
+    which of the session's KB reads were the anchor's: T0 and
+    ``_kb_amend_recipe`` consult the same store through the same audit hook, so
+    a projection reading that log back could only guess.
+
+    The Recipe publication is recorded into the ``close`` key instead (see
+    :mod:`..recorder.close_out`): the session publishes unconditionally on its
+    way out, so the absence of a publication is a fact worth stating -- and a
+    timeline event that did not happen is simply not there, which leaves
+    nowhere to state it.
+    """
+    events = [collect_warm_replay_event(state)]
     return [event for event in events if event is not None]
 
 
@@ -591,5 +412,4 @@ __all__ = [
     "collect_kb_events",
     "collect_kb_write_back_event",
     "collect_warm_replay_event",
-    "collect_warm_start_event",
 ]

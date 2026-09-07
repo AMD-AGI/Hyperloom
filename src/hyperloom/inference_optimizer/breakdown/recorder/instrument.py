@@ -857,6 +857,15 @@ def record_phase_event(
             "key_metric_kind": entry.get("key_metric_kind"),
             "workspace": entry.get("workspace"),
             "error_class": entry.get("error_class"),
+            # The caller is handed both of these and used to forward them only
+            # to the v4 mirror, so the audit rows reached export with an empty
+            # ``phase`` and ``collect_phase_segments`` had to attribute each one
+            # by testing its timestamp against the phase windows -- a guess,
+            # made from a fact that was in scope right here. The authoritative
+            # record is now the phase event's own action row; this keeps the
+            # legacy key honest for as long as it survives.
+            "phase": str(phase or entry.get("phase") or ""),
+            "macro_cycle": int(macro_cycle or 0),
             "extras": dict(entry.get("extras") or {}),
         }
         # Stable key per (action, task) so a re-recorded attempt overwrites.
@@ -2001,6 +2010,10 @@ def record_geak_e2e_attempt(
             measurement_ids=measurement_refs,
             artifact_ids=artifact_refs,
             kind=attempt_kind,
+            # Frozen here rather than left on the operation: the kernel bucket
+            # splits its gain by backend, and the operation this adoption hangs
+            # off carries ``strategy`` only because a different call stamped it.
+            backend="geak",
             gain_pct=to_float(gain_pct),
             throughput_before=before,
             throughput_after=after,
@@ -2228,20 +2241,38 @@ def record_gemm_tuning_operation(
             producer=producer,
         )
         return
+    # ATTRIBUTABLE ONLY WITH A THROUGHPUT PAIR, on the same terms as the
+    # kernel integrate above: ``e2e_gain_pct`` is measured against whatever
+    # baseline the tuning run held, and percentages taken against different
+    # denominators do not add. The pair anchors the keep to the one session
+    # baseline; without it the keep stays visible and countable but withholds
+    # its contribution to any total.
+    #
+    # Frozen inline rather than left to the measurement citation: the readings
+    # are keyed by the validation run, so a later tuning pass on the same
+    # engine overwrites the very numbers this adoption was decided on.
+    before_tput = to_float(value.get("baseline_tput"))
+    after_tput = to_float(value.get("new_tput") or value.get("final_throughput"))
+    has_pair = bool(before_tput and after_tput and before_tput > 0 and after_tput > 0)
     _record_adoption_transition(
         session_dir,
         adoption_id=adoption_id,
         producer=producer,
         operation_id=operation_id,
         adopted=e2e_keep,
+        attribution_eligible=has_pair,
         reason=str(value.get("decision_reason") or ("gemm_e2e_keep" if e2e_keep else "gemm_e2e_revert")),
         transitioned_at=now,
         measurement_ids=measurement_refs,
         artifact_ids=artifact_refs,
         kind="gemm_tuning",
+        backend=backend,
         gain_pct=to_float(value.get("e2e_gain_pct")),
+        throughput_before=before_tput,
+        throughput_after=after_tput,
         configuration=dict(value.get("recommended_env") or value.get("extra_envs") or {}),
         validation_basis="e2e_validation",
+        metadata={} if has_pair else {"non_attributable_reason": "no_throughput_pair"},
     )
     record_operation(session_dir, operation_id=operation_id, producer=producer, adoption_refs=[adoption_id])
 
@@ -2373,6 +2404,7 @@ def record_collective_promotion(
             artifact_ids=artifact_refs,
             kind="kernel_collective",
             agent="kernel_agent",
+            backend=backend,
             gain_pct=to_float(gain_pct),
             throughput_before=to_float(baseline_tput),
             throughput_after=to_float(new_tput),
@@ -3095,6 +3127,149 @@ def record_kernel_dispatch(
         trace_skip(reason="writer raised", section="kernel_dispatch", error=exc)
 
 
+def _forge_route(route_strategy: str) -> bool:
+    """True when the route is forge-owned rather than GEAK or legacy-only."""
+    route = str(route_strategy or "")
+    return route not in {"geak", "geak_internal", "legacy_only"}
+
+
+def _mirror_forge_backend_to_kernel_timeline(
+    result: dict[str, Any],
+    *,
+    route_strategy: str,
+) -> None:
+    """Mirror forge backend attempts into the open KERNEL timeline event.
+
+    The legacy ``kernel_backend_result`` fragment is session-wide; the V6 kernel
+    event is visit-scoped. This copies each attempt as its own
+    ``kernel_rewrites[]`` row while a KERNEL visit recorder is active.
+    """
+    from .kernel_event import active_kernel_recorder
+
+    recorder = active_kernel_recorder()
+    if recorder is None or not _forge_route(route_strategy):
+        return
+    kid = str(result.get("kernel_id") or "")
+    if not kid:
+        return
+    run_id = str(result.get("run_id") or result.get("session_id") or "")
+    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
+    proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+    attempts = result.get("attempts") if isinstance(result.get("attempts"), list) else []
+    all_backends = [
+        str(item.get("backend") or "") for item in attempts if isinstance(item, dict) and item.get("backend")
+    ]
+    adopted_attempt_id = str(verification.get("best_attempt_id") or "")
+    kernel_decision = str(proposal.get("decision") or "").upper()
+    kernel_artifact = str(verification.get("best_artifact_path") or "")
+    task_group = ""
+    candidate = result.get("candidate")
+    if isinstance(candidate, dict):
+        task_group = str(candidate.get("task_group") or "")
+
+    if attempts:
+        for att in attempts:
+            if not isinstance(att, dict):
+                continue
+            attempt_id = str(att.get("attempt_id") or att.get("id") or "")
+            backend = str(att.get("backend") or "")
+            is_adopted = bool(attempt_id) and attempt_id == adopted_attempt_id
+            status_lower = str(att.get("status") or "").lower()
+            decision = str(att.get("decision") or "").upper()
+            if not decision and status_lower in _FAILED_STATUSES:
+                decision = "FAILED"
+            if is_adopted and kernel_decision:
+                decision = kernel_decision
+            micro_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
+            if micro_speedup is None and is_adopted:
+                micro_speedup = to_float(verification.get("micro_speedup"))
+            compile_passed = _to_bool(att.get("compile_passed"))
+            correctness_passed = _to_bool(att.get("correctness_passed"))
+            if is_adopted and compile_passed is None:
+                compile_passed = _to_bool(verification.get("compile_passed"))
+            if is_adopted and correctness_passed is None:
+                correctness_passed = _to_bool(verification.get("correctness_passed"))
+            optimized = att.get("optimized_path") or att.get("optimized_file")
+            artifact_path = str(optimized or (kernel_artifact if is_adopted else "") or "")
+            recorder.record_kernel_rewrite(
+                run_id=attempt_id or f"{run_id}-{backend}",
+                kernel_id=kid,
+                kernel_name=str(result.get("kernel_name") or result.get("name") or ""),
+                status=status_lower or "unknown",
+                dispatched=True,
+                backends_tried=all_backends or ([backend] if backend else []),
+                adopted_backend=backend if is_adopted else "",
+                task_group=task_group,
+                speedup=micro_speedup,
+                compile_status="passed" if compile_passed is True else ("failed" if compile_passed is False else ""),
+                correctness=correctness_passed,
+                artifact_path=artifact_path,
+                micro_decision=decision,
+                started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
+                ended_at=str(att.get("ended_at") or ""),
+                duration_sec=to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
+                failure_reason=str(att.get("error") or att.get("error_message") or ""),
+            )
+        return
+
+    status = str(result.get("status") or "").lower()
+    err_class = str(result.get("error_class") or "")
+    decision = str(proposal.get("decision") or "").upper()
+    failed = status in _FAILED_STATUSES or (decision == "REVERT" and bool(err_class))
+    if not failed:
+        return
+    backend = str(result.get("backend") or "").lower() or "unknown"
+    recorder.record_kernel_rewrite(
+        run_id=run_id or f"{kid}:predispatch",
+        kernel_id=kid,
+        status=status or "failed",
+        dispatched=False,
+        backends_tried=[backend] if backend != "unknown" else [],
+        skip_reason=str(result.get("skip_reason") or err_class or ""),
+        micro_decision=decision or "FAILED",
+        failure_reason=str(result.get("error") or err_class or ""),
+    )
+
+
+def _mirror_forge_e2e_to_kernel_timeline(
+    *,
+    kernel_id: str,
+    integrated: bool,
+    e2e_gain_pct: Any,
+    validated: bool | None,
+    decision: str,
+    patch_path: str | None,
+    target_file: str | None,
+    extra_server_args: str,
+    result: Mapping[str, Any] | None,
+    route_strategy: str,
+) -> None:
+    """Stamp integrate outcomes onto the matching forge rewrite row."""
+    from .kernel_event import active_kernel_recorder
+
+    recorder = active_kernel_recorder()
+    if recorder is None or not _forge_route(route_strategy):
+        return
+    evidence = dict(result or {})
+    verification = evidence.get("verification") if isinstance(evidence.get("verification"), dict) else {}
+    attempt_id = str(verification.get("best_attempt_id") or evidence.get("attempt_id") or "")
+    recorder.record_kernel_rewrite(
+        run_id=attempt_id or f"{kernel_id}:integrate",
+        kernel_id=str(kernel_id),
+        status="success" if integrated else "failed",
+        micro_decision=str(decision or "").upper(),
+        e2e={
+            "integrated": bool(integrated),
+            "e2e_gain_pct": to_float(e2e_gain_pct),
+            "validated": validated if isinstance(validated, bool) else None,
+            "decision": str(decision or "").upper(),
+            "patch_path": patch_path,
+            "target_file": target_file,
+            "extra_server_args": str(extra_server_args or ""),
+        },
+    )
+
+
 def record_kernel_backend_result(
     session_dir: Path | str | None,
     result: dict[str, Any],
@@ -3400,7 +3575,10 @@ def record_kernel_backend_result(
                 error=result.get("error") or result.get("error_class"),
             )
 
-        if recorded_any or not kid:
+        if not kid:
+            return
+        if recorded_any:
+            _mirror_forge_backend_to_kernel_timeline(result, route_strategy=route_strategy)
             return
 
         # No per-backend attempts: capture a pre-dispatch / infra failure as a
@@ -3473,6 +3651,7 @@ def record_kernel_backend_result(
                 version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
+        _mirror_forge_backend_to_kernel_timeline(result, route_strategy=route_strategy)
     except Exception as exc:  # noqa: BLE001
         log.debug("record_kernel_backend_result failed", exc_info=True)
         trace_skip(reason="writer raised", section="kernel_backend_result", error=exc)
@@ -3583,6 +3762,18 @@ def record_kernel_e2e(
             "kernel_e2e",
             payload,
             key=str(kernel_id),
+        )
+        _mirror_forge_e2e_to_kernel_timeline(
+            kernel_id=str(kernel_id),
+            integrated=integrated,
+            e2e_gain_pct=e2e_gain_pct,
+            validated=validated,
+            decision=decision,
+            patch_path=patch_path,
+            target_file=target_file,
+            extra_server_args=extra_server_args,
+            result=evidence,
+            route_strategy=route_strategy,
         )
         if str(route_strategy or "") == "legacy_only":
             # No operation and no adoption for this integrate. On a KEEP that
@@ -3736,6 +3927,11 @@ def record_kernel_e2e(
                 artifact_ids=artifact_refs,
                 measurement_ids=measurement_refs,
                 kind="kernel_optimization",
+                backend=_canonical_route(route_strategy)[1],
+                # The landing travels with the credit. Read off the operation
+                # instead, it is a second row that drops independently of this
+                # one, and the disagreement reads as drift nobody caused.
+                integrated=bool(integrated),
                 gain_pct=to_float(e2e_gain_pct),
                 # Frozen inline, not just referenced: measurement ids are stable
                 # per kernel, so a later attempt on the same kernel overwrites
@@ -3752,6 +3948,38 @@ def record_kernel_e2e(
                     "validation_tier": validation_tier or "integrate_e2e",
                     **({} if has_pair else {"non_attributable_reason": "no_throughput_pair"}),
                 },
+            )
+            adoption_refs.append(adoption_id)
+        elif integrated:
+            # LANDED WITH NOBODY CREDITING IT. No verdict has adjudicated this
+            # change yet, but it is already in the tree, so the workload has
+            # moved. With no row at all the gain walk skips the step while the
+            # next adopted one still starts from the higher figure, and the
+            # difference lands in unattributed gain, where a real hole in the
+            # accounting is indistinguishable from drift nobody caused.
+            #
+            # Recorded as landed rather than adopted: it earns no gain and is
+            # not a keep, and the point of the row is that the ledger can say
+            # the change is outstanding instead of staying silent about it.
+            adoption_id = _stable_id("adoption", operation_id, "integrate")
+            record_adoption(
+                session_dir,
+                adoption_id=adoption_id,
+                producer=producer,
+                operation_id=operation_id,
+                status="landed",
+                decision=decision_value or "PENDING_REVIEW",
+                validated=False,
+                integrated=True,
+                attribution_eligible=False,
+                kind="kernel_optimization",
+                backend=_canonical_route(route_strategy)[1],
+                subject=subject,
+                reason=decision_reason or "integrated_pending_verdict",
+                throughput_before=to_float(evidence.get("base_tput")),
+                throughput_after=to_float(evidence.get("new_tput")),
+                gain_pct=to_float(e2e_gain_pct),
+                landed_at=_now_iso_safe(),
             )
             adoption_refs.append(adoption_id)
         record_operation(

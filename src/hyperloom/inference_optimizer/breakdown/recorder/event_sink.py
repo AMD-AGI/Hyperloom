@@ -72,6 +72,9 @@ class RecordSink(Protocol):
     ) -> Path | None:
         """Record one row into ``section``."""
 
+    def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
+        """Append one row to ``section``, with no identity of its own."""
+
 
 class EventSink:
     """Writes rows into one event, whichever event that turns out to be."""
@@ -158,6 +161,54 @@ class EventSink:
                 section,
                 self._event_id,
                 key or "<unbuilt>",
+                self._producer,
+                exc_info=True,
+            )
+            return None
+
+    def append(self, section: str, payload: Mapping[str, Any]) -> Path | None:
+        """Append one row to ``section``, tagged for this sink's event.
+
+        For rows that are observations in time rather than entities: a plateau
+        reading, a lifecycle step. They have nothing to be keyed by, and
+        minting a key for them buys nothing and costs a whole failure mode --
+        two rows that mint the same one silently become a single row. An
+        appended row gets a write-unique fragment instead, so a second row can
+        never land on a first, and a resumed leg needs no knowledge of what an
+        earlier leg already wrote.
+
+        The price is that the fragment carries no identity, so an appended row
+        cannot be revised later. A fact that gets re-ruled -- a gate whose
+        verdict resolves after the fact -- wants :meth:`record` instead.
+
+        Args:
+            section (str): The section the row belongs to, registered in
+                ``SECTION_SHAPES`` with shape ``item``.
+            payload (Mapping[str, Any]): The whole row. Unlike :meth:`record`
+                there is no merging, so this is written as given.
+
+        Returns:
+            Path | None: The fragment written, or ``None`` when nothing was.
+                As with :meth:`record`, recording never breaks the run being
+                recorded, so a failure is logged at warning and ends here.
+        """
+        from .recorder import get_recorder  # local: avoid an import cycle at module load
+
+        try:
+            declared = str(payload.get(EVENT_ID_FIELD) or "") if isinstance(payload, Mapping) else ""
+            if declared and declared != self._event_id:
+                raise ValueError(
+                    f"payload claims event {declared!r} but this sink writes {self._event_id!r}; "
+                    "the event id is the sink's to decide, so the caller should not set it"
+                )
+            row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
+            return get_recorder(producer=self._producer).record_item(section, row)
+        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+            log.warning(
+                "recorder: dropped an appended %s row of event %s (producer %s); "
+                "the assembled event will be missing this fact",
+                section,
+                self._event_id,
                 self._producer,
                 exc_info=True,
             )

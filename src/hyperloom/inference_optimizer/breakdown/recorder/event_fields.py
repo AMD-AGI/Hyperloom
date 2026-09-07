@@ -39,6 +39,7 @@ __all__ = [
     "failure_row",
     "float_or_none",
     "int_or_none",
+    "now_iso_micros",
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
@@ -47,6 +48,15 @@ __all__ = [
 ]
 
 now_iso_seconds = functools.partial(now_iso, "seconds")
+
+#: For rows whose order carries meaning and that land faster than one a second.
+#: A whole gating sequence or a pass of plateau evaluations fits inside one
+#: second, so a second-precision stamp sorts them by whatever the tiebreak
+#: field happens to be -- usually a name. Ordering still does not rest on this
+#: alone: the wall clock is not monotonic across an NTP step or a resume, so
+#: rows that must hold an order carry an explicit ordinal and use the stamp
+#: only to read them by.
+now_iso_micros = functools.partial(now_iso, "microseconds")
 
 # Kept small on purpose. The full candidate list already lives in the
 # ``kernel_candidates`` artifact, so the event carries the ranking head for

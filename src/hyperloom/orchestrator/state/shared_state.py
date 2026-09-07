@@ -819,6 +819,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # budget still counts from the original start, which leaves this the only
     # record of where the previous leg ended.
     resumed_ts: str = ""
+    # Wall-clock seconds the previous run legs spent running, banked at each
+    # resume boundary so the gaps between legs are never charged. The live leg
+    # is not in here: it is measured from ``resumed_ts`` (or ``start_ts`` on a
+    # session that has only ever run once). A leg that crashed left no
+    # ``stop_ts`` and so banks nothing, which under-counts rather than
+    # inventing an end -- the same direction the phase clock tolerates.
+    prior_legs_elapsed_s: float = 0.0
     # Closing phase — set when wall-clock deadline fires; Coordinator only drains a ``report`` task. Cleared on resume.
     closing_phase: bool = False
     closing_started_unix: float = 0.0

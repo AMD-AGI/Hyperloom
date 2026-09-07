@@ -19,11 +19,13 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -94,6 +96,258 @@ def _is_upstream_pr_candidate(pending: Any) -> bool:
     if getattr(pending, "action_name", "") != "integrate_patch":
         return False
     return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
+
+
+def _record_config_proposal(router: Any, pending: Any) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed.
+
+    The arm's measured attempts already name this row through their
+    ``proposal_ref``, so without it the whole upstream of the config arm is a
+    dangling reference: the event says six variants were benched and cannot
+    say what was proposed or who proposed it.
+
+    Recorded when the grid is proposed rather than when it is approved, so one
+    the Critic denies is still on record as a thing the phase pursued and
+    dropped -- which is the reading the arm's plateau acts on.
+
+    One row per grid, not per variant, because that is what the attempts point
+    at: the config arm proposes in batches and the Critic rules on them by
+    name, so a grid of six variants is one proposal with six attempts.
+
+    Module-level and self-defending like the phase's other recording helpers:
+    this seam is driven by lightweight stand-ins in tests, and a proposal must
+    never fail to route because its observability did.
+
+    Args:
+        router: The intent router, or a stand-in; the recorder is read off it.
+        pending: The pending proposal just minted.
+    """
+    if str(getattr(pending, "action_name", "") or "") != "explore":
+        return
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    getter = getattr(router, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_CONFIG,
+        PRODUCER_ORCHESTRATION,
+        STEP_PROPOSED,
+        producer_for_provenance,
+    )
+
+    params = (getattr(pending, "payload", None) or {}).get("params") or {}
+    grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
+    labels = {str(row.get("provenance") or "").strip() for row in grid}
+    if len(labels) == 1:
+        producer, producer_ref = producer_for_provenance(next(iter(labels)))
+    else:
+        # A grid mixing provenances was assembled by the orchestration agent:
+        # a specialist's own config arrives as a single-provenance proposal of
+        # its own. Either way each variant keeps its label on its attempt, so
+        # the mix is not lost by naming the assembler here.
+        producer, producer_ref = PRODUCER_ORCHESTRATION, ""
+    scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
+    try:
+        recorder.record_proposal(
+            proposal_id,
+            arm=ARM_CONFIG,
+            producer=producer,
+            producer_ref=producer_ref,
+            lever_kind=LEVER_CONFIG,
+            scope=scopes.pop() if len(scopes) == 1 else "",
+        )
+        recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug(
+            "framework timeline: config proposal row failed for %s",
+            proposal_id,
+            exc_info=True,
+        )
+
+
+def _variant_review_rows(
+    payload: Mapping[str, Any] | None,
+    held_by_name: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Return the per-variant rulings a ``verdict_map`` carried.
+
+    A variant the Critic rejected never reaches a bench, so its ruling has no
+    attempt row to live on and the map is the only record that it was judged
+    at all. Kept per variant rather than collapsed, because the collapse is
+    deliberately lossy: a grid proceeds on its approved subset, and the summary
+    verdict says nothing about which variants that was.
+
+    Args:
+        payload: The ``review_verdict`` payload, read for ``verdict_map``.
+        held_by_name: What each entry was held to, keyed by variant name.
+
+    Returns:
+        One row per named variant, in the order the Critic wrote them.
+    """
+    entries = (payload or {}).get("verdict_map")
+    if not isinstance(entries, Mapping):
+        return []
+    held = held_by_name or {}
+    rows: list[dict[str, Any]] = []
+    for name, entry in entries.items():
+        variant = str(name or "")
+        if not variant:
+            continue
+        fields = entry if isinstance(entry, Mapping) else {}
+        authored = str(fields.get("verdict") or "")
+        effective = str(held.get(variant) or "") or authored
+        rows.append(
+            {
+                "variant_name": variant,
+                "verdict": authored,
+                "effective_verdict": effective,
+                # A hold is visible in the pair, and naming the rule twice
+                # would be a second thing to keep in step with the hold itself.
+                "held_to_rule": str(fields.get("failure_reason_code") or "") if effective != authored else "",
+                "reason": str(fields.get("rationale") or fields.get("reasoning") or ""),
+                "failure_reason_code": str(fields.get("failure_reason_code") or ""),
+            }
+        )
+    return rows
+
+
+def _review_subject(pending: Any) -> str:
+    """Return the proposal row a ruling belongs on.
+
+    The two arms identify a proposal differently: a configuration grid is known
+    by the bus message that raised it, an upstream candidate by its candidate
+    id, and the row already recorded under that id is the one the ruling is
+    about. Resolving it here is what keeps a review on the proposal it judged
+    instead of opening a second, near-empty row beside it.
+
+    Args:
+        pending: The proposal reviewed.
+
+    Returns:
+        The candidate id when the proposal carries one, else the bus message id.
+    """
+    payload = getattr(pending, "payload", None) or {}
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    candidate = str(
+        payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id") or ""
+    ).strip()
+    return candidate or str(getattr(pending, "proposal_msg_id", "") or "")
+
+
+def _record_critic_review(
+    router: Any,
+    pending: Any,
+    *,
+    authored: str,
+    effective: str,
+    reason: str,
+    payload: Mapping[str, Any] | None = None,
+    advisory: Mapping[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> None:
+    """Record the Critic's ruling on one proposal, onto the proposal.
+
+    Every action the Critic reviews is recorded, not only the config-arm grid:
+    a rejected ``integrate_patch`` is the reason a patch never landed, and
+    keeping that ruling only in the state mirror the patch gate consults left
+    the round reading as though the patch had never been authored.
+
+    Both verdicts are kept because they are different facts and the loop
+    already treats them so: a reject held to a formatting rule is mirrored
+    onto state as the reject the Critic wrote, not as what the hold made of
+    it. The review carries what the Critic ruled; the lifecycle step carries
+    what the loop then did with it.
+
+    A rejected proposal is settled here. It never reaches a bench, so nothing
+    downstream would otherwise resolve it, and a proposal left ``pending``
+    reads as one the phase never finished deciding.
+
+    Args:
+        router: The intent router, or a stand-in.
+        pending: The proposal reviewed.
+        authored: The verdict the Critic wrote.
+        effective: The verdict the loop acted on.
+        reason: The Critic's reasoning.
+        payload: The ``review_verdict`` payload, read for the grounds the
+            Critic stated -- source, confidence and the rule it cited.
+        advisory: The advisory block already serialised for the rebroadcast.
+        variants: Per-variant rulings, when a ``verdict_map`` named any.
+    """
+    proposal_id = _review_subject(pending)
+    if not proposal_id:
+        return
+    getter = getattr(router, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        DISPOSITION_DROPPED,
+        REVIEWER_CRITIC,
+        REVIEWER_CRITIC_UNAVAILABLE,
+        STEP_REVIEWED,
+    )
+
+    fields = payload or {}
+    grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
+    try:
+        recorder.record_proposal_review(
+            proposal_id,
+            verdict=authored or effective,
+            effective_verdict=effective,
+            held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+            reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
+            reason=reason,
+            confidence=fields.get("confidence"),
+            failure_reason_code=str(fields.get("failure_reason_code") or ""),
+            advisory=advisory,
+            variants=variants,
+        )
+        recorder.record_proposal_step(
+            proposal_id,
+            step=STEP_REVIEWED,
+            outcome=effective,
+            reason=reason,
+        )
+        if effective == "reject":
+            recorder.settle_proposal(
+                proposal_id,
+                disposition=DISPOSITION_DROPPED,
+                reason=reason or "critic_rejected",
+            )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug(
+            "framework timeline: critic review row failed for %s",
+            proposal_id,
+            exc_info=True,
+        )
+
+
+def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
+    """Record what the loop did with a ruling, onto the ruling.
+
+    Args:
+        router: The intent router, or a stand-in.
+        pending: The proposal ruled on.
+        **outcome: The fields ``record_proposal_review_outcome`` accepts.
+    """
+    proposal_id = _review_subject(pending)
+    if not proposal_id:
+        return
+    getter = getattr(router, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    try:
+        recorder.record_proposal_review_outcome(proposal_id, **outcome)
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug(
+            "framework timeline: review outcome row failed for %s",
+            proposal_id,
+            exc_info=True,
+        )
 
 
 class IntentRouter:
@@ -300,6 +554,7 @@ class IntentRouter:
             payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
+        _record_config_proposal(self, pending)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Apply a Critic ``review_verdict`` to its target proposal.
@@ -336,6 +591,7 @@ class IntentRouter:
         )
         authored = str(single_verdict or "").strip()
         approved_variant_names: set[str] | None = None
+        held_by_name: dict[str, str] = {}
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             held_by_name = await self._held_verdict_map(
                 verdict_map,
@@ -356,6 +612,8 @@ class IntentRouter:
             reasoning=str(intent.payload.get("reasoning") or ""),
             advisory=serialize_verdict_advisory(intent.payload),
             approved_variant_names=approved_variant_names,
+            payload=intent.payload,
+            variant_verdicts=_variant_review_rows(intent.payload, held_by_name),
         )
 
     async def _held_verdict_map(
@@ -471,6 +729,8 @@ class IntentRouter:
         authored_verdict: str = "",
         advisory: dict[str, Any] | None = None,
         approved_variant_names: set[str] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        variant_verdicts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
 
@@ -490,6 +750,10 @@ class IntentRouter:
             approved_variant_names: When a ``verdict_map`` named proceedable
                 variants, restrict an explore grid to those names; ``None``
                 keeps the full proposal.
+            payload: The ``review_verdict`` payload, recorded onto the
+                proposal for the grounds the Critic stated.
+            variant_verdicts: The per-variant rulings a ``verdict_map``
+                carried, recorded onto the proposal.
         """
         pending.decided = True
         pending.verdict = verdict
@@ -553,6 +817,24 @@ class IntentRouter:
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
                 )
+        _record_critic_review(
+            self,
+            pending,
+            authored=patch_verdict,
+            effective=str(verdict or "").strip(),
+            reason=str(reasoning or ""),
+            payload=payload,
+            advisory=advisory,
+            variants=variant_verdicts,
+        )
+        _record_review_outcome(
+            self,
+            pending,
+            materialized=verdict in ("approve", "advise"),
+            denied=verdict == "reject",
+            reauthored=verdict == "needs_review",
+            patch_verdict_key=sid_candidate if patch_verdict else "",
+        )
         # Both `approve` and `advise` mean "dispatch may proceed"; treat them
         # identically for materialization.
         if verdict in ("approve", "advise"):

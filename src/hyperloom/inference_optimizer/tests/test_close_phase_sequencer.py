@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -608,6 +609,111 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_close_sequencer_records_its_own_verdict_and_artifacts(
+    coord,
+    tmp_path,
+    monkeypatch,
+):
+    """The sequencer states the close-out rather than leaving it to be inferred.
+
+    The projection this replaces had to guess a verdict from which steps were
+    present, and it ran while the sequence was still going, so it labelled a
+    healthy session ``degraded``. Here the same happy path is asserted to
+    settle at ``succeeded``, with the artifact paths named by the steps that
+    produced them instead of recovered by probing the session tree.
+    """
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.recipe_kb = _StubRecipeKB()
+    coord.shared_state.recipe_kb_session_id = "sid-test"
+    coord.shared_state.model_name = "model"
+    coord.shared_state.gpu_type = "mi300x"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    recorded = assemble_parts(tmp_path, warnings=[])["close"]
+    assert recorded["status"] == "succeeded"
+    assert recorded["close_sequence_done"] is True
+    assert recorded["stop_reason"] == "sweep_done"
+    assert [row["step"] for row in recorded["steps"]] == [
+        "sequencer_started",
+        "fact_finalize",
+        "report",
+        "session_breakdown",
+        "artifact_package",
+        "ndjson_drain",
+        "done",
+    ]
+    # Named by the artifact_package step from the path it was handed, not
+    # parsed back out of that step's free-text detail.
+    assert recorded["artifacts"]["artifact_package_path"].endswith(".zip")
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_records_the_recipe_publication_under_close(
+    coord,
+    tmp_path,
+    monkeypatch,
+):
+    """The publication lands in ``close.kb_write_back``, not the timeline.
+
+    It is what the session does unconditionally on its way out, so whether it
+    happened is always worth answering -- and a timeline event that did not
+    happen is simply absent, leaving nowhere to answer it.
+    """
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.recipe_kb = _StubRecipeKB()
+    coord.shared_state.recipe_kb_session_id = "sid-test"
+    coord.shared_state.model_name = "model"
+    coord.shared_state.gpu_type = "mi300x"
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    write_back = assemble_parts(tmp_path, warnings=[])["close"]["kb_write_back"]
+    assert write_back["status"] == "written"
+    # Stated by the publisher at the exit it took, not recovered downstream by
+    # matching substrings against the reason string.
+    assert write_back["result_type"] == "written"
+    assert write_back["backend"] == "local"
+    # One attempt, opened by the CLOSE path and settled by it.
+    assert [(row["attempt"], row["source"], row["status"]) for row in write_back["attempts"]] == [
+        (1, "close", "written"),
+    ]
+    assert "queue" in write_back
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_records_degraded_when_a_step_fails(
+    coord,
+    tmp_path,
+    monkeypatch,
+):
+    """``degraded`` now means a step failed, which is what it always read as."""
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.recipe_kb = _StubRecipeKB()
+    coord.shared_state.recipe_kb_session_id = "sid-test"
+
+    class _FailingRunner(_StubSubAgentRunner):
+        async def run_task(self, task, *args, **kwargs):
+            self.run_calls.append(task)
+            return _StubSubResult(state="failed")
+
+    coord.sub = _FailingRunner()
+
+    await coord._on_enter_close(from_phase="SWEEP")
+
+    recorded = assemble_parts(tmp_path, warnings=[])["close"]
+    assert recorded["status"] == "degraded"
+    assert recorded["close_sequence_done"] is True
+    assert [row["step"] for row in recorded["steps"] if row["status"] == "failed"] == [
+        "report",
+        "session_breakdown",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_close_sequencer_surfaces_remote_finalize_failure(
     coord,
     monkeypatch,
@@ -863,12 +969,15 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
 
     for delivered in (zipped["close"], loose["close"]):
         # The steps recorded after step 2 are the whole point: they are what
-        # the bundled copy was missing before the rebuild. The stage status is
-        # not asserted here because the internal tasks do not run under mock
-        # backends; ``test_sbd_v6_stages.py`` pins the ``succeeded`` ladder on
-        # a finished sequence.
+        # the bundled copy was missing before the rebuild.
         assert delivered["close_sequence_done"] is True
         assert {"artifact_package", "ndjson_drain", "done"} <= {step["step"] for step in delivered["steps"]}
+        # Both copies carry a settled verdict. Which one it is depends on the
+        # internal tasks, which do not run under mock backends, but it is
+        # never ``running``: that would mean the patch never delivered the
+        # verdict the sequencer recorded, which is the failure this rebuild
+        # exists to prevent.
+        assert delivered["status"] in {"succeeded", "degraded"}
 
 
 @pytest.mark.asyncio

@@ -565,6 +565,30 @@ def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     bank_phase_segment(state, until_unix=stop_unix)
 
 
+def _bank_previous_leg_elapsed(state: SharedState) -> None:
+    """Bank the wall-clock the stopped leg actually ran into the durable total.
+
+    The live leg is measured from ``resumed_ts``, which this resume is about to
+    overwrite, so the leg it currently names has to be settled first. Its start
+    is that stamp, or ``start_ts`` when this is the first resume.
+
+    Only ``stop_ts`` records when a leg ended, so a crash or a kill banks
+    nothing rather than charging the idle gap that followed. That under-counts,
+    which is the direction to err: the total is what the session spent running,
+    and time nothing was running must never enter it.
+
+    Must run before ``resumed_ts`` is restamped.
+
+    Args:
+        state (SharedState): The loaded session state, mutated in place.
+    """
+    started = to_unix(state.resumed_ts or state.start_ts, 0.0) or 0.0
+    ended = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
+    if started <= 0.0 or ended <= started:
+        return
+    state.prior_legs_elapsed_s = max(0.0, float(state.prior_legs_elapsed_s or 0.0)) + (ended - started)
+
+
 def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     """Mark the start of a resumed run leg on ``state`` (caller persists).
 
@@ -582,9 +606,10 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
     after ``time_exhausted`` stop immediately. After a clean stop ``start_ts``
     and the stamp are deliberately kept, so remaining wall-clock is the
     persisted deadline, not this invocation's ``--max-hours``. Raising that
-    flag on this path does not extend the stamp. The phase clock moves on
-    either branch: the two answer different questions, and neither answer
-    includes time nothing was running.
+    flag on this path does not extend the stamp. The phase clock and the
+    banked run-time total move on either branch: they answer different
+    questions from the budget, and neither answer includes time nothing was
+    running.
 
     Args:
         state (SharedState): The loaded session state, mutated in place.
@@ -594,6 +619,7 @@ def _begin_resume_leg(state: SharedState, *, reanchor_budget: bool) -> str:
         str: The timestamp stamped as this leg's boundary.
     """
     _bank_previous_leg_phase_segment(state)
+    _bank_previous_leg_elapsed(state)
     state.resumed_ts = now_iso()
     if reanchor_budget:
         # CRITICAL: clear the leftover stop_reason or Orchestration heartbeats

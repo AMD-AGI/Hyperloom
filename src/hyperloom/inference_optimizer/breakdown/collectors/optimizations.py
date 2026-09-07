@@ -48,6 +48,10 @@ _ATTEMPT_KINDS = frozenset(
     }
 )
 
+#: Adoption statuses that mean a verdict ruled on the change. Anything else --
+#: no row, or a row that only records the landing -- leaves it outstanding.
+_SETTLED_ADOPTIONS = frozenset({"adopted", "revoked"})
+
 _KEEP_DECISIONS = frozenset({"KEEP", "KEPT", "KEPT_INERT", "ADOPT", "ADOPTED", "PROMOTED"})
 _REVERT_DECISIONS = frozenset({"REVERT", "REVERTED", "REJECTED", "FAILED", "ACCURACY_UNAVAILABLE_REJECT"})
 
@@ -463,7 +467,10 @@ def _recorded_attempt_row(
         "kernel_id": (
             str(subject.get("name") or "") if "kernel" in str(subject.get("subject_type") or "").lower() else None
         ),
-        "backend": str(operation.get("strategy") or ""),
+        # Frozen on the adoption first: the operation carries ``strategy`` only
+        # because a separate call stamped it, so reading it there makes the
+        # backend split depend on a join the ledger no longer needs.
+        "backend": str(adoption.get("backend") or operation.get("strategy") or ""),
         "phase": str(operation.get("phase") or ""),
         "macro_cycle": operation.get("macro_cycle"),
         "started_at": str(operation.get("started_at") or ""),
@@ -488,7 +495,17 @@ def _recorded_attempt_row(
         # What the operation says happened to the workload, as distinct from
         # what the adoption stream credits. The two are written by one call and
         # dropped independently, so they can disagree.
-        "integrated": (bool(outputs.get("integrated")) if outputs.get("integrated") is not None else None),
+        "integrated": (
+            bool(adoption["integrated"])
+            if adoption.get("integrated") is not None
+            else bool(outputs["integrated"])
+            if outputs.get("integrated") is not None
+            else None
+        ),
+        # Whether the adoption stream settled this change, as distinct from what
+        # verdict the executor reached. A landing recorded before anything ruled
+        # on it is a row that exists and has settled nothing.
+        "adoption_status": str(adoption.get("status") or ""),
         # What stood behind the verdict: an accuracy gate that ruled, an
         # end-to-end re-measurement, or a KEEP nothing checked the accuracy of.
         "validation_basis": str(adoption.get("validation_basis") or ""),
@@ -882,19 +899,22 @@ def collect_recorded_optimizations(
             f"{sorted(set(off_ledger_adoptions))[:5]}"
         )
 
-    # The mirror image of an orphan adoption, and the more damaging of the two.
-    # An operation saying the change was integrated is the workload having
-    # moved; with no adoption to credit it, the gain walk below skips the step
-    # entirely, yet the next adopted step still starts from the higher figure.
-    # The difference lands in ``unattributed_gain_pct``, where it is
-    # indistinguishable from drift nobody caused -- a plausible number in place
-    # of a missing record. Both rows come from one call through a writer that
-    # swallows its own failures, so losing one and keeping the other is
-    # reachable rather than theoretical.
+    # A change that landed with no verdict crediting it, which is the more
+    # damaging half of the accounting. The change being integrated is the
+    # workload having moved; with nothing adjudicating it, the gain walk below
+    # skips the step entirely, yet the next adopted step still starts from the
+    # higher figure. The difference lands in ``unattributed_gain_pct``, where a
+    # real hole in the accounting is indistinguishable from drift nobody caused.
+    #
+    # Counted by what the adoption stream settled on rather than by whether a
+    # row exists at all: the landing is recorded while it is still outstanding,
+    # so a row is there well before anything has ruled on it. The attempt's own
+    # ``decision`` cannot answer this -- it falls back to the operation's, which
+    # states the executor's verdict whether or not it was ever credited.
     unclaimed_integrations = [
         str(attempt["attempt_id"])
         for attempt in attempts
-        if attempt.get("integrated") is True and not attempt.get("adoption_id")
+        if attempt.get("integrated") is True and str(attempt.get("adoption_status") or "") not in _SETTLED_ADOPTIONS
     ]
     if unclaimed_integrations:
         warnings.append(

@@ -98,12 +98,13 @@ async def test_promote_conc_sweep_records_once_and_returns_before_tail(session_d
         task=_task("conc_sweep"),
     )
 
-    # conc_sweep is NOT in _AUDIT_ACTIONS, so the in-branch record_action_attempt
-    # is a no-op recorder, and the tail also skips it. Exactly one CALL, zero effect.
+    # conc_sweep is NOT in _AUDIT_ACTIONS, so an audit attempt here could only
+    # ever return on the method's first line. The branch used to make the call
+    # anyway, assembling a rich extras dict that was dropped every time; it has
+    # been removed, and the sweep's skip reason, budget verdict and summary are
+    # recorded on the conc_sweep timeline event instead.
     assert "conc_sweep" not in _AUDIT_ACTIONS
-    assert len(calls) == 1
-    assert calls[0]["action"] == "conc_sweep"
-    assert calls[0]["decision"] == "discarded"
+    assert calls == []
     # No conc_sweep_attempts ledger exists; record_conc_sweep wrote last_conc_sweep.
     assert not hasattr(s, "conc_sweep_attempts")
     assert s.last_conc_sweep.get("status") == "succeeded"

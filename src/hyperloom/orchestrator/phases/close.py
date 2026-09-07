@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 import logging as _logging
+from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
+
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -163,6 +165,58 @@ class ClosePhase(PhaseHandler):
         state = getattr(result, "state", None)
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
+    def _record_close_roofline_progress(self) -> None:
+        """Snapshot the session's roofline progress into the breakdown's close section.
+
+        Best-effort: this describes the wind-down and must never obstruct it.
+        """
+        try:
+            state = self.shared_state
+            snapshots = state.roofline_snapshots if isinstance(state.roofline_snapshots, list) else []
+            _close_out.record_roofline_progress(
+                self.session_dir,
+                baseline_tput=state.baseline_tput,
+                baseline_ts=state.start_ts,
+                optimization_stack=state.optimization_stack,
+                latest_snapshot=snapshots[-1] if snapshots else None,
+                current_best_tput=(state.current_best or {}).get("tput"),
+                cumulative_gain_pct=state.cumulative_gain_validated,
+                failure_streak=state.roofline_failure_streak,
+            )
+        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+            log.debug("CLOSE: roofline progress record failed", exc_info=True)
+
+    def _close_stack_ledger(self) -> None:
+        """Settle the stack ledger's timeline event.
+
+        Best-effort: this describes the wind-down and must never obstruct it. A
+        session that never reaches here leaves the ledger open, and finalize
+        reports it interrupted -- which is the truthful reading, since the
+        reconciliation never ran.
+        """
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+
+            stack_event.finish()
+        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+            log.debug("CLOSE: stack ledger close failed", exc_info=True)
+
+    def _record_close_baseline_progress(self) -> None:
+        """Snapshot the session's baseline failure tally into the close section.
+
+        Best-effort: this describes the wind-down and must never obstruct it.
+        """
+        try:
+            state = self.shared_state
+            _close_out.record_baseline_progress(
+                self.session_dir,
+                failure_streak=state.baseline_failure_streak,
+                total_failures=state.baseline_total_failures,
+                arg_error_streak=state.baseline_arg_error_streak,
+            )
+        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+            log.debug("CLOSE: baseline progress record failed", exc_info=True)
+
     async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
         """Stop any GEAK 2b rebench and close its pending slot as the run winds down.
 
@@ -224,6 +278,11 @@ class ClosePhase(PhaseHandler):
             from_phase: The phase being left, used only for logging.
         """
         log.info("CLOSE entered (from=%s); starting 7-step close sequence", from_phase or "<unknown>")
+        # Open the breakdown's close section before anything can record a step
+        # into it. It stands at ``running`` until the verdict below, so a
+        # session killed mid-sequence is reported as interrupted rather than
+        # judged on the steps it had got through.
+        _close_out.record_close_opened(self.session_dir)
         await self._drain_geak_rebench_for_close()
         await self._record_close_step("sequencer_started", status="running")
 
@@ -243,6 +302,21 @@ class ClosePhase(PhaseHandler):
             await self._maybe_run_close_post_opt_roofline()
         except Exception as exc:  # noqa: BLE001
             log.warning("CLOSE step 0 (post-opt roofline) failed: %r", exc)
+
+        # Snapshot the session's progress against its ceiling now that the run
+        # above has had its chance to refine it. Recorded here rather than
+        # derived by the exporter, which would have to re-walk the promotion
+        # stack against a snapshot history that is capped and may have evicted
+        # the analysis the ceiling came from.
+        self._record_close_roofline_progress()
+        # The baseline counters, on the same footing: they are advanced after
+        # each measurement's own event has closed, so the close-out is the
+        # first moment the session's tally is final.
+        self._record_close_baseline_progress()
+        # The stack stops changing here, so this is the first moment its ledger
+        # can be reconciled: the adoptions and the whole-stack validations are
+        # both complete, and the two can be asked the same question.
+        self._close_stack_ledger()
 
         # ---------------- Fact finalize (Recipe KB commit) -------------------
         # Publish before report/breakdown/Langfuse so the terminal outcome and
@@ -299,9 +373,19 @@ class ClosePhase(PhaseHandler):
                 from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
                 _rd = _reports_dir(self.session_dir)
+                _json_path = _rd / "final.json" if (_rd / "final.json").exists() else None
+                _md_path = _rd / "final.md" if (_rd / "final.md").exists() else None
+                # Recorded here, where the step that wrote the files knows
+                # which of them landed, so the export names them instead of
+                # probing the filesystem for them long afterwards.
+                _close_out.record_close_artifacts(
+                    self.session_dir,
+                    final_json_path=_json_path,
+                    final_md_path=_md_path,
+                )
                 _artifacts = {
-                    "json_path": str(_rd / "final.json") if (_rd / "final.json").exists() else "",
-                    "md_path": str(_rd / "final.md") if (_rd / "final.md").exists() else "",
+                    "json_path": str(_json_path) if _json_path else "",
+                    "md_path": str(_md_path) if _md_path else "",
                 }
                 self._emit_lifecycle(
                     step="report",
@@ -405,6 +489,11 @@ class ClosePhase(PhaseHandler):
                 session_id=session_id,
             )
             if pkg_path is not None:
+                # The package location is recorded as a field rather than
+                # recovered at export by parsing it back out of the step's
+                # free-text ``detail``, which the step reuses for the skip and
+                # failure reasons as well.
+                _close_out.record_close_artifacts(self.session_dir, artifact_package_path=pkg_path)
                 await self._record_close_step(
                     "artifact_package",
                     status="done",
@@ -439,6 +528,15 @@ class ClosePhase(PhaseHandler):
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
         await self._record_close_step("done", status="done")
+
+        # The verdict, recorded last because reaching this line is the evidence
+        # for it: the sequence ran to its end. Nothing else in the session can
+        # establish that -- a reader looking at the steps alone cannot tell the
+        # ones that had not happened yet from the ones that never will.
+        _close_out.record_close_settled(
+            self.session_dir,
+            stop_reason=str(getattr(self.shared_state, "stop_reason", "") or ""),
+        )
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
         # disk. Step 2 wrote the breakdown, so the copy it produced describes
@@ -803,7 +901,13 @@ class ClosePhase(PhaseHandler):
         task_id: str = "",
         detail: str = "",
     ) -> None:
-        """Append one row to ``phase_history[-1].evidence.close_steps`` (best-effort, per-step persist).
+        """Record one settled close step (best-effort, per-step persist).
+
+        The row goes to the breakdown's ``close`` section, which is what the
+        exported ``close.steps`` is built from, and to
+        ``phase_history[-1].evidence.close_steps``, which is the phase evidence
+        ledger. The two are written independently: a session with no phase
+        history row to append to still has a close-out to report.
 
         Args:
             step: The close-step name.
@@ -812,10 +916,19 @@ class ClosePhase(PhaseHandler):
             task_id: Optional task id associated with the step.
             detail: Optional free-text detail recorded on the row.
         """
+        ts = datetime.now(timezone.utc).isoformat()
+        _close_out.record_close_step(
+            self.session_dir,
+            step=step,
+            status=status,
+            ts=ts,
+            task_id=task_id,
+            detail=detail,
+        )
         entry: dict[str, Any] = {
             "step": step,
             "status": status,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": ts,
         }
         if task_id:
             entry["task_id"] = task_id

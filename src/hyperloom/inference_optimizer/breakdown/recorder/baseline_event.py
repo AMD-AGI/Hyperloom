@@ -92,6 +92,16 @@ ROUND_WARMUP = "warmup"
 ROUND_MEASURE = "measure"
 ROUND_ACCURACY = "accuracy"
 
+# Where the recorded ``framework_args`` came from. The executor reports the
+# args it is about to launch under, at the moment it resolves them, so the
+# ordinary answer is ``launch_extra_server_args`` -- including when the string
+# is empty, which is a baseline running on the framework's own defaults and is
+# a fact rather than a gap. The observed label is the fallback for a run whose
+# launch report never landed, and ``unavailable`` means neither did.
+ARGS_FROM_LAUNCH = "launch_extra_server_args"
+ARGS_FROM_OBSERVED = "observed_server_launch_flags"
+ARGS_UNAVAILABLE = "unavailable"
+
 # The failure class the run's own clock raises. A run carrying it that never
 # booted a round was refused rather than attempted, which assembly reports as
 # ``skipped``.
@@ -103,6 +113,9 @@ _BUDGET_ERROR_CLASS = "session_time_exhausted"
 _MAX_ROUND_WARNINGS = 12
 
 __all__ = [
+    "ARGS_FROM_LAUNCH",
+    "ARGS_FROM_OBSERVED",
+    "ARGS_UNAVAILABLE",
     "EVENT_COMPONENT",
     "EVENT_KIND",
     "EVENT_TYPE",
@@ -179,6 +192,15 @@ def _measurement(result: Mapping[str, Any]) -> dict[str, Any]:
         "ttft_mean_ms": _float_or_none(result.get("ttft_mean_ms")),
         "e2el_mean_ms": _float_or_none(result.get("e2el_mean_ms")),
         "tpot_mean_ms": _float_or_none(result.get("tpot_mean_ms")),
+        # Which of the extraction's sources supplied the latency. A benchmark
+        # report, a raw InferenceX JSON found in the workspace, and one
+        # salvaged out of a leaked path all write the same keys, so after the
+        # fact the numbers are indistinguishable -- and they are not equally
+        # trustworthy. The executor labels them where it reads them.
+        "ttft_e2el_source": str(result.get("ttft_e2el_source") or ""),
+        # Separate because TPOT alone can be computed from the other two, and
+        # a computed figure must not be read as a measured one.
+        "tpot_source": str(result.get("tpot_source") or ""),
         "accuracy": _float_or_none(result.get("accuracy")),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),
@@ -186,6 +208,47 @@ def _measurement(result: Mapping[str, Any]) -> dict[str, Any]:
         "benchmark_report_path": str(result.get("report_path") or ""),
         "workspace": str(result.get("workspace") or ""),
     }
+
+
+def _observed_invocation(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Project what the server was observed to have launched under.
+
+    The declared half of the invocation is recorded before the launch, by
+    :meth:`BaselineEventRecorder.record_invocation`. This is the other half,
+    read back out of the launch evidence the executor builds once the round
+    has run, and it is kept as its own set of fields rather than merged into
+    the declared ones: a server that booted with flags the session did not ask
+    for is exactly what this block exists to make visible, and overwriting the
+    request with the observation would erase it.
+
+    Args:
+        result (Mapping[str, Any]): The executor result to read.
+
+    Returns:
+        dict[str, Any]: The observed fields, empty when the result carries no
+            launch evidence -- which is every failure path, since the evidence
+            is built only once a round has produced a measurement.
+    """
+    evidence = _as_dict(result.get("launch_evidence"))
+    log_path = str(result.get("server_log_path") or evidence.get("actual_server_log_path") or "")
+    if not evidence and not log_path:
+        return {}
+    observed = str(evidence.get("observed_server_launch_flags") or "").strip()
+    block: dict[str, Any] = {
+        "observed_server_launch_flags": observed,
+        "observed_server_identity": _as_dict(evidence.get("observed_server_identity")),
+        "server_log_path": log_path,
+        "recipe_digest": str(evidence.get("recipe_digest") or ""),
+        "warm_reuse": _as_dict(evidence.get("warm_reuse")),
+    }
+    # The evidence's own view of the requested args, which is read from the
+    # materialized YAML rather than from the launch call. Recorded next to the
+    # launch report so a disagreement between the two is on the wire instead of
+    # having to be re-derived by reading the config back.
+    requested = str(evidence.get("requested_server_args") or "").strip()
+    if requested:
+        block["materialized_server_args"] = requested
+    return block
 
 
 def _timing(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -245,6 +308,8 @@ class BaselineEventRecorder:
         framework: str = "",
         establishes_quality_ref: bool = False,
         params: dict[str, Any] | None = None,
+        failure_streak_before: Any = None,
+        total_failures_before: Any = None,
     ):
         """Bind a recorder to one action inside one event.
 
@@ -265,6 +330,16 @@ class BaselineEventRecorder:
                 recoverable from the numbers alone.
             params (dict[str, Any] | None): The task params, read for the
                 workspace and the config the round rendered from.
+            failure_streak_before (Any): How many baselines had failed
+                consecutively when this one was dispatched. Read at the
+                dispatch rather than at the close because the session's own
+                counter is advanced by the write-back, after this event has
+                already closed -- so the value at the close would be the one
+                this action produced, not the one it was dispatched under. As
+                the count going in, it says what a reader wants of an action:
+                whether this was the first attempt or the fourth.
+            total_failures_before (Any): How many baselines had failed in the
+                session, on the same footing.
         """
         self._sink = sink
         self._t0 = time.monotonic()
@@ -290,6 +365,8 @@ class BaselineEventRecorder:
                     "config_path": str(params.get("config_path") or ""),
                     "output_dir": str(params.get("output_dir") or ""),
                     "requested_timeout_sec": _int_or_none(params.get("timeout_sec")),
+                    "failure_streak_before": _int_or_none(failure_streak_before),
+                    "total_failures_before": _int_or_none(total_failures_before),
                 },
             },
             row_type=ROW_ACTION,
@@ -379,6 +456,66 @@ class BaselineEventRecorder:
             natural_ids=(self._action_id, str(int(run_index))),
         )
 
+    def record_invocation(
+        self,
+        *,
+        run_index: int,
+        framework_args: str = "",
+        extra_envs: Mapping[str, Any] | None = None,
+        config_path: Any = "",
+        framework: str = "",
+        model_path: str = "",
+        args_mode: str = "",
+    ) -> None:
+        """Record what this pass is about to launch the server under.
+
+        Called at the launch, by the frame that resolved the args, which is
+        the only place and moment they are known as a fact. The projection
+        this replaces recovered them at export time by regexing ``server.log``
+        for a launch line and falling back to re-parsing the config YAML --
+        five ordered guesses deep, and reporting ``unknown`` whenever a
+        framework logged its startup in a shape none of them matched.
+
+        Recorded on the run rather than only on the action because the two
+        retries this executor takes can change the args: the MoE-runner
+        fallback drops a flag and re-launches, so an action-only record would
+        publish one invocation for a pass that ran under two.
+
+        Args:
+            run_index (int): The pass this launch belongs to.
+            framework_args (str): The extra server args the launch resolved,
+                after the one-shot eager fallback and the MoE-runner drop have
+                had their say. An empty string is a real answer -- the
+                framework's own defaults -- and is recorded as one.
+            extra_envs (Mapping[str, Any] | None): The env overrides rendered
+                into the materialized config.
+            config_path (Any): The materialized YAML the round renders from.
+            framework (str): The serving framework being launched.
+            model_path (str): The resolved model the server serves.
+            args_mode (str): How the extra args combine with the config's own
+                (``append`` or ``replace``), which decides whether the
+                recorded string is the whole of what was requested.
+        """
+        invocation: dict[str, Any] = {
+            "framework_args": str(framework_args or ""),
+            "framework_args_source": ARGS_FROM_LAUNCH,
+            "args_mode": str(args_mode or ""),
+            "extra_envs": {str(key): str(value) for key, value in _as_dict(extra_envs).items()},
+            "config_path": str(config_path or ""),
+            "framework": str(framework or ""),
+            "model_path": str(model_path or ""),
+        }
+        self._sink.record(
+            SECTION_RUN,
+            {"task_id": self._task_id, "run_index": int(run_index), "invocation": invocation},
+            row_type=ROW_RUN,
+            natural_ids=(self._action_id, str(int(run_index))),
+        )
+        # The action's own copy is the last pass to launch, which is the one
+        # its adopted measurement was taken under. Repeated writes deep-merge,
+        # so a later pass revises the fields it changed and leaves the rest.
+        self._record_action({"invocation": invocation})
+
     def record_round(
         self,
         *,
@@ -425,6 +562,10 @@ class BaselineEventRecorder:
                 "run_eval_disabled": bool(payload.get("run_eval_disabled")),
                 "measurement": _measurement(payload),
                 "timing": _timing(payload),
+                # A round is one server launch, so the observed half of the
+                # invocation belongs to it. Only the observed fields: the
+                # declared half is on the run, which is what decided them.
+                "invocation": _observed_invocation(payload),
                 "warnings": _warnings(payload),
                 "failure": _failure(payload, phase=f"round_{label}"),
             },
@@ -440,11 +581,21 @@ class BaselineEventRecorder:
         """
         payload = _as_dict(result)
         dropped = _as_dict(payload.get("measure_round_dropped"))
+        action: dict[str, Any] = {
+            "measurement": _measurement(payload),
+            "timing": _timing(payload),
+        }
+        # Merged onto whatever the launch already declared, which is why it is
+        # only written when there is something to write: the singleton merges
+        # leaf-by-leaf, and an empty observation would say nothing while a
+        # missing one says the round never got far enough to be observed.
+        observed = _observed_invocation(payload)
+        if observed:
+            action["invocation"] = observed
         self._close(
             status=self._derived_status(payload),
             action={
-                "measurement": _measurement(payload),
-                "timing": _timing(payload),
+                **action,
                 "warnings": _warnings(payload),
                 "run_eval_disabled": bool(payload.get("run_eval_disabled")),
                 "materialized_config": str(payload.get("materialized_config") or ""),
@@ -535,6 +686,33 @@ class BaselineEventRecorder:
         )
 
 
+def _invocation_block(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a row's recorded invocation onto the wire shape.
+
+    The two halves land separately -- the launch declares its args before the
+    server boots, the round reports what was observed once it has -- so a row
+    can hold either, both, or neither. The source label is settled here, at
+    the one point that can see which of them arrived.
+
+    Args:
+        row (Mapping[str, Any]): The action or run row to read.
+
+    Returns:
+        dict[str, Any]: The invocation block, always carrying a source label.
+    """
+    block = dict(_as_dict(row.get("invocation")))
+    source = str(block.get("framework_args_source") or "")
+    if not source:
+        # No launch report. An observed flag string is a weaker answer to the
+        # same question -- it is the argv the server logged, not the args the
+        # session asked for -- so it is promoted into ``framework_args`` only
+        # when nothing better exists, and says so.
+        observed = str(block.get("observed_server_launch_flags") or "").strip()
+        block["framework_args"] = observed
+        block["framework_args_source"] = ARGS_FROM_OBSERVED if observed else ARGS_UNAVAILABLE
+    return block
+
+
 def assemble_baseline_actions(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -573,6 +751,7 @@ def assemble_baseline_actions(
         run_rows = []
         for run in wire_rows(runs.get(task, []), drop=("event_id", "task_id")):
             index = _int_or_none(run.get("run_index"))
+            run["invocation"] = _invocation_block(run)
             run["rounds"] = wire_rows(
                 by_run.get("" if index is None else str(index), []),
                 drop=("event_id", "task_id", "run_index", "ordinal"),
@@ -589,6 +768,7 @@ def assemble_baseline_actions(
                 "request": _as_dict(row.get("request")),
                 "measurement": _as_dict(row.get("measurement")),
                 "timing": _as_dict(row.get("timing")),
+                "invocation": _invocation_block(row),
                 "warnings": _as_dict(row.get("warnings")),
                 "run_eval_disabled": bool(row.get("run_eval_disabled")),
                 "materialized_config": str(row.get("materialized_config") or ""),
@@ -657,6 +837,8 @@ def make_baseline_recorder(
     framework: str = "",
     establishes_quality_ref: bool = False,
     params: dict[str, Any] | None = None,
+    failure_streak_before: Any = None,
+    total_failures_before: Any = None,
 ) -> BaselineEventRecorder | None:
     """Build a recorder, or ``None`` when one cannot be constructed.
 
@@ -673,6 +855,8 @@ def make_baseline_recorder(
         establishes_quality_ref (bool): Whether this run defines the session's
             accuracy reference.
         params (dict[str, Any] | None): The task params.
+        failure_streak_before (Any): Consecutive baseline failures at dispatch.
+        total_failures_before (Any): Session baseline failures at dispatch.
 
     Returns:
         BaselineEventRecorder | None: The recorder, or ``None`` when it could
@@ -689,6 +873,8 @@ def make_baseline_recorder(
             framework=framework,
             establishes_quality_ref=establishes_quality_ref,
             params=params,
+            failure_streak_before=failure_streak_before,
+            total_failures_before=total_failures_before,
         )
     except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
         log.warning(

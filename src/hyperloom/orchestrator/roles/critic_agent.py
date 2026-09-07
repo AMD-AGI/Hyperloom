@@ -282,6 +282,36 @@ def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
     return ""
 
 
+def _review_subjects(judge_bundle: dict[str, Any]) -> dict[str, str]:
+    """Map each reviewed proposal's message id to the row it is recorded under.
+
+    The two arms identify a proposal differently -- a configuration grid by the
+    bus message that raised it, an upstream candidate by its candidate id --
+    and evidence filed under the wrong one opens a second, near-empty row
+    beside the proposal it was about.
+
+    Args:
+        judge_bundle (dict[str, Any]): The bundle of proposals reviewed.
+
+    Returns:
+        dict[str, str]: ``{msg_id: row_id}``, holding only the proposals whose
+            row id is not their message id.
+    """
+    out: dict[str, str] = {}
+    for proposal in judge_bundle.get("proposals") or []:
+        if not isinstance(proposal, dict):
+            continue
+        msg_id = str(proposal.get("msg_id") or "")
+        payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        candidate = str(
+            payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id") or ""
+        ).strip()
+        if msg_id and candidate:
+            out[msg_id] = candidate
+    return out
+
+
 def _verdict_references_kb(review: dict[str, Any] | None) -> bool:
     """Whether any final review verdict cites KB evidence.
 
@@ -880,6 +910,19 @@ class CriticAgentBackend:
         except Exception:  # noqa: BLE001
             pass
 
+        # Attach what each ruling was grounded in to the ruling itself, on the
+        # proposal it judged. Done here because these are the turn's own facts:
+        # the artifacts are this runtime's files, and a KB write's result only
+        # comes back on the emit.
+        self._record_review_evidence(
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            workdir=workdir,
+            kb_priors=kb_priors_trace,
+        )
+
         # Mirror the KB integration trace into Langfuse (opt-in, best-effort).
         self._mirror_kb_trace_to_langfuse(
             turn_idx=turn_idx,
@@ -1033,6 +1076,86 @@ class CriticAgentBackend:
                 )
         except Exception:  # noqa: BLE001 — trace must never break the review
             log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
+
+    def _record_review_evidence(
+        self,
+        *,
+        request: dict[str, Any],
+        judge_bundle: dict[str, Any],
+        review: dict[str, Any] | None,
+        emit: dict[str, Any],
+        workdir: Path,
+        kb_priors: dict[str, Any],
+    ) -> None:
+        """Record what each of this turn's rulings was grounded in.
+
+        Written onto the proposal each verdict targets, because a ruling and
+        its grounds are one fact about one proposal: the alternative is a
+        per-turn stream a reader has to join back to the proposals, keyed on a
+        turn index that resume reuses.
+
+        The KB write is matched to its verdict by target, not spread across
+        them: the Critic asks for a lesson to be persisted per verdict, and a
+        turn that reviewed six proposals and wrote one lesson would otherwise
+        report the write six times.
+
+        Args:
+            request (dict[str, Any]): The review request, read for the cycle.
+            judge_bundle (dict[str, Any]): The bundle reviewed, read for the
+                row each verdict's target is recorded under.
+            review (dict[str, Any] | None): The parsed review object.
+            emit (dict[str, Any]): The commit emit, read for the KB writes.
+            workdir (Path): This turn's workdir, holding the artifacts.
+            kb_priors (dict[str, Any]): The priors trace for the turn.
+        """
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
+
+            context = request.get("context") if isinstance(request.get("context"), dict) else {}
+            macro_cycle = context.get("macro_cycle")
+            if macro_cycle is None:
+                return
+            subjects = _review_subjects(judge_bundle)
+            writes: dict[str, dict[str, Any]] = {}
+            for write in emit.get("kb_writes") or []:
+                if not isinstance(write, dict):
+                    continue
+                target = str(write.get("target_proposal_msg_id") or "")
+                result = write.get("result") if isinstance(write.get("result"), dict) else {}
+                if target:
+                    writes[target] = {
+                        "trigger": str(write.get("trigger") or ""),
+                        "status": str(result.get("status") or ""),
+                        "detail": str(result.get("detail") or result.get("error") or ""),
+                    }
+            artifacts = {
+                name: str(workdir / filename)
+                for name, filename in (
+                    ("request_path", "request.json"),
+                    ("judge_bundle_path", "judge_bundle.json"),
+                    ("review_path", "review.json"),
+                    ("emit_path", "emit.json"),
+                )
+            }
+            for verdict in (review or {}).get("review_verdicts") or []:
+                if not isinstance(verdict, dict):
+                    continue
+                target = str(verdict.get("target_proposal_msg_id") or "")
+                if not target:
+                    continue
+                kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
+                if kb_priors:
+                    kb["priors"] = kb_priors
+                if target in writes:
+                    kb["write"] = writes[target]
+                record_review_evidence(
+                    macro_cycle=macro_cycle,
+                    proposal_id=subjects.get(target) or target,
+                    artifacts=artifacts,
+                    kb=kb,
+                )
+        except Exception:  # noqa: BLE001 — observability cannot break the review
+            log.debug("critic_agent: review evidence record failed", exc_info=True)
 
     @staticmethod
     def _build_kb_priors_trace(

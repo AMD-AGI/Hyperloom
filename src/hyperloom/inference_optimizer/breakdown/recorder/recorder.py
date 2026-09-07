@@ -138,6 +138,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "kernel_geak_attempt": "item",  # one per kernel geak considered
     "kernel_geak_discovery": "item",  # one per geak hot-kernel discovery run
     "kernel_geak_acceptance": "item",  # one per kernel or env selection geak accepted
+    "kernel_discovered": "item",  # one per kernel in the visit's profiling table
     # SBD v6 roofline substreams. Written by the same executor whether it was
     # dispatched on its own or called inline by a phase that owns an event, and
     # the only difference between the two is the event id on the rows: the
@@ -147,6 +148,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "roofline_action": "item",  # one per roofline action, keyed by its task id
     "roofline_profile_run": "item",  # one per profile attempt within an action
     "roofline_analysis_run": "item",  # one per trace-analysis attempt within an action
+    "roofline_kernel": "item",  # one per kernel in an action's roofline table
     # SBD v6 baseline substreams. The executor retries at two levels -- a pass
     # through its core, and a Magpie round within a pass -- so runs and rounds
     # are separate sections rather than one flat list: a pass the budget
@@ -156,6 +158,79 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "baseline_action": "item",  # one per measurement dispatched, keyed by its task id
     "baseline_run": "item",  # one per pass through the executor's core
     "baseline_round": "item",  # one per Magpie round within a pass
+    # SBD v6 conc-sweep substreams. An arm is a whole ladder run under one set
+    # of server args and holds the decisions the ladder was run under; a
+    # variant is one rung of it, including the rungs that only ever attempted
+    # to boot; a pair is the two arms joined at one concurrency.
+    "conc_sweep_event": "item",  # one per sweep event, holding its timeline sequence
+    "conc_sweep_action": "item",  # one per sweep dispatched, keyed by its task id
+    "conc_sweep_arm": "item",  # one per arm of a sweep
+    "conc_sweep_variant": "item",  # one per rung attempt within an arm
+    "conc_sweep_pair": "item",  # one per concurrency the two arms are joined at
+    # SBD v6 enablement substreams. One event per session because there is one
+    # repair lane per session: the pump that drives it is phase-independent by
+    # design, so the lane's trigger and the round that settles it are recorded
+    # from different phases and must land on the same event.
+    "enablement_event": "item",  # the lane, holding its mode, trigger and terminal
+    "enablement_attempt": "item",  # one per authoring round, keyed by its specialist task
+    "enablement_build": "item",  # one per targeted build the lane ran
+    "enablement_revalidation": "item",  # one per eval-origin revalidation window
+    "enablement_human_review": "item",  # one per launch failure too unclassifiable to dispatch
+    # SBD v6 phase substreams. One event per (phase, macro_cycle): the id has no
+    # segment that could tell two entries into one phase apart, so a re-entry is
+    # another segment row on the same event rather than a second event.
+    "phase_event": "item",  # the phase's span, summed over its entries
+    "phase_segment": "item",  # one per entry, keyed by the entering transition's position
+    "phase_action": "item",  # one per dispatched action, keyed by its task id
+    "phase_marker": "item",  # one per non-transition phase_history marker
+    # SBD v6 stack ledger. One event per session because there is one stack: its
+    # adoptions arrive from four phases and form a single ordered chain, and the
+    # reconciliation is only meaningful over the whole of it.
+    "stack_event": "item",  # the ledger, holding the baseline every share is measured on
+    "stack_adoption": "item",  # one per adoption, keyed by its stack position
+    "stack_validation": "item",  # one per session validation, keyed by the stack length it covers
+    "warm_start_event": "item",  # one per T0 lookup, holding its request and what it matched
+    # One row per KB read T0 made. Rows rather than a tally because the tally
+    # is what went wrong: the projection counted the session's whole recipe
+    # audit log, which also holds writes and mid-session amendment reads, and
+    # published the total inside an event that covers T0 alone.
+    "warm_start_read": "item",
+    "warm_replay_event": "item",  # one per warm replay, holding its request, measurement and verdict
+    "warm_replay_gate": "item",  # one per gate evaluated, keyed by the gate's name
+    "framework_event": "item",  # one per phase entry, holding its policy and exit
+    "framework_plateau": "item",  # one per plateau evaluation, with the values it ruled on
+    "framework_run": "item",  # one per specialist dispatch, keyed by its task id
+    "framework_proposal": "item",  # one per pursued thing, keyed by its proposal id
+    "framework_proposal_step": "item",  # one per lifecycle step of a proposal
+    "framework_attempt": "item",  # one per measured attempt, keyed by its attempt id
+    "framework_attempt_gate": "item",  # one per gate evaluated on an attempt
+    # SBD v6 session close-out. ``close`` holds the close-out's own facts --
+    # when the sequencer opened, the verdict it reached, the artifacts it
+    # produced and the Recipe KB publication -- and ``close_step`` is one
+    # append-only row per step, composed into ``close.steps`` at assembly.
+    #
+    # The verdict is recorded by the sequencer's last act rather than inferred
+    # at export from which steps are present, because ``session_breakdown`` is
+    # itself a step in the middle of the sequence: at the moment the breakdown
+    # is written the later steps genuinely have not happened, and a reader
+    # deriving a verdict from that snapshot can only conclude something is
+    # wrong with a session that is closing perfectly normally.
+    "close": "singleton",
+    "close_step": "item",
+    # The Recipe KB publication, composed into ``close.kb_write_back``. It is
+    # part of the close-out rather than a timeline event of its own because it
+    # is what the session does unconditionally on its way out, so its absence
+    # is meaningful -- and a timeline event that did not happen simply is not
+    # there, which leaves nowhere to say so.
+    #
+    # Attempts are a section of their own, keyed by attempt number, because the
+    # publication is retried: the CLOSE path tries once and the T4 teardown
+    # hook tries again if that never settled. Each attempt is opened before the
+    # write and closed after it, so an attempt with no close is a session that
+    # died mid-publish -- which the projection could only report as a failure,
+    # claiming a refusal the KB never actually issued.
+    "close_write_back": "singleton",
+    "close_write_back_attempt": "item",
 }
 
 # Sections computed at finalize from in-memory state, never written as

@@ -16,10 +16,12 @@ propagates to the caller.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z
 
 from .recorder import Recorder, recorder_for
@@ -124,6 +126,7 @@ def record_metadata_identity(
         "model_name": _text(manifest.get("model_name")),
         "model_path": _text(manifest.get("model_path")),
         "framework_name": _text(manifest.get("framework")),
+        "framework_version": _text(manifest.get("framework_version")),
         "gpu_type": _text(manifest.get("gpu_type")),
         "tp": manifest.get("tp"),
         "conc": workload.get("conc"),
@@ -133,6 +136,9 @@ def record_metadata_identity(
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(manifest.get("objective") or {}),
     }
+    signature = _workload_signature(task_config)
+    if signature:
+        task_config["workload_signature"] = signature
     _write(session_dir, {"session": session, "task_config": task_config}, producer=producer)
 
 
@@ -162,9 +168,11 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
     """Snapshot session lifecycle and launch config from a live ``SharedState``.
 
     Covers the facts that only exist in memory while the run is going: the
-    budget anchor and its end, the tick count, the crash/resume history, and
-    the operator-supplied launch overrides. Called on every state save, so the
-    last write before the session stops is the one the export reads.
+    budget anchor and its end, how long the run has been going, the tick count,
+    the crash/resume history, and the operator-supplied launch overrides.
+    Called on every state save, so the last write before the session stops is
+    the one the export reads -- which is what freezes the elapsed time at the
+    end of the run instead of letting a re-export stretch it.
 
     Args:
         rec: The recorder writing on the Coordinator's behalf.
@@ -174,6 +182,7 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
     if not session_id:
         return
     stop_reason = _text(getattr(state, "stop_reason", ""))
+    leg_seconds, total_seconds = _elapsed_seconds(state)
     session = {
         "session_id": session_id,
         "start_ts": _text(getattr(state, "start_ts", "")),
@@ -181,6 +190,8 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
         # timestamp, so the pair is only ever emitted together.
         "ended_at_utc": iso_z(getattr(state, "stop_ts", "")) if stop_reason else "",
         "max_minutes": int(getattr(state, "max_minutes", 0) or 0),
+        "elapsed_minutes": round(leg_seconds / 60.0, 2),
+        "total_elapsed_minutes": round(total_seconds / 60.0, 2),
         "tick_count": int(getattr(state, "tick", 0) or 0),
         "recovery": _recovery(state),
     }
@@ -209,10 +220,41 @@ def _architecture(model_info: Any, *, model_class: str = "") -> dict[str, Any]:
     return architecture
 
 
+def _workload_signature(config: Mapping[str, Any]) -> str:
+    """The workload contract digest for ``config``, empty when it is unknown.
+
+    The explore executor stamps this digest on every variant it tests so a
+    cross-workload resume can tell that an old KEEP was measured under a
+    different (CONC, ISL, OSL, precision, TP). It is a pure function of those
+    five, which makes it session-level rather than per-variant, so it belongs
+    here once instead of on every attempt row.
+
+    An all-unknown contract still digests to a stable string, which the
+    leaf-by-leaf singleton merge would then treat as a real value and never
+    replace. So it is only returned once at least one input is known.
+
+    Args:
+        config: A mapping carrying ``conc`` / ``isl`` / ``osl`` /
+            ``precision`` / ``tp``.
+
+    Returns:
+        The 12-char digest, or ``""`` when no input is known.
+    """
+    fields = {name: config.get(name) for name in ("conc", "isl", "osl", "precision", "tp")}
+    if not any(str(value or "").strip() for value in fields.values()):
+        return ""
+    try:
+        from hyperloom.orchestrator.actions.executors._canonical_fingerprint import workload_signature
+
+        return workload_signature(**{name: value for name, value in fields.items() if value is not None})
+    except Exception:  # noqa: BLE001 — metadata must not cost the session
+        return ""
+
+
 def _launch_config(state: Any) -> dict[str, Any]:
     """Workload shape and operator-supplied launch overrides from live state."""
     server_args = getattr(state, "operator_server_args", "") or getattr(state, "server_args", "")
-    return {
+    config: dict[str, Any] = {
         "model_name": _text(getattr(state, "model_name", "")),
         "model_path": _text(getattr(state, "model_path", "")),
         "framework_name": _text(getattr(state, "framework", "")),
@@ -226,6 +268,52 @@ def _launch_config(state: Any) -> dict[str, Any]:
         "launch_env": dict(getattr(state, "operator_extra_env", None) or {}),
         "launch_server_args": _text(server_args),
     }
+    # The singleton merges leaf-by-leaf with no notion of an empty value, so
+    # the version detected at launch has to be left alone rather than
+    # overwritten every save by a state field that stays empty until (and
+    # unless) the framework reports one.
+    framework_version = _text(getattr(state, "framework_version", ""))
+    if framework_version:
+        config["framework_version"] = framework_version
+    signature = _workload_signature(config)
+    if signature:
+        config["workload_signature"] = signature
+    return config
+
+
+def _elapsed_seconds(state: Any) -> tuple[float, float]:
+    """Seconds this run leg has been running, and the total across all legs.
+
+    The leg starts at ``resumed_ts``, falling back to ``start_ts`` for a
+    session that has only ever run once. ``start_ts`` cannot stand in for it in
+    general: a resume after a clean stop deliberately keeps the original anchor
+    so the wall-clock budget still counts from there, and measuring the leg
+    from it would charge the leg with the gap between the two.
+
+    The leg ends at ``stop_ts``, which is only evidence of an end while a
+    ``stop_reason`` stands -- a clean-stop resume keeps the stamp of the
+    previous leg -- and any stamp that does not postdate the leg's start is
+    that stale one rather than this leg's end.
+
+    The total adds the legs already banked at each resume boundary, so it
+    measures time the session spent running instead of the span it existed
+    over.
+
+    Args:
+        state: The live ``SharedState`` to measure.
+
+    Returns:
+        ``(leg_seconds, total_seconds)``.
+    """
+    started = to_unix(_text(getattr(state, "resumed_ts", "")) or _text(getattr(state, "start_ts", "")), 0.0) or 0.0
+    ended = 0.0
+    if _text(getattr(state, "stop_reason", "")):
+        ended = to_unix(_text(getattr(state, "stop_ts", "")), 0.0) or 0.0
+    if ended <= started:
+        ended = time.time()
+    leg = max(0.0, ended - started) if started > 0.0 else 0.0
+    banked = max(0.0, float(getattr(state, "prior_legs_elapsed_s", 0.0) or 0.0))
+    return leg, banked + leg
 
 
 def _recovery(state: Any) -> dict[str, Any]:

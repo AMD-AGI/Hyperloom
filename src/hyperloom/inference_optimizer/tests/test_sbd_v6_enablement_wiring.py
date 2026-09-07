@@ -1,0 +1,590 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The enablement event, recorded by the real lane rather than by hand.
+
+:mod:`test_sbd_v6_enablement_timeline` drives the recorder directly. These
+tests drive the production code paths -- the dispatch, the rearm, the eval
+writeback, the build executor, the revalidation enqueue -- and assert on what
+lands on the timeline, so a call site that stops recording is a failure here
+even when the recorder itself is still correct.
+
+That matters more for this event than for the others. Nothing owns the lane's
+lifetime: its facts come from five modules on different ticks, each opening the
+event idempotently, so there is no single recorder object whose absence would
+be obvious. The way a fact goes missing is one call site quietly not making a
+call.
+"""
+
+from __future__ import annotations
+
+import types
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+from hyperloom.inference_optimizer.session.session_binding import session_scope
+from hyperloom.orchestrator.actions.executors._accuracy_gate import (
+    BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+    BASELINE_EVAL_EVIDENCE_KEY,
+    BASELINE_EVAL_FAILURE_KIND_KEY,
+    BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
+)
+from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.loop.coordinator import _ENABLEMENT_MAX_STALL, Coordinator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+_MISSING_ARCH_LOG = (
+    "Traceback (most recent call last):\n"
+    '  File "/opt/sglang/server.py", line 42, in load\n'
+    "ValueError: Model architecture 'Glm5ForCausalLM' is not supported"
+)
+
+
+@pytest.fixture(autouse=True)
+def _bound_session(tmp_path):
+    """Bind the session the way startup does, so the lane records into it."""
+    with session_scope(tmp_path):
+        yield tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _single_node(monkeypatch):
+    """The lane is a no-op on multi-node, which is not what is under test."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_candidate_discovery(monkeypatch):
+    """Keep the real param builder off the network."""
+    import hyperloom.agents.framework.sources as sources
+
+    monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
+
+
+def _events(session_dir: Path) -> list[dict[str, Any]]:
+    return [event for event in read_timeline_events(session_dir) if event.get("type") == "enablement"]
+
+
+def _ext() -> dict[str, Any]:
+    """The lane's assembled ``ext``, whether or not it has closed yet."""
+    ext, _status = enablement_event.assemble_enablement_ext(
+        enablement_event_parts(),
+        event=enablement_event.enablement_event_id(),
+    )
+    return ext
+
+
+class _FakeTasks:
+    """Enough of the task registry for the lane to open rows against."""
+
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+
+    async def create_or_return_existing(self, **kwargs: Any):
+        self.created.append(kwargs)
+        return types.SimpleNamespace(task_id=f"spec-{len(self.created)}", state="queued"), False
+
+    async def get(self, task_id: str):
+        from hyperloom.orchestrator.state.task_registry import TaskNotFound
+
+        raise TaskNotFound(task_id)
+
+    async def queued(self):
+        return []
+
+    async def running(self):
+        return []
+
+
+def _lane(session_dir: Path, **overrides: Any):
+    """A lane bound to the real dispatch, rearm and revalidation methods."""
+    state = types.SimpleNamespace(
+        framework="sglang",
+        model_name="zai-org/GLM-5",
+        model_path="",
+        reference_model="",
+        gpu_type="mi300x",
+        tp=8,
+        max_model_len=8192,
+        enablement_mode=overrides.get("mode", "all"),
+        enablement=EnablementRound(
+            origin=overrides.get("origin", ""),
+            launch_log=overrides.get("launch_log", _MISSING_ARCH_LOG),
+            attempts=overrides.get("attempts", 0),
+            inflight_task_id=overrides.get("inflight_task_id", ""),
+            stall_streak=overrides.get("stall_streak", 0),
+            validation_pending=overrides.get("validation_pending", False),
+            revalidation_generation=overrides.get("revalidation_generation", 0),
+            accepted_config_path=overrides.get("accepted_config_path", ""),
+            accepted_config=overrides.get("accepted_config", {}),
+            accuracy_floor=overrides.get("accuracy_floor", 0.0),
+            human_review_logged=[],
+        ),
+        baseline_tput=0.0,
+        baseline_failure_streak=1,
+        baseline_arg_error_streak=0,
+        baseline_total_failures=0,
+        tick=0,
+        stop_reason="",
+        save=lambda *a, **k: None,
+    )
+    state.set_stop_reason = lambda value, **k: setattr(state, "stop_reason", str(value or ""))
+
+    async def _noop(*_a: Any, **_k: Any) -> None:
+        return None
+
+    fake = types.SimpleNamespace(
+        shared_state=state,
+        state=types.SimpleNamespace(pending_proposals={}),
+        tasks=_FakeTasks(),
+        session_dir=str(session_dir),
+        _run_deadline=None,
+        _warm_specialist_params=_noop,
+        _record_observation=_noop,
+        _maybe_enqueue_specialist_requested_build=_noop,
+        _maybe_escalate_to_targeted_build=_noop,
+        _read_enablement_source_context=lambda _sig: "",
+        _derive_checkpoint_weight_facts=lambda _log: "",
+        _framework_gpu_params=lambda: {},
+        _framework_authoring_lanes_ttl=lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
+        _time_budget_denial_for_action=lambda _action: None,
+        action_registry=ACTION_CATALOGUE,
+    )
+    for name in (
+        "_registry_lanes_ttl",
+        "_build_enablement_specialist_params",
+        "_discover_enablement_candidate_refs",
+        "_maybe_enqueue_enablement_specialist",
+        "_maybe_record_enablement_human_review",
+        "_maybe_rearm_enablement",
+        "_maybe_enqueue_enablement_baseline_revalidation",
+        "_open_revalidation_row",
+        "_open_row_past_spent_generations",
+    ):
+        setattr(fake, name, types.MethodType(getattr(Coordinator, name), fake))
+    fake._enablement_in_flight = types.MethodType(EnablementLane._enablement_in_flight, fake)
+    return fake
+
+
+def _writeback(**overrides: Any):
+    """A writeback bound to the real eval-failure persistence."""
+    state = types.SimpleNamespace(
+        enablement_mode=overrides.get("mode", "all"),
+        enablement=EnablementRound(
+            validation_pending=overrides.get("validation_pending", False),
+            revalidation_generation=overrides.get("revalidation_generation", 0),
+            stall_streak=overrides.get("stall_streak", 0),
+            baseline_eval_kind=overrides.get("baseline_eval_kind", ""),
+            observed_accuracy=overrides.get("observed_accuracy", 0.0),
+            observed_task=overrides.get("observed_task", ""),
+        ),
+        stop_reason="",
+    )
+    state.set_stop_reason = lambda value, **k: setattr(state, "stop_reason", str(value or ""))
+    fake = types.SimpleNamespace(shared_state=state)
+    for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
+        setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
+    return fake
+
+
+# --- the dispatch ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_real_dispatch_records_the_kind_it_classified(_bound_session):
+    """The classified kind comes from the params the real builder produced.
+
+    The projection read a ``failure_kind`` state field that does not exist, so
+    the export published nothing here; the kind only ever lives in the
+    specialist params, which is why the dispatch is where it is recorded.
+    """
+    lane = _lane(_bound_session)
+
+    task_id = await lane._maybe_enqueue_enablement_specialist()
+
+    assert task_id == "spec-1"
+    rows = _ext()["attempts"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "spec-1"
+    assert rows[0]["attempt"] == 1
+    assert rows[0]["failure_kind"] == "missing_model_arch"
+    assert "Glm5ForCausalLM" in rows[0]["launch_log_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_the_dispatch_opens_the_lane_the_trigger_missed(_bound_session):
+    """A lane whose trigger went unrecorded is still on the timeline.
+
+    The boot trigger is stashed by the baseline writeback, which a resumed
+    session may have run in a previous process. The dispatch carries mode and
+    origin for exactly that case.
+    """
+    lane = _lane(_bound_session, mode="launch")
+
+    await lane._maybe_enqueue_enablement_specialist()
+
+    events = _events(_bound_session)
+    assert len(events) == 1
+    ext = _ext()
+    assert ext["mode"] == "launch"
+    assert ext["origin"] == enablement_event.ORIGIN_BOOT
+
+
+@pytest.mark.asyncio
+async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
+    """Rotation through attempts is a sequence of rows, not a counter."""
+    lane = _lane(_bound_session)
+    await lane._maybe_enqueue_enablement_specialist()
+    lane._maybe_rearm_enablement({"enablement": True, "status": "reverted", "specialist_task_id": "spec-1"})
+    await lane._maybe_enqueue_enablement_specialist()
+
+    assert len(_events(_bound_session)) == 1
+    rows = _ext()["attempts"]["rows"]
+    assert [row["task_id"] for row in rows] == ["spec-1", "spec-2"]
+    assert [row["attempt"] for row in rows] == [1, 2]
+
+
+# --- the rearm ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
+    """A boot-origin KEEP is the terminal, and the event says which round it was."""
+    lane = _lane(_bound_session)
+    await lane._maybe_enqueue_enablement_specialist()
+
+    lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "patches_applied": ["/s/patches/arch.diff"],
+            "setup_commands_applied": ["pip install -e ."],
+            "framework_root": "/fw/sglang",
+        }
+    )
+
+    events = _events(_bound_session)
+    assert len(events) == 1
+    assert events[0]["status"] == "succeeded"
+    ext = events[0]["ext"]
+    assert ext["attempts"]["landed"] == 1
+    assert ext["attempts"]["rows"][0]["failure_kind"] == "missing_model_arch"
+    assert ext["result"]["outcome"] == enablement_event.OUTCOME_SUCCEEDED
+    assert ext["result"]["kept_patches"] == ["/s/patches/arch.diff"]
+    assert ext["result"]["framework_root"] == "/fw/sglang"
+
+
+@pytest.mark.asyncio
+async def test_an_advanced_round_records_the_gap_it_revealed(_bound_session):
+    """Serial enablement: the round's own gap and the next one are both kept."""
+    lane = _lane(_bound_session)
+    await lane._maybe_enqueue_enablement_specialist()
+
+    lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "specialist_task_id": "spec-1",
+            "patches_applied": ["/s/patches/arch.diff"],
+            "enablement_launch_log": "ValueError: Following weights were not initialized from checkpoint",
+        }
+    )
+
+    row = _ext()["attempts"]["rows"][0]
+    assert row["advanced"] is True
+    assert "Glm5ForCausalLM" in row["launch_log_excerpt"]
+    assert "not initialized from checkpoint" in row["next_launch_log_excerpt"]
+    # An advance is not a terminal, so the lane is still open.
+    assert _events(_bound_session)[0]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
+    """``enablement_stalled`` stops the run, so the lane failed."""
+    lane = _lane(_bound_session)
+    for attempt in range(_ENABLEMENT_MAX_STALL):
+        lane.shared_state.enablement.inflight_task_id = f"spec-{attempt}"
+        lane._maybe_rearm_enablement(
+            {"enablement": True, "status": "reverted", "specialist_task_id": f"spec-{attempt}"}
+        )
+
+    assert lane.shared_state.stop_reason == "enablement_stalled"
+    events = _events(_bound_session)
+    assert events[0]["status"] == "failed"
+    assert events[0]["ext"]["result"]["reason"] == "enablement_stalled"
+    assert events[0]["ext"]["attempts"]["count"] == _ENABLEMENT_MAX_STALL
+    assert events[0]["ext"]["attempts"]["landed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
+    """The patch is provisional until a genuine baseline re-measures accuracy."""
+    lane = _lane(_bound_session, origin="eval")
+    lane.shared_state.enablement.inflight_task_id = "spec-1"
+
+    lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "enablement_accepted_config_path": "/s/accepted.yaml",
+        }
+    )
+
+    assert lane.shared_state.enablement.succeeded is False
+    assert lane.shared_state.enablement.validation_pending is True
+    events = _events(_bound_session)
+    assert events[0]["status"] == "running"
+    row = _ext()["attempts"]["rows"][0]
+    assert row["status"] == "kept"
+    assert row["validation_pending"] is True
+    assert row["landed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_finished_without_a_rearm_settles_its_own_row(_bound_session):
+    """The pump's watchdog rearm carries no specialist id of its own.
+
+    It closes out the round the in-flight guard names, so it settles that
+    round's row rather than opening an anonymous second one -- which is what
+    keeps the kind and the log the round was pointed at attached to the verdict
+    it eventually got.
+    """
+    lane = _lane(_bound_session)
+    await lane._maybe_enqueue_enablement_specialist()
+    # The specialist row is gone from the registry, so the next pump treats the
+    # round as finished without a rearm, charges it as a stall, and dispatches
+    # the next one.
+    await lane._maybe_enqueue_enablement_specialist()
+
+    rows = _ext()["attempts"]["rows"]
+    assert [row["task_id"] for row in rows] == ["spec-1", "spec-2"]
+    assert rows[0]["failure_kind"] == "missing_model_arch"
+    assert rows[0]["reason"] == "round_finished_without_rearm"
+    assert rows[0]["stall_streak_after"] == 1
+    # The round the watchdog dispatched has not been ruled.
+    assert rows[1].get("status") in (None, "")
+
+
+# --- rounds that never happened -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_unclassifiable_failure_is_recorded_without_a_round(_bound_session):
+    """A lane that declines to dispatch is not a lane that was never triggered.
+
+    Driven through the real one-shot recorder rather than through the pump: a
+    non-blank log dispatches whatever it classifies to, because the kind is
+    advisory, so the pump only reaches this path for a log it was handed no
+    params for at all.
+    """
+    lane = _lane(_bound_session)
+    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="unknown")
+
+    await lane._maybe_record_enablement_human_review("Segmentation fault (core dumped)")
+
+    ext = _ext()
+    assert ext["attempts"]["count"] == 0
+    assert ext["human_review"]["count"] == 1
+    row = ext["human_review"]["rows"][0]
+    assert row["failure_kind"]
+    assert "human triage" in row["reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_same_unclassifiable_failure_is_filed_once(_bound_session):
+    """Keyed by the digest the lane itself dedupes the observation on."""
+    lane = _lane(_bound_session)
+    for _ in range(3):
+        await lane._maybe_record_enablement_human_review("Segmentation fault (core dumped)")
+
+    assert _ext()["human_review"]["count"] == 1
+
+
+# --- the eval trigger -----------------------------------------------------
+
+
+def test_the_eval_writeback_opens_the_lane_with_what_it_measured(_bound_session):
+    """The real writeback records the trigger it just persisted to state."""
+    writeback = _writeback()
+
+    writeback._persist_eval_failure(
+        {
+            BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_below_floor",
+            BASELINE_EVAL_OBSERVED_ACCURACY_KEY: 0.21,
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY: 0.5,
+            BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY: "fp-abc",
+            BASELINE_EVAL_EVIDENCE_KEY: "gsm8k exact_match 0.21",
+            "accuracy_task": "gsm8k",
+            "accuracy_metric": "exact_match",
+            "materialized_config": "/s/runs/baseline/materialized.yaml",
+        }
+    )
+
+    ext = _ext()
+    assert ext["origin"] == enablement_event.ORIGIN_EVAL
+    trigger = ext["trigger"]
+    assert trigger["kind"] == "accuracy_below_floor"
+    assert trigger["observed_accuracy"] == 0.21
+    assert trigger["accuracy_floor"] == 0.5
+    assert trigger["observed_task"] == "gsm8k"
+    assert trigger["eval_contract_fingerprint"] == "fp-abc"
+    assert trigger["probe_config_path"] == "/s/runs/baseline/materialized.yaml"
+
+
+def test_an_eval_less_rebaseline_cannot_downgrade_the_trigger(_bound_session):
+    """The measured trigger stands, in state and on the timeline alike.
+
+    ``RUN_EVAL`` is itself a contract field, so a fingerprint cannot gate this:
+    the eval-less run's fingerprint never matches the measured one. The
+    recorder keeps the opening trigger for the same reason the state does.
+    """
+    writeback = _writeback()
+    writeback._persist_eval_failure(
+        {
+            BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_below_floor",
+            BASELINE_EVAL_OBSERVED_ACCURACY_KEY: 0.21,
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY: 0.5,
+            "accuracy_task": "gsm8k",
+        }
+    )
+    writeback._persist_eval_failure({BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_unavailable"})
+
+    trigger = _ext()["trigger"]
+    assert trigger["kind"] == "accuracy_below_floor"
+    assert trigger["observed_accuracy"] == 0.21
+
+
+def test_a_failed_revalidation_closes_its_window_and_charges_the_stall(_bound_session):
+    """A revalidation that comes back sub-floor reopens the authoring loop."""
+    writeback = _writeback(
+        validation_pending=True, revalidation_generation=2, baseline_eval_kind="accuracy_below_floor"
+    )
+
+    writeback._persist_eval_failure(
+        {
+            BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_below_floor",
+            BASELINE_EVAL_OBSERVED_ACCURACY_KEY: 0.33,
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY: 0.5,
+            "accuracy_task": "gsm8k",
+        }
+    )
+
+    revalidations = _ext()["revalidations"]["rows"]
+    assert len(revalidations) == 1
+    assert revalidations[0]["generation"] == 2
+    assert revalidations[0]["promoted"] is False
+    assert revalidations[0]["accuracy"] == 0.33
+
+
+def test_a_revalidation_that_trips_the_cap_closes_the_lane(_bound_session):
+    """The last window's failure is also the lane's terminal."""
+    writeback = _writeback(
+        validation_pending=True,
+        revalidation_generation=3,
+        stall_streak=_ENABLEMENT_MAX_STALL - 1,
+        baseline_eval_kind="accuracy_below_floor",
+    )
+
+    writeback._persist_eval_failure(
+        {
+            BASELINE_EVAL_FAILURE_KIND_KEY: "accuracy_below_floor",
+            BASELINE_EVAL_ACCURACY_FLOOR_KEY: 0.5,
+            "accuracy_task": "gsm8k",
+        }
+    )
+
+    assert writeback.shared_state.stop_reason == "enablement_stalled"
+    events = _events(_bound_session)
+    assert events[0]["status"] == "failed"
+    assert events[0]["ext"]["result"]["stall_streak"] == _ENABLEMENT_MAX_STALL
+
+
+# --- the revalidation enqueue --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_session):
+    """The window is what holds the lane open, so it is on the timeline."""
+    lane = _lane(
+        _bound_session,
+        origin="eval",
+        validation_pending=True,
+        revalidation_generation=1,
+        accepted_config_path="/s/accepted.yaml",
+    )
+
+    task_id = await lane._maybe_enqueue_enablement_baseline_revalidation()
+
+    assert task_id
+    rows = _ext()["revalidations"]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["generation"] == 1
+    assert rows[0]["task_id"] == task_id
+    assert rows[0]["config_path"] == "/s/accepted.yaml"
+    assert "closed_at" not in rows[0]
+
+
+# --- the targeted build ---------------------------------------------------
+
+
+def test_the_build_executor_records_the_build_it_ran(_bound_session):
+    """A compile the lane escalated to, recorded where its result is classified."""
+    from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
+
+    result = types.SimpleNamespace(
+        ok=False,
+        failure_class="compile_error",
+        failure_summary="hipcc: unsupported arch",
+        error="",
+        attempt_root="/s/enablement/builds/build-7",
+        to_state=lambda: {
+            "ok": False,
+            "failure_class": "compile_error",
+            "failure_summary": "hipcc: unsupported arch",
+            "action": {"component": "aiter", "gpu_arch": "gfx942", "max_jobs": 32},
+            "installed_versions": {"aiter_ref": "abc123"},
+            "attempt_root": "/s/enablement/builds/build-7",
+        },
+    )
+    enablement_event.record_trigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
+
+    TargetedBuildExecutor._record_result(result, None, task_id="build-7")
+
+    builds = _ext()["builds"]
+    assert builds["count"] == 1
+    assert builds["failed"] == 1
+    assert builds["rows"][0]["task_id"] == "build-7"
+    assert builds["rows"][0]["component"] == "aiter"
+    assert builds["rows"][0]["ref"] == "abc123"
+
+
+# --- recording never breaks the lane --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypatch):
+    """Every call site is on a hot path; none of them may need a session."""
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.session.session_binding.bound_session_or_none",
+        lambda: None,
+    )
+    lane = _lane(tmp_path)
+
+    task_id = await lane._maybe_enqueue_enablement_specialist()
+    lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
+
+    assert task_id == "spec-1"
+    assert lane.shared_state.enablement.succeeded is True

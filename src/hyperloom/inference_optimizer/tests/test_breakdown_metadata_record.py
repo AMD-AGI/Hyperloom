@@ -40,6 +40,7 @@ _MANIFEST = {
     "model_name": "DeepSeek-V3",
     "model_path": "/models/dsv3",
     "framework": "sglang",
+    "framework_version": "0.4.6",
     "gpu_type": "MI300X",
     "tp": 8,
     "workload": {"conc": 64, "isl": 1024, "osl": 512, "precision": "fp8", "max_model_len": 4096},
@@ -113,12 +114,69 @@ def test_identity_carries_the_launch_shape(tmp_path):
     task_config = assemble_parts(tmp_path)[SECTION]["task_config"]
     assert task_config["model_name"] == "DeepSeek-V3"
     assert task_config["framework_name"] == "sglang"
+    assert task_config["framework_version"] == "0.4.6"
     assert (task_config["tp"], task_config["conc"], task_config["isl"]) == (8, 64, 1024)
+
+
+def test_a_save_does_not_erase_the_framework_version_from_launch(tmp_path):
+    """The state field stays empty until the framework reports one, if ever."""
+    record_metadata_identity(tmp_path, _MANIFEST)
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(framework_version=""))
+    assert assemble_parts(tmp_path)[SECTION]["task_config"]["framework_version"] == "0.4.6"
+
+
+def test_a_detected_framework_version_wins_over_the_launch_one(tmp_path):
+    record_metadata_identity(tmp_path, _MANIFEST)
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(framework_version="0.4.9"))
+    assert assemble_parts(tmp_path)[SECTION]["task_config"]["framework_version"] == "0.4.9"
 
 
 def test_an_empty_manifest_records_nothing(tmp_path):
     record_metadata_identity(tmp_path, {})
     assert SECTION not in assemble_parts(tmp_path)
+
+
+def test_the_workload_contract_is_digested_once_for_the_session(tmp_path):
+    """The digest belongs to the session, not to each variant that quotes it.
+
+    The explore executor stamps it on every ``explore_search.tested`` row so a
+    resume can tell an old KEEP was measured under a different contract. It is
+    a pure function of (CONC, ISL, OSL, precision, TP), so recording it here
+    once is what lets the per-variant copies go away.
+    """
+    record_metadata_identity(tmp_path, _MANIFEST)
+    from_manifest = assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"]
+    assert from_manifest
+
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    # Same contract from the other writer, so the singleton merge is a no-op
+    # rather than two writers fighting over one key.
+    assert assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"] == from_manifest
+
+
+def test_a_different_concurrency_is_a_different_contract(tmp_path):
+    """The digest has to move, or a cross-workload resume cannot be caught."""
+    record_metadata_identity(tmp_path, _MANIFEST)
+    baseline = assemble_parts(tmp_path)[SECTION]["task_config"]["workload_signature"]
+
+    other = dict(_MANIFEST, workload=dict(_MANIFEST["workload"], conc=128))
+    record_metadata_identity(tmp_path / "other", other)
+    assert assemble_parts(tmp_path / "other")[SECTION]["task_config"]["workload_signature"] != baseline
+
+
+def test_an_unknown_contract_records_no_signature(tmp_path):
+    """A digest of five blanks is a stable string the merge would never replace.
+
+    So absence has to stay absent: the key is omitted rather than carrying the
+    digest of nothing, which a later writer with a real contract could not
+    overwrite.
+    """
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(tp=None, conc=None, isl=None, osl=None, precision=""))
+    assert "workload_signature" not in assemble_parts(tmp_path)[SECTION]["task_config"]
 
 
 # ---- lifecycle snapshot ----
@@ -138,6 +196,40 @@ def test_a_running_session_records_no_end(tmp_path):
     rec = recorder_for(tmp_path, producer="coordinator")
     snapshot_metadata(rec, _state(stop_reason=""))
     assert assemble_parts(tmp_path)[SECTION]["session"]["ended_at_utc"] == ""
+
+
+def test_a_stopped_session_records_the_time_it_ran(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state())
+    session = assemble_parts(tmp_path)[SECTION]["session"]
+    assert session["elapsed_minutes"] == 120.0
+    assert session["total_elapsed_minutes"] == 120.0
+
+
+def test_a_resumed_leg_is_measured_from_its_own_start(tmp_path):
+    """Measuring from ``start_ts`` would charge the leg with the gap before it."""
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(rec, _state(resumed_ts="2026-09-01T01:00:00+00:00"))
+    assert assemble_parts(tmp_path)[SECTION]["session"]["elapsed_minutes"] == 60.0
+
+
+def test_the_total_adds_the_legs_already_banked(tmp_path):
+    rec = recorder_for(tmp_path, producer="coordinator")
+    snapshot_metadata(
+        rec,
+        _state(resumed_ts="2026-09-01T01:00:00+00:00", prior_legs_elapsed_s=1800.0),
+    )
+    session = assemble_parts(tmp_path)[SECTION]["session"]
+    assert session["elapsed_minutes"] == 60.0
+    assert session["total_elapsed_minutes"] == 90.0
+
+
+def test_a_stale_stop_stamp_does_not_zero_a_live_leg(tmp_path):
+    """A clean-stop resume keeps the previous leg's reason and stamp, and neither ends this leg."""
+    rec = recorder_for(tmp_path, producer="coordinator")
+    # ``stop_ts`` predates the resume, so it is the previous leg's end.
+    snapshot_metadata(rec, _state(resumed_ts="2026-09-01T03:00:00+00:00"))
+    assert assemble_parts(tmp_path)[SECTION]["session"]["elapsed_minutes"] > 0.0
 
 
 def test_the_snapshot_carries_the_whole_architecture_not_a_digest(tmp_path):
@@ -258,7 +350,14 @@ def test_an_empty_recorded_leaf_does_not_erase_a_projected_one():
 def test_the_projection_supplies_blocks_the_fragment_never_wrote():
     metadata = _collect(recorded={"langfuse": {"enabled": True}})
     assert metadata["task_config"]["framework_name"] == "sglang"
-    assert metadata["versions"]["schema_version"]
+    assert metadata["versions"]["framework"] == "sglang"
+
+
+def test_versions_does_not_restate_the_envelope():
+    """The schema version and the optimizer revision are carried elsewhere."""
+    versions = _collect()["versions"]
+    assert "schema_version" not in versions
+    assert "hyperloom" not in versions
 
 
 def test_tool_provenance_keeps_commit_and_root_dir():
@@ -274,17 +373,19 @@ def test_export_facts_are_never_taken_from_a_fragment():
     assert metadata["warnings"] == ["w"]
 
 
-def test_elapsed_is_measured_from_the_resolved_anchor_and_end():
-    """The recorder writes both ends; the span between them is only known here."""
-    metadata = _collect(
-        recorded={
-            "session": {
-                "start_ts": "2026-09-01T00:00:00+00:00",
-                "ended_at_utc": "2026-09-01T01:30:00+00:00",
-            }
-        }
-    )
+def test_recorded_elapsed_is_taken_verbatim():
+    """Re-exporting a stopped session must report what it ran, not the span since."""
+    metadata = _collect(recorded={"session": {"elapsed_minutes": 90.0, "total_elapsed_minutes": 150.0}})
     assert metadata["session"]["elapsed_minutes"] == 90.0
+    assert metadata["session"]["total_elapsed_minutes"] == 150.0
+
+
+def test_elapsed_falls_back_to_the_collected_window():
+    """A session with no fragment still reports the window the collector measured."""
+    metadata = _collect(session={"session_id": "sess-1", "elapsed_minutes": 42.0})
+    assert metadata["session"]["elapsed_minutes"] == 42.0
+    # No per-leg history to add up, so the total can only be the one window.
+    assert metadata["session"]["total_elapsed_minutes"] == 42.0
 
 
 def test_the_recovery_block_is_carried_whole():

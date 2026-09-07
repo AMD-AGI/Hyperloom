@@ -24,8 +24,31 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import baseline_event, kernel_event, roofline_event
-from .assembler import BASELINE_EVENT_SECTIONS, EVENT_SECTIONS, ROOFLINE_EVENT_SECTIONS, event_parts
+from . import (
+    baseline_event,
+    conc_sweep_event,
+    enablement_event,
+    framework_event,
+    kernel_event,
+    phase_event,
+    roofline_event,
+    stack_event,
+    warm_replay_event,
+    warm_start_event,
+)
+from .assembler import (
+    BASELINE_EVENT_SECTIONS,
+    CONC_SWEEP_EVENT_SECTIONS,
+    ENABLEMENT_EVENT_SECTIONS,
+    EVENT_SECTIONS,
+    FRAMEWORK_EVENT_SECTIONS,
+    PHASE_EVENT_SECTIONS,
+    ROOFLINE_EVENT_SECTIONS,
+    STACK_EVENT_SECTIONS,
+    WARM_REPLAY_EVENT_SECTIONS,
+    WARM_START_EVENT_SECTIONS,
+    event_parts,
+)
 from .event_timeline import EVENT_STATUS_INTERRUPTED, finish_event, residual_events
 
 __all__ = ["finalize_events"]
@@ -80,6 +103,55 @@ _EVENT_TYPES: tuple[_EventType, ...] = (
         event_section=baseline_event.SECTION_EVENT,
         sections=BASELINE_EVENT_SECTIONS,
         assemble=baseline_event.assemble_baseline_ext,
+    ),
+    _EventType(
+        event_type=conc_sweep_event.EVENT_TYPE,
+        kind=conc_sweep_event.EVENT_KIND,
+        event_section=conc_sweep_event.SECTION_EVENT,
+        sections=CONC_SWEEP_EVENT_SECTIONS,
+        assemble=conc_sweep_event.assemble_conc_sweep_ext,
+    ),
+    _EventType(
+        event_type=enablement_event.EVENT_TYPE,
+        kind=enablement_event.EVENT_KIND,
+        event_section=enablement_event.SECTION_EVENT,
+        sections=ENABLEMENT_EVENT_SECTIONS,
+        assemble=enablement_event.assemble_enablement_ext,
+    ),
+    _EventType(
+        event_type=phase_event.EVENT_TYPE,
+        kind=phase_event.EVENT_KIND,
+        event_section=phase_event.SECTION_EVENT,
+        sections=PHASE_EVENT_SECTIONS,
+        assemble=phase_event.assemble_phase_ext,
+    ),
+    _EventType(
+        event_type=stack_event.EVENT_TYPE,
+        kind=stack_event.EVENT_KIND,
+        event_section=stack_event.SECTION_EVENT,
+        sections=STACK_EVENT_SECTIONS,
+        assemble=stack_event.assemble_stack_ext,
+    ),
+    _EventType(
+        event_type=warm_replay_event.EVENT_TYPE,
+        kind=warm_replay_event.EVENT_KIND,
+        event_section=warm_replay_event.SECTION_EVENT,
+        sections=WARM_REPLAY_EVENT_SECTIONS,
+        assemble=warm_replay_event.assemble_warm_replay_ext,
+    ),
+    _EventType(
+        event_type=warm_start_event.EVENT_TYPE,
+        kind=warm_start_event.EVENT_KIND,
+        event_section=warm_start_event.SECTION_EVENT,
+        sections=WARM_START_EVENT_SECTIONS,
+        assemble=warm_start_event.assemble_warm_start_ext,
+    ),
+    _EventType(
+        event_type=framework_event.EVENT_TYPE,
+        kind=framework_event.EVENT_KIND,
+        event_section=framework_event.SECTION_EVENT,
+        sections=FRAMEWORK_EVENT_SECTIONS,
+        assemble=framework_event.assemble_framework_ext,
     ),
 )
 

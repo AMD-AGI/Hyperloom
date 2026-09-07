@@ -1101,6 +1101,26 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
+
+        def _measured_against() -> dict[str, Any]:
+            """The stack this variant launched on top of, as it stands now.
+
+            Read at each write rather than captured once: every KEEP advances
+            the stack, so a variant later in the round was measured against a
+            different one than the round opened with. Carried verbatim for the
+            same reason ``base_tput`` is -- a consumer that reconstructs the
+            stack from the session's current config gets whichever one is
+            current, not the one this variant was judged on.
+            """
+            return {
+                "throughput": running_base_tput,
+                "accuracy": baseline_accuracy or None,
+                "extra_server_args": stack_extra_args,
+                "extra_envs": dict(stack_extra_envs),
+                "remove_args": list(stack_remove_args),
+                "unset_envs": list(stack_unset_envs),
+                "args_mode": stack_base_args_mode,
+            }
         grade_on_total = total_tput_serving_grading_enabled(
             scriptable=framework_is_scriptable(framework),
             benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
@@ -1362,6 +1382,10 @@ class ExploreExecutor:
                                 "error_excerpt": tail_excerpt(w.error) if w is not None else None,
                                 "workspace": w.workspace if w is not None else None,
                                 "raw_result_path": w.raw_result_path if w is not None else None,
+                                # It launched on a stack even though it never
+                                # reached a gate, so no gates are recorded and
+                                # nothing validated it.
+                                "measured_against": _measured_against(),
                             }
                             if gv.name:
                                 round_name_index[gv.name] = fp
@@ -1458,6 +1482,9 @@ class ExploreExecutor:
                             "gain_pct": None,
                             "estimated_output_throughput": est_tput,
                             "base_tput": running_base_tput,
+                            # Killed before any gate ruled: the stack it ran on
+                            # is known, its verdicts are not.
+                            "measured_against": _measured_against(),
                             "round_id": round_id,
                             "ts": _now_iso(),
                             "provenance": provenance,
@@ -1553,9 +1580,28 @@ class ExploreExecutor:
                     outcome = "FAILED"
                     reason: str = ""
                     _graded_on_total = False
+                    # Each gate's verdict as it rules, in the order it ruled.
+                    # Recorded here because this is where it is known: read off
+                    # the outcome afterwards, "REVERT" cannot say which gate
+                    # ended the arc, and a gate that never ran is indistinguishable
+                    # from one that ruled against the variant.
+                    decision_gates: list[dict[str, Any]] = []
                     if grade_on_total and running_base_perf and cand_snap:
                         _graded_on_total = True
-                        if passes_intvty_gate(cand_snap, running_base_perf):
+                        intvty_ok = passes_intvty_gate(cand_snap, running_base_perf)
+                        decision_gates.append(
+                            {
+                                "gate": "intvty_p90",
+                                "passed": intvty_ok,
+                                "observed": cand_snap.get("intvty_p90"),
+                                # The anchor is the reference; the noise band it
+                                # is allowed to regress within belongs to the
+                                # gate, as the tolerance does for accuracy.
+                                "threshold": running_base_perf.get("intvty_p90"),
+                                "reason": "" if intvty_ok else "intvty_regression",
+                            }
+                        )
+                        if intvty_ok:
                             gain = gain_pct(total_tput_of(cand_snap), total_tput_of(running_base_perf))
                         else:
                             gain = None
@@ -1574,9 +1620,25 @@ class ExploreExecutor:
                     if not reason:
                         if r.status != "succeeded" or gain is None:
                             reason = (r.error or "")[-1200:] or "no_measurement"
-                        elif gain < keep_threshold_pct:
-                            outcome = "REVERT"
-                            reason = "gain_below_threshold"
+                        else:
+                            # A measurement exists, so this gate ruled. It does
+                            # not rule at all when there is none, which is why
+                            # no row is appended above.
+                            decision_gates.append(
+                                {
+                                    "gate": "keep_threshold",
+                                    "passed": gain >= keep_threshold_pct,
+                                    "observed": gain,
+                                    "threshold": keep_threshold_pct,
+                                    "reason": "" if gain >= keep_threshold_pct else "gain_below_threshold",
+                                }
+                            )
+                            if gain < keep_threshold_pct:
+                                outcome = "REVERT"
+                                reason = "gain_below_threshold"
+                    accuracy_value: float | None = None
+                    accuracy_reference: float | None = None
+                    accuracy_gated = False
                     if outcome == "FAILED" and not reason:
                         # Accuracy gate. Every variant is gated: the round already
                         # ran the eval, so the score is on disk and the flag
@@ -1591,10 +1653,10 @@ class ExploreExecutor:
 
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
-                        accuracy_value: float | None = None
                         # Serving still needs a measured baseline to compare
                         # against; scriptable compares against a fixed 1.0.
                         if scriptable or baseline_accuracy > 0:
+                            accuracy_gated = True
                             eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
@@ -1602,6 +1664,7 @@ class ExploreExecutor:
                                 # compare against a perfect reference (1.0);
                                 # serving compares vs the measured baseline.
                                 reference = 1.0 if scriptable else baseline_accuracy
+                                accuracy_reference = reference
                                 accuracy_ok = accuracy_passed(
                                     reference,
                                     float(accuracy_value),
@@ -1616,6 +1679,18 @@ class ExploreExecutor:
                                 # is where a missing accuracy result halts the run;
                                 # post-baseline it is a per-variant REVERT.
                                 accuracy_ok = False
+                        if accuracy_gated:
+                            decision_gates.append(
+                                {
+                                    "gate": "accuracy",
+                                    "passed": accuracy_ok,
+                                    "observed": accuracy_value if isinstance(accuracy_value, (int, float)) else None,
+                                    "threshold": accuracy_reference,
+                                    "reason": ""
+                                    if accuracy_ok
+                                    else ("accuracy_unavailable" if accuracy_value is None else "accuracy_drop"),
+                                }
+                            )
                         if not accuracy_ok:
                             outcome = "REVERT"
                             reason = "accuracy_unavailable" if accuracy_value is None else "accuracy_drop"
@@ -1653,6 +1728,21 @@ class ExploreExecutor:
                         "launch_evidence": dict(r.launch_evidence or {}),
                         "launch_evidence_path": r.launch_evidence_path,
                         "stage": FAILURE_STAGE_DECISION,
+                        "measured_against": _measured_against(),
+                        "gates": decision_gates,
+                        # What stood behind an adoption. A session with no
+                        # baseline accuracy gates nothing, so its KEEPs rest on
+                        # throughput alone -- a weaker claim than one an
+                        # accuracy gate ruled on, and the two must not read
+                        # alike. Only a KEEP carries it, matching the field's
+                        # adoption-scoped meaning elsewhere: on a reverted row
+                        # "accuracy_pass" would name the gate that refused it.
+                        # What ruled against those is in ``gates``.
+                        "validation_basis": (
+                            ("accuracy_pass" if accuracy_gated else "keep_verdict_unscored")
+                            if outcome == "KEEP"
+                            else ""
+                        ),
                     }
                     if gv.name:
                         round_name_index[gv.name] = fp
@@ -1867,6 +1957,14 @@ class ExploreExecutor:
                 metrics["tput"] = te.get("tput")
             if te.get("gain_pct") is not None:
                 metrics["gain_pct"] = te.get("gain_pct")
+            # The anchor this variant's gain was measured against. Carried
+            # verbatim rather than left to be back-solved from the gain: each
+            # KEEP advances ``running_base_tput``, so a consumer dividing the
+            # gain out of the final throughput reconstructs whichever anchor
+            # happens to be current, not the one this variant was judged on --
+            # and for a FAILED or killed variant there is no gain to divide.
+            if te.get("base_tput") is not None:
+                metrics["base_tput"] = te.get("base_tput")
             # Rough decode tput salvaged from a killed-overtime variant's
             # partial server.log. Informational only (no ``tput``/gain).
             if te.get("estimated_output_throughput") is not None:
@@ -1909,6 +2007,13 @@ class ExploreExecutor:
                         "extra_envs": dict(te.get("extra_envs") or {}),
                         "note": str(te.get("note") or ""),
                     },
+                    # The verdicts and the stack behind them, as the round
+                    # ruled. Absent keys mean the variant never got that far:
+                    # no gate ruled on a warmup failure, and nothing validated
+                    # one that was killed before it was graded.
+                    "measured_against": te.get("measured_against") or {},
+                    "gates": [gate for gate in (te.get("gates") or []) if isinstance(gate, dict)],
+                    "validation_basis": str(te.get("validation_basis") or ""),
                 }
             )
         for sd in skipped_dup:

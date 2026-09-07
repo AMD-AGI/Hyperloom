@@ -67,6 +67,93 @@ def apply_critic_grid_filter(
     return bool(stamped_grid)
 
 
+def _framework_recorder(coll: Any, pending: Any) -> Any:
+    """The framework recorder to write one config-arm proposal's step onto.
+
+    ``None`` whenever the step is not a config-arm one to record: another
+    action, or a phase whose event is not open. Recording is read off the
+    collaborator defensively because this module's methods get borrowed onto
+    lightweight stand-ins in tests, which carry no recorder.
+
+    Args:
+        coll: The proposals collaborator, or a stand-in.
+        pending: The proposal being moved.
+
+    Returns:
+        The recorder, or ``None`` when there is nothing to record onto.
+    """
+    if str(getattr(pending, "action_name", "") or "") != "explore":
+        return None
+    if not str(getattr(pending, "proposal_msg_id", "") or ""):
+        return None
+    getter = getattr(coll, "_framework_timeline", None)
+    return getter() if callable(getter) else None
+
+
+def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
+    """Record that one config-arm grid reached a bench.
+
+    Args:
+        coll: The proposals collaborator, or a stand-in.
+        pending: The proposal materialised.
+        task_id: The task it became, which its attempts also carry.
+    """
+    recorder = _framework_recorder(coll, pending)
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
+
+    try:
+        recorder.record_proposal_step(
+            pending.proposal_msg_id,
+            step=STEP_ROUTED,
+            outcome="materialized",
+            reason=str(task_id or ""),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change materialization
+        log.debug(
+            "framework timeline: config routed step failed for %s",
+            pending.proposal_msg_id,
+            exc_info=True,
+        )
+
+
+def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
+    """Settle one config-arm grid that never reached a bench.
+
+    The empty-grid case is the one that most needs saying: the Critic approved
+    the proposal and then named no variant that survived the filter, so the
+    arm spent a review and benched nothing. Without a settled row that reads
+    as a proposal still under way.
+
+    Args:
+        coll: The proposals collaborator, or a stand-in.
+        pending: The proposal dropped.
+        reason: Why it never ran.
+    """
+    recorder = _framework_recorder(coll, pending)
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        DISPOSITION_DROPPED,
+        STEP_DROPPED,
+    )
+
+    try:
+        recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
+        recorder.settle_proposal(
+            pending.proposal_msg_id,
+            disposition=DISPOSITION_DROPPED,
+            reason=reason,
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change materialization
+        log.debug(
+            "framework timeline: config drop row failed for %s",
+            pending.proposal_msg_id,
+            exc_info=True,
+        )
+
+
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
     """Read canonical ``extra_server_args`` from a payload."""
     value = payload.get("extra_server_args")
@@ -470,6 +557,7 @@ class ProposalsCollaborator:
                         "from_agent": pending.from_agent,
                     },
                 )
+                _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
                 return
         if pending.action_name == "profile":
             # Stamp the server config that produced this trace.
@@ -587,6 +675,7 @@ class ProposalsCollaborator:
         )
         # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
         self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
+        _record_config_routed(self, pending, task_id=task.task_id)
 
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
         """Append one ``{proposal_msg_id -> task_id}`` row to the trace map.

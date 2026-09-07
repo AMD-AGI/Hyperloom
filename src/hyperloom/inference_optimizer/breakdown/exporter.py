@@ -580,10 +580,6 @@ def build(
             sd,
             v6_warnings,
             state=state,
-            recorded_operations=recorded_operations,
-            critic_iterations=(
-                critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
-            ),
             conc_sweep_summary=conc_sweep_summary,
             phase_timeline=phase_timeline,
         ),
@@ -594,9 +590,7 @@ def build(
         "outcome",
         lambda: collectors.collect_v6_outcome(
             session=session_section,
-            baseline=baseline,
             final=final,
-            optimizations=optimizations,
             state=state,
             timeline=timeline,
         ),
@@ -621,7 +615,13 @@ def build(
     )
     v6_close = _safe_collect(
         "close",
-        lambda: collectors.collect_v6_close(sd, state, critic_robustness, v6_warnings),
+        lambda: collectors.collect_v6_close(
+            sd,
+            state,
+            critic_robustness,
+            v6_warnings,
+            recorded=assembled.get("close"),
+        ),
         v6_warnings,
         default={},
     )
@@ -940,16 +940,16 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
 def patch_breakdown_close(session_dir: Path | str) -> bool:
     """Refresh only the ``close`` section of an already-written breakdown.
 
-    ``session_breakdown`` is step 2 of the CLOSE sequencer, so the breakdown it
-    writes can only ever describe the close-out up to its own step: the four
-    steps after it are not recorded yet and ``close_sequence_done`` is still
-    false. Left alone, every healthy session reports ``close.status:
-    "degraded"`` — an accurate statement about the *record*, but one that reads
-    as the close-out having gone wrong.
+    ``session_breakdown`` is a step in the middle of the CLOSE sequencer, so
+    the breakdown it writes can only ever describe the close-out up to its own
+    step: the steps after it have not run, and no verdict has been recorded.
+    Left alone, every healthy session reports ``close.status: "running"``,
+    which reads as a session that died during its own wind-down.
 
-    Call this as the last act of the sequencer. ``_record_close_step``
-    persists ``state.json`` on every step, so by then the full sequence and
-    ``close_sequence_done`` are on disk and the recomputed key is the real one.
+    Call this as the last act of the sequencer, after
+    ``record_close_settled``. Every close step persists as it settles, so by
+    then the full sequence, the artifact paths and the verdict are all on disk
+    and the re-read key is the real one.
 
     Best-effort and self-skipping, exactly like
     :func:`patch_breakdown_langfuse`: returns False on a missing breakdown, an
@@ -978,7 +978,16 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
             fresh_warnings,
             default={},
         )
-        fresh = collectors.collect_v6_close(sd, state, critic_robustness, fresh_warnings)
+        # Re-assembled rather than reused from the export: this pass runs after
+        # the sequencer's last act, so the fragments now carry the verdict and
+        # the artifact paths that did not exist when the breakdown was written.
+        fresh = collectors.collect_v6_close(
+            sd,
+            state,
+            critic_robustness,
+            fresh_warnings,
+            recorded=_load_assembled(sd, fresh_warnings).get("close"),
+        )
         changed = breakdown.get("close") != fresh
         breakdown["close"] = fresh
 

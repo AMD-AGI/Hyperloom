@@ -535,77 +535,118 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
 # ---------------------------------------------------------------------------
 # outcome
 # ---------------------------------------------------------------------------
-def _v6_outcome(optimizations: dict) -> dict:
+def _v6_outcome(timeline: list | None = None) -> dict:
     return v6_collectors.collect_v6_outcome(
         session={"stop_reason": "target_reached"},
-        baseline={},
         final={},
-        optimizations=optimizations,
         state={"phase": "CLOSE"},
-        timeline=[],
+        timeline=timeline or [],
     )
 
 
-def test_outcome_projects_authoritative_gain_by_v6_source_and_kernel_backend():
-    outcome = _v6_outcome(
-        {
-            "available": True,
-            "summary_by_source": {
-                "warm_replay": {"keeps": 1, "total_gain_pct": 1.25},
-                "explore": {"keeps": 2, "total_gain_pct": 2.0},
-                "framework_agent": {"keeps": 1, "total_gain_pct": 0.75},
-                "kernel_agent": {
-                    "keeps": 4,
-                    "total_gain_pct": 5.5,
-                    "by_backend": {
-                        "geak": {"keeps": 2, "total_gain_pct": 4.25, "non_attributable_keeps": 1},
-                        "forge": {"keeps": 1, "total_gain_pct": 1.25, "non_attributable_keeps": 0},
-                    },
-                },
-            },
-            "validation": {
-                "attributed_total_gain_pct": 9.5,
-                "unattributed_gain_pct": 0.5,
-                "reconciliation_gap_pct": 0.5,
-            },
-        }
-    )
-
-    attribution = outcome["validation"]["attribution"]
-    assert attribution == {
-        "available": True,
-        "by_source": {
-            "warm_replay": {"total_gain_pct": 1.25, "keep_count": 1},
-            "framework_agent": {"total_gain_pct": 2.75, "keep_count": 3},
-            "kernel": {
-                "total_gain_pct": 5.5,
-                "keep_count": 4,
-                "by_backend": {
-                    "geak": {
-                        "total_gain_pct": 4.25,
-                        "keep_count": 2,
-                        "non_attributable_keep_count": 1,
-                    },
-                    "forge": {
-                        "total_gain_pct": 1.25,
-                        "keep_count": 1,
-                        "non_attributable_keep_count": 0,
-                    },
-                },
-            },
+def _baseline_action(
+    *,
+    task_id: str,
+    throughput: float,
+    establishes_quality_ref: bool = True,
+    status: str = "succeeded",
+    end_time: str = "2026-01-01T00:00:00+00:00",
+) -> dict:
+    """One action on a ``baseline`` event, shaped as the recorder assembles it."""
+    return {
+        "task_id": task_id,
+        "status": status,
+        "end_time": end_time,
+        "request": {"task_id": task_id, "establishes_quality_ref": establishes_quality_ref},
+        "measurement": {
+            "throughput_tok_s_per_gpu": throughput,
+            "accuracy": 0.81,
+            "ttft_mean_ms": 120.0,
+            "e2el_mean_ms": 900.0,
         },
     }
 
 
-def test_outcome_marks_gain_totals_unknown_when_the_canonical_ledger_is_unavailable():
-    attribution = _v6_outcome({"available": False})["validation"]["attribution"]
+def _baseline_event(*actions: dict) -> dict:
+    return {"type": "baseline", "ext": {"actions": list(actions)}}
 
-    assert attribution["available"] is False
-    assert attribution["by_source"]["warm_replay"]["total_gain_pct"] is None
-    assert attribution["by_source"]["framework_agent"]["total_gain_pct"] is None
-    assert attribution["by_source"]["kernel"]["total_gain_pct"] is None
-    assert attribution["by_source"]["kernel"]["by_backend"]["geak"]["total_gain_pct"] is None
-    assert attribution["by_source"]["kernel"]["by_backend"]["forge"]["total_gain_pct"] is None
+
+def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
+    """The four figures come from the event, latency included.
+
+    Latency used to be parsed out of ``benchmark_report.json`` at export time;
+    the executor reports it, so the event already holds it.
+    """
+    outcome = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=800.0))])
+
+    assert outcome["baseline"] == {
+        "throughput_tok_s_per_gpu": 800.0,
+        "accuracy": 0.81,
+        "ttft_mean_ms": 120.0,
+        "e2el_mean_ms": 900.0,
+    }
+
+
+def test_outcome_baseline_ignores_a_kernel_probe_that_anchors_nothing():
+    """The discrimination the dispatch kind cannot make.
+
+    The kernel lane's integrate re-baseline and stack validation reach the same
+    executor carrying ``kind="baseline"`` literally, and land actions on the
+    same event. They measure against an already-anchored baseline, so reading
+    the newest ``baseline``-kind action would publish an A/B probe as the
+    session's reference.
+    """
+    outcome = _v6_outcome([
+            _baseline_event(
+                _baseline_action(task_id="b-1", throughput=800.0, end_time="2026-01-01T00:00:00+00:00"),
+                _baseline_action(
+                    task_id="k-probe",
+                    throughput=915.0,
+                    establishes_quality_ref=False,
+                    end_time="2026-01-01T05:00:00+00:00",
+                ),
+            )
+        ],
+    )
+
+    assert outcome["baseline"]["throughput_tok_s_per_gpu"] == 800.0
+
+
+def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
+    """A baseline re-measured after an enablement fix legitimately re-anchors."""
+    outcome = _v6_outcome([
+            _baseline_event(_baseline_action(task_id="b-1", throughput=800.0, end_time="2026-01-01T00:00:00+00:00")),
+            _baseline_event(_baseline_action(task_id="b-2", throughput=845.0, end_time="2026-01-01T02:00:00+00:00")),
+        ],
+    )
+
+    assert outcome["baseline"]["throughput_tok_s_per_gpu"] == 845.0
+
+
+def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
+    """``degraded`` is the number the session's gains were read against.
+
+    It stands on the cold warmup round because the budget would not hold the hot
+    pass -- knowingly depressed, but it is what the session actually used.
+    """
+    degraded = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="degraded"))]
+    )
+    failed = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="failed"))])
+
+    assert degraded["baseline"]["throughput_tok_s_per_gpu"] == 770.0
+    assert failed["baseline"] == {
+        "throughput_tok_s_per_gpu": None,
+        "accuracy": None,
+        "ttft_mean_ms": None,
+        "e2el_mean_ms": None,
+    }
+
+
+# ``outcome.validation``'s attribution is covered in
+# ``test_sbd_v6_stack_ledger.py``, against a recorded ``stack`` event rather
+# than a hand-built ``optimizations`` dict. The two tests that lived here fed
+# the collector a summary nothing had produced, so they could pin the
+# projection's arithmetic and not whether the figures it projected were right.
 
 
 # ---------------------------------------------------------------------------

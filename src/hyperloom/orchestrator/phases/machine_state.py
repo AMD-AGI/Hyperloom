@@ -3197,6 +3197,10 @@ def record_phase_transition(
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
     from_phase = (state.phase or "").strip().upper()
+    # Read before the loopback's bump can be observed here: it increments
+    # ``macro_cycle`` on the way out of a phase, so the cycle in scope at the
+    # transition is not always the one the outgoing phase ran in.
+    prev_cycle = int(getattr(state, "macro_cycle", 0) or 0)
     # Bank the finished segment for EVERY phase so the budget guards can charge
     # a phase for the whole run instead of the current entry.
     bank_phase_segment(state, until_unix=now_unix)
@@ -3222,6 +3226,36 @@ def record_phase_transition(
     from hyperloom.common.llm_attribution import set_current_phase
 
     set_current_phase(str(row["to_phase"] or ""))
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        # The phase itself, as a timeline event: close the span being left on
+        # the exit that ended it, and open the one being entered. Recorded here
+        # because here is where the two facts exist -- export could only pair
+        # phase_history rows off two at a time to guess them back, and had no
+        # row at all to close the segment the session ended in.
+        if from_phase and from_phase != str(row.get("to_phase") or ""):
+            phase_event.record_exit(
+                phase=from_phase,
+                macro_cycle=prev_cycle,
+                to_phase=str(row.get("to_phase") or ""),
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                exited_at=str(row.get("ts") or ""),
+                exited_unix=now_unix,
+            )
+        phase_event.record_entry(
+            phase=str(row.get("to_phase") or ""),
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            sequence=len(history),
+            from_phase=from_phase,
+            reason=str(row.get("reason") or ""),
+            evidence=dict(row.get("evidence") or {}),
+            entered_at=str(row.get("ts") or ""),
+            entered_unix=now_unix,
+        )
+    except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
+        pass
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -3301,6 +3335,19 @@ def append_phase_history_event(
     if len(history) > _PHASE_HISTORY_CAP:
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_marker(
+            phase=phase,
+            macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
+            sequence=len(history),
+            reason=str(row.get("reason") or ""),
+            evidence=dict(row.get("evidence") or {}),
+            ts=str(row.get("ts") or ""),
+        )
+    except Exception:  # noqa: BLE001 -- telemetry must never block the marker
+        pass
     return row
 
 

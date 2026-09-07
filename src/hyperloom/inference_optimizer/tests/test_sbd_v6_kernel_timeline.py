@@ -700,3 +700,142 @@ def test_a_recovered_kernel_event_keeps_its_inline_reprofile(tmp_path):
     reprofile = event["ext"]["forge"]["reprofile"]
     assert reprofile["ran"] is True
     assert reprofile["run"]["task_id"] == "rp-1"
+
+
+def test_discovered_kernels_carry_profiling_fields(tmp_path):
+    """The visit needs per-kernel profiling, not just a capped hot-kernel summary."""
+    recorder = _forge_recorder()
+    recorder.record_discovered_kernels(
+        {
+            "roofline_snapshot_id": 9,
+            "reusable_native_kernel_ids": ["k-hot"],
+            "hot_kernels_top15": [
+                {
+                    "kernel_id": "k-hot",
+                    "name": "gemm",
+                    "gpu_pct": 61.0,
+                    "duration_us": 900.0,
+                    "call_count": 120,
+                    "kernel_category": "gemm",
+                    "bound_type": "compute",
+                    "arithmetic_intensity": 180.0,
+                    "bandwidth_utilization_pct": 12.0,
+                    "compute_utilization_pct": 77.0,
+                    "recommended_backends": ["triton"],
+                    "recommended_actions": ["tile"],
+                    "reusable_native_kernel": True,
+                    "source_file": "ops/gemm.py",
+                },
+                {
+                    "kernel_id": "k-cheap",
+                    "name": "rms_norm",
+                    "gpu_pct": 4.0,
+                    "duration_us": 12.0,
+                    "efficiency_percent": 3.0,
+                    "bound_type": "memory",
+                },
+            ],
+        },
+        provenance="entry_snapshot",
+    )
+    recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
+
+    forge = _kernel_events(tmp_path)[0]["ext"]["forge"]
+    assert len(forge["discovered_kernels"]) == 2
+    hot = forge["discovered_kernels"][0]
+    assert hot["kernel_id"] == "k-hot"
+    assert hot["duration_us"] == 900.0
+    assert hot["call_count"] == 120
+    assert hot["bound_type"] == "compute"
+    assert hot["bandwidth_util_pct"] == 12.0
+    assert hot["recommended_actions"] == ["tile"]
+    assert forge["recommended_kernels"][0]["kernel_id"] == "k-hot"
+
+
+def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
+    recorder = _forge_recorder()
+    recorder.record_trace_analyze_run(
+        run_id="ta-2",
+        trigger="pre_run_optimization",
+        status="ok",
+        result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
+        snapshot={
+            "roofline_snapshot_id": 6,
+            "hot_kernels_top15": [
+                {
+                    "kernel_id": "k001",
+                    "name": "aten::mm",
+                    "gpu_pct": 10.0,
+                    "duration_us": 50.0,
+                    "call_count": 8,
+                    "bound_type": "memory",
+                }
+            ],
+            "reusable_native_kernel_ids": ["k001"],
+        },
+    )
+    recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
+
+    discovered = _kernel_events(tmp_path)[0]["ext"]["forge"]["discovered_kernels"]
+    assert discovered[0]["kernel_id"] == "k001"
+    assert discovered[0]["duration_us"] == 50.0
+    assert discovered[0]["provenance"] == "trace_analyze_run"
+
+
+def test_record_kernel_backend_result_mirrors_each_attempt(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder.instrument import record_kernel_backend_result
+
+    recorder = _forge_recorder()
+    record_kernel_backend_result(
+        tmp_path,
+        {
+            "kernel_id": "k001",
+            "run_id": "forge-run-1",
+            "status": "ok",
+            "attempts": [
+                {
+                    "attempt_id": "a1",
+                    "backend": "triton",
+                    "status": "failed",
+                    "micro_speedup": 0.9,
+                    "decision": "REVERT",
+                },
+                {
+                    "attempt_id": "a2",
+                    "backend": "aiter",
+                    "status": "success",
+                    "micro_speedup": 1.4,
+                    "decision": "KEEP",
+                },
+            ],
+            "verification": {
+                "best_attempt_id": "a2",
+                "micro_speedup": 1.4,
+                "best_artifact_path": "/w/out.py",
+            },
+            "proposal": {"decision": "KEEP"},
+        },
+        route_strategy="kernel_agent_forge",
+    )
+    recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
+
+    rows = _kernel_events(tmp_path)[0]["ext"]["forge"]["lanes"]["kernel_rewrites"]
+    assert [row["run_id"] for row in rows] == ["a1", "a2"]
+    assert rows[1]["adopted_backend"] == "aiter"
+    assert rows[1]["speedup"] == 1.4
+    assert rows[0]["micro_decision"] == "REVERT"
+
+
+def test_finish_records_stack_delta(tmp_path):
+    recorder = _forge_recorder()
+    recorder.finish(
+        verdict="adopted",
+        status="succeeded",
+        tput_after=1100.0,
+        stack_added=[{"action": "integrate_patch", "variant_name": "fused_gemm"}],
+        stack_removed=[],
+    )
+
+    delta = _kernel_events(tmp_path)[0]["ext"]["outcome"]["stack_delta"]
+    assert delta["added"][0]["variant_name"] == "fused_gemm"
+    assert delta["removed"] == []

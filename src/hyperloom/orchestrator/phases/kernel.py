@@ -482,6 +482,8 @@ class KernelPhase(PhaseHandler):
             snapshot_id_after=snapshot_id_after,
             task_id=str(getattr(reprofile_task, "task_id", "") or ""),
         )
+        if snapshot_landed:
+            self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")
 
     def _geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer.
@@ -525,6 +527,9 @@ class KernelPhase(PhaseHandler):
         self._kernel_timeline_recorder = recorder
         if recorder is None:
             return
+        state = self.shared_state
+        stack = state.optimization_stack if isinstance(getattr(state, "optimization_stack", None), list) else []
+        self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
         cached = getattr(state, "last_trace_analyze", None) or {}
         current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
         try:
@@ -537,6 +542,19 @@ class KernelPhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: begin failed", exc_info=True)
+        else:
+            self._record_kernel_discovered_from_cache(provenance="entry_snapshot")
+
+    def _record_kernel_discovered_from_cache(self, *, provenance: str) -> None:
+        """Record the profiling table the visit inherited or just produced."""
+        recorder = self._kernel_timeline()
+        if recorder is None:
+            return
+        cached = getattr(self.shared_state, "last_trace_analyze", None) or {}
+        try:
+            recorder.record_discovered_kernels(cached, provenance=provenance)
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: discovered kernels record failed", exc_info=True)
 
     def _close_kernel_timeline(self, *, verdict: str = "", exit_reason: str = "") -> None:
         """Close the kernel timeline event when the phase is left.
@@ -559,6 +577,16 @@ class KernelPhase(PhaseHandler):
         self._kernel_timeline_recorder = None
         state = self.shared_state
         current_best = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        stack_before = getattr(self, "_kernel_stack_at_entry", None) or []
+        stack_after = [
+            dict(item) for item in (state.optimization_stack or []) if isinstance(item, dict)
+        ]
+        if len(stack_after) >= len(stack_before):
+            stack_added = stack_after[len(stack_before) :]
+            stack_removed = []
+        else:
+            stack_added = [item for item in stack_after if item not in stack_before]
+            stack_removed = [item for item in stack_before if item not in stack_after]
         try:
             recorder.finish(
                 verdict=verdict,
@@ -566,6 +594,8 @@ class KernelPhase(PhaseHandler):
                 tput_after=current_best.get("tput"),
                 cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),
                 stack_depth_out=getattr(state, "cumulative_gain_validated_stack_len", None),
+                stack_added=stack_added,
+                stack_removed=stack_removed,
             )
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: finish failed", exc_info=True)

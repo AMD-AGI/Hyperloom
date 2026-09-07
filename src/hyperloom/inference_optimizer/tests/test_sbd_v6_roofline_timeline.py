@@ -345,6 +345,184 @@ def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
     assert event["ext"]["actions"][0]["outcome"]["kernel_attribution_degraded"] is True
 
 
+def _write_sidecar(session_dir: Path, **overrides: Any) -> str:
+    """Write a kernel-roofline sidecar the way the analyzer subprocess does."""
+    import json
+
+    payload: dict[str, Any] = {
+        "schema_version": "1",
+        "source": "tracelens_analysis",
+        "trace_input": "/w/traces/a.gz",
+        "trace_input_type": "file",
+        "analysis_md_path": "/w/reports/analysis.md",
+        "kernel_candidates_path": "/w/reports/candidates.json",
+        "kernels": [
+            {
+                "kernel_id": "k-cheap",
+                "name": "rms_norm",
+                "gpu_pct": 4.0,
+                "duration_us": 12.5,
+                "call_count": 900,
+                "kernel_category": "norm",
+                "bound_type": "memory",
+                "arithmetic_intensity": 0.5,
+                "efficiency_percent": 3.0,
+                "bandwidth_utilization_pct": 41.0,
+                "recommended_actions": ["fuse"],
+                "roofline_source": "analytical",
+            },
+            {
+                "kernel_id": "k-hot",
+                "name": "gemm",
+                "gpu_pct": 61.0,
+                "duration_us": 900.0,
+                "call_count": 120,
+                "kernel_category": "gemm",
+                "bound_type": "compute",
+                "arithmetic_intensity": 180.0,
+                "efficiency_percent": 78.0,
+                "compute_utilization_pct": 77.5,
+                "reusable_native_kernel": True,
+                "roofline_source": "analytical",
+            },
+        ],
+    }
+    payload.update(overrides)
+    path = session_dir / "kernel_roofline.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_the_action_carries_the_per_kernel_roofline_table(tmp_path: Path) -> None:
+    """The bound type is the whole point of a roofline, and the event lacked it.
+
+    Before this, the event named the sidecar's path and summarized the hot
+    kernels without ``bound_type`` / ``efficiency_percent`` /
+    ``arithmetic_intensity`` -- so the one question the table exists to answer,
+    "is this kernel memory- or compute-bound", could only be answered by
+    finding a file that the export may well outlive.
+    """
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
+        trace_path="/w/traces/a.gz",
+    )
+
+    table = _actions(tmp_path)[0]["kernel_roofline"]
+    assert table["source"] == "tracelens_analysis"
+    assert table["kernel_count"] == 2
+    assert table["truncated"] is False
+    # Ranked by GPU share, so the reader meets the expensive kernel first.
+    assert [row["kernel_id"] for row in table["kernels"]] == ["k-hot", "k-cheap"]
+    hot, cheap = table["kernels"]
+    assert hot["bound_type"] == "compute"
+    assert hot["efficiency_percent"] == 78.0
+    assert hot["arithmetic_intensity"] == 180.0
+    assert hot["duration_us"] == 900.0
+    assert hot["call_count"] == 120
+    assert hot["reusable_native_kernel"] is True
+    # The cheap kernel is exactly what a top-N-by-cost cut would have dropped
+    # and exactly what a reader is hunting: 4% of the GPU at 3% efficiency.
+    assert cheap["bound_type"] == "memory"
+    assert cheap["efficiency_percent"] == 3.0
+    assert cheap["recommended_actions"] == ["fuse"]
+
+
+def test_a_missing_sidecar_does_not_fail_a_run_that_succeeded(tmp_path: Path) -> None:
+    """The table is a detail of an analysis that already reached a conclusion."""
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": str(tmp_path / "absent.json")},
+        trace_path="/w/traces/a.gz",
+    )
+
+    event = _roofline_events(tmp_path)[0]
+    assert event["status"] == "succeeded"
+    assert event["ext"]["actions"][0]["kernel_roofline"] is None
+
+
+def test_the_outcome_carries_the_snapshot_and_not_only_its_id(tmp_path: Path) -> None:
+    """A snapshot id alone is only usable by joining against evictable state."""
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=7,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 7},
+        trace_path="/w/traces/a.gz",
+        snapshot={
+            "snapshot_id": 7,
+            "ts": "2026-09-06T10:00:00Z",
+            "framework": "sglang",
+            "achieved_tok_per_sec": 1200.0,
+            "theoretical_peak_tok_per_sec": 4000.0,
+            "roofline_mem_ceiling_tok_per_sec": 4000.0,
+            "roofline_cmp_ceiling_tok_per_sec": 9000.0,
+            "roofline_bound_kind": "memory",
+            "within_roofline_pct": 30.0,
+            "gap_to_roofline_pct": 70.0,
+            "compute_pct": 55.0,
+            "idle_pct": 30.0,
+            "comm_pct": 15.0,
+            "top_bottleneck": "memory",
+            "top_kernel": {"name": "gemm", "gpu_pct": 61.0, "efficiency_pct": 78.0, "bound_type": "compute"},
+            "roofline_provenance": {"formula": "decode_mem"},
+            "perfmodel_breakdown": {"bound_kind": "memory", "ops": [{"name": "attn", "time_s": 0.001}]},
+        },
+    )
+
+    snapshot = _actions(tmp_path)[0]["outcome"]["snapshot"]
+    assert snapshot["snapshot_id"] == 7
+    assert snapshot["achieved_tok_per_sec"] == 1200.0
+    assert snapshot["theoretical_peak_tok_per_sec"] == 4000.0
+    assert snapshot["roofline_bound_kind"] == "memory"
+    assert snapshot["gap_to_roofline_pct"] == 70.0
+    assert snapshot["top_kernel"]["bound_type"] == "compute"
+    assert snapshot["roofline_provenance"] == {"formula": "decode_mem"}
+    assert snapshot["perfmodel_breakdown"]["op_count"] == 1
+
+
+def test_an_analysis_with_no_snapshot_records_none_rather_than_an_empty_one(tmp_path: Path) -> None:
+    """An empty snapshot object would claim numbers that were never measured."""
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    _succeed(recorder)
+
+    assert _actions(tmp_path)[0]["outcome"]["snapshot"] is None
+
+
+def test_the_table_is_recorded_once_however_the_action_unwinds(tmp_path: Path) -> None:
+    """The crash path runs after a normal close and must not double the table.
+
+    The executor's ``finally`` calls ``finish_crashed`` unconditionally, so a
+    successful action reaches the close path twice. Keyed rows are what stops
+    the second pass from appending a duplicate of every kernel.
+    """
+    recorder = _recorder(reason="kernel_followup")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=2,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
+        trace_path="/w/traces/a.gz",
+    )
+    recorder.finish_crashed(RuntimeError("late"))
+
+    table = _actions(tmp_path)[0]["kernel_roofline"]
+    assert [row["kernel_id"] for row in table["kernels"]] == ["k-hot", "k-cheap"]
+    assert table["kernel_count"] == 2
+
+
 def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
     """The KERNEL entry's re-profile belongs to the kernel event, not beside it.
 

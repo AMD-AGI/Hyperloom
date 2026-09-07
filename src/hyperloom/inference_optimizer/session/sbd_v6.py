@@ -28,7 +28,36 @@ _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
 # is dispatchable on its own: roofline's profile / analysis are atomic halves of
 # one action, a kernel event's lanes only exist inside a phase entry, and a
 # baseline's rounds only exist inside a measurement.
-_EVENT_TYPES = ("install", "model_gate", "roofline", "kernel", "baseline")
+#
+# ``warm_replay`` recurs on the same terms, and its gate rows nest for the same
+# reason: a gate is a step inside the replay's own arc, not something the
+# coordinator can dispatch.
+#
+# ``framework_agent`` nests the most: its runs, proposals and attempts are all
+# dispatched, but only within the phase entry that owns them, and the reason to
+# read them is the chain they form. Emitted as sibling events they would be the
+# session's most numerous type and the chain would have to be rebuilt from
+# cross-references.
+#
+# ``phase`` is the one event that is about the run rather than about work: it is
+# the span every other event's id is scoped by. Its ``actions`` rows are
+# deliberately thin, naming the stage event that holds each dispatch's detail
+# rather than restating it, so the phase answers "when, and what was ordered
+# here" without becoming a second copy of the stage events.
+_EVENT_TYPES = (
+    "install",
+    "model_gate",
+    "roofline",
+    "kernel",
+    "baseline",
+    "conc_sweep",
+    "enablement",
+    "phase",
+    "stack",
+    "warm_start",
+    "warm_replay",
+    "framework_agent",
+)
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 

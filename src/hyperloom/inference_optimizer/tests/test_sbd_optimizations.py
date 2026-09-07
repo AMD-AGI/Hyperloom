@@ -411,6 +411,75 @@ def test_attempt_gain_is_never_named_like_the_baseline_relative_one():
         assert "local_gain_pct" in attempt
 
 
+def test_the_kernel_backend_split_stands_on_the_adoption_alone():
+    """The backend a kernel keep is credited to comes off the adoption.
+
+    It used to be read from ``operation.strategy``, which the integrate that
+    adopts the kernel never sets -- only a separate earlier call on the same
+    operation id does, and it survives solely because the two deep-merge.
+    Freezing the backend where the decision is recorded is what lets the gain
+    be split without the operations stream beside it.
+    """
+    operations = [
+        {
+            "operation_id": "op-baseline",
+            "kind": "composite",
+            "name": "baseline",
+            "agent": "coordinator",
+            "measurement_refs": ["m-baseline"],
+        },
+        # Deliberately no ``strategy``: this is the shape the integrate writes.
+        {
+            "operation_id": "op-geak",
+            "kind": "kernel_optimization",
+            "name": "k-geak",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "operation_id": "op-forge",
+            "kind": "kernel_optimization",
+            "name": "k-forge",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-baseline", "name": "throughput", "value": 1000.0}]
+    adoptions = [
+        {
+            "adoption_id": "ad-geak",
+            "operation_id": "op-geak",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "backend": "geak",
+            "gain_pct": 10.0,
+            "throughput_before": 1000.0,
+            "throughput_after": 1100.0,
+            "adopted_at": "2026-01-01T01:00:00+00:00",
+        },
+        {
+            "adoption_id": "ad-forge",
+            "operation_id": "op-forge",
+            "decision": "KEEP",
+            "validated": True,
+            "agent": "kernel_agent",
+            "backend": "forge",
+            "gain_pct": 10.0,
+            "throughput_before": 1100.0,
+            "throughput_after": 1210.0,
+            "adopted_at": "2026-01-01T02:00:00+00:00",
+        },
+    ]
+
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])
+
+    by_backend = result["summary_by_source"]["kernel_agent"]["by_backend"]
+    assert by_backend["geak"] == {"keeps": 1, "total_gain_pct": 10.0, "non_attributable_keeps": 0}
+    assert by_backend["forge"] == {"keeps": 1, "total_gain_pct": 11.0, "non_attributable_keeps": 0}
+    assert by_backend["unattributed"]["keeps"] == 0
+
+
 def test_recorded_optimizations_report_gain_against_the_session_baseline():
     """Two adoptions from the gemma session, with its real measured numbers.
 
@@ -995,6 +1064,105 @@ def test_a_change_that_landed_with_nobody_claiming_it_is_reported():
     # The 10pp the lost step earned is sitting in the unattributed bucket.
     assert validation["unattributed_gain_pct"] == 10.0
     assert any("no adoption crediting it" in warning and "op-lost" in warning for warning in warnings)
+
+
+def test_an_outstanding_landing_is_reported_from_the_ledger_alone():
+    """The same hole, seen without the operations stream beside it.
+
+    The integrate records the landing on the adoption while the change is still
+    awaiting a verdict, so the ledger can say it is outstanding. Counting by the
+    absence of a row would read that as settled; counting by what the adoption
+    settled on is what keeps it visible.
+    """
+    adoptions = [
+        {
+            "adoption_id": "ad-landed",
+            "operation_id": "op-landed",
+            "status": "landed",
+            "decision": "PENDING_REVIEW",
+            "validated": False,
+            "integrated": True,
+            "attribution_eligible": False,
+            "kind": "kernel_optimization",
+            "agent": "kernel_agent",
+            "throughput_before": 100.0,
+            "throughput_after": 110.0,
+        },
+    ]
+    operations = [
+        {
+            "operation_id": "op-base",
+            "kind": "baseline",
+            "measurement_refs": ["m-base"],
+        },
+        # No ``outputs.integrated`` here: the landing is known only because the
+        # adoption froze it.
+        {
+            "operation_id": "op-landed",
+            "kind": "kernel_optimization",
+            "name": "k-landed",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-base", "name": "throughput", "value": 100.0}]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], warnings)
+
+    attempt = result["attempts"][0]
+    assert attempt["integrated"] is True
+    assert attempt["adoption_status"] == "landed"
+    assert attempt["adopted"] is False
+    assert result["validation"]["unclaimed_integration_count"] == 1
+    # Outstanding, so it earns nothing and is not a keep.
+    assert result["validation"]["keep_count"] == 0
+    assert any("no adoption crediting it" in warning and "op-landed" in warning for warning in warnings)
+
+
+def test_a_settled_verdict_clears_the_outstanding_landing():
+    """The landing and the verdict share one adoption id, so the row settles.
+
+    A later verdict upserts the same row rather than adding a second, which is
+    what keeps the change from being counted as both credited and outstanding.
+    """
+    adoptions = [
+        {
+            "adoption_id": "ad-landed",
+            "operation_id": "op-landed",
+            "status": "adopted",
+            "decision": "KEEP",
+            "validated": True,
+            "integrated": True,
+            "kind": "kernel_optimization",
+            "agent": "kernel_agent",
+            "backend": "forge",
+            "throughput_before": 100.0,
+            "throughput_after": 110.0,
+            "adopted_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    operations = [
+        {
+            "operation_id": "op-base",
+            "kind": "baseline",
+            "measurement_refs": ["m-base"],
+        },
+        {
+            "operation_id": "op-landed",
+            "kind": "kernel_optimization",
+            "name": "k-landed",
+            "agent": "kernel_agent",
+            "ended_at": "2026-01-01T01:00:00+00:00",
+        },
+    ]
+    measurements = [{"measurement_id": "m-base", "name": "throughput", "value": 100.0}]
+
+    result = collect_recorded_optimizations("s1", operations, measurements, adoptions, [], [], [], [])
+
+    assert result["validation"]["unclaimed_integration_count"] == 0
+    assert result["validation"]["keep_count"] == 1
+    assert result["summary_by_source"]["kernel_agent"]["by_backend"]["forge"]["keeps"] == 1
 
 
 def test_a_threshold_says_which_of_its_four_homes_it_came_from():

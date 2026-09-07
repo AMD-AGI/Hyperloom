@@ -10,6 +10,8 @@ import os
 import time
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+
 from ..actions.executors._grid_server_args import merge_server_args
 from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator import _ENABLEMENT_MAX_STALL
@@ -120,6 +122,18 @@ class EnablementLane(CoordinatorCollaborator):
         spec_tid = str(getattr(spec_task, "task_id", "") or "")
         state.enablement.attempts = attempt + 1
         state.enablement.inflight_task_id = spec_tid
+        # Recorded here rather than derived at export: the classified failure
+        # kind exists only in the params this dispatch built, and the log the
+        # round was pointed at is replaced by the next advance.
+        enablement_event.record_dispatch(
+            task_id=spec_tid,
+            attempt=attempt + 1,
+            failure_kind=str(params.get("enablement_failure_kind") or ""),
+            launch_log=launch_log,
+            candidate_refs=params.get("enablement_candidate_refs"),
+            mode=str(state.enablement_mode or ""),
+            origin=origin or enablement_event.ORIGIN_BOOT,
+        )
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -193,6 +207,16 @@ class EnablementLane(CoordinatorCollaborator):
         if digest in seen:
             return
         seen.append(digest)
+        # A round that never happened is still something the lane spent the
+        # session doing; without this the timeline shows a lane that was
+        # triggered and then did nothing, with no way to tell that apart from
+        # a lane that was never triggered at all.
+        enablement_event.record_human_review(
+            digest=digest,
+            failure_kind=signature.kind,
+            reason=("baseline launch failure did not match any actionable enablement signature; needs human triage"),
+            signature=signature.to_dict(),
+        )
         framework = (getattr(state, "framework", "") or "").strip().lower()
         model = (getattr(state, "model_name", "") or "").strip()
         try:
@@ -397,10 +421,11 @@ class EnablementLane(CoordinatorCollaborator):
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
             state.enablement.framework_root = res_fw_root
+        setting_script = ""
         try:
             snapshot_round(self.session_dir, res)
             if status in ("kept", "advanced"):
-                write_setting_script(
+                setting_script = write_setting_script(
                     self.session_dir,
                     state.enablement,
                     framework=str(state.framework or os.environ.get("FRAMEWORK") or "sglang"),
@@ -411,6 +436,11 @@ class EnablementLane(CoordinatorCollaborator):
                 )
         except Exception:  # noqa: BLE001 — archiving must not break the rearm
             log.warning("enablement: artifact write failed", exc_info=True)
+        # The round is recorded before the in-flight guard is cleared, while the
+        # id it was dispatched under is still readable. A round the lane
+        # synthesised carries no specialist id of its own, so it settles the row
+        # the guard names.
+        _record_enablement_round(state, res, setting_script=setting_script, stop_reason=stop_set)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:
@@ -462,3 +492,61 @@ class EnablementLane(CoordinatorCollaborator):
             await self._maybe_enqueue_enablement_specialist()
         except Exception:  # noqa: BLE001 — never wedge the tick
             log.exception("ENABLEMENT pump (%s) failed", caller)
+
+
+def _record_enablement_round(
+    state: Any,
+    res: dict[str, Any],
+    *,
+    setting_script: str,
+    stop_reason: str,
+) -> None:
+    """Record how one authoring round settled, and close a lane that ended.
+
+    A function of the lane state rather than a method, because it needs nothing
+    of the coordinator: the round's own facts are in ``res`` and the terminal it
+    reached is what the rearm just wrote to ``state``. Reading those two lines
+    above is author time, not a projection -- but reading them inline would
+    bury the recording inside a method whose job is the state machine.
+
+    Args:
+        state: The live SharedState, whose enablement lane the rearm just wrote.
+        res: The ``integrate_patch`` result the rearm scored.
+        setting_script: The reproduction script this round rewrote, when it
+            made progress.
+        stop_reason: The stop reason this round set, when it hit the stall cap.
+    """
+    lane = state.enablement
+    round_tid = str(res.get("specialist_task_id") or "").strip() or str(lane.inflight_task_id or "")
+    succeeded = bool(lane.succeeded)
+    enablement_event.record_round(
+        task_id=round_tid,
+        attempt=int(lane.attempts or 0),
+        result=res,
+        stall_streak=int(lane.stall_streak or 0),
+        succeeded=succeeded,
+        validation_pending=bool(lane.validation_pending),
+    )
+    # An eval-origin KEEP is not a terminal: the patch is provisional until a
+    # genuine baseline re-measures accuracy, and the window it opens is what
+    # eventually closes the lane. Only a boot-origin KEEP lands here.
+    if succeeded:
+        outcome, reason = enablement_event.OUTCOME_SUCCEEDED, str(res.get("status") or "")
+    elif stop_reason:
+        outcome, reason = enablement_event.OUTCOME_STALLED, stop_reason
+    else:
+        return
+    enablement_event.finish(
+        outcome=outcome,
+        reason=reason,
+        kept_patches=lane.kept_patches,
+        kept_artifacts=lane.kept_artifacts,
+        setup_commands=lane.setup_commands,
+        accepted_config=lane.accepted_config,
+        accepted_config_path=str(lane.accepted_config_path or ""),
+        setting_script=setting_script,
+        active_runtime=lane.active_runtime,
+        attempt_runtimes=lane.attempt_runtimes,
+        framework_root=str(lane.framework_root or ""),
+        stall_streak=int(lane.stall_streak or 0),
+    )

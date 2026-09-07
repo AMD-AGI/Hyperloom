@@ -2750,3 +2750,154 @@ def test_overlay_provenance_summary_tolerates_unusable_counts():
     )
 
     assert summary["artifacts_outside_root"] == 0
+
+
+# ---- the replay's own timeline event, recorded as the arc runs -------------
+#
+# These drive the real settling seams rather than the recorder directly, so
+# they pin the wiring: that each gate writes its verdict where it rules, and
+# that a refusal before dispatch closes an event of its own instead of leaving
+# the timeline silent about a replay the session considered and declined.
+
+
+def _replay_events(session_dir: Path) -> list[dict]:
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
+    return [event for event in read_timeline_events(session_dir) if event.get("type") == "warm_replay"]
+
+
+def _replay_ext(session_dir: Path) -> dict:
+    events = _replay_events(session_dir)
+    assert len(events) == 1, f"expected one warm_replay event, got {len(events)}"
+    return events[0]["ext"]
+
+
+def _in_flight_outcome() -> dict:
+    return {
+        "status": "in_flight",
+        "warm_recipe_tier": "exact",
+        "warm_recipe_conf": 0.85,
+        "config_source": "recipe-abc",
+        "config_donor_tier": "self",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+
+
+def _replay_task() -> "_StubTask":
+    return _StubTask(
+        params={
+            "extra_server_args": "--attention-backend AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+
+
+def test_a_reproduced_replay_records_the_arc_it_actually_ran(tmp_path):
+    """Every gate that ruled is on record, in the order it ruled."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    with session_scope(tmp_path):
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=_replay_task())
+        ext = _replay_ext(tmp_path)
+
+    assert [row["gate"] for row in ext["gates"]] == [
+        "tput_valid",
+        "accuracy",
+        "keep_threshold",
+        "promotion",
+        "params_present",
+    ]
+    # The eval found no round directory to read, so accuracy ran and could not
+    # rule. That admits the replay rather than rejecting it, which is why the
+    # arc still succeeded and nothing is named as having blocked it.
+    assert [row["passed"] for row in ext["gates"]] == [True, None, True, True, True]
+    assert ext["blocked_by"] is None
+    assert ext["verdict"]["outcome_status"] == "reproduced"
+
+
+def test_the_anchor_the_replay_was_judged_against_is_recorded_not_back_solved(tmp_path):
+    """The enqueue anchor is written where it is used, so a re-baseline cannot rewrite it."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["baseline_tput_anchor"] = 600.0
+    with session_scope(tmp_path):
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=task)
+        measurement = _replay_ext(tmp_path)["measurement"]
+
+    assert measurement["before_tput"] == 600.0
+    assert measurement["after_tput"] == 738.0
+    assert measurement["gain_pct"] == pytest.approx(23.0)
+
+
+def test_a_replay_that_measured_and_lost_is_rejected_rather_than_failed(tmp_path):
+    """Drift is a judged rejection: the number was real and it lost."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["combined_current_contract"] = True
+    task.params["combined_keep_threshold_pct"] = 5.0
+    with session_scope(tmp_path):
+        # 600 -> 606 is +1%, under the 5% keep threshold.
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 606.0}, task=task)
+        events = _replay_events(tmp_path)
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
+    assert events[0]["status"] == "rejected"
+    assert events[0]["ext"]["blocked_by"] == "keep_threshold"
+
+
+def test_a_replay_that_lost_still_records_the_config_that_lost(tmp_path):
+    """The config is recorded when it is measured, not when it is promoted."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["combined_current_contract"] = True
+    task.params["combined_keep_threshold_pct"] = 5.0
+    with session_scope(tmp_path):
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 606.0}, task=task)
+        applied = _replay_ext(tmp_path)["applied"]
+
+    assert applied["extra_server_args"] == "--attention-backend AITER"
+    assert applied["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+def test_a_replay_the_session_declined_is_on_the_timeline_with_a_stable_code(tmp_path):
+    """A skip is a decision, and its code is recorded rather than parsed back out of prose."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_replay_enabled=False)
+    with session_scope(tmp_path):
+        assert asyncio.run(coord._maybe_enqueue_warm_replay(baseline_tput=600.0)) is None
+        events = _replay_events(tmp_path)
+
+    assert len(events) == 1
+    assert events[0]["status"] == "skipped"
+    assert events[0]["ext"]["skip"]["code"] == "disabled_by_flag"
+
+
+def test_a_skip_that_resolved_no_recipe_states_an_empty_request_not_an_invented_one(tmp_path):
+    """The earliest refusals happen before the identity is read, and say so."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path)
+    with session_scope(tmp_path):
+        assert asyncio.run(coord._maybe_enqueue_warm_replay(baseline_tput=600.0)) is None
+        ext = _replay_ext(tmp_path)
+
+    assert ext["skip"]["code"] == "no_warm_start_recipe"
+    assert ext["request"]["tier"] == ""
+    assert ext["request"]["donor"] is None

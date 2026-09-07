@@ -31,6 +31,7 @@ three times is one action with three profile runs, not three actions.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -43,8 +44,10 @@ from .event_fields import (
     as_list as _as_list,
     clip as _clip,
     failure_row as _failure_row,
+    float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
+    text_or_none as _text_or_none,
     worst_status as _worst_status,
 )
 from .event_ids import event_id
@@ -74,9 +77,17 @@ SECTION_ACTION = "roofline_action"
 SECTION_PROFILE_RUN = "roofline_profile_run"
 SECTION_ANALYSIS_RUN = "roofline_analysis_run"
 
+#: One row per kernel in the analysis's own roofline table, read back from the
+#: sidecar the analyzer wrote. A section of its own rather than a list on the
+#: action row because the table is the widest thing the action produces and it
+#: is per-kernel, not per-action: folding it into the action row would make the
+#: row's size scale with the model's operator count.
+SECTION_KERNEL = "roofline_kernel"
+
 ROW_ACTION = "action"
 ROW_PROFILE_RUN = "profile_run"
 ROW_ANALYSIS_RUN = "analysis_run"
+ROW_KERNEL = "kernel"
 
 # ``trace_files`` reaches 424 entries on multi-rank xDiT runs (p99 424, p50 2),
 # which would be ~85 KiB of paths per profile run. The rank histogram plus a few
@@ -87,6 +98,19 @@ _MAX_SAMPLE_TRACE_FILES = 4
 # Trace-structure issues are prose written for an operator; a handful is enough
 # to characterize a degraded trace and the count carries the rest.
 _MAX_TRACE_ISSUES = 8
+
+# The roofline table names every kernel the trace attributed, which on a large
+# MoE reaches the low hundreds. Kept generous rather than top-N: the table is
+# what a reader consults to find the one kernel worth optimizing, and a cutoff
+# by GPU share is exactly the wrong filter for "which cheap kernel is
+# memory-bound at 3% efficiency". The cap only exists so a pathological trace
+# cannot write an unbounded fragment.
+_MAX_ROOFLINE_KERNELS = 512
+
+# ``perfmodel_breakdown.ops`` is a per-operator analytical model, one row per op
+# in the decode path. A few dozen covers the model; the rest are tail ops whose
+# individual times round to nothing.
+_MAX_PERFMODEL_OPS = 64
 
 # Every profile run row names why it ran, so a multi-attempt roofline can be read
 # without re-deriving the retry reason from log text.
@@ -131,6 +155,7 @@ __all__ = [
     "SECTION_ACTION",
     "SECTION_ANALYSIS_RUN",
     "SECTION_EVENT",
+    "SECTION_KERNEL",
     "SECTION_PROFILE_RUN",
     "SUBSTEP_ANALYSIS",
     "SUBSTEP_PROFILE",
@@ -138,6 +163,7 @@ __all__ = [
     "assemble_roofline_action",
     "assemble_roofline_ext",
     "make_roofline_recorder",
+    "read_kernel_roofline",
     "roofline_event_id",
 ]
 
@@ -176,6 +202,168 @@ def _rank_of(path: str) -> str:
         if token.startswith("rank") and token[4:].isdigit():
             return token[4:]
     return "unknown"
+
+
+def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize one row of the analyzer's kernel-roofline table.
+
+    The TraceLens and bypass routes agree on the identity and cost fields and
+    diverge in the tail: bypass measures attainment against a real rocprof
+    ceiling (``roofline_attainment_pct`` / ``roofline_measured``) where
+    TraceLens has only its analytical model. Both spellings are kept, because
+    the absent one is itself the answer to "was this number measured".
+
+    Args:
+        entry (Mapping[str, Any]): One ``kernels[]`` row from the sidecar.
+
+    Returns:
+        dict[str, Any] | None: The normalized row, or ``None`` when the row
+            carries no kernel identity and so cannot be joined to anything.
+    """
+    kernel_id = _text_or_none(entry.get("kernel_id"))
+    name = _text_or_none(entry.get("name"))
+    if not kernel_id and not name:
+        return None
+    intensity = entry.get("arithmetic_intensity")
+    if intensity is None:
+        intensity = entry.get("flops_per_byte")
+    return {
+        "kernel_id": kernel_id or "",
+        "name": _clip(name or ""),
+        "kernel_category": str(entry.get("kernel_category") or ""),
+        "source_file": _text_or_none(entry.get("source_file")),
+        "gpu_pct": _float_or_none(entry.get("gpu_pct")),
+        "duration_us": _float_or_none(entry.get("duration_us")),
+        "call_count": _int_or_none(entry.get("call_count")),
+        "bottleneck": _text_or_none(entry.get("bottleneck")),
+        "bound_type": _text_or_none(entry.get("bound_type")),
+        "arithmetic_intensity": _float_or_none(intensity),
+        "flops_per_byte": _float_or_none(entry.get("flops_per_byte")),
+        "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
+        "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
+        "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),
+        "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
+        "roofline_name": _text_or_none(entry.get("roofline_name")),
+        "roofline_source": str(entry.get("roofline_source") or ""),
+        "roofline_measured": bool(entry.get("roofline_measured")),
+        "suggestion": _clip(entry.get("suggestion") or ""),
+        "recommended_actions": [str(item) for item in _as_list(entry.get("recommended_actions"))],
+        "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
+        "rocprof_roofline": _as_dict(entry.get("rocprof_roofline")) or None,
+    }
+
+
+def read_kernel_roofline(path: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read the kernel-roofline sidecar the analyzer wrote for one run.
+
+    The analyzer runs in a subprocess and cannot hold a recorder, so it leaves
+    the table on disk. Reading it here -- in the orchestrator, at the moment the
+    action that produced it settles -- is what makes the table a recorded fact
+    rather than something the exporter re-derives from whatever files survived
+    to the end of the session.
+
+    Args:
+        path (Any): The sidecar path named by the analysis result.
+
+    Returns:
+        tuple[dict[str, Any], list[dict[str, Any]]]: The table's provenance
+            header and its per-kernel rows, ordered by descending GPU share. An
+            unreadable or malformed sidecar yields ``({}, [])``: the table is a
+            detail of a run that already succeeded, so losing it must not turn
+            that run into a failure.
+    """
+    text = str(path or "")
+    if not text:
+        return {}, []
+    try:
+        payload = json.loads(Path(text).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.debug("roofline: kernel roofline sidecar unreadable at %s", text, exc_info=True)
+        return {}, []
+    if not isinstance(payload, Mapping):
+        return {}, []
+    rows: list[dict[str, Any]] = []
+    for entry in _as_list(payload.get("kernels")):
+        if not isinstance(entry, Mapping):
+            continue
+        row = _kernel_roofline_row(entry)
+        if row is not None:
+            rows.append(row)
+    rows.sort(key=lambda row: (-(row.get("gpu_pct") or 0.0), row.get("kernel_id") or ""))
+    header = {
+        "schema_version": _text_or_none(payload.get("schema_version")),
+        "source": str(payload.get("source") or ""),
+        "trace_input": str(payload.get("trace_input") or ""),
+        "trace_input_type": str(payload.get("trace_input_type") or ""),
+        "analysis_md_path": str(payload.get("analysis_md_path") or ""),
+        "kernel_candidates_path": str(payload.get("kernel_candidates_path") or ""),
+        "path": text,
+        # The table's own size, not the recorded row count: with ``truncated``
+        # it says how much the cap dropped, which a count of what survived
+        # cannot.
+        "kernel_count": len(rows),
+        "truncated": len(rows) > _MAX_ROOFLINE_KERNELS,
+    }
+    return header, rows[:_MAX_ROOFLINE_KERNELS]
+
+
+def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a roofline snapshot into the shape the event carries.
+
+    The snapshot is the run's quantitative conclusion: where the achieved
+    throughput sits against the memory and compute ceilings, and which of the
+    two binds. The event recorded only its id, which made the conclusion
+    reachable solely by joining against session state that later runs overwrite.
+
+    Args:
+        snapshot (Mapping[str, Any]): One entry of the snapshot history.
+
+    Returns:
+        dict[str, Any]: The snapshot's fields, with the per-operator model
+            bounded.
+    """
+    top_kernel = _as_dict(snapshot.get("top_kernel"))
+    row = {
+        "snapshot_id": _int_or_none(snapshot.get("snapshot_id")),
+        "ts": str(snapshot.get("ts") or ""),
+        "framework": str(snapshot.get("framework") or ""),
+        "macro_cycle": _int_or_none(snapshot.get("macro_cycle")),
+        "throughput_unit": str(snapshot.get("throughput_unit") or ""),
+        "achieved_tok_per_sec": _float_or_none(snapshot.get("achieved_tok_per_sec")),
+        "theoretical_peak_tok_per_sec": _float_or_none(snapshot.get("theoretical_peak_tok_per_sec")),
+        "roofline_mem_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_mem_ceiling_tok_per_sec")),
+        "roofline_cmp_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_cmp_ceiling_tok_per_sec")),
+        "roofline_bound_kind": str(snapshot.get("roofline_bound_kind") or ""),
+        "e2e_mean_ms": _float_or_none(snapshot.get("e2e_mean_ms")),
+        "roofline_ideal_ms": _float_or_none(snapshot.get("roofline_ideal_ms")),
+        "within_roofline_pct": _float_or_none(snapshot.get("within_roofline_pct")),
+        "within_roofline_pct_uncapped": _float_or_none(snapshot.get("within_roofline_pct_uncapped")),
+        "gap_to_roofline_pct": _float_or_none(snapshot.get("gap_to_roofline_pct")),
+        "roofline_ceiling_exceeded": bool(snapshot.get("roofline_ceiling_exceeded")),
+        "ceiling_arm": str(snapshot.get("ceiling_arm") or ""),
+        "compute_pct": _float_or_none(snapshot.get("compute_pct")),
+        "idle_pct": _float_or_none(snapshot.get("idle_pct")),
+        "comm_pct": _float_or_none(snapshot.get("comm_pct")),
+        "top_bottleneck": str(snapshot.get("top_bottleneck") or ""),
+        "top_kernel": {
+            "name": _clip(top_kernel.get("name") or ""),
+            "gpu_pct": _float_or_none(top_kernel.get("gpu_pct")),
+            "efficiency_pct": _float_or_none(top_kernel.get("efficiency_pct")),
+            "bound_type": str(top_kernel.get("bound_type") or ""),
+        }
+        if top_kernel
+        else None,
+        "roofline_provenance": _as_dict(snapshot.get("roofline_provenance")) or None,
+    }
+    breakdown = _as_dict(snapshot.get("perfmodel_breakdown"))
+    if breakdown:
+        ops = [_as_dict(op) for op in _as_list(breakdown.get("ops"))]
+        row["perfmodel_breakdown"] = {
+            **{key: value for key, value in breakdown.items() if key != "ops"},
+            "op_count": len(ops),
+            "ops": [op for op in ops if op][:_MAX_PERFMODEL_OPS],
+        }
+    return row
 
 
 def _summarize_trace_files(profile_result: dict[str, Any]) -> dict[str, Any]:
@@ -602,8 +790,13 @@ class RooflineEventRecorder:
         kernel_attribution_degraded: bool,
         cached: dict[str, Any] | None,
         trace_path: str,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> None:
         """Close the action as succeeded and record the promoted artifacts.
+
+        Also records the two things the run concluded that the action only
+        pointed at before: the snapshot's own numbers, and the per-kernel
+        roofline table read back from the sidecar.
 
         Args:
             snapshot_id (Any): The roofline snapshot id the recorder bumped to.
@@ -613,8 +806,24 @@ class RooflineEventRecorder:
             cached (dict[str, Any] | None): The promoted ``last_trace_analyze``
                 cache.
             trace_path (str): The profile trace the conclusion rests on.
+            snapshot (Mapping[str, Any] | None): The snapshot this run appended
+                to the history, passed in rather than looked up because the
+                recorder holds no reference to session state.
         """
         promoted = _as_dict(cached)
+        roofline_path = str(promoted.get("kernel_roofline_path") or "")
+        table, kernels = read_kernel_roofline(roofline_path)
+        for rank, kernel in enumerate(kernels):
+            self._sink.record(
+                SECTION_KERNEL,
+                {"task_id": self._task_id, "rank": rank, **kernel},
+                row_type=ROW_KERNEL,
+                # Ranked by GPU share rather than keyed by kernel id alone: a
+                # re-profile within the same action rewrites the table, and the
+                # rank is what keeps the rewritten rows in the reader's order
+                # instead of interleaving them with the ones they replaced.
+                natural_ids=(self._action_id, f"{rank:04d}"),
+            )
         # Zero routable candidates is a completed roofline that cannot advance
         # kernel work, which is a different operational state from a clean run.
         self._close(
@@ -628,8 +837,10 @@ class RooflineEventRecorder:
                     "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
                     "analysis_md_path": str(promoted.get("analysis_md_path") or ""),
                     "candidates_path": str(promoted.get("candidates_path") or ""),
-                    "kernel_roofline_path": str(promoted.get("kernel_roofline_path") or ""),
-                }
+                    "kernel_roofline_path": roofline_path,
+                    "snapshot": _snapshot_row(snapshot) if isinstance(snapshot, Mapping) and snapshot else None,
+                },
+                "kernel_roofline_table": table or None,
             },
         )
 
@@ -775,6 +986,10 @@ def assemble_roofline_actions(
         sort_rows(rows_for_event(parts.get(SECTION_ANALYSIS_RUN) or [], event), keys=("run_index",)),
         "task_id",
     )
+    kernels = group_rows(
+        sort_rows(rows_for_event(parts.get(SECTION_KERNEL) or [], event), keys=("rank",)),
+        "task_id",
+    )
 
     actions: list[dict[str, Any]] = []
     for row in action_rows:
@@ -812,10 +1027,35 @@ def assemble_roofline_actions(
                     "effective_run": _as_dict(row.get("analysis_effective_run")),
                 },
                 "outcome": _as_dict(row.get("outcome")),
+                "kernel_roofline": _kernel_roofline_block(row, kernels.get(task, [])),
                 "failure": _as_dict(row.get("failure")) or None,
             }
         )
     return actions
+
+
+def _kernel_roofline_block(
+    action_row: Mapping[str, Any],
+    kernel_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Assemble the action's per-kernel roofline table.
+
+    Args:
+        action_row (Mapping[str, Any]): The action row, holding the table's
+            provenance header.
+        kernel_rows (list[dict[str, Any]]): The action's kernel rows, ranked.
+
+    Returns:
+        dict[str, Any] | None: The table, or ``None`` when the action recorded
+            none -- a failed action, or one whose analyzer wrote no sidecar.
+    """
+    header = _as_dict(action_row.get("kernel_roofline_table"))
+    if not header and not kernel_rows:
+        return None
+    return {
+        **header,
+        "kernels": wire_rows(kernel_rows, drop=("event_id", "task_id", "rank")),
+    }
 
 
 def assemble_roofline_ext(

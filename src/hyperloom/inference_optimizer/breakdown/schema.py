@@ -381,6 +381,11 @@ class PhaseEvent(TypedDict, total=False):
         key_metric_kind (str | None): Type/label of the key metric, or None.
         workspace (str | None): Benchmark workspace path, or None.
         error_class (str | None): Error classification on failure, or None.
+        phase (str): The phase that ordered the dispatch, recorded at the
+            attempt. Empty only for rows read from an archived session whose
+            writer dropped it, which is why ``phase_segments`` still falls back
+            to a timestamp window.
+        macro_cycle (int): The macro cycle the dispatch was ordered in.
         extras (dict[str, Any]): Action-specific extra fields. For journal-sourced
             events this carries proposer attribution and a filter label:
             ``provenance`` (raw explore label), ``proposer`` (resolved component:
@@ -400,7 +405,8 @@ class PhaseEvent(TypedDict, total=False):
     key_metric_kind: str | None
     workspace: str | None
     error_class: str | None
-    phase: str  # declared phase (journal-sourced events); "" otherwise
+    phase: str  # recorded at the attempt; "" only for archived sessions
+    macro_cycle: int
     change: str  # human-readable change summary (journal) or action key
     extras: dict[str, Any]
 
@@ -2789,10 +2795,13 @@ class V6ToolVersion(TypedDict, total=False):
 
 
 class V6MetadataVersions(TypedDict, total=False):
-    """Version identifiers projected into V6 metadata."""
+    """Version identifiers projected into V6 metadata.
 
-    schema_version: str
-    hyperloom: str
+    The breakdown's own schema version and the optimizer's revision are not
+    here: they are the envelope's ``schema_version`` and
+    ``metadata.session.code_revision``.
+    """
+
     framework: str | None
     framework_version: str | None
     tools: dict[str, V6ToolVersion]
@@ -2810,7 +2819,15 @@ class V6MetadataRecovery(TypedDict, total=False):
 
 
 class V6MetadataSession(TypedDict, total=False):
-    """Session identity and lifecycle fields exposed by V6 metadata."""
+    """Session identity and lifecycle fields exposed by V6 metadata.
+
+    ``elapsed_minutes`` is how long this run leg ran and
+    ``total_elapsed_minutes`` how long every leg of the session ran, so
+    neither counts the gap between two legs the way the wall-clock budget
+    does. Both are snapshotted while the run is going, which is why a
+    re-export of a finished session reports the same figures rather than the
+    span since its anchor.
+    """
 
     session_id: str
     claw_session_id: str | None
@@ -2827,6 +2844,7 @@ class V6MetadataSession(TypedDict, total=False):
     image_id: str | None
     max_minutes: int
     elapsed_minutes: float
+    total_elapsed_minutes: float
     tick_count: int
     recovery: V6MetadataRecovery
 
@@ -2904,7 +2922,9 @@ class V6OutcomeGainBucket(TypedDict, total=False):
 
     total_gain_pct: float | None
     keep_count: int
-    non_attributable_keep_count: int
+    #: Adoptions in the bucket with no measurable contribution. Zero of these
+    #: is what makes ``total_gain_pct`` a complete account rather than a floor.
+    unmeasured_keep_count: int
 
 
 class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
@@ -2929,12 +2949,30 @@ class V6OutcomeAttribution(TypedDict, total=False):
 
 
 class V6OutcomeValidation(TypedDict, total=False):
-    """Reconciliation of final measured gain with canonical KEEP entries."""
+    """Reconciliation of the stack ledger's parts against the measured whole.
+
+    Read off the ``stack`` timeline event, whose rows the orchestrator recorded
+    as each adoption was accepted. ``attributed_gain_pct`` is the sum of the
+    per-adoption contributions, all measured against the session baseline;
+    ``chain_total_gain_pct`` is the last adoption's own reading against that
+    same baseline. The two differ by ``unattributed_gain_pct``, which is
+    throughput the chain gained between one adoption's measurement and the
+    next one's. ``validated_total_gain_pct`` is the independent figure measured
+    on the whole stack, and ``reconciliation_gap_pct`` is its distance from the
+    chain -- the number worth alerting on, since the parts and the whole
+    disagreeing means one of them is wrong.
+    """
 
     attributed_gain_pct: float
     unattributed_gain_pct: float
+    chain_total_gain_pct: float | None
+    validated_total_gain_pct: float | None
     reconciliation_gap_pct: float | None
     attribution: V6OutcomeAttribution
+    #: ``unmeasured`` and ``chain_breaks``; see :mod:`.recorder.stack_event`.
+    guards: dict[str, int]
+    #: One entry per finding the ledger's own figures support. Empty is the
+    #: meaningful case: the ledger reconciles.
     notes: list[str]
 
 
@@ -2974,7 +3012,9 @@ class V6TimelineEvent(TypedDict, total=False):
 class V6WarmStartMatched(TypedDict, total=False):
     """The Recipe the PRELUDE KB lookup selected.
 
-    Present only on a ``matched`` event. ``tier`` and ``confidence`` name the
+    Present when the lookup found a record, whether or not it turned out to be
+    executable -- a ``seed_only`` match is described here too. ``tier`` and
+    ``confidence`` name the
     rung of the seven-tuple degradation ladder the hit came from, which is what
     separates an exact identity match from one that relaxed hardware or
     framework version to find anything at all. ``origin`` points back at the
@@ -3021,54 +3061,66 @@ class V6WarmStartMatched(TypedDict, total=False):
 
 
 class V6WarmStartReads(TypedDict, total=False):
-    """``timeline[type=warm_start].ext.reads`` — Recipe KB read attribution.
+    """``timeline[type=warm_start].ext.reads`` — the KB reads T0 made.
 
-    Aggregated from the recipe-snapshot audit log (last 50 reads): how the T0
-    lookups resolved, which backend served each, and which source supplied the
-    champion config. Omitted when the session recorded no readable read.
+    One row per read, recorded as the KB serves it, plus tallies over exactly
+    those rows. Omitted when T0 made no read.
+
+    Only T0's own reads are here. ``_kb_amend_recipe`` consults the same store
+    through the same audit hook in the middle of the session; those reads are
+    real but they are not the anchor's, and this block would misreport the
+    lookup if it counted them.
 
     Attributes:
-        count (int): Number of read rows considered (capped at the last 50).
-        hits (int): How many of those reads returned a usable record.
+        count (int): How many reads T0 made.
+        hits (int): How many returned a record.
         by_resolution (dict[str, int]): Reads counted by resolution outcome.
-        by_remote (dict[str, int]): Reads counted by serving backend
-            (e.g. ``kb-store`` vs local ``recipe_kb``).
-        by_source (dict[str, int]): Contributing-source counts across the reads.
-        best_config_by_source (dict[str, int]): Which source supplied the
-            champion config, counted per source.
-        tail (list[dict[str, Any]]): The most recent raw audit rows; downstream
-            champion-config and donor resolution read the latest hit's own
-            ``result`` off these.
+        by_method (dict[str, int]): Reads counted by the KB method that served
+            them (``get_recipe`` / ``search`` / ``get_authoritative_recipe``),
+            which is what separates the exact-identity probe from the
+            degradation cascade.
+        rows (list[dict[str, Any]]): The reads themselves, in service order, so
+            a tally that looks wrong can be checked against what it counted.
     """
 
     count: int
     hits: int
     by_resolution: dict[str, int]
-    by_remote: dict[str, int]
-    by_source: dict[str, int]
-    best_config_by_source: dict[str, int]
-    tail: list[dict[str, Any]]
+    by_method: dict[str, int]
+    rows: list[dict[str, Any]]
 
 
 class V6WarmStartExt(TypedDict, total=False):
     """``timeline[type=warm_start].ext`` — what was asked for, what came back.
 
+    Whether the lookup ran and whether it found anything are separate facts:
+    the event's ``status`` carries the first and ``match_status`` the second.
+    Every finding is a ``succeeded`` lookup, because the KB was asked and it
+    answered; only the machinery breaking is a ``failed`` one. A first-ever
+    session for a workload matches the bare anchor row T0 stamped moments
+    earlier and reports ``seed_only``, which is normal and not a fault.
+
     Attributes:
         requested (dict[str, Any]): ``{canonical_id, scope}`` this session asked
-            for. ``canonical_id`` is read from ``recipe_finalize`` rather than
-            rebuilt, because the hardware dimension is topology-aware.
-        match_status (str): The raw ``warm_start_context.status`` when it is not
-            a plain hit; ``seed_only`` is a hit that could not be executed and
-            would otherwise be indistinguishable from a miss.
-        matched (V6WarmStartMatched): Omitted unless the status is ``matched``.
-        reads (V6WarmStartReads): Per-source read attribution from the recipe
-            snapshot audit; omitted when no read was recorded.
+            for, recorded by T0 as it asks. The hardware dimension is
+            topology-aware, so rebuilding the identity later could disagree
+            with what the run actually queried.
+        match_status (str): What was found — ``hit`` / ``seed_only`` / ``miss``.
+            ``seed_only`` is a record that was found and cannot be executed,
+            which is neither a usable match nor the absence of one.
+        matched (V6WarmStartMatched | None): The matched record's facts; absent
+            on a miss.
+        reads (V6WarmStartReads | None): T0's own KB reads; absent when it made
+            none.
+        failure (dict[str, Any]): ``{error_class}``, present only when the
+            lookup itself failed rather than completing with no match.
     """
 
     requested: dict[str, Any]
     match_status: str
-    matched: V6WarmStartMatched
-    reads: V6WarmStartReads
+    matched: V6WarmStartMatched | None
+    reads: V6WarmStartReads | None
+    failure: dict[str, Any]
 
 
 class V6WarmReplayApplied(TypedDict, total=False):
@@ -3151,7 +3203,13 @@ class V6WarmReplayExt(TypedDict, total=False):
 
 
 class V6KBWriteBackExt(TypedDict, total=False):
-    """``timeline[type=kb_write_back].ext`` — did this session's Recipe land.
+    """``close.kb_write_back`` — did this session's Recipe land.
+
+    Lives under ``close`` rather than as a timeline event of its own. The
+    session publishes on its way out no matter what, so whether it did is a
+    question always worth answering, and a timeline event that did not happen
+    is simply absent — there would be nowhere to answer it. Absence of this
+    key therefore means the publication was never attempted at all.
 
     The published Recipe body is deliberately not mirrored here: it is the KB
     Store's record, and duplicating three columns of overlay refs into every
@@ -3159,11 +3217,13 @@ class V6KBWriteBackExt(TypedDict, total=False):
     and the throughput do not already answer.
 
     Attributes:
-        result_type (str): Stable reason code. The publisher's own vocabulary is
-            narrower than it looks — build, transport and upload failures all
-            surface as a bare exception class name — so the raw reasons are
-            mapped onto a fixed set here.
-        raw_reason (str | None): The unmapped reason.
+        status (str): The arc's terminal verdict. ``pending`` means an attempt
+            was opened and never settled, i.e. the process died mid-publish —
+            not that the store refused anything.
+        result_type (str): Stable reason code, recorded by the publisher at
+            whichever exit it took rather than recovered afterwards by matching
+            substrings against ``raw_reason``.
+        raw_reason (str | None): The publisher's own reason, verbatim.
         backend (str | None): ``kb-store`` / ``local`` / ``disabled``.
         canonical_id (str | None): Identity written to.
         session_id (str | None): Session id recorded on the KB side.
@@ -3171,12 +3231,18 @@ class V6KBWriteBackExt(TypedDict, total=False):
         optimized_throughput (float | None): Throughput submitted, and the value
             compared against the incumbent Champion.
         validated_gain_pct (float | None): Session's cumulative validated gain.
-        attempts (int | None): Finalize attempts; above one means it retried.
-        source (str | None): ``close`` or the ``t4_fallback`` teardown path.
-        queue (dict[str, Any]): Local write-queue depths.
-        failure (dict[str, Any]): ``{error_class, error}``.
+        attempts (list[dict[str, Any]]): One row per attempt, each carrying its
+            own ``source`` / ``status`` / ``result_type``. A list rather than a
+            count because the publication is retried from two different seams
+            and the row is what says which one settled it.
+        queue (dict[str, Any]): Local write-queue depths, snapshotted when the
+            attempt settled rather than counted at export.
+        failure (dict[str, Any]): ``{error_class, error}``. ``error_class`` is
+            the exception class name and is kept apart from ``raw_reason``,
+            which the two used to share.
     """
 
+    status: str
     result_type: str
     raw_reason: str | None
     backend: str | None
@@ -3185,22 +3251,1202 @@ class V6KBWriteBackExt(TypedDict, total=False):
     scope: dict[str, Any]
     optimized_throughput: float | None
     validated_gain_pct: float | None
-    attempts: int | None
-    source: str | None
+    attempts: list[dict[str, Any]]
     queue: dict[str, Any]
     failure: dict[str, Any]
 
 
-class V6Close(TypedDict, total=False):
-    """V6 session finalization result exposed outside the business timeline."""
+class V6RooflineKernel(TypedDict, total=False):
+    """One kernel in a roofline action's own per-kernel table.
 
-    status: Literal["succeeded", "failed", "degraded"]
+    Recorded by reading the sidecar the analyzer wrote, at the moment the action
+    that produced it settles. The table is not truncated by GPU share, because
+    the kernel worth optimizing is often a cheap one running at low efficiency,
+    which is exactly what a top-N-by-cost cut removes.
+
+    The two analysis routes agree on identity and cost and diverge on
+    provenance: the bypass route measures attainment against a real rocprof
+    ceiling and sets ``roofline_measured`` / ``roofline_attainment_pct``, where
+    TraceLens has only its analytical model. The absent field is itself the
+    answer to "was this number measured".
+
+    Attributes:
+        kernel_id (str): Stable id the candidate list joins on.
+        name (str): Kernel name as the trace reported it.
+        kernel_category (str): TraceLens category bucket.
+        source_file (str | None): Source file the kernel was attributed to.
+        gpu_pct (float | None): Share of GPU time.
+        duration_us (float | None): Total GPU time.
+        call_count (int | None): Invocations in the traced window.
+        bottleneck (str | None): The route's own bottleneck verdict.
+        bound_type (str | None): ``memory`` / ``compute``, the question the
+            roofline exists to answer.
+        arithmetic_intensity (float | None): FLOPs per byte moved.
+        flops_per_byte (float | None): As reported, before the fallback above.
+        efficiency_percent (float | None): Achieved share of the kernel's own
+            ceiling.
+        compute_utilization_pct (float | None): Share of peak FLOPs.
+        bandwidth_utilization_pct (float | None): Share of peak bandwidth.
+        roofline_attainment_pct (float | None): Attainment against a measured
+            ceiling; absent on the analytical route.
+        roofline_name (str | None): The roofline model applied.
+        roofline_source (str): ``analytical`` / ``measured`` / ``placeholder``.
+        roofline_measured (bool): Whether the numbers came from rocprof.
+        suggestion (str): The route's own optimization suggestion.
+        recommended_actions (list[str]): Actions the route recommends.
+        reusable_native_kernel (bool): Whether a native kernel could replace it.
+        rocprof_roofline (dict[str, Any] | None): The rocprof sidecar's own
+            measurements, when it produced any.
+    """
+
+    kernel_id: str
+    name: str
+    kernel_category: str
+    source_file: str | None
+    gpu_pct: float | None
+    duration_us: float | None
+    call_count: int | None
+    bottleneck: str | None
+    bound_type: str | None
+    arithmetic_intensity: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
+    compute_utilization_pct: float | None
+    bandwidth_utilization_pct: float | None
+    roofline_attainment_pct: float | None
+    roofline_name: str | None
+    roofline_source: str
+    roofline_measured: bool
+    suggestion: str
+    recommended_actions: list[str]
+    reusable_native_kernel: bool
+    rocprof_roofline: dict[str, Any] | None
+
+
+class V6RooflineKernelTable(TypedDict, total=False):
+    """A roofline action's per-kernel table with the provenance of its source.
+
+    Attributes:
+        schema_version (str | None): Sidecar schema version, absent on the
+            bypass route.
+        source (str): ``tracelens_analysis`` / ``bypass``.
+        trace_input (str): The trace the table was computed from.
+        trace_input_type (str): Whether that input was a file or a directory.
+        analysis_md_path (str): The analysis report the table accompanies.
+        kernel_candidates_path (str): The candidate list built from it.
+        path (str): The sidecar the table was read from.
+        kernel_count (int): Kernels the table held, before the cap. Compare
+            against ``len(kernels)`` to see how many the cap dropped.
+        truncated (bool): Whether the cap dropped rows.
+        kernels (list[V6RooflineKernel]): The rows, by descending GPU share.
+    """
+
+    schema_version: str | None
+    source: str
+    trace_input: str
+    trace_input_type: str
+    analysis_md_path: str
+    kernel_candidates_path: str
+    path: str
+    kernel_count: int
+    truncated: bool
+    kernels: list[V6RooflineKernel]
+
+
+class V6RooflineEventSnapshot(TypedDict, total=False):
+    """A roofline run's own quantitative conclusion, recorded on its event.
+
+    The event used to record only ``snapshot_id``, which made the conclusion
+    reachable solely by joining against a capped session-state history that
+    later runs evict entries from.
+
+    Attributes:
+        snapshot_id (int | None): The snapshot this run appended.
+        ts (str): When it was taken.
+        framework (str): The serving framework measured.
+        macro_cycle (int | None): The cycle it was taken in.
+        throughput_unit (str): Unit the throughput fields are in.
+        achieved_tok_per_sec (float | None): Measured throughput.
+        theoretical_peak_tok_per_sec (float | None): The binding ceiling.
+        roofline_mem_ceiling_tok_per_sec (float | None): Memory-bound ceiling.
+        roofline_cmp_ceiling_tok_per_sec (float | None): Compute-bound ceiling.
+        roofline_bound_kind (str): Which of the two binds.
+        e2e_mean_ms (float | None): Measured end-to-end latency.
+        roofline_ideal_ms (float | None): Ideal latency the model implies.
+        within_roofline_pct (float | None): Achieved share of the ceiling.
+        within_roofline_pct_uncapped (float | None): The same, uncapped, so a
+            measurement above the modelled ceiling stays visible.
+        gap_to_roofline_pct (float | None): Headroom remaining.
+        roofline_ceiling_exceeded (bool): Whether the measurement beat the
+            model, which indicts the model rather than the measurement.
+        ceiling_arm (str): ``baseline`` when the snapshot fixed the baseline
+            ceiling.
+        compute_pct (float | None): Share of wall time computing.
+        idle_pct (float | None): Share idle.
+        comm_pct (float | None): Share communicating.
+        top_bottleneck (str): The analysis's headline bottleneck.
+        top_kernel (dict[str, Any] | None): The costliest kernel, with its own
+            share, efficiency and bound type.
+        roofline_provenance (dict[str, Any] | None): The inputs the ceiling was
+            computed from, so a suspicious ceiling can be audited.
+        perfmodel_breakdown (dict[str, Any]): The per-operator analytical
+            model, with ``op_count`` alongside a bounded ``ops``.
+    """
+
+    snapshot_id: int | None
+    ts: str
+    framework: str
+    macro_cycle: int | None
+    throughput_unit: str
+    achieved_tok_per_sec: float | None
+    theoretical_peak_tok_per_sec: float | None
+    roofline_mem_ceiling_tok_per_sec: float | None
+    roofline_cmp_ceiling_tok_per_sec: float | None
+    roofline_bound_kind: str
+    e2e_mean_ms: float | None
+    roofline_ideal_ms: float | None
+    within_roofline_pct: float | None
+    within_roofline_pct_uncapped: float | None
+    gap_to_roofline_pct: float | None
+    roofline_ceiling_exceeded: bool
+    ceiling_arm: str
+    compute_pct: float | None
+    idle_pct: float | None
+    comm_pct: float | None
+    top_bottleneck: str
+    top_kernel: dict[str, Any] | None
+    roofline_provenance: dict[str, Any] | None
+    perfmodel_breakdown: dict[str, Any]
+
+
+class V6RooflineTrajectoryPoint(TypedDict, total=False):
+    """One measured step on the session's throughput curve.
+
+    Attributes:
+        ts (str): When the step was measured.
+        tput (float): Throughput at that step.
+        label (str): The variant name, falling back to the action.
+        action (str): The action that produced the step.
+        gain_pct (float): Gain over the baseline.
+        flags (str): Extra server args the variant carried.
+        extra_envs (dict[str, Any]): Extra environment the variant carried.
+    """
+
+    ts: str
+    tput: float
+    label: str
+    action: str
+    gain_pct: float
+    flags: str
+    extra_envs: dict[str, Any]
+
+
+class V6RooflineProgress(TypedDict, total=False):
+    """How far the session got against its roofline ceiling, snapshotted at close.
+
+    This is the one roofline fact that is not a property of a single roofline
+    run, which is why it sits under ``close`` rather than in a timeline event:
+    the ceiling comes from the last analysis, the curve from every promotion
+    between them, and the streak from the runs that failed.
+
+    ``ceiling_kind`` discriminates two domains that cannot share fields.
+    Token-decoding models are bounded in throughput and report the ``tok/sec``
+    fields; scriptable/diffusion models decode no tokens and are bounded in
+    latency, reporting the ``ms`` fields instead. A reader that ignores
+    ``ceiling_kind`` will read the absent domain's nulls as a failed analysis.
+
+    The snapshot history is deliberately absent: each roofline event carries
+    its own snapshot in full, and a second copy here would be free to disagree.
+    ``latest_snapshot_id`` is the join back to the event that set the ceiling.
+
+    Attributes:
+        ceiling_kind (str): ``throughput`` / ``latency`` / ``none``.
+        ceiling_tok_per_sec (float | None): Theoretical peak from the last
+            analysis. ``None``, never zero, when nothing was measured: zero
+            would read as a ceiling of zero.
+        target_tok_per_sec (float | None): ``ceiling_tok_per_sec`` scaled by
+            ``ceiling_ratio_target``, a roofline ceiling being unreachable in
+            practice.
+        ceiling_ratio_target (float): The share of the ceiling aimed at.
+        ceiling_available (bool): Whether a throughput ceiling was measured.
+        latency_ceiling_ms (float | None): Ideal per-image compute floor.
+        achieved_latency_ms (float | None): Measured end-to-end latency.
+        latency_ceiling_available (bool): Whether a latency ceiling was
+            measured.
+        current_best_pct_of_latency_ceiling (float | None): Ideal over
+            measured, so higher is nearer the floor.
+        trajectory (list[V6RooflineTrajectoryPoint]): Baseline plus one point
+            per promotion, oldest first.
+        baseline_tput (float): Throughput the curve starts from.
+        current_best_tput (float): The curve's own tail.
+        cumulative_gain_pct (float): Validated cumulative gain.
+        current_best_pct_of_ceiling (float | None): Curve tail over ceiling.
+        current_best_pct_of_target (float | None): Curve tail over target.
+        roofline_failure_streak (int): Consecutive failed roofline runs at
+            close.
+        latest_snapshot_id (int | None): The snapshot the ceiling came from.
+        trajectory_incomplete (bool): True when the curve's tail disagrees with
+            the session's own headline throughput, which is what a resume
+            interrupted mid-promotion leaves behind.
+        current_best_tput_declared (float): The session's headline throughput,
+            present only when it disagrees with the curve.
+    """
+
+    ceiling_kind: Literal["throughput", "latency", "none"]
+    ceiling_tok_per_sec: float | None
+    target_tok_per_sec: float | None
+    ceiling_ratio_target: float
+    ceiling_available: bool
+    latency_ceiling_ms: float | None
+    achieved_latency_ms: float | None
+    latency_ceiling_available: bool
+    current_best_pct_of_latency_ceiling: float | None
+    trajectory: list[V6RooflineTrajectoryPoint]
+    baseline_tput: float
+    current_best_tput: float
+    cumulative_gain_pct: float
+    current_best_pct_of_ceiling: float | None
+    current_best_pct_of_target: float | None
+    roofline_failure_streak: int
+    latest_snapshot_id: int | None
+    trajectory_incomplete: bool
+    current_best_tput_declared: float
+
+
+class V6BaselineProgress(TypedDict, total=False):
+    """The session's final tally of baseline failures, snapshotted at close.
+
+    Under ``close`` rather than in the baseline event for the same reason the
+    roofline curve is: no single measurement can hold it. Each baseline event
+    closes when its own measurement ends and the counters are advanced by the
+    write-back that accounts for it afterwards, so an event records the count
+    it was dispatched under (``request.failure_streak_before``) while the
+    session total is only final here.
+
+    Attributes:
+        failure_streak (int): Consecutive baseline failures still standing at
+            the close. Non-zero on a finished session means the last baseline
+            it tried never landed.
+        total_failures (int): Every baseline failure the session had.
+        arg_error_streak (int): Consecutive failures rooted in a rejected
+            server arg, counted apart because a bad flag is a configuration
+            error the session can correct and a dying server is not.
+    """
+
+    failure_streak: int
+    total_failures: int
+    arg_error_streak: int
+
+
+class V6ConcSweepPoint(TypedDict, total=False):
+    """One rung of one arm's concurrency curve, as the sweep recorded it.
+
+    The measurement half is the same flattening the sweep's own report writes,
+    so the recorded curve and the written one cannot differ. The process half
+    -- everything from ``stage`` down -- is what the report has no place for:
+    a rung that produced no throughput number is otherwise indistinguishable
+    from one the budget refused, one the server would not boot at, and one the
+    benchmark simply failed.
+
+    Attributes:
+        arm (str): ``baseline`` or ``optimized``.
+        conc (int): The rung's concurrency.
+        status (str): The rung's outcome.
+        output_throughput (float | None): Output tokens per second, the axis a
+            synthetic sweep is graded on.
+        request_throughput (float | None): Requests per second.
+        total_token_throughput (float | None): Input plus output tokens per
+            second, the axis an agentic sweep is graded on.
+        input_throughput (float | None): Input tokens per second.
+        intvty_p90 (float | None): The p90 interactivity an agentic run is
+            plotted against; null on a synthetic run.
+        tpot_p90_ms (float | None): p90 time per output token.
+        ttft_mean_ms (float | None): Mean time to first token.
+        e2el_mean_ms (float | None): Mean end-to-end latency.
+        duration_seconds (float | None): The benchmark's own measured window,
+            which is not the rung's wall clock.
+        completed_requests (int | None): Requests the rung completed.
+        error (str | None): What went wrong, when something did.
+        error_class (str | None): The failure's class.
+        killed_overtime (bool | None): Whether the rung was killed for
+            exceeding its cap.
+        estimated_output_throughput (float | None): The throughput estimated
+            for a rung that did not finish.
+        workspace (str): The rung's own workspace.
+        report_path (str): The rung's benchmark report.
+        stage (str): How the rung came to run -- ``boot``, ``reuse``,
+            ``server_restart``, ``boot_attempt`` or ``budget_skip``.
+        num_prompts (int | None): The load the rung carried, derived from its
+            concurrency and never otherwise written down.
+        start_time (str): When the rung started.
+        end_time (str): When it ended.
+        wall_duration_sec (float | None): How long it occupied, wall clock.
+        granted_cap_sec (float | None): The cap it was granted, which under
+            AgentX is raised above the declared per-rung timeout.
+        budget_remaining_sec (float | None): What the budget had left when the
+            rung was admitted.
+    """
+
+    arm: str
+    conc: int
+    status: str
+    output_throughput: float | None
+    request_throughput: float | None
+    total_token_throughput: float | None
+    input_throughput: float | None
+    intvty_p90: float | None
+    tpot_p90_ms: float | None
+    ttft_mean_ms: float | None
+    e2el_mean_ms: float | None
+    duration_seconds: float | None
+    completed_requests: int | None
+    error: str | None
+    error_class: str | None
+    killed_overtime: bool | None
+    estimated_output_throughput: float | None
+    workspace: str
+    report_path: str
+    stage: str
+    num_prompts: int | None
+    start_time: str
+    end_time: str
+    wall_duration_sec: float | None
+    granted_cap_sec: float | None
+    budget_remaining_sec: float | None
+
+
+class V6ConcSweepArm(TypedDict, total=False):
+    """One arm of a concurrency sweep: a whole ladder under one configuration.
+
+    The two arms differ only by the server args and envs they add, so the
+    curve is only readable alongside the decisions the ladder was run under.
+    The reuse path boots one server at the most demanding rung and reuses it
+    down; the restart path pays a server start per rung. They fail
+    differently, and which one ran is not recoverable after the fact.
+
+    Attributes:
+        arm (str): ``baseline`` or ``optimized``.
+        status (str): The arm's outcome. ``degraded`` when it measured some
+            rungs and lost others, which is the ordinary partial result.
+        start_time (str): When the arm started its ladder.
+        end_time (str): When it finished.
+        extra_server_args (str): The args defining this arm. ``""`` on the
+            baseline arm, whose defining property is that it adds none -- a
+            fact ``None`` would not carry.
+        extra_envs (dict[str, str]): The environment defining this arm.
+        strategy (str): ``single_server_reuse``, ``server_restart``, or
+            ``refused`` for an arm the budget turned away before it built
+            anything.
+        strategy_reason (str | None): Why that strategy, when it was not the
+            intended one -- an ineligible framework, or every boot failing.
+        lifecycle (dict[str, Any]): ``{eligible, reason, port, framework}``
+            from resolving whether a server can be kept across rungs.
+        serving_lease_held (bool | None): Whether a Ray serving lease covered
+            this arm's server for its whole lifetime.
+        refused (dict[str, Any] | None): ``{reason, remaining_sec}`` for an arm
+            the budget gate refused; ``None`` for an arm that ran.
+        grid (list[dict[str, Any]]): The rungs planned, each
+            ``{name, conc, num_prompts}``.
+        boot (dict[str, Any]): The boot-retry-descend outcome --
+            ``{succeeded, booted_conc, attempted_concs, failed_concs,
+            attempts[]}``. ``failed_concs`` is the capacity finding a sweep
+            produces for free: the concurrencies this configuration could not
+            bring a server up at.
+        points (list[V6ConcSweepPoint]): The curve, ascending by concurrency.
+    """
+
+    arm: str
+    status: str
+    start_time: str
+    end_time: str
+    extra_server_args: str
+    extra_envs: dict[str, str]
+    strategy: str
+    strategy_reason: str | None
+    lifecycle: dict[str, Any]
+    serving_lease_held: bool | None
+    refused: dict[str, Any] | None
+    grid: list[dict[str, Any]]
+    boot: dict[str, Any]
+    points: list[V6ConcSweepPoint]
+
+
+class V6ConcSweepPair(TypedDict, total=False):
+    """The two arms joined at one concurrency.
+
+    Attributes:
+        conc (int): The concurrency both arms were measured at.
+        baseline_throughput (float | None): The baseline arm's number on the
+            graded axis.
+        optimized_throughput (float | None): The optimized arm's number.
+        speedup (float | None): Their ratio, ``None`` when either side is
+            missing.
+        delta_pct (float | None): The same gain as a percentage.
+        baseline_status (str): The baseline point's status.
+        optimized_status (str): The optimized point's status.
+        error (str | None): Why the pair produced no speedup, named by the arm
+            that did not succeed. Settled when the pair was computed rather
+            than at export, because only the arm that broke can say why.
+    """
+
+    conc: int
+    baseline_throughput: float | None
+    optimized_throughput: float | None
+    speedup: float | None
+    delta_pct: float | None
+    baseline_status: str
+    optimized_status: str
+    error: str | None
+
+
+class V6ConcSweepExt(TypedDict, total=False):
+    """The ``conc_sweep`` timeline event's ``ext``, recorded as the sweep runs.
+
+    The sweep runs the CONC ladder twice -- once on the session's optimized
+    server args, once on none -- and pairs the curves into a speedup per
+    concurrency. What the event adds over the report on disk is the run rather
+    than the result: the ladder and where it came from, the budget each arm
+    was admitted under, the strategy each ladder ran with, and every rung
+    including the ones that were refused or would not boot.
+
+    Attributes:
+        schema_version (str): The producer's report schema.
+        request (dict[str, Any]): The dispatch -- ``{task_id, task_kind,
+            reason, requested_concs, requested_variant_timeout_sec,
+            requested_total_budget_sec}``.
+        input_anchor (dict[str, Any]): The configuration the sweep was asked
+            to compare -- ``{base_variant_id, base_action,
+            input_throughput_tok_s_per_gpu, anchor_tput, baseline_tput,
+            extra_server_args, extra_envs}``. A sweep dispatched two cycles
+            later compares a different configuration under the same event
+            type, which is why the event names it.
+        workload (dict[str, Any]): ``{session_id, isl, osl, tp,
+            benchmark_mode}``. ``benchmark_mode`` names the axis pair the
+            points are drawn on, so a reader never infers it from whether
+            ``intvty_p90`` happens to be null.
+        plan (dict[str, Any]): ``{grid_source, concs_requested,
+            concs_ordered, num_prompts_factor, variant_timeout_sec,
+            arms_order}``. ``grid_source`` says whether the ladder was handed
+            to the sweep or picked for the workload; ``arms_order`` matters to
+            a reader of the budget, since the optimized arm runs first and a
+            budget that runs out takes the baseline arm with it.
+        budget (dict[str, Any]): ``{declared_total_sec, granted_total_sec,
+            rung_cost_sec, raised, gate_active, deadline,
+            session_soft_deadline_sec}``. Both totals are kept because they
+            disagree: the sweep raises its own default when that default
+            cannot fund one rung at the cap the grid runner will grant.
+        environment (dict[str, Any]): ``{sweep_task_id, workspace,
+            model_path, gpu_type, base_config_path}``. ``sweep_task_id`` is
+            the sweep's own minted id, which names its workspace and is
+            distinct from the dispatched task id.
+        arms (dict[str, V6ConcSweepArm]): The two arms, keyed by name.
+        comparison (list[V6ConcSweepPair]): The pair table, by concurrency.
+        result (dict[str, Any]): ``{status, metric, best_conc, best_speedup,
+            successful_pairs, failed_pairs, median_speedup, mean_speedup,
+            skip_reason, was_skipped, budget_exhausted, declined}``.
+            ``declined`` marks a sweep that refused before running anything,
+            which is a different outcome from a ladder that ran and produced
+            no usable pair.
+        roofline_ceiling (dict[str, Any] | None): The per-concurrency
+            theoretical peak and MBU the sweep computes once every point is
+            in; ``None`` when model meta or the GPU spec was unavailable.
+        runtime (dict[str, Any]): ``{workspace, elapsed_sec, duration_sec,
+            budget_remaining_sec, budget_skip_reason}``.
+        artifacts (dict[str, Any]): ``{report_json_path, report_csv_path}``.
+        failure (dict[str, Any]): ``{stop_reason, message, error_class}``.
+        superseded_sweeps (list[str]): Present only if one phase and cycle
+            somehow held more than one sweep; the event reports the newest and
+            names the rest rather than dropping them silently.
+    """
+
+    schema_version: str
+    request: dict[str, Any]
+    input_anchor: dict[str, Any]
+    workload: dict[str, Any]
+    plan: dict[str, Any]
+    budget: dict[str, Any]
+    environment: dict[str, Any]
+    arms: dict[str, V6ConcSweepArm]
+    comparison: list[V6ConcSweepPair]
+    result: dict[str, Any]
+    roofline_ceiling: dict[str, Any] | None
+    runtime: dict[str, Any]
+    artifacts: dict[str, Any]
+    failure: dict[str, Any]
+    superseded_sweeps: list[str]
+
+
+class V6EnablementAttempt(TypedDict, total=False):
+    """One authoring round of the enablement lane, keyed by its specialist.
+
+    The dispatch and the settlement are recorded onto the same row from
+    different ticks, so a round the session was killed between the two is on
+    the timeline as a round that was dispatched and never ruled -- which the
+    counters it used to be folded into could not express at all.
+
+    The gap a round faced and the gap it revealed are separate fields.
+    ``launch_log_excerpt`` is what the round was pointed at;
+    ``next_launch_log_excerpt`` is what its patch uncovered underneath, which
+    is the gap the *next* round will be pointed at. The projection kept one
+    ``launch_log`` for the whole lane and every advance overwrote it, so the
+    export published the newest gap as the reason the lane had opened.
+
+    Attributes:
+        attempt (int): The round's ordinal, 1-based.
+        task_id (str): The authoring specialist's task id.
+        failure_kind (str): The classified signature the round targeted. Read
+            off the specialist params the dispatch built; the projection read a
+            ``failure_kind`` state field that does not exist, so it was always
+            empty.
+        dispatched_at (str): ISO UTC timestamp the round was dispatched.
+        launch_log_excerpt (str | None): The tail of the log it was dispatched
+            against.
+        candidate_refs (list[str]): The candidate refs the mandate carried.
+        settled_at (str): ISO UTC timestamp the round was ruled.
+        status (str): The integrate gate's verdict -- ``kept`` / ``advanced``
+            / ``reverted``, in the gate's own words.
+        advanced (bool): Whether the patch cleared its gap without making the
+            combo runnable, which is progress on a serial enablement.
+        reason (str): The gate's stated reason.
+        landed (bool): Whether the lane reached terminal success on this round.
+        validation_pending (bool): Whether an eval-origin KEEP opened a
+            revalidation window instead of landing. A KEEP here is provisional.
+        stall_streak_after (int): The no-progress streak after this round was
+            scored, against a cap of five.
+        patches_applied (list[str]): The patches this round contributed.
+        artifacts_applied (list[dict[str, Any]]): ``{target, rel_target,
+            kind}`` per whole-file artifact it installed.
+        setup_commands_applied (list[str]): The env-setup commands it ran.
+        patches_dropped_by_grounding (list[str]): Patches dropped for naming
+            targets absent from the tree, which is what the next mandate is
+            told so it stops writing diffs that cannot apply.
+        patches_span_multiple_roots (bool): Whether its patches targeted more
+            than one source tree.
+        framework_root (str | None): The tree the patches apply against.
+        accepted_config_path (str | None): The materialized config the KEEP'd
+            bench ran.
+        effective_config (dict[str, Any] | None): ``{extra_server_args,
+            extra_envs}`` the bench launched with.
+        stack_action (dict[str, Any] | None): The capability acquisition this
+            round made -- ``{kind, framework, capability,
+            acquisition_method, repo_url, ref, index_url, reason}``.
+        runtime (dict[str, Any] | None): The framework runtime it provisioned.
+        localization_manifest (dict[str, Any] | None): The localized closure
+            it recorded, so the next round does not re-fetch it.
+        next_launch_log_excerpt (str | None): The gap this round revealed.
+    """
+
+    attempt: int
+    task_id: str
+    failure_kind: str
+    dispatched_at: str
+    launch_log_excerpt: str | None
+    candidate_refs: list[str]
+    settled_at: str
+    status: str
+    advanced: bool
+    reason: str
+    landed: bool
+    validation_pending: bool
+    stall_streak_after: int
+    patches_applied: list[str]
+    artifacts_applied: list[dict[str, Any]]
+    setup_commands_applied: list[str]
+    patches_dropped_by_grounding: list[str]
+    patches_span_multiple_roots: bool
+    framework_root: str | None
+    accepted_config_path: str | None
+    effective_config: dict[str, Any] | None
+    stack_action: dict[str, Any] | None
+    runtime: dict[str, Any] | None
+    localization_manifest: dict[str, Any] | None
+    next_launch_log_excerpt: str | None
+
+
+class V6EnablementBuild(TypedDict, total=False):
+    """One targeted build the enablement lane ran, keyed by its task id.
+
+    ``ok`` is absent, rather than false, on a row that only records an enqueue:
+    a build with no verdict yet has not failed.
+
+    Attributes:
+        task_id (str): The build task id.
+        recorded_at (str): ISO UTC timestamp the row was written.
+        component (str): The component built -- ``aiter`` / ``vllm`` /
+            ``sgl_kernel``.
+        ref (str): The ref it built, as the installed versions report it.
+        gpu_arch (str): The architecture it targeted.
+        max_jobs (int): The parallelism it was given.
+        installed_versions (dict[str, str]): What the build left installed.
+        build_probes (list[str]): The import probes that verified it.
+        build_log_path (str | None): Its log.
+        attempt_root (str | None): Its build tree.
+        novelty_key (str): The key the enqueue was idempotent on, which is what
+            stops the lane rebuilding the same thing every round.
+        ok (bool): Whether it succeeded.
+        failure_class (str): The failure class, ``ok`` when it succeeded.
+        failure_summary (str): The failure, clipped.
+    """
+
+    task_id: str
+    recorded_at: str
+    component: str
+    ref: str
+    gpu_arch: str
+    max_jobs: int
+    installed_versions: dict[str, str]
+    build_probes: list[str]
+    build_log_path: str | None
+    attempt_root: str | None
+    novelty_key: str
+    ok: bool
+    failure_class: str
+    failure_summary: str
+
+
+class V6EnablementRevalidation(TypedDict, total=False):
+    """One eval-origin revalidation window, keyed by its generation.
+
+    An eval-origin KEEP is provisional: the patch passed the gate's own bench,
+    but accuracy is only official once a genuine baseline re-measures it under
+    the frozen eval contract. The window is what holds the lane open until that
+    happens, and its generation is what keeps a fresh enqueue from resolving to
+    a spent task row.
+
+    A window the run stopped is recorded with a ``reason`` and no
+    ``error_class``: it measured nothing, so it is not a failed revalidation
+    and the lane is not charged a stall for it.
+
+    Attributes:
+        generation (int): The window's generation, 1-based.
+        opened_at (str): ISO UTC timestamp the window opened.
+        task_id (str): The revalidation baseline's task id.
+        config_path (str): The config it ran -- the accepted one from the
+            KEEP'd bench, or the original probe config as a fallback.
+        reason (str): Why the window opened, or why it did not promote.
+        closed_at (str): ISO UTC timestamp the window closed.
+        promoted (bool): Whether a genuine baseline promoted and cleared it.
+        accuracy (float | None): The accuracy it measured.
+        accuracy_floor (float | None): The floor it was graded against.
+        error_class (str): The failure class, when it failed rather than
+            measuring under the floor.
+    """
+
+    generation: int
+    opened_at: str
+    task_id: str
+    config_path: str
+    reason: str
+    closed_at: str
+    promoted: bool
+    accuracy: float | None
+    accuracy_floor: float | None
+    error_class: str
+
+
+class V6EnablementExt(TypedDict, total=False):
+    """The ``enablement`` timeline event's ``ext``: one repair lane per session.
+
+    Enablement repairs a (model, backend) combo that cannot be benched at all
+    -- it will not boot, or it boots and fails its accuracy eval. The lane
+    dispatches an authoring specialist, applies its patch, optionally compiles
+    a component, benches the result, and either lands or rearms against the
+    gap the patch revealed underneath. That is a sequence of dispatched actions
+    with outcomes, which is what this event holds.
+
+    The event spans the whole session rather than a phase, because the lane
+    does. Its pump is phase-independent by design: a combo that cannot boot
+    never leaves PRELUDE, and the round that repairs it is ruled in
+    FRAMEWORK_AGENT. A phase-scoped event would hold the trigger in one half
+    and the outcome in the other.
+
+    Attributes:
+        mode (str): The admitted ``--enablement`` mode -- ``off`` / ``launch``
+            / ``eval`` / ``all``. A lane that never opened because the operator
+            opted out is why a run with no baseline tried nothing.
+        origin (str): ``boot`` or ``eval``, recorded when the lane opened.
+            The projection derived this from two fields with different
+            lifetimes -- ``origin`` is cleared on success, ``baseline_eval_kind``
+            is not -- because nothing recorded it.
+        engaged (bool): Always true. The lane is on the timeline because it was
+            triggered; the projection needed this field to separate "did
+            something" from "was armed and never needed", which an event that
+            exists at all already answers.
+        trigger (dict[str, Any] | None): What opened the lane -- ``{kind,
+            recorded_at, evidence_excerpt, observed_accuracy, accuracy_floor,
+            observed_task, observed_metric, eval_contract_fingerprint,
+            probe_config_path}``. The first trigger wins: a later failure of
+            the same gap belongs to the round that faced it, and letting the
+            newest overwrite the oldest is how an eval-less re-baseline could
+            downgrade a measured ``accuracy_below_floor`` to an empty
+            ``accuracy_unavailable``.
+        attempts (dict[str, Any]): ``{count, settled, landed, advanced,
+            rows}`` over :class:`V6EnablementAttempt`. ``count`` counts rounds
+            dispatched and ``settled`` counts rounds ruled, which differ by the
+            one still in flight -- a distinction the projection's single
+            ``attempts`` counter was read as making and did not.
+        builds (dict[str, Any]): ``{count, failed, rows}`` over
+            :class:`V6EnablementBuild`.
+        revalidations (dict[str, Any]): ``{count, promoted, rows}`` over
+            :class:`V6EnablementRevalidation`.
+        human_review (dict[str, Any]): ``{count, rows}`` over the launch
+            failures the lane could not classify well enough to dispatch a
+            round for -- ``{digest, failure_kind, reason, signature,
+            recorded_at}``. These are the rounds that never happened, and a
+            lane that spent a session declining to dispatch reads, from
+            counters alone, exactly like one that was never triggered.
+        result (dict[str, Any] | None): The terminal -- ``{outcome, reason,
+            stall_streak, kept_patches, kept_artifacts, setup_commands,
+            accepted_config, accepted_config_path, setting_script,
+            framework_root, active_runtime, attempt_runtimes}``. ``outcome`` is
+            ``succeeded`` or ``stalled``; ``None`` on an event finalize
+            recovered, which is a lane nothing judged rather than one that
+            failed.
+    """
+
+    mode: str
+    origin: str
+    engaged: bool
+    trigger: dict[str, Any] | None
+    attempts: dict[str, Any]
+    builds: dict[str, Any]
+    revalidations: dict[str, Any]
+    human_review: dict[str, Any]
+    result: dict[str, Any] | None
+
+
+class V6PhaseSegment(TypedDict, total=False):
+    """One entry into a phase, with the exit that ended it.
+
+    A row rather than a whole event because a phase re-entered inside one macro
+    cycle cannot be given a second event id: the id's three segments are
+    ``(phase, macro_cycle, component)`` and every one of them must be
+    recomputable from persisted state, so there is nothing left to tell two
+    entries apart. The event therefore covers all of a phase's time in a cycle
+    and each entry is a segment on it.
+
+    Both endpoints are recorded by the transition that produced them. The
+    legacy ``phase_segments`` key derived them instead, by pairing
+    ``phase_history`` rows off two at a time -- which cannot describe the
+    segment a session ends in, because that one has no successor row to be
+    closed by, and so published it with an empty exit and no duration.
+
+    Attributes:
+        sequence (int): The entering transition's position in ``phase_history``,
+            which is this row's identity.
+        from_phase (str): The phase the run came from; empty at the first entry.
+        entered_at (str): The ISO timestamp of the entering transition.
+        entered_unix (float | None): The matching Unix epoch, which the exit
+            measures the segment against.
+        entered_reason (str): The entering transition's reason.
+        entered_evidence (dict[str, Any]): Its structured evidence.
+        to_phase (str): The phase the run left for; absent while still here.
+        exited_at (str): The ISO timestamp of the leaving transition; absent on
+            the segment the session ended in.
+        exited_unix (float | None): The matching Unix epoch.
+        exit_reason (str): Why the run left, from ``PHASE_EXIT_REASONS``.
+        exit_evidence (dict[str, Any]): The leaving transition's evidence.
+        duration_sec (float | None): Measured from this segment's own two
+            endpoints. ``None`` means the segment never closed, which is a
+            different fact from zero.
+    """
+
+    sequence: int
+    from_phase: str
+    entered_at: str
+    entered_unix: float | None
+    entered_reason: str
+    entered_evidence: dict[str, Any]
+    to_phase: str
+    exited_at: str
+    exited_unix: float | None
+    exit_reason: str
+    exit_evidence: dict[str, Any]
+    duration_sec: float | None
+
+
+class V6PhaseAction(TypedDict, total=False):
+    """One dispatched action, charged to the phase that ordered it.
+
+    Deliberately thin. The per-dispatch detail belongs to the stage events --
+    ``baseline.ext.actions[]`` carries the discarded cold-warmup rounds,
+    ``framework_agent.ext.attempts[]`` carries the arm and provenance, and
+    neither could be expressed by a flat row -- so restating any of it here
+    would put one semantic in two places. The detail is reached by joining on
+    :attr:`task_id`, which those rows already carry. For ``report``,
+    ``recover``, ``session_breakdown`` and ``target_analysis``, which no stage
+    event covers, this row is the only record and the join finds nothing.
+
+    :attr:`phase` and :attr:`macro_cycle` are recorded at the dispatch, not at
+    the settle. An action can outlive the phase that ordered it -- a baseline
+    settling after a plateau exit -- so reading the phase when the result lands
+    charges the wrong one. That is what the legacy ``phase_timeline`` did: the
+    writer was handed both fields and dropped them, leaving export to attribute
+    each action by testing its timestamp against the phase windows.
+
+    Attributes:
+        action (str): The action kind, as dispatched.
+        task_id (str): The task id, which is this row's identity and the join
+            key to whichever stage event holds the detail.
+        phase (str): The phase that ordered the dispatch.
+        macro_cycle (int): The macro cycle it was ordered in.
+        tick (int): The coordinator tick, which orders dispatches within a phase
+            more finely than a seconds-resolution timestamp can.
+        dispatched_at (str): When the runner started it.
+        dispatched_unix (float | None): The matching Unix epoch.
+        status (str): The state it settled on; absent while in flight.
+        decision (str): ``promoted`` or ``no_promote``, the dispatcher's own
+            promotability verdict.
+        error_class (str | None): The failure class, when it failed.
+        workspace (str | None): The workspace it ran in.
+        settled_at (str): When the verdict landed; absent while in flight.
+        settled_unix (float | None): The matching Unix epoch.
+        duration_sec (float | None): Measured from this row's two endpoints.
+            ``None`` for an action that never settled, which is how a dispatch
+            killed at shutdown stays legible as one that ran and was cut off.
+    """
+
+    action: str
+    task_id: str
+    phase: str
+    macro_cycle: int
+    tick: int
+    dispatched_at: str
+    dispatched_unix: float | None
+    status: str
+    decision: str
+    error_class: str | None
+    workspace: str | None
+    settled_at: str
+    settled_unix: float | None
+    duration_sec: float | None
+
+
+class V6PhaseMarker(TypedDict, total=False):
+    """One non-transition ``phase_history`` marker, in the phase that raised it.
+
+    Attributes:
+        sequence (int): The marker's position in ``phase_history``.
+        reason (str): What it marks.
+        evidence (dict[str, Any]): Its structured payload.
+        ts (str): When it was raised.
+    """
+
+    sequence: int
+    reason: str
+    evidence: dict[str, Any]
+    ts: str
+
+
+class V6PhaseExt(TypedDict, total=False):
+    """The ``phase`` timeline event's ``ext``: the run's time in one phase.
+
+    The one event that is about the run rather than about work. Every other
+    event's id is scoped by a phase, and until this event existed the timeline
+    held no record of the phases themselves -- a reader could see a baseline
+    event tagged ``framework_agent`` and had no way to learn when that phase was
+    entered, why the run left it, or how long it had.
+
+    One event per ``(phase, macro_cycle)``, covering every entry into that phase
+    in that cycle. See :class:`V6PhaseSegment` for why a re-entry is a row here
+    rather than an event of its own.
+
+    Attributes:
+        phase (str): The phase this event is about.
+        macro_cycle (int): The macro cycle it ran in.
+        entered_at (str): When the phase was first entered in this cycle.
+        exited_at (str): When it was last left; empty when it never was.
+        exit_reason (str): The reason it was last left on.
+        entries (int): How many times the phase was entered in this cycle.
+        duration_sec (float | None): Summed over the entries, not measured from
+            the first to the last: a phase re-entered inside one cycle did not
+            own the time the run spent elsewhere in between, and charging it
+            that time is how a budget guard comes to believe a phase overran.
+        open (bool): True when an entry has no exit -- the phase the run was in
+            when it stopped.
+        segments (list[V6PhaseSegment]): One row per entry.
+        actions (dict[str, Any]): ``{count, settled, kinds, rows}`` over
+            :class:`V6PhaseAction`. ``count`` minus ``settled`` is the
+            dispatches still in flight or killed mid-flight, which the flat
+            projection could not express because it only ever held settled rows.
+        markers (dict[str, Any]): ``{count, rows}`` over
+            :class:`V6PhaseMarker`.
+    """
+
+    phase: str
+    macro_cycle: int
+    entered_at: str
+    exited_at: str
+    exit_reason: str
+    entries: int
+    duration_sec: float | None
+    open: bool
+    segments: list[V6PhaseSegment]
+    actions: dict[str, Any]
+    markers: dict[str, Any]
+
+
+class V6StackAdoption(TypedDict, total=False):
+    """One adoption onto the optimization stack, recorded as it was accepted.
+
+    Attributes:
+        stack_index (int): Position in the stack, which keys the row and indexes
+            ``optimization_stack`` directly.
+        action (str): The action kind that produced the winner.
+        source (str): The attribution bucket, from
+            :func:`.recorder.stack_event.source_for`. Recorded alongside the
+            raw ``action`` so a row bucketed wrongly can still be re-bucketed.
+        variant_name (str | None): The winning variant's name.
+        lever_kind (str | None): Which lever the winner moved.
+        operation_kind (str | None): The stable "what kind of optimization"
+            label the stack can be sliced by.
+        backend (str | None): For kernel adoptions, ``geak`` or ``forge``.
+        source_phase (str | None): The phase that authored the winner, which is
+            not always the phase live at writeback time.
+        task_id (str | None): The dispatch that produced it, joining this row to
+            its stage event.
+        throughput_before (float | None): The anchor this adoption beat. The
+            lift refuses a winner that does not beat exactly this number, and
+            the ``current_best`` write immediately after overwrites it -- so
+            this is the only moment it can be recorded.
+        throughput_after (float | None): What the winner measured.
+        baseline_tput (float | None): The session baseline.
+        contribution_pct (float | None): ``(after - before) / baseline``. On the
+            baseline rather than on ``before``, because contributions on one
+            denominator sum to the chain total exactly and contributions on
+            their own anchors do not.
+        local_gain_pct (float | None): ``(after - before) / before`` -- the
+            step's gain over the anchor it beat, which is what the promotion
+            decision was actually made on.
+        cumulative_gain_pct (float | None): ``(after - baseline) / baseline``.
+        objective (str): The axis both readings were taken on.
+        degrade_reason (str): Why the run's requested axis did not apply.
+        attribution_eligible (bool | None): ``None`` when the producer never
+            ruled, which is different from ruling it ineligible.
+    """
+
+    stack_index: int
+    recorded_at: str
+    ts: str
+    action: str
+    source: str
+    variant_name: str | None
+    lever_kind: str | None
+    operation_kind: str | None
+    scope: str | None
+    backend: str | None
+    source_phase: str | None
+    task_id: str | None
+    kernel_id: str | None
+    fingerprint: str | None
+    provenance: str | None
+    gap_canonical_id: str | None
+    objective: str
+    degrade_reason: str
+    throughput_before: float | None
+    throughput_after: float | None
+    baseline_tput: float | None
+    contribution_pct: float | None
+    local_gain_pct: float | None
+    cumulative_gain_pct: float | None
+    accuracy: float | None
+    attribution_eligible: bool | None
+    accepted_kernels: list[str]
+
+
+class V6StackValidation(TypedDict, total=False):
+    """One measurement of the whole stack's gain, keyed by the length it covers.
+
+    The ledger's only independent check on itself. Without one of these the
+    session total is the sum of the very steps it is meant to be checking.
+
+    Attributes:
+        stack_len (int): The stack length this figure validates. A later
+            validation at one length supersedes the earlier one, which is the
+            right reading: a re-measurement replaces the figure it revises.
+        measurement_basis (str): ``e2e_rebench`` for a full-stack
+            revalidation, ``e2e_decision_round`` for the round a variant was
+            graded on.
+    """
+
+    stack_len: int
+    ts: str
+    baseline_tput: float | None
+    validated_tput: float | None
+    validated_gain_pct: float | None
+    source: str
+    measurement_basis: str
+
+
+class V6StackExt(TypedDict, total=False):
+    """The ``stack`` timeline event's ``ext``: what the session actually kept.
+
+    One event per session, because there is one stack. Its adoptions arrive from
+    PRELUDE warm replay, EXPLORE, FRAMEWORK_AGENT and KERNEL_AGENT and form a
+    single ordered chain; scoping the event by phase would cut that chain at
+    every phase boundary, which is exactly where its before / after pairs have
+    to line up for the reconciliation to mean anything.
+
+    Attributes:
+        baseline_tput (float | None): The denominator every contribution shares.
+        adoptions (dict[str, Any]): ``{count, by_source, rows}`` over
+            :class:`V6StackAdoption`. Each ``by_source`` bucket carries its
+            adoption count, summed contribution and unmeasured tally, and every
+            bucket is present even when empty -- so a reader can tell "this
+            subsystem earned nothing" from "this subsystem is not reported".
+        validations (dict[str, Any]): ``{count, rows, settled, at_head}`` over
+            :class:`V6StackValidation`. ``at_head`` is false when the last
+            validation predates the final adoptions, meaning the session total
+            is a claim about a shorter stack than the one that shipped.
+        attributed_gain_pct (float): Summed contributions.
+        chain_total_gain_pct (float | None): The last adoption's own reading
+            against the baseline. One measurement, not a sum -- which is how the
+            ledger gets to check itself.
+        unattributed_gain_pct (float | None): ``chain_total - attributed``:
+            throughput the chain gained that no adoption claims. An identity,
+            equal to the sum of the chain breaks below.
+        validated_total_gain_pct (float | None): The settled whole-stack figure.
+        reconciliation_gap_pct (float | None): Its distance from the chain.
+        guards (dict[str, int]): ``unmeasured`` and ``chain_breaks``. The eight
+            guard counts the legacy ledger published were each a check on
+            whether three v4 streams agreed; a fact recorded once at the moment
+            it becomes true has nothing to disagree with, so only these two --
+            which are about the measurements rather than the bookkeeping --
+            have a referent here.
+    """
+
+    baseline_tput: float | None
+    objective: str
+    adoptions: dict[str, Any]
+    validations: dict[str, Any]
+    attributed_gain_pct: float
+    chain_total_gain_pct: float | None
+    unattributed_gain_pct: float | None
+    validated_total_gain_pct: float | None
+    reconciliation_gap_pct: float | None
+    guards: dict[str, int]
+
+
+class V6CriticReviewVariant(TypedDict, total=False):
+    """One variant's ruling from a grid the Critic reviewed per variant.
+
+    A rejected variant never reaches a bench, so there is no attempt row for
+    its ruling to live on and this is the only record that it was judged. The
+    map is kept per variant rather than collapsed because the collapse is
+    deliberately lossy: a grid proceeds on its approved subset, and the
+    proposal's summary verdict does not say which variants that was.
+
+    Attributes:
+        variant_name (str): The variant ruled on.
+        verdict (str): What the Critic wrote for it.
+        effective_verdict (str): What the loop acted on, which differs when a
+            reject was held to a rule that declared a lesser verdict.
+        held_to_rule (str): The rule the reject was held to, when one was.
+        reason (str): The Critic's rationale for this variant.
+        failure_reason_code (str): The rule it cited, when it cited one.
+    """
+
+    variant_name: str
+    verdict: str
+    effective_verdict: str
+    held_to_rule: str
+    reason: str
+    failure_reason_code: str
+
+
+class V6CriticReview(TypedDict, total=False):
+    """The Critic's ruling on one proposal, recorded on the proposal itself.
+
+    The review is a sub-structure of its subject rather than a stream of its
+    own. On the bus a proposal and its verdict are two messages about one
+    thing, and the Critic reviews proposals raised by every phase -- so a
+    ruling attached to the proposal follows it wherever it was raised, needs no
+    per-phase home, and leaves nothing to reconcile between a review list and a
+    proposal list.
+
+    Both verdicts are kept. A reject the loop held to a rule that only declared
+    ``advise`` is two facts, and reporting either alone misreads the round: the
+    authored verdict alone says a proposal was refused that in fact ran, the
+    effective verdict alone says one was approved that the Critic refused.
+
+    Attributes:
+        verdict (str): The ruling the Critic wrote -- ``approve``, ``reject``,
+            ``redirect``, ``advise`` or ``needs_review``.
+        effective_verdict (str): The ruling the loop acted on.
+        held_to_rule (str): The reason code a reject was held to, empty when
+            nothing held it.
+        reviewer (str): ``critic``, or ``critic_unavailable`` for a ruling the
+            Critic could not ground -- which is not the same fact as one it
+            examined and refused.
+        iteration (int | None): Which review round, for a proposal re-submitted
+            after ``needs_review``.
+        reason (str): Why it ruled that way.
+        confidence (float | None): How sure it was.
+        failure_reason_code (str): The rule it cited, when it cited one.
+        concerns (list[str]): The concerns it raised.
+        reviewed_at (str): When the ruling was recorded.
+        required_evidence (list[Any]): What it wants measured before approving.
+        risks (list[Any]): The risks it named, each ``{severity, risk}``.
+        notes (list[Any]): Remediation text.
+        kb_evidence (list[Any]): The KB entries it cited.
+        packet_evidence (list[Any]): The evidence packet rows it cited.
+        advice_text (str): Its advice, on an ``advise`` verdict.
+        alternative_action (str): What it would rather have run.
+        variants (list[V6CriticReviewVariant]): Per-variant rulings, present
+            only when the grid was reviewed by ``verdict_map``.
+        outcome (dict[str, Any]): What the loop did with the ruling --
+            ``{materialized, denied, reauthored, patch_verdict_key}``. Recorded
+            onto the ruling because the consequence is usually what a reader is
+            after and on its own does not say what it was the outcome of.
+            ``patch_verdict_key`` names the subject the patch gate consults
+            this ruling under, which is what connects a blocked
+            ``integrate_patch`` to the review that blocked it.
+    """
+
+    verdict: str
+    effective_verdict: str
+    held_to_rule: str
+    reviewer: str
+    iteration: int | None
+    reason: str
+    confidence: float | None
+    failure_reason_code: str
+    concerns: list[str]
+    reviewed_at: str
+    required_evidence: list[Any]
+    risks: list[Any]
+    notes: list[Any]
+    kb_evidence: list[Any]
+    packet_evidence: list[Any]
+    advice_text: str
+    alternative_action: str
+    variants: list[V6CriticReviewVariant]
+    outcome: dict[str, Any]
+
+
+class V6Close(TypedDict, total=False):
+    """V6 session finalization result exposed outside the business timeline.
+
+    ``status`` is recorded by the CLOSE sequencer, not derived from ``steps``.
+    ``running`` means no verdict was ever recorded, so the process died partway
+    through its own close-out; ``degraded`` means the sequence finished with at
+    least one step reporting a failure. The two used to be the same word, which
+    made a healthy session indistinguishable from a damaged one.
+    """
+
+    status: Literal["running", "succeeded", "failed", "degraded"]
     start_time: str
     end_time: str
     close_sequence_done: bool
     steps: list[dict[str, Any]]
     robustness: dict[str, Any]
     artifacts: dict[str, Any]
+    # Absent when the session never attempted to publish its Recipe.
+    kb_write_back: V6KBWriteBackExt
+    # Absent when the close-out never got far enough to snapshot it.
+    roofline_progress: V6RooflineProgress
+    # Same rule: absent when the close-out never reached the snapshot.
+    baseline_progress: V6BaselineProgress
 
 
 # V6 KERNEL timeline event
@@ -3636,6 +4882,56 @@ class V6KernelRebenchAttempt(V6RowScope, total=False):
     engagement: V6KernelRebenchEngagement
 
 
+class V6KernelDiscoveredKernel(TypedDict, total=False):
+    """One kernel the trace attributed, with profiling fields the summary drops.
+
+    Attributes:
+        kernel_id (str): Stable kernel identity.
+        name (str): Kernel name as reported by the trace.
+        snapshot_id (int | None): The analysis snapshot this row came from.
+        provenance (str): Why this snapshot was recorded.
+        gpu_pct (float | None): Share of GPU time.
+        duration_us (float | None): Total GPU time in microseconds.
+        call_count (int | None): Invocations in the traced window.
+        kernel_category (str): TraceLens category bucket.
+        bottleneck (str | None): Bottleneck verdict from the analyzer.
+        bound_type (str | None): Memory/compute bound classification.
+        arithmetic_intensity (float | None): FLOPs per byte moved.
+        flops_per_byte (float | None): As reported before the fallback above.
+        efficiency_percent (float | None): Achieved share of the kernel ceiling.
+        bandwidth_util_pct (float | None): Share of peak bandwidth.
+        compute_util_pct (float | None): Share of peak compute.
+        source_file (str | None): Source file the kernel was attributed to.
+        optimization_notes (str): Analyzer notes or suggestions.
+        recommended_backends (list[str]): Backends the analyzer recommends.
+        recommended_actions (list[str]): Actions the analyzer recommends.
+        reusable_native_kernel (bool): Whether a native rewrite is in play.
+        selected (bool): Whether the visit considered this kernel a target.
+    """
+
+    kernel_id: str
+    name: str
+    snapshot_id: int | None
+    provenance: str
+    gpu_pct: float | None
+    duration_us: float | None
+    call_count: int | None
+    kernel_category: str
+    bottleneck: str | None
+    bound_type: str | None
+    arithmetic_intensity: float | None
+    flops_per_byte: float | None
+    efficiency_percent: float | None
+    bandwidth_util_pct: float | None
+    compute_util_pct: float | None
+    source_file: str | None
+    optimization_notes: str
+    recommended_backends: list[str]
+    recommended_actions: list[str]
+    reusable_native_kernel: bool
+    selected: bool
+
+
 class V6KernelForge(TypedDict, total=False):
     """The forge route's work for one visit.
 
@@ -3644,6 +4940,10 @@ class V6KernelForge(TypedDict, total=False):
         reprofile (V6KernelReprofile | None): The entry re-profile.
         trace_analyze_runs (list[V6KernelTraceAnalyzeRun]): Analyses the phase
             requested for itself.
+        discovered_kernels (list[V6KernelDiscoveredKernel]): Profiling-rich
+            kernel table this visit targeted.
+        recommended_kernels (list[V6KernelDiscoveredKernel]): Subset marked as
+            optimization targets.
         lanes (V6KernelForgeLanes): The four candidate lanes.
         rebench_ledger (list[V6KernelRebenchAttempt]): Forge re-measurements.
     """
@@ -3651,6 +4951,8 @@ class V6KernelForge(TypedDict, total=False):
     engaged: bool
     reprofile: V6KernelReprofile | None
     trace_analyze_runs: list[V6KernelTraceAnalyzeRun]
+    discovered_kernels: list[V6KernelDiscoveredKernel]
+    recommended_kernels: list[V6KernelDiscoveredKernel]
     lanes: V6KernelForgeLanes
     rebench_ledger: list[V6KernelRebenchAttempt]
 
@@ -4362,7 +5664,25 @@ __all__ = [
     "V6MetadataVersions",
     "V6ModelArchitecture",
     "V6ToolVersion",
+    "V6BaselineProgress",
     "V6Close",
+    "V6ConcSweepArm",
+    "V6ConcSweepExt",
+    "V6EnablementAttempt",
+    "V6EnablementBuild",
+    "V6EnablementExt",
+    "V6EnablementRevalidation",
+    "V6PhaseAction",
+    "V6PhaseExt",
+    "V6PhaseMarker",
+    "V6PhaseSegment",
+    "V6StackAdoption",
+    "V6StackExt",
+    "V6StackValidation",
+    "V6ConcSweepPair",
+    "V6ConcSweepPoint",
+    "V6CriticReview",
+    "V6CriticReviewVariant",
     "V6KBWriteBackExt",
     "V6KernelAdoptedRow",
     "V6KernelAnalysisArtifacts",
@@ -4372,6 +5692,7 @@ __all__ = [
     "V6KernelEvent",
     "V6KernelExt",
     "V6KernelFailure",
+    "V6KernelDiscoveredKernel",
     "V6KernelForge",
     "V6KernelForgeLanes",
     "V6KernelFusionRun",
@@ -4406,6 +5727,11 @@ __all__ = [
     "V6OutcomeKernelAttribution",
     "V6Outcome",
     "V6OutcomeValidation",
+    "V6RooflineEventSnapshot",
+    "V6RooflineKernel",
+    "V6RooflineKernelTable",
+    "V6RooflineProgress",
+    "V6RooflineTrajectoryPoint",
     "V6RowScope",
     "V6TaskConfig",
     "V6TimelineEvent",
