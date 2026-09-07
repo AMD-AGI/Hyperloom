@@ -245,6 +245,9 @@ run_leg() {
           *)           log "ERROR: leg '$leg' -- no demo skill for this leg name"; return 1 ;;
         esac
         echo "HYPERLOOM_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
+        # The setup backend rewrites HYPERLOOM_SKILL_PATH to the optimizer skill, so the
+        # image-extraction grep in the setup prompts needs its own key it will not touch.
+        echo "E2E_DEMO_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
         echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
         local leg_mem leg_shm
         case "$leg" in
