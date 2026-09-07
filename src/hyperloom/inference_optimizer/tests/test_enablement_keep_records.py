@@ -366,11 +366,10 @@ def test_an_override_naming_no_interpreter_off_the_bypass_path_observes_nothing(
     tmp_path: Path,
     monkeypatch,
 ):
-    """Naming a plausible interpreter would reproduce the defect being closed.
+    """An AITER runtime names no interpreter, and only bypass can say which ran.
 
-    An AITER runtime names no interpreter; only the bypass backend can say which
-    one launched the graded server, so under any other backend both probes
-    report nothing rather than an environment the server never ran in.
+    Under any other backend both probes report nothing rather than an
+    environment the graded server never ran in.
     """
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
@@ -410,12 +409,7 @@ def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path):
 
 
 def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path, tmp_path: Path):
-    """framework_root keeps only one tree; a second root is a real second answer.
-
-    Reading the git identity off the apply root alone reported every other
-    contributing tree as non-git with no base commit, which is a claim about
-    that tree rather than an absence.
-    """
+    """Each contributing tree carries its own binding, git flag and base commit."""
     second = tmp_path / "artifacts_root"
     (second / "lib").mkdir(parents=True)
     (second / "lib" / "a.so").write_bytes(b"\x00artifact")

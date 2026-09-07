@@ -394,8 +394,6 @@ def test_remote_recipe_unaffected_by_recipe_steps():
         build_publishable_recipe_config,
     )
 
-    # The published key set is closed and built explicitly; nothing this design
-    # emits is a member, so the recipe cannot inherit one by accident.
     emitted = {"recipe_steps", "replay_sufficiency", "roots", "source_snapshots", "launch_evidence"}
     assert emitted.isdisjoint(set(RECIPE_SECTIONS))
 

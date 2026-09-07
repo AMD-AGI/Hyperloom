@@ -23,10 +23,7 @@ BLOCKS_ASSERTION = "assertion_validation"
 BLOCKS_BOTH = "both"
 
 #: The closed code set, each with what it blocks. A code outside this table is
-#: itself insufficient. ``setup_inputs_incomplete`` is the one member the
-#: published vocabulary did not carry: an allowlisted installer consumes local
-#: files and moving VCS refs that no other code names, and without it such an
-#: install would be reported replayable on the strength of its command string.
+#: itself insufficient.
 REASON_BLOCKS: dict[str, str] = {
     "not_evaluated": BLOCKS_BOTH,
     "activation_incomplete": BLOCKS_BOTH,
@@ -164,9 +161,6 @@ def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
         reasons.append(_reason("activation_incomplete", "config_path"))
     evidence = section.get("launch_evidence")
     if not isinstance(evidence, Mapping) or not evidence:
-        # Judged whether or not a configuration projected: an empty
-        # ``accepted_config`` is one more thing no launch confirmed, not a
-        # reason to stop asking whether a launch was observed at all.
         reasons.append(_reason("activation_incomplete", "launch_evidence"))
         return reasons
     binding = evidence.get("observed_model_binding")
@@ -367,9 +361,7 @@ def _setup_reasons(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
         stranded = not row.get("present_at_final_launch") and not row.get("replayed_at_final_launch")
         if outcome == "failed" or (outcome == "applied" and stranded):
             reasons.append(_reason("setup_effect_outside_verified_launch", scope))
-        # Scope is decided by what ran, not by whether it succeeded: a failed
-        # apt or conda install has already written outside the Python
-        # distribution set the closure enumerates. A skipped one never ran.
+        # A failed apt or conda has already written outside the distribution set.
         if outcome != "skipped" and str(row.get("installer") or "") not in ("", "pip"):
             reasons.append(_reason("closure_scope_incomplete", scope))
         if outcome == "applied" and row.get("unresolved_inputs"):
@@ -392,9 +384,8 @@ def _truncation_reasons(
     rounds = {str(row.get("round_task_id") or "") for row in ledger if row.get("present_at_final_launch")}
     if not rounds:
         return []
-    # Every row of that round, not only its applied ones: a command it resolved
-    # and then failed or refused was reached by the replay, and its own reason
-    # is that its effect stands outside the verified launch.
+    # Every row of that round, not only its applied ones: a command it reached
+    # and failed is a mutation, which has its own reason.
     reached = {str(row.get("cmd_digest") or "") for row in ledger if str(row.get("round_task_id") or "") in rounds}
     missing = [cmd for cmd in commands if command_digest(cmd) not in reached]
     return [_reason("setup_ledger_truncated", "setup_commands")] if missing else []

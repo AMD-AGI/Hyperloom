@@ -325,7 +325,7 @@ def test_driver_overwritten_names_are_per_driver():
     assert "HOME" in ambient_closure(env, component="aiter")
 
 
-def test_a_build_spawned_with_a_credentialed_index_env_classifies_it(tmp_path):
+def test_a_build_spawned_with_a_credentialed_index_env_classifies_it():
     """The build inherits the whole environment, so the channel is its input too."""
 
     class _Action:

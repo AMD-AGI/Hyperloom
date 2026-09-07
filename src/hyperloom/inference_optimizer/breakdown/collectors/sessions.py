@@ -32,6 +32,7 @@ from ._common import (
     _to_float,
     _to_int,
 )
+from ..session_package import deliverable_relpaths
 
 
 log = logging.getLogger(__name__)
@@ -1581,8 +1582,6 @@ def _delivered_payload_paths(out: dict[str, Any], session_dir: Path) -> set[str]
     references = bool(out.get("source_snapshots")) or bool((out.get("accepted_config") or {}).get("config_path"))
     if not references:
         return None
-    from ..session_package import deliverable_relpaths
-
     return deliverable_relpaths(session_dir)
 
 
