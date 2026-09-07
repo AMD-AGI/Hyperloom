@@ -151,6 +151,7 @@ def test_reap_kills_an_atom_server_orphan(tmp_path):
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            # The assertions below report a survivor; finally still cleans it up.
             pass
 
         assert proc.pid in reaped
@@ -160,6 +161,7 @@ def test_reap_kills_an_atom_server_orphan(tmp_path):
         try:
             proc.kill()
         except OSError:
+            # The reaper may already have terminated and collected the child.
             pass
         proc.wait(timeout=5)
 

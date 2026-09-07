@@ -128,6 +128,7 @@ def test_completed_warmup_keeps_its_persistent_server(tmp_path, framework):
             try:
                 os.killpg(server_pid, signal.SIGKILL)
             except ProcessLookupError:
+                # The test server may have exited before cleanup reached its group.
                 pass
 
 

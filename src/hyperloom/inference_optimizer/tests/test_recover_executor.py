@@ -1004,6 +1004,7 @@ def test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path):
         try:
             os.killpg(leader.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # Successful recovery can remove the entire group before test cleanup.
             pass
         leader.wait(timeout=5)
         outsider.kill()
