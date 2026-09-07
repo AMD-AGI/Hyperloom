@@ -20,6 +20,7 @@ serialize nothing at all.
 from __future__ import annotations
 
 import fcntl
+import functools
 import os
 import re
 import site
@@ -28,6 +29,25 @@ import sys
 
 def editable_roots() -> list[str]:
     """Collect filesystem roots of PEP 660 editable-finder installs.
+
+    Cached, and returned as a fresh list so a caller cannot disturb the cache.
+    The scan opens every ``__editable__*`` file under every site-packages on the
+    path -- on a serving image that is a few hundred -- and the controller asks
+    this question once a second for the length of a campaign, through the
+    checkpoint probe that resolves each task's workspace. An install layout does
+    not change inside one run.
+    """
+    return list(_editable_roots_cached())
+
+
+@functools.lru_cache(maxsize=1)
+def _editable_roots_cached() -> tuple[str, ...]:
+    """Memoize one scan for the life of the process."""
+    return _scan_editable_roots()
+
+
+def _scan_editable_roots() -> tuple[str, ...]:
+    """Scan the interpreter's search path for editable-install roots.
 
     Scans site-packages for ``__editable__*.pth`` and ``__editable___*_finder.py``
     and extracts the absolute paths they map into. Such packages are imported via
@@ -110,7 +130,7 @@ def editable_roots() -> list[str]:
                     for m in re.findall(r"['\"](/[^'\"]+)['\"]", ftxt):
                         if os.path.isdir(m):
                             roots.add(os.path.realpath(m))
-    return sorted(roots)
+    return tuple(sorted(roots))
 
 
 def needs_inplace(kernel_repo: str) -> bool:

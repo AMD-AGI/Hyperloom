@@ -8,9 +8,16 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 from hyperloom.orchestrator.kernel.campaign_baseline import (
+    campaign_repositories,
+    reclaim_campaign_repositories,
     seal_campaign_baseline,
     session_branch_name,
+)
+from kernelforge.kernel_rewrite_controller.worktree import (
+    CAMPAIGN_BRANCH_PREFIX,
+    FORGE_LOOP_OUTPUT_DIRNAME,
 )
 
 _GIT_IDENTITY = {
@@ -125,3 +132,82 @@ def test_a_repository_that_cannot_be_sealed_does_not_stop_the_others(tmp_path: P
 
     assert str(good) in pins
     assert str(broken) not in pins
+
+
+def test_the_framework_being_served_is_found_without_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """All three configured sources were empty in the GLM-5.2 session."""
+    repo = _repo(tmp_path, "sglang-checkout")
+    package = repo / "python" / "sglang"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        campaign_baseline,
+        "_package_repository",
+        lambda name: repo.resolve() if name == "sglang" else None,
+    )
+
+    roots = campaign_repositories(SimpleNamespace(framework_repo_path=""))
+
+    assert roots == (repo.resolve(),)
+
+
+def test_a_configured_root_is_added_to_what_the_runtime_found(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An operator pointing at a fourth checkout is honoured, not overridden."""
+    served = _repo(tmp_path, "served")
+    extra = _repo(tmp_path, "extra")
+    monkeypatch.setattr(
+        campaign_baseline,
+        "_package_repository",
+        lambda name: served.resolve() if name == "aiter" else None,
+    )
+
+    roots = campaign_repositories(SimpleNamespace(framework_repo_path=str(extra)))
+
+    assert set(roots) == {served.resolve(), extra.resolve()}
+
+
+def test_a_wheel_installed_framework_is_not_a_repository_to_seal(monkeypatch) -> None:
+    """A wheel carries no source to rewrite, so it has no base to pin."""
+    import importlib.util
+    from types import SimpleNamespace as Spec
+
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: Spec(origin="/opt/venv/lib/python3.10/site-packages/vllm/__init__.py"),
+    )
+
+    assert campaign_baseline._package_repository("vllm") is None
+
+
+def test_a_repository_a_killed_controller_left_on_a_branch_is_reclaimed(tmp_path: Path) -> None:
+    """Integration refuses a HEAD that is not the base commit it was promised."""
+    repo = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    _git(repo, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}abandoned")
+    (repo / "kernel.py").write_text("half-finished\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "campaign work")
+    (repo / FORGE_LOOP_OUTPUT_DIRNAME).mkdir()
+
+    reclaimed = reclaim_campaign_repositories({str(repo): base})
+
+    assert str(repo) in reclaimed
+    assert _git(repo, "rev-parse", "HEAD").lower() == base
+    assert (repo / "kernel.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert not (repo / FORGE_LOOP_OUTPUT_DIRNAME).exists()
+
+
+def test_a_repository_the_controller_returned_cleanly_is_left_alone(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    branch_before = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+    assert reclaim_campaign_repositories({str(repo): base}) == {}
+    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == branch_before

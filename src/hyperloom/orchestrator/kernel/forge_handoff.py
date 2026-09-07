@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import Any
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
 from hyperloom.common.io import atomic_write_text
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
+from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
 
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
@@ -95,27 +95,13 @@ def _head_commit(repo: Path) -> str:
 
 
 def source_repository_roots(state: Any) -> tuple[Path, ...]:
-    """Resolve configured source paths to distinct Git repository roots."""
-    raw_paths = [
-        getattr(state, "framework_repo_path", ""),
-        os.environ.get("FRAMEWORK_REPO_PATH", ""),
-    ]
-    raw_paths.extend(
-        value for value in os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep) if value
-    )
-    roots: set[Path] = set()
-    for raw in raw_paths:
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        path = Path(text).expanduser().resolve(strict=False)
-        if path.is_file():
-            path = path.parent
-        for candidate in (path, *path.parents):
-            if (candidate / ".git").exists():
-                roots.add(candidate)
-                break
-    return tuple(sorted(roots, key=str))
+    """The repositories a rewrite may name, resolved the same way the seal does.
+
+    Shared with the baseline seal deliberately. The agent is told which
+    repositories exist and at which commit; a document that named a different
+    set than the one that was sealed would send it at a tree with no base.
+    """
+    return campaign_repositories(state)
 
 
 def build_serving_context_md(state: Any, env_spec: Mapping[str, Any] | None = None) -> str:
