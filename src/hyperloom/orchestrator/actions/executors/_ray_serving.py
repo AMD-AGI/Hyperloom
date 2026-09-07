@@ -68,7 +68,9 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
 
 
 def _pdeathsig_preexec() -> None:
-    """Best-effort: ask the OS to SIGKILL this child if its parent dies."""
+    """Best-effort ``PR_SET_PDEATHSIG``: reaches the direct child only, so a server that forks its own workers still
+    leaves grandchildren holding GPU memory. It narrows the window; the durable backstop is the pidfile scanned by
+    :func:`._server_lifecycle.reap_orphaned_servers`. No-op where prctl is unavailable."""
     try:
         import ctypes  # noqa: PLC0415
 
@@ -81,7 +83,11 @@ def _pdeathsig_preexec() -> None:
 
 @dataclass
 class ManagedServerProcess:
-    """Supervise a single GPU/serving subprocess tied to this object's lifetime."""
+    """Supervise a single GPU/serving subprocess tied to this object's lifetime.
+
+    Launched in a new POSIX session (distinct pgid) so the tree can be reaped atomically; PR_SET_PDEATHSIG narrows the
+    window on an unexpected owner death (direct child only -- see :func:`_pdeathsig_preexec`).
+    """
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
@@ -386,8 +392,15 @@ class ServingLease:
             else:
                 rc, out, err = self._await_or_cancel(ref, cancel_scope=cancel_scope)
         except _actor_err as exc:  # type: ignore[misc]
-            # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it.
-            log.warning("ServingLease.run_session_kill: ray actor died: %r", exc)
+            # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
+            # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
+            # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
+            # here can still reach the server tree the dead actor spawned; the shutdown pidfile reap frees those GPUs.
+            log.warning(
+                "ServingLease.run_session_kill: ray actor died: %r; its server tree (if any) "
+                "is left to the pidfile reaper",
+                exc,
+            )
             self._actor = None
             try:
                 from ._ray_backend import mark_ray_backend_unhealthy  # noqa: PLC0415

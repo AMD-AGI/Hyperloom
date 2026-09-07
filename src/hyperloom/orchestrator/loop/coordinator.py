@@ -593,7 +593,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._resumed_from = self._detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
-        self._reap_orphaned_servers_best_effort()
+        self._reap_orphaned_servers_best_effort(phase="boot")
         # Derive model_class once at boot if not supplied; never overwrite a resume.
         if not (self.shared_state.model_class or "").strip():
             self.shared_state.model_class = self._model_class_override or _infer_model_class_from_config(
@@ -1146,8 +1146,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
         ss = self.shared_state
         return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
 
-    def _reap_orphaned_servers_best_effort(self) -> None:
-        """Reap leftover single-node serving processes from a prior crash."""
+    def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
+        """Reap leftover single-node serving processes via this session's pidfiles.
+
+        Runs at boot and again at shutdown. The shutdown pass is the only mechanism covering a server whose owner died
+        without running its own teardown: the in-band paths all die with the owner, whereas a pidfile plus a cmdline
+        check outlives it.
+        """
         try:
             from ..actions.executors._multi_node_env import is_multi_node
 
@@ -1158,12 +1163,13 @@ class Coordinator(metaclass=_CoordinatorMeta):
             reaped = reap_orphaned_servers(self.session_dir)
             if reaped:
                 log.warning(
-                    "coordinator: reaped %d orphaned serving process(es) at boot: %s",
+                    "coordinator: reaped %d orphaned serving process(es) at %s: %s",
                     len(reaped),
+                    phase,
                     reaped,
                 )
-        except Exception:  # noqa: BLE001 - boot-time cleanup must never be fatal
-            log.exception("coordinator: orphan server reaper failed (ignored)")
+        except Exception:  # noqa: BLE001 - cleanup must never be fatal
+            log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     # Advisory disk guard: when the session partition runs low, LRU-trim the bulkiest churn (per-task runs/
     # workspaces); durable state is never touched.
@@ -1586,6 +1592,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     pass
             with timed_teardown_step(self.shared_state, "close_backends"):
                 await self._close_backends()
+            # A benchmark server outliving the run holds every GPU it was given,
+            # so the last thing the session does is reap its own pidfiles.
+            with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
+                await asyncio.to_thread(self._reap_orphaned_servers_best_effort, phase="shutdown")
             self.shared_state.save(self.session_dir)
         return self.shared_state.stop_reason
 

@@ -1343,3 +1343,61 @@ class TestThePersistedDeadlineIsTheLoopDeadline:
         assert time.monotonic() - started < 15.0
         assert "close_backends" in coord.shared_state.teardown_timings_sec
         assert coord.shared_state.teardown_timings_sec["total"] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_a_server_still_up_at_exit_is_reaped_by_teardown(self, coord: Coordinator):
+        """The run reaps its own serving pidfiles on the way out.
+
+        Every in-band kill path (a live ``Popen`` handle, ``PR_SET_PDEATHSIG``
+        on a Ray actor's direct child) dies with the process that owns it, so a
+        session that ended while a benchmark server was up left it holding its
+        GPUs until some later session booted in the same directory.
+        """
+        import subprocess
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path
+
+        marker = "vllm serve"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", f"import time; _={marker!r}; time.sleep(120)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # /proc/<pid>/cmdline stays empty until the child execs, and the reaper
+        # matches on it.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                if marker.encode() in Path(f"/proc/{proc.pid}/cmdline").read_bytes():
+                    break
+            except OSError:
+                pass
+            time.sleep(0.02)
+        else:
+            proc.kill()
+            pytest.skip("child never exposed a matching cmdline")
+
+        run_dir = coord.session_dir / "runs" / "roofline" / "post_opt"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        pidfile = run_dir / "vllm_8000.pid"
+        pidfile.write_text(str(proc.pid), encoding="utf-8")
+
+        start = datetime.now(timezone.utc) - timedelta(hours=3)
+        coord.shared_state.start_ts = start.isoformat()
+        coord.shared_state.max_minutes = 180
+        coord.shared_state.deadline_unix = start.timestamp() + 180 * 60.0
+        try:
+            await coord.run(max_minutes=180, closing_grace_sec=0.0, max_ticks=8)
+            # Read liveness before the safety kill below, or the assertion is
+            # satisfied by this test rather than by the teardown.
+            reaped = proc.poll() is not None or proc.wait(timeout=10) is not None
+        finally:
+            await coord.stop()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+
+        assert "reap_orphaned_servers" in coord.shared_state.teardown_timings_sec
+        assert reaped, "teardown left the serving process alive"
+        assert not pidfile.exists()
