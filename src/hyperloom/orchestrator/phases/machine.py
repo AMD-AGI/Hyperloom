@@ -272,18 +272,6 @@ class MachinePhase(PhaseHandler):
                     "detail": f"kind not allowed in {target}; re-dispatch if still needed",
                 },
             )
-            # Also per task, so the cancellation survives in last_action_failures
-            # after the observation has scrolled out of the inbox window.
-            for task_id in cancelled:
-                self.shared_state.record_action_failure(
-                    action="queued_task_cancelled_on_phase_transition",
-                    task_id=task_id,
-                    result={
-                        "status": "cancelled",
-                        "error_class": "phase_transition_cancel",
-                        "error": f"kind not allowed in {target} (entered from {prior})",
-                    },
-                )
         state.record_phase_transition(
             to_phase=target,
             reason=reason,

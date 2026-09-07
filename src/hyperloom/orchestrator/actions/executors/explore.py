@@ -764,25 +764,9 @@ class ExploreExecutor:
 
         runnable: list[GridVariant] = list(unique_in_round.values())
 
-        # Re-proposals are still benchmarked; we only surface the prior outcome.
-        re_proposed = 0
-        for fp in unique_in_round:
-            prior = tested_dict.get(fp)
-            if not isinstance(prior, dict):
-                continue
-            re_proposed += 1
-            if shared_state is not None:
-                shared_state.record_action_failure(
-                    action="explore_re_proposal",
-                    task_id=str(ctx.task.task_id),
-                    result={
-                        "status": "warning",
-                        "fingerprint": fp,
-                        "prior_outcome": prior.get("outcome"),
-                        "prior_gain_pct": prior.get("gain_pct"),
-                        "name": prior.get("name"),
-                    },
-                )
+        # Re-proposals are still benchmarked; the tested ledger already carries
+        # each prior outcome and is rendered in full, so this only counts them.
+        re_proposed = sum(1 for fp in unique_in_round if isinstance(tested_dict.get(fp), dict))
 
         log.info(
             "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d)",
