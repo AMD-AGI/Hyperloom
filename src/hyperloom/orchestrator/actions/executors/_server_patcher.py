@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from ._file_lock import best_effort_file_lock
 
@@ -704,6 +704,14 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     version = (getattr(sglang, "__version__", "") or "").strip()
 
+    sglang_pkg = _sglang_package_dir(sglang)
+    if sglang_pkg is None:
+        log.warning(
+            "_server_patcher: cannot locate sglang install root (no "
+            "__file__ and no __path__ entries); skip patch"
+        )
+        return None
+
     # Resolve the patches dir before the version check so the gate can consult
     # the TraceLens-shipped manifest.
     patches_root = _patch_tree(tracelens_root, "sglang_roofline_patches")
@@ -745,18 +753,13 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     # Support both editable and wheel layouts (see _resolve_sglang_apply_root).
-    sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
-        return None
-    apply_root, apply_strip = apply_resolution
+    apply_root, apply_strip = _resolve_sglang_apply_root(sglang_pkg)
 
     filtered_patches: list[Path] = list(patches)
 
     # Sentinel: the kernel_shape_profiler patch creates a new file at
     # ``sglang/srt/utils/kernel_shape_profiler.py`` in both layouts.
-    sentinel = sglang_module.parent / "srt" / "utils" / "kernel_shape_profiler.py"
-    sglang_pkg = sglang_module.parent
+    sentinel = sglang_pkg / "srt" / "utils" / "kernel_shape_profiler.py"
     # Also verify the annotation pipeline so a partial apply (main sentinel
     # present but annotations missing) is still detected: scheduler callback ->
     # profiler_manager toggle -> io_struct request fields -> step-span
@@ -788,31 +791,53 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     )
 
 
-def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
-    """Pick ``(apply_root, strip_count)`` for the active SGLang install.
+def _sglang_package_dir(sglang_module: Any) -> Path | None:
+    """Resolve the installed ``sglang`` package directory.
 
-    Editable (``<repo>/python/sglang/``): ``(repo_root, 1)``. Wheel
-    (``site-packages/sglang/`` with no ``python/`` parent):
-    ``(<site-packages>/sglang, 3)``. Anything else: ``None`` (fail-soft).
+    Prefers ``__file__``'s parent (the common case: a regular package whose
+    ``__init__.py`` sits directly in the package directory). Falls back to
+    ``__path__[0]`` when ``__file__`` is ``None`` -- the shape of a PEP 420
+    namespace-package install, which some pip/conda layouts produce for
+    ``sglang``. ``__path__`` is always present on an importable package
+    (namespace or regular) and already points at the package directory
+    itself, so no further ``.parent`` walk is needed for that branch.
 
     Args:
-        sglang_module: Resolved path to the imported ``sglang`` package file.
+        sglang_module: The imported ``sglang`` module object.
 
     Returns:
-        An ``(apply_root, strip_count)`` tuple, or ``None`` when the install
-        layout is unrecognized.
+        The resolved package directory, or ``None`` when neither
+        ``__file__`` nor ``__path__`` resolves to anything (an install this
+        module has no way to locate).
     """
-    if sglang_module.parent.parent.name == "python":
-        return sglang_module.parent.parent.parent, 1
-    sglang_dir = sglang_module.parent
-    if sglang_dir.name == "sglang":
-        return sglang_dir, 3
-    log.info(
-        "_server_patcher: SGLang install at %s has unexpected layout (parent dir name=%r); skip patching",
-        sglang_module,
-        sglang_dir.name,
-    )
+    file_attr = getattr(sglang_module, "__file__", None)
+    if file_attr:
+        return Path(file_attr).resolve().parent
+    search_path = list(getattr(sglang_module, "__path__", []) or [])
+    if search_path:
+        return Path(search_path[0]).resolve()
     return None
+
+
+def _resolve_sglang_apply_root(sglang_pkg: Path) -> tuple[Path, int]:
+    """Pick ``(apply_root, strip_count)`` for the active SGLang install.
+
+    Editable (``<repo>/python/sglang/``): ``(repo_root, 1)``. Wheel /
+    namespace-package (``site-packages/sglang/`` with no ``python/``
+    parent): ``(sglang_pkg, 3)``.
+
+    Args:
+        sglang_pkg: The resolved ``sglang`` package directory (see
+            :func:`_sglang_package_dir`).
+
+    Returns:
+        An ``(apply_root, strip_count)`` tuple. Always resolvable given a
+        genuine package directory; the caller fail-softs earlier, when
+        :func:`_sglang_package_dir` cannot locate one at all.
+    """
+    if sglang_pkg.parent.name == "python":
+        return sglang_pkg.parent.parent, 1
+    return sglang_pkg, 3
 
 
 # CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the
@@ -931,6 +956,14 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     version = (getattr(sglang, "__version__", "") or "").strip()
 
+    sglang_pkg = _sglang_package_dir(sglang)
+    if sglang_pkg is None:
+        log.warning(
+            "_server_patcher: cannot locate sglang install root (no "
+            "__file__ and no __path__ entries); skip CK block-scale patch"
+        )
+        return None
+
     # KernelForge layout: ``serving_patches/sglang/`` holds the per-version
     # subdirs plus the SUPPORTED_VERSIONS manifest.
     patches_root = serving_patches_root / "sglang"
@@ -972,15 +1005,11 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
-        return None
-    apply_root, apply_strip = apply_resolution
+    apply_root, apply_strip = _resolve_sglang_apply_root(sglang_pkg)
 
     # Sentinel: the patch edits
     # ``sglang/srt/layers/quantization/fp8_utils.py`` in place (both layouts).
-    sentinel = sglang_module.parent / "srt" / "layers" / "quantization" / "fp8_utils.py"
+    sentinel = sglang_pkg / "srt" / "layers" / "quantization" / "fp8_utils.py"
     if not sentinel.is_file():
         log.warning(
             "_server_patcher: SGLang install layout unexpected (no %s); skip CK block-scale patch",
