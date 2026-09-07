@@ -1587,9 +1587,9 @@ def _delivered_payload_paths(
     """What the session bundle actually hands a consumer of this recipe.
 
     The recipe names the bytes behind its manifests and digests, and the
-    packager says which of them arrive; neither side restates the other's rules.
-    ``None`` when the recipe references nothing, which is the one case with
-    nothing to deliver.
+    packager says which of them arrive as the recipe describes them; neither
+    side restates the other's rules. ``None`` when the recipe references
+    nothing, which is the one case with nothing to deliver.
     """
     from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
 

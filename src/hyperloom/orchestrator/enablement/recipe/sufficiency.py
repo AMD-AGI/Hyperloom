@@ -471,15 +471,16 @@ def _credential_reasons(
 def _payload_references(
     section: Mapping[str, Any],
     steps: Sequence[Mapping[str, Any]],
-) -> list[tuple[str, str, str]]:
-    """Return ``(code, scope, path)`` for every byte a replay must be handed.
+) -> list[tuple[str, str, str, str]]:
+    """Return ``(code, scope, path, sha256)`` for every byte a replay is handed.
 
     The recipe carries manifests, digests and class names; these name the bytes
-    behind them, each with the refusal its absence earns. A patch step is not
-    among them: its own ``path`` names the authoring workspace no bundle ships,
-    while the content it produced is its root's snapshot payload.
+    behind them, each with the refusal its absence earns and, where its recorder
+    took one, the digest the delivered bytes must still hash to. A patch step is
+    not among them: its own ``path`` names the authoring workspace no bundle
+    ships, while the content it produced is its root's snapshot payload.
     """
-    refs: list[tuple[str, str, str]] = []
+    refs: list[tuple[str, str, str, str]] = []
     for snapshot in section.get("source_snapshots") or []:
         if not isinstance(snapshot, Mapping):
             continue
@@ -490,25 +491,31 @@ def _payload_references(
         # reference at all has nowhere for one to be.
         payloads = [str(row.get("rel") or "").strip("/") for row in rows if str(row.get("op") or "") != "delete"]
         if not ref:
-            refs.append(("source_snapshot_missing", root_id, ""))
+            refs.append(("source_snapshot_missing", root_id, "", ""))
             continue
-        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}") for rel in payloads if rel)
+        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel)
     config_path = str((section.get("accepted_config") or {}).get("config_path") or "").strip("/")
     if config_path:
-        refs.append(("artifact_not_self_contained", "config_path", config_path))
+        refs.append(("artifact_not_self_contained", "config_path", config_path, ""))
     for index, step in enumerate(steps):
         # A digest names the bytes an install consumed; only the delivery makes
         # them obtainable.
         for identity in step.get("input_identity") or ():
-            rel = str(identity.get("rel") or "").strip("/") if isinstance(identity, Mapping) else ""
+            if not isinstance(identity, Mapping):
+                continue
+            rel = str(identity.get("rel") or "").strip("/")
             if rel:
-                refs.append(("artifact_not_self_contained", f"step[{index}]", rel))
+                refs.append(("artifact_not_self_contained", f"step[{index}]", rel, str(identity.get("sha256") or "")))
     return refs
 
 
-def referenced_payloads(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> list[str]:
-    """Return the paths a delivery must be asked about, for :func:`evaluate_replay_sufficiency`."""
-    return [path for _code, _scope, path in _payload_references(section, steps) if path]
+def referenced_payloads(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """Return ``{path: sha256}`` for the bytes a delivery must be asked about.
+
+    The digest is ``""`` where the recipe recorded none; where it recorded one,
+    a delivery carrying different bytes is not carrying this payload.
+    """
+    return {path: digest for _code, _scope, path, digest in _payload_references(section, steps) if path}
 
 
 def _delivery_reasons(
@@ -526,7 +533,7 @@ def _delivery_reasons(
     """
     packaged = {str(p).strip("/") for p in delivered}
     reasons: list[dict[str, Any]] = []
-    for code, scope, path in _payload_references(section, steps):
+    for code, scope, path, _digest in _payload_references(section, steps):
         if path not in packaged:
             reasons.append(_reason(code, scope))
     return reasons

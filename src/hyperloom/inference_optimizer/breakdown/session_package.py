@@ -27,6 +27,7 @@ Contract:
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import logging
 import os
@@ -36,7 +37,7 @@ import zipfile
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Mapping
 
 from ..session.paths import is_path_within
 
@@ -440,35 +441,46 @@ def _apply_caps(matched: list[Path], session_dir: Path) -> tuple[list[tuple[Path
     return included, False, []
 
 
-def deliverable(session_dir: Path | str, rel_paths: Iterable[str]) -> set[str]:
-    """Return which of ``rel_paths`` this bundle would hand a consumer.
+def deliverable(session_dir: Path | str, expected: Mapping[str, str]) -> set[str]:
+    """Return which of ``expected``'s paths this bundle would hand a consumer.
 
-    The packager's own rules answer, rather than a second copy of them: a path
-    the curated selection does not match, one the session does not hold as a
-    regular file inside itself, and one no bundle could carry because it alone
-    exceeds the byte cap are all the same answer -- absent.
+    ``expected`` maps each session-relative path to the sha256 its recorder took
+    of it, or ``""`` where none was taken. A path is deliverable when the
+    packager's own selection and caps admit it *and*, where a digest was
+    recorded, the bytes on disk still hash to it -- a recorded digest that no
+    longer matches names content the consumer would receive in a form the recipe
+    does not describe.
 
-    Asked per candidate rather than by enumerating the tree, because a caller
-    judging a handful of payloads should not pay a walk of a session whose
-    ``runs/`` trees hold tens of thousands of files.
+    The caps are the packager's, applied the way it applies them: cumulatively,
+    over the whole selection in the order it bundles. A per-file test would call
+    a payload deliverable that the real run drops because earlier files had
+    already spent the budget.
     """
+    wanted = {str(k).strip("/"): str(v or "") for k, v in expected.items() if str(k).strip("/")}
+    if not wanted:
+        return set()
     try:
         sd = Path(session_dir).resolve()
+        if not sd.is_dir():
+            return set()
+        matched, _unmatched, _refused = _select(sd)
+        included, _truncated, _dropped = _apply_caps(matched, sd)
     except OSError:
-        log.debug("session package: deliverable check failed to resolve %s", session_dir, exc_info=True)
+        log.debug("session package: deliverable scan failed for %s", session_dir, exc_info=True)
         return set()
-    out: set[str] = set()
-    for raw in rel_paths:
-        rel = str(raw).strip("/")
-        if not rel or not any(_glob_match(rel, pattern) for pattern in PACKAGE_GLOBS):
-            continue
-        candidate = sd / rel
-        try:
-            if _is_packageable(candidate, sd) and candidate.stat().st_size <= _MAX_TOTAL_BYTES:
-                out.add(rel)
-        except OSError:
-            log.debug("session package: deliverable check failed for %s", rel, exc_info=True)
-    return out
+    admitted = {rel: path for path, rel, _sz in included if rel in wanted}
+    return {rel for rel, path in admitted.items() if _digest_matches(path, wanted[rel])}
+
+
+def _digest_matches(path: Path, expected_sha256: str) -> bool:
+    """Whether ``path`` still hashes to the digest its recorder took, if any."""
+    if not expected_sha256:
+        return True
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
+    except OSError:
+        log.debug("session package: could not re-read %s to verify its digest", path, exc_info=True)
+        return False
 
 
 def package_session_artifacts(
