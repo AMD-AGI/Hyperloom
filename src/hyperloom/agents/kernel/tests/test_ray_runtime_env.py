@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``backends/ray_runtime.py`` ``safe_runtime_env`` key/URL derivation.
-
-Locks the per-side alias derivation: each side's aliases come from that side's
-own credentials, and the GEAK aliases are never derived at all (GEAK runs on the
-Anthropic side via GEAK_CLAUDE_MODEL + ANTHROPIC_*).
-"""
+"""Unit tests for ``backends/ray_runtime.py`` ``safe_runtime_env`` key/URL derivation."""
 
 from __future__ import annotations
 
@@ -79,8 +74,7 @@ def test_explicit_anthropic_key_stays_on_anthropic_side(monkeypatch):
 
 
 def test_split_gateway_leaves_geak_aliases_to_the_operator(monkeypatch):
-    """Split deploy: the generic OpenAI-protocol aliases derive from the OpenAI
-    key, while the GEAK aliases stay unset for either side to claim."""
+    """Split deploy: the generic OpenAI-protocol aliases derive from the OpenAI"""
     _clear(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
@@ -113,8 +107,7 @@ def test_explicit_geak_aliases_are_forwarded_verbatim(monkeypatch):
 
 
 def test_anthropic_only_leaves_openai_side_unset(monkeypatch):
-    """Anthropic-only entry: the OpenAI-protocol aliases stay unconfigured. GEAK
-    itself runs from ANTHROPIC_* + GEAK_CLAUDE_MODEL, not from these aliases."""
+    """Anthropic-only entry: the OpenAI-protocol aliases stay unconfigured. GEAK"""
     _clear(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -135,12 +128,7 @@ def test_no_credentials_leaves_aliases_unset(monkeypatch):
 
 
 def test_gateway_custom_headers_reach_the_worker(monkeypatch):
-    """Both sides' gateway auth headers cross the Ray boundary.
-
-    A worker that receives the base URL and the key but not the subscription
-    header is rejected by a header-authenticated gateway, and the header cannot
-    be re-derived from the key.
-    """
+    """Both sides' gateway auth headers cross the Ray boundary."""
     _clear(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example/anthropic")

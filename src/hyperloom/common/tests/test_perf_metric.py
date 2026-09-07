@@ -19,8 +19,8 @@ from hyperloom.common.perf_metric import (
 
 _KEEP_THRESHOLD_PCT = 1.0
 
-# Shaped like a measured AgentX round: prefill dominates the token budget, so
-# total is essentially input and output-only grading would see ~1% of it.
+# Shaped like a measured AgentX round: prefill dominates the token budget, so total is essentially input and
+# output-only grading would see ~1% of it.
 _BASELINE = {
     "input_throughput": 25801.36,
     "output_throughput": 183.44,
@@ -80,11 +80,7 @@ def test_unusable_total_falls_back_to_input_plus_output():
 
 
 def test_total_lift_grades_like_a_throughput_delta():
-    """The graded gain must be the plain percentage delta of the objective.
-
-    This is what makes it comparable against ``keep_threshold_pct`` on the same
-    terms run_grid and integrate_patch use for a throughput delta.
-    """
+    """The graded gain must be the plain percentage delta of the objective."""
     for pct in (1.0, 3.0, 10.0):
         candidate = _measured(input_throughput=pct, output_throughput=pct)
         assert _graded_gain(candidate, _BASELINE) == pytest.approx(pct)
@@ -103,10 +99,7 @@ def test_sub_threshold_lift_is_refused_by_the_threshold_alone():
 
 
 def test_trading_input_for_output_is_not_a_win():
-    """Prefill carries the token budget, so giving it up cannot read as a gain.
-
-    Output-only grading called this variant a +8% win.
-    """
+    """Prefill carries the token budget, so giving it up cannot read as a gain."""
     candidate = _measured(input_throughput=-10.0, output_throughput=8.0)
     gain = _graded_gain(candidate, _BASELINE)
     assert gain is not None and gain < 0.0

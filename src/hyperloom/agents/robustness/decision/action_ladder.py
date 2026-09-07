@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Translate Symptoms into Coordinator Intents.
-
-Three tiers by severity:
-
-1. **observe** (low) — ``send_message(topic="observation")``: visibility, no pause.
-2. **diagnose** (medium) — ``alert(severity="medium")`` carrying evidence.
-3. **recommend** (high) — ``alert(severity="high")`` plus, for some symptoms, a
-   symptom-specific remediation intent: ``delegate(recover)`` (gpu_memory_leaked,
-   local_server_unreachable), or ``prune_branch`` (stuck / no-lever families in
-   ``_PRUNE_SYMPTOMS``). Every other HIGH symptom is strategic: the alert alone,
-   and Orchestration decides.
-
-Strategic suggestions ride the alert ``detail.suggestion`` field. A per-key
-cooldown (``Symptom.dedup_key`` × ``cooldown_ticks``) prevents inbox flooding.
-Findings — one record per intent batch — go to :class:`FindingSink`.
-"""
+"""Translate Symptoms into Coordinator Intents."""
 
 from __future__ import annotations
 
@@ -38,8 +23,7 @@ from ..role.envelope import (
 from ..signals import Symptom, SymptomSeverity
 
 
-# HIGH symptoms whose remediation is to prune an action family. Value is a fixed
-# family, or None to resolve it from the symptom's subject/evidence "family".
+# HIGH symptoms whose remediation is to prune an action family.
 _PRUNE_SYMPTOMS: dict[str, str | None] = {
     "repeated_failure": None,
     "same_payload_loop": None,
@@ -67,10 +51,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Finding:
-    """Persistent record describing one ladder firing.
-
-    Stored on disk by the FindingSink for later inspection.
-    """
+    """Persistent record describing one ladder firing."""
 
     tick_index: int
     timestamp_unix: float
@@ -91,23 +72,14 @@ class ActionLadderConfig:
 
 @dataclass
 class _LadderResult:
-    """Bundle of intents and findings produced by one ``decide`` call.
-
-    Attributes:
-        intents (list[Intent]): Intents to emit this tick.
-        findings (list[Finding]): Persistent records describing the firings.
-    """
+    """Bundle of intents and findings produced by one ``decide`` call."""
 
     intents: list[Intent]
     findings: list[Finding]
 
 
 class ActionLadder:
-    """Stateful ladder that maps symptoms onto intents and findings.
-
-    Emits intents only for symptoms whose dedup key is outside the cooldown
-    window and falls back to a heartbeat when the symptom set is empty.
-    """
+    """Stateful ladder that maps symptoms onto intents and findings."""
 
     def __init__(
         self,
@@ -115,21 +87,14 @@ class ActionLadder:
         config: ActionLadderConfig | None = None,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the ladder and load persisted cooldown bookkeeping.
-
-        Args:
-            config (ActionLadderConfig | None): Ladder tunables; a default
-                config is used when ``None``.
-            state_view (DetectorStateView | None): Optional disk-backed store
-                used to persist per-key cooldown ticks across restarts.
-        """
+        """Initialise the ladder and load persisted cooldown bookkeeping."""
         self._config = config or ActionLadderConfig()
         self._state_view = state_view
         # Cooldown bookkeeping persisted across subprocess restarts.
         loaded = state_view.load() if state_view is not None else {}
         self._last_emitted_tick: dict[tuple[str, ...], int] = _decode_last_emitted(loaded.get("last_emitted"))
-        # Stamped at the top of decide() so branches can build a stable
-        # tick-indexed idempotency_key without threading the tick around.
+        # Stamped at the top of decide() so branches can build a stable tick-indexed idempotency_key without threading
+        # the tick around.
         self._last_tick_index: int = 0
 
     def _persist_cooldown(self) -> None:
@@ -150,24 +115,7 @@ class ActionLadder:
         now_unix: float,
         rca_provider: Any | None = None,
     ) -> _LadderResult:
-        """Produce intents (+ findings) for this tick.
-
-        ``rca_provider`` may be ``None`` (no RCA), or any object exposing
-        ``async def summarize(symptom) -> str``. When the provider has a
-        ``set_tick(int)`` hook (e.g. :class:`LlmRcaEngine`) we call it
-        once per tick so per-tick budgets reset deterministically.
-
-        Args:
-            symptoms (list[Symptom]): Symptoms detected this tick.
-            tick_index (int): Monotonic index of the current tick.
-            now_unix (float): Current wall-clock time in Unix seconds.
-            rca_provider (Any | None): Optional RCA engine used to attach
-                ``rca_text`` to findings.
-
-        Returns:
-            _LadderResult: The intents to emit and the findings to persist; a
-            lone heartbeat intent when nothing else fired.
-        """
+        """Produce intents (+ findings) for this tick."""
         intents: list[Intent] = []
         findings: list[Finding] = []
         any_emit = False
@@ -206,16 +154,7 @@ class ActionLadder:
         return _LadderResult(intents=intents, findings=findings)
 
     def _cooldown_elapsed(self, key: tuple[str, ...], tick_index: int) -> bool:
-        """Report whether a dedup key is outside its cooldown window.
-
-        Args:
-            key (tuple[str, ...]): The symptom dedup key.
-            tick_index (int): The current tick index.
-
-        Returns:
-            bool: ``True`` if the key has never fired or enough ticks have
-            elapsed since it last did.
-        """
+        """Report whether a dedup key is outside its cooldown window."""
         cooldown = self._config.cooldown_ticks
         last = self._last_emitted_tick.get(key)
         if last is None:
@@ -223,14 +162,7 @@ class ActionLadder:
         return (tick_index - last) >= cooldown
 
     def _intents_for(self, sym: Symptom) -> list[Intent]:
-        """Dispatch a symptom to the ladder tier matching its severity.
-
-        Args:
-            sym (Symptom): The symptom to translate.
-
-        Returns:
-            list[Intent]: The intents for the observe/diagnose/recommend tier.
-        """
+        """Dispatch a symptom to the ladder tier matching its severity."""
         if sym.severity is SymptomSeverity.LOW:
             return self._observe(sym)
         if sym.severity is SymptomSeverity.MEDIUM:
@@ -238,14 +170,7 @@ class ActionLadder:
         return self._recommend(sym)
 
     def _observe(self, sym: Symptom) -> list[Intent]:
-        """Build the low-severity observation intent for a symptom.
-
-        Args:
-            sym (Symptom): The low-severity symptom.
-
-        Returns:
-            list[Intent]: A single ``send_message`` observation intent.
-        """
+        """Build the low-severity observation intent for a symptom."""
         return [
             build_send_message(
                 "observation",
@@ -255,29 +180,11 @@ class ActionLadder:
         ]
 
     def _diagnose(self, sym: Symptom) -> list[Intent]:
-        """Build the medium-severity diagnostic intent for a symptom.
-
-        Args:
-            sym (Symptom): The medium-severity symptom.
-
-        Returns:
-            list[Intent]: A single medium-severity ``alert`` intent.
-        """
+        """Build the medium-severity diagnostic intent for a symptom."""
         return [build_alert("medium", sym.summary, detail=_detail(sym))]
 
     def _recommend(self, sym: Symptom) -> list[Intent]:
-        """Build high-severity intents, adding policing intents per symptom.
-
-        Always emits a high-severity alert; depending on ``sym.name`` it may
-        append a delegate / prune_branch intent that encodes the concrete
-        remediation for that symptom.
-
-        Args:
-            sym (Symptom): The high-severity symptom.
-
-        Returns:
-            list[Intent]: The alert plus any symptom-specific policing intents.
-        """
+        """Build high-severity intents, adding policing intents per symptom."""
         intents: list[Intent] = [build_alert("high", sym.summary, detail=_detail(sym))]
         # Resource-safety: GPU leak -> ``delegate(recover, force_gpu_cleanup=True)``.
         if sym.name == "gpu_memory_leaked":
@@ -295,21 +202,12 @@ class ActionLadder:
             )
             return intents
         # Dead inference server -> ``delegate(recover, force_gpu_cleanup=True)``.
-        # ``recover``'s owner-pattern kill list already covers the atom/Magpie
-        # server process names (Magpie, EngineCore); this is the same remedy
-        # as gpu_memory_leaked, just triggered by an unreachable health check
-        # instead of a VRAM leak. ("server_lifecycle", named in this
-        # symptom's own suggestion text, is an internal warm-reuse config
-        # helper, not a real dispatchable action — PolicyGate would reject it
-        # as unknown_action.)
         if sym.name == "local_server_unreachable":
             evidence = dict(sym.evidence) if isinstance(sym.evidence, dict) else {}
-            # `_server_unreachable` emits one symptom per unreachable probe
-            # target and marks all of them HIGH together, so a tick-only key
-            # would collide across targets: the first delegate creates the
-            # task and the rest come back as duplicate-idempotency
-            # PolicyDenied, which incorrectly books a working recovery as a
-            # repeated policy denial. Disambiguate with the target itself.
+            # `_server_unreachable` emits one symptom per unreachable probe target and marks all of them HIGH
+            # together, so a tick-only key would collide across targets: the first delegate creates the task and the
+            # rest come back as duplicate-idempotency PolicyDenied, which incorrectly books a working recovery as a
+            # repeated policy denial.
             target = str(sym.subject.get("url") or evidence.get("url") or "unknown")
             target_key = hashlib.sha1(target.encode("utf-8")).hexdigest()[:8]
             intents.append(
@@ -324,28 +222,19 @@ class ActionLadder:
                 )
             )
             return intents
-        # Stuck / no-lever families: prune the branch so its budget lands
-        # elsewhere. Family resolves from a fixed map or the symptom subject.
+        # Stuck / no-lever families: prune the branch so its budget lands elsewhere.
         if sym.name in _PRUNE_SYMPTOMS:
             family = _prune_family_for(sym)
             if family:
                 intents.append(build_prune_branch(family, reason=sym.summary))
             return intents
-        # Every other HIGH symptom is strategic: the alert above carries
-        # evidence + suggestion; Orchestration decides how to act.
+        # Every other HIGH symptom is strategic: the alert above carries evidence + suggestion; Orchestration decides
+        # how to act.
         return intents
 
 
 def _detail(sym: Symptom) -> dict[str, Any]:
-    """Build the structured detail payload carried on alert intents.
-
-    Args:
-        sym (Symptom): The symptom whose fields are packed into the detail.
-
-    Returns:
-        dict[str, Any]: The symptom metadata and evidence, plus ``suggestion``
-        when present.
-    """
+    """Build the structured detail payload carried on alert intents."""
     body = {
         "symptom": sym.name,
         "severity": sym.severity.value,
@@ -366,18 +255,7 @@ def _build_finding(
     now_unix: float,
     rca_text: str,
 ) -> Finding:
-    """Assemble a persistent :class:`Finding` for one ladder firing.
-
-    Args:
-        sym (Symptom): The symptom that fired.
-        intents (Iterable[Intent]): The intents emitted for the symptom.
-        tick_index (int): The tick on which the firing occurred.
-        now_unix (float): Wall-clock time of the firing, in Unix seconds.
-        rca_text (str): Optional root-cause text to attach.
-
-    Returns:
-        Finding: The fully populated finding record.
-    """
+    """Assemble a persistent :class:`Finding` for one ladder firing."""
     return Finding(
         tick_index=tick_index,
         timestamp_unix=now_unix,
@@ -391,16 +269,7 @@ def _build_finding(
 
 
 async def _safe_rca(provider: Any | None, sym: Symptom) -> str:
-    """Invoke an RCA provider defensively, awaiting it when needed.
-
-    Args:
-        provider (Any | None): Optional object exposing ``summarize(symptom)``
-            (sync or async).
-        sym (Symptom): The symptom to summarize.
-
-    Returns:
-        str: The RCA text, or an empty string when absent or on error.
-    """
+    """Invoke an RCA provider defensively, awaiting it when needed."""
     if provider is None:
         return ""
     try:
@@ -422,17 +291,7 @@ _LADDER_KEY_SEP: str = "\x1f"  # ASCII unit separator — safe inside JSON strin
 def _encode_last_emitted(
     last_emitted: dict[tuple[str, ...], int],
 ) -> dict[str, int]:
-    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict.
-
-    Tuple components are joined with ``_LADDER_KEY_SEP`` so the decoder can
-    recover them.
-
-    Args:
-        last_emitted: Cooldown map keyed by tuple of string components.
-
-    Returns:
-        A string-keyed dict safe for JSON serialization.
-    """
+    """Serialise a tuple-keyed cooldown dict to a JSON-safe dict."""
     out: dict[str, int] = {}
     for key, tick in last_emitted.items():
         try:
@@ -449,15 +308,7 @@ def _encode_last_emitted(
 def _decode_last_emitted(
     payload: Any,
 ) -> dict[tuple[str, ...], int]:
-    """Inverse of :func:`_encode_last_emitted`; tolerant of bad input.
-
-    Args:
-        payload (Any): The persisted mapping of encoded keys to ticks.
-
-    Returns:
-        dict[tuple[str, ...], int]: The decoded tuple-keyed cooldown dict;
-        empty when ``payload`` is not a dict.
-    """
+    """Inverse of :func:`_encode_last_emitted`; tolerant of bad input."""
     if not isinstance(payload, dict):
         return {}
     out: dict[tuple[str, ...], int] = {}

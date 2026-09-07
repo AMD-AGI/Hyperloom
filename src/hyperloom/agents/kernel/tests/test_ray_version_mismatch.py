@@ -32,8 +32,7 @@ _VERSION_MISMATCH_MSG = (
 
 
 def _make_fake_ray(init_side_effects):
-    """Build a stand-in ``ray`` module whose ``init`` pops side effects in
-    order: a ``BaseException`` instance is raised, ``None`` succeeds."""
+    """Build a stand-in ``ray`` module whose ``init`` pops side effects in"""
     fake = types.ModuleType("ray")
     calls = {"init": 0, "shutdown": 0}
     effects = list(init_side_effects)
@@ -120,8 +119,7 @@ def test_quiet_ray_init_no_mismatch_succeeds_first_try(monkeypatch):
 
 
 def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
-    """``force_restart_local_cluster`` must ``ray stop --force`` then
-    ``ray start --head`` with the requested num_gpus, logging to the audit file."""
+    """``force_restart_local_cluster`` must ``ray stop --force`` then"""
     log_path = tmp_path / "ray_lifecycle.log"
     runs = []
 
@@ -136,8 +134,8 @@ def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
         ray_runtime.force_restart_local_cluster(num_gpus=4, log_path=log_path)
 
     assert runs[0] == ["ray", "stop", "--force"]
-    # The fresh head binds a probed free port (not the fixed 6379) so co-located
-    # host-network sessions never collide on Ray's default GCS port.
+    # The fresh head binds a probed free port (not the fixed 6379) so co-located host-network sessions never collide
+    # on Ray's default GCS port.
     assert runs[1][:3] == ["ray", "start", "--head"]
     assert any(tok.startswith("--port=") for tok in runs[1])
     assert "--num-gpus=4" in runs[1]
@@ -145,8 +143,7 @@ def test_force_restart_local_cluster_runs_stop_then_start(tmp_path):
 
 
 def test_force_restart_raises_when_start_fails(tmp_path):
-    """A non-zero ``ray start`` exit must raise so ``submit``'s except can
-    record it as a backend-dispatch failure."""
+    """A non-zero ``ray start`` exit must raise so ``submit``'s except can"""
     log_path = tmp_path / "ray_lifecycle.log"
 
     class _Proc:

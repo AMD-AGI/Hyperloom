@@ -5,11 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""End-to-end tests for the bypass CLI (bypass_trace_analysis.main).
-
-Covers the failure-fallback contract (bad/missing trace still yields valid
-artifacts + health warnings) and the stdout-is-a-single-result-JSON invariant.
-"""
+"""End-to-end tests for the bypass CLI (bypass_trace_analysis.main)."""
 
 from __future__ import annotations
 
@@ -156,8 +152,8 @@ def test_multi_rank_provenance_and_warning(tmp_path, capsys, monkeypatch):
 
 
 def test_high_gpu_idle_gate_suppresses_hot_kernels(tmp_path, capsys, monkeypatch):
-    # When the GPU is idle beyond the threshold, bypass suppresses every candidate
-    # list and surfaces a high_gpu_idle_pct warning.
+    # When the GPU is idle beyond the threshold, bypass suppresses every candidate list and surfaces a
+    # high_gpu_idle_pct warning.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
     trace = tmp_path / "idle.trace.json"
@@ -194,8 +190,7 @@ def test_high_idle_gate_respects_threshold_env(tmp_path, capsys, monkeypatch):
 
 
 def test_bypass_diffusion_aggregation_numerics():
-    # sigma_ideal = sum(actual * eff); placeholder kernels count only toward
-    # no_perf_model_us.
+    # sigma_ideal = sum(actual * eff); placeholder kernels count only toward no_perf_model_us.
     hot = [
         {
             "duration_us": 100.0,
@@ -237,8 +232,7 @@ def test_bypass_diffusion_aggregation_numerics():
 
 
 def test_diffusion_report_totals_param_marks_full_scope():
-    # When workload totals are supplied, the report uses them verbatim and marks
-    # kernel_scope=all_device_kernels.
+    # When workload totals are supplied, the report uses them verbatim and marks kernel_scope=all_device_kernels.
     totals = {
         "sigma_actual_kernel_us": 100.0,
         "sigma_ideal_roofline_us": 30.0,
@@ -271,8 +265,7 @@ def test_bypass_diffusion_report_shape_without_steps():
 
 
 def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
-    # The xDiT/scriptable path emits a workload-level diffusion_roofline.json
-    # that consumes --num-denoise-steps.
+    # The xDiT/scriptable path emits a workload-level diffusion_roofline.json that consumes --num-denoise-steps.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "t.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -306,8 +299,8 @@ def test_xdit_emits_diffusion_roofline(tmp_path, capsys, monkeypatch):
 
 
 def test_bypass_cli_accepts_forwarded_diffusion_flags():
-    # The bypass parser must accept --model-path/--precision (and the
-    # diffusion-ceiling siblings) or strict parse_args exits 2.
+    # The bypass parser must accept --model-path/--precision (and the diffusion-ceiling siblings) or strict parse_args
+    # exits 2.
     args = bta._build_arg_parser().parse_args(
         [
             "--trace-input",
@@ -368,8 +361,8 @@ def test_should_enable_steady_legacy_and_xdit_and_env():
 
 def test_non_kineto_json_yields_valid_artifacts_and_warns(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
-    # Valid JSON that is not a Kineto trace: still emit the full artifact set
-    # plus a no-GPU-kernels warning instead of crashing.
+    # Valid JSON that is not a Kineto trace: still emit the full artifact set plus a no-GPU-kernels warning instead of
+    # crashing.
     trace = tmp_path / "notrace.json"
     trace.write_bytes(json.dumps({"foo": "bar"}).encode("utf-8"))
     rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
@@ -523,8 +516,8 @@ def test_steady_state_mode_flag_enables_windowing(tmp_path, capsys, monkeypatch)
 
 
 def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
-    # When the repeating ProfilerStep window is found, per-step shares are
-    # trace-anchored, so the result is NOT estimated.
+    # When the repeating ProfilerStep window is found, per-step shares are trace-anchored, so the result is NOT
+    # estimated.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _STEADY_EVENTS}).encode("utf-8"))
@@ -558,8 +551,7 @@ def test_xdit_steady_anchored_is_not_estimated(tmp_path, capsys, monkeypatch):
 
 
 def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
-    # No per-step annotations -> falls back to full_trace, so the result is
-    # estimated and flags bypass_xdit_estimated.
+    # No per-step annotations -> falls back to full_trace, so the result is estimated and flags bypass_xdit_estimated.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "x.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
@@ -589,8 +581,8 @@ def test_xdit_full_trace_fallback_is_estimated(tmp_path, capsys, monkeypatch):
 
 
 def test_parse_failure_flags_analysis_degraded(tmp_path, capsys, monkeypatch):
-    # An unresolvable trace degrades gracefully (status=ok) but flags
-    # analysis_degraded so consumers know it actually failed.
+    # An unresolvable trace degrades gracefully (status=ok) but flags analysis_degraded so consumers know it actually
+    # failed.
     missing = tmp_path / "does_not_exist.trace.json"  # resolve_trace_file -> None -> status failed
     rc, result, _ = _run(_base_argv(tmp_path, str(missing)), capsys)
     assert rc == 0
@@ -648,8 +640,8 @@ _STEADY_EVENTS = [
 
 
 def test_text_gen_steady_fallback_is_estimated(tmp_path, capsys, monkeypatch):
-    # When steady-state windowing is requested but no repeating window is found,
-    # the full-trace shares are an estimate -> estimated=True.
+    # When steady-state windowing is requested but no repeating window is found, the full-trace shares are an estimate
+    # -> estimated=True.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     trace = tmp_path / "ng.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))  # no ProfilerStep
@@ -763,8 +755,7 @@ def test_maybe_build_shape_manifest_degrades_on_error(tmp_path, monkeypatch):
 
 
 def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):
-    # The gate used to default off, so forge's preferred dense-shape source was
-    # produced for nobody. On by default now.
+    # The gate used to default off, so forge's preferred dense-shape source was produced for nobody.
     monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
     res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res["status"] == "ok"
@@ -773,11 +764,9 @@ def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF", "", "  ", "none", "disabled"])
 def test_maybe_build_shape_manifest_can_still_be_turned_off(tmp_path, monkeypatch, value):
-    # The empty string and "none" belong here: a launcher disables a variable by
-    # exporting it empty at least as often as by unsetting it, and a bare
-    # {"0","false","no","off"} check read every one of those as ENABLED -- the
-    # opposite of what the operator asked for. Same off-vocabulary this file
-    # already documents for --steady-state-mode.
+    # The empty string and "none" belong here: a launcher disables a variable by exporting it empty at least as often
+    # as by unsetting it, and a bare {"0","false","no","off"} check read every one of those as ENABLED -- the opposite
+    # of what the operator asked for.
     monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", value)
     res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res == {"status": "disabled"}
@@ -785,12 +774,7 @@ def test_maybe_build_shape_manifest_can_still_be_turned_off(tmp_path, monkeypatc
 
 
 def test_the_cap_keeps_a_deterministic_spread_of_batch_sizes(tmp_path, monkeypatch):
-    """Which variants survive the cap must not depend on directory order.
-
-    Discovery walks the filesystem, so "first N" varied between machines; once
-    sorted, "first N" would instead have kept only the small-batch end -- 64
-    decode variants and no prefill one. Take an evenly spaced slice.
-    """
+    """Which variants survive the cap must not depend on directory order."""
     monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
     monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", "4")
     batches = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -813,18 +797,15 @@ def test_the_cap_keeps_a_deterministic_spread_of_batch_sizes(tmp_path, monkeypat
     forward = _run(shards)
     assert len(forward) == 4
     assert forward == _run(list(reversed(shards)))  # order-independent
-    # ...and it spans the range rather than hugging the decode end. Both ends
-    # inclusive: an even but half-open slice stops short of the tail, dropping
-    # the widest batch -- the one prefill variant the spread exists to keep.
+    # ...and it spans the range rather than hugging the decode end.
     assert forward[0] == "bs_1", forward
     assert forward[-1] == f"bs_{batches[-1]}", forward
     assert len(set(forward)) == 4, forward
 
 
 def test_capture_shards_are_capped_by_default(tmp_path, monkeypatch):
-    # Each shard costs an analyze_trace pass plus a sha256; with the manifest
-    # now built on every run, an uncapped default would put that cost on all of
-    # them. The cap is a budget, not a filter -- the drop is logged.
+    # Each shard costs an analyze_trace pass plus a sha256; with the manifest now built on every run, an uncapped
+    # default would put that cost on all of them.
     monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
     monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", raising=False)
     n = bta._DEFAULT_MAX_CAPTURES + 10
@@ -881,9 +862,7 @@ def test_build_manifest_provenance_stub_when_shared_raises(monkeypatch):
 
 
 def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
-    # TP>1 emits bs_16_rank0 / bs_16_rank1 (same shapes, different rank). They
-    # must collapse to ONE bs_16 variant, not two duplicate-labeled shards that
-    # overwrite each other's hash/meta and inflate variant_count.
+    # TP>1 emits bs_16_rank0 / bs_16_rank1 (same shapes, different rank).
     d = tmp_path / "caps"
     d.mkdir()
     for f in ("bs_16_rank0.json", "bs_16_rank1.json", "bs_64_rank0.json"):
@@ -895,11 +874,7 @@ def test_discover_capture_shards_dedups_tp_ranks(tmp_path):
 
 
 def test_discover_capture_shards_dedups_a_runner_prefixed_batch(tmp_path):
-    # An SGLang without the profiler patch prefixes the runner name:
-    # DecodeCudaGraphRunner_bs_104_rank0. The batch token is still what
-    # identifies the variant, so the ranks must collapse the same way — an
-    # anchored read finds nothing here and falls back to the per-rank stem,
-    # which silently turns one variant into one-per-rank.
+    # An SGLang without the profiler patch prefixes the runner name: DecodeCudaGraphRunner_bs_104_rank0.
     d = tmp_path / "graph_capture_profile"
     d.mkdir()
     for f in (
@@ -913,12 +888,8 @@ def test_discover_capture_shards_dedups_a_runner_prefixed_batch(tmp_path):
 
 
 def test_discover_capture_shards_skips_a_whole_capture_per_rank_file(tmp_path):
-    # ``cuda_graph_capture-<runner>-TP-<n>`` is one file per rank holding every
-    # batch size at once, so it carries no variant identity. Indexing it mints a
-    # bogus variant per rank (TP=8 -> eight shape-identical entries) because the
-    # label falls back to the stem, which differs per rank. It is a capture
-    # sidecar — the shared classifier is right to demote it from analysis — but
-    # that is a wider question than "does this shard name a variant".
+    # ``cuda_graph_capture-<runner>-TP-<n>`` is one file per rank holding every batch size at once, so it carries no
+    # variant identity.
     d = tmp_path / "graph_capture_profile"
     d.mkdir()
     for rank in range(3):
@@ -930,16 +901,15 @@ def test_discover_capture_shards_skips_a_whole_capture_per_rank_file(tmp_path):
 
 
 def _graph_under_recorded_events():
-    """Synthetic graph-mode trace: 4 graph launches but only 1 replay's kernels
-    recorded, spanning a large wall clock (busy fraction << 0.5)."""
+    """Synthetic graph-mode trace: 4 graph launches but only 1 replay's kernels"""
     events = [{"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}}]
     # Four graph-launch runtime events (no External id, only correlation).
     for i, corr in enumerate((5, 6, 7, 8)):
         events.append(
             {"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": corr, "External id": None}}
         )
-    # A normally-launched kernel (attributable) and graph-internal kernels for a
-    # single recorded replay (correlation 5). Total wall span ~10s, busy ~200us.
+    # A normally-launched kernel (attributable) and graph-internal kernels for a single recorded replay (correlation
+    # 5).
     events += [
         {"cat": "cuda_runtime", "name": "hipLaunchKernel", "args": {"correlation": 99, "External id": 200}},
         {"cat": "kernel", "ph": "X", "name": "Cijk_Alik_Bljk_HHS", "ts": 1000, "dur": 100, "args": {"correlation": 99}},
@@ -957,8 +927,8 @@ def _graph_under_recorded_events():
 
 
 def test_reader_marks_graph_attributed_not_unlinked(tmp_path):
-    # Graph-launch correlations classify replayed kernels as graph-attributed,
-    # never as (unlinked); flags graph_mode / graph_under_recorded.
+    # Graph-launch correlations classify replayed kernels as graph-attributed, never as (unlinked); flags graph_mode /
+    # graph_under_recorded.
     trace = tmp_path / "g.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
     out = bta._reader.analyze_trace(str(trace), top_k=0)
@@ -983,8 +953,8 @@ def test_reader_no_graph_mode_when_no_graph_launches(tmp_path):
 
 
 def test_graph_under_recorded_skips_idle_gate_keeps_candidates(tmp_path, capsys, monkeypatch):
-    # Under-recorded graph trace: idle% is ~99% but the idle gate must NOT clear
-    # candidates; instead a bypass_graph_under_recorded warning is surfaced.
+    # Under-recorded graph trace: idle% is ~99% but the idle gate must NOT clear candidates; instead a
+    # bypass_graph_under_recorded warning is surfaced.
     monkeypatch.delenv("HYPERLOOM_BYPASS_STEADY_STATE", raising=False)
     monkeypatch.delenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", raising=False)
     trace = tmp_path / "g.trace.json"
@@ -1039,10 +1009,7 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
 
 
 def _graph_fully_recorded_idle_events():
-    """Four graph launches that EACH recorded a kernel (coverage 1.0) but spread
-    over a long wall so busy% ~0 / idle% ~100%. This is a genuinely idle graph
-    workload, NOT an under-recorded capture: recorded-launch coverage is full, so
-    the idle gate must still suppress candidates (regression for the P1 review)."""
+    """Four graph launches that EACH recorded a kernel (coverage 1.0) but spread"""
     events = []
     for corr in (5, 6, 7, 8):
         events.append(
@@ -1090,13 +1057,9 @@ def test_fully_recorded_idle_graph_still_suppressed_by_idle_gate(tmp_path, capsy
 
 
 def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
-    """Regression: recorded-launch coverage must be computed over the FULL event
-    stream, not the steady window. A fully-recorded 4-launch trace whose steady
-    window happens to clip to a single replay must NOT read as 1/4 under-recorded
-    (the denominator graph_launch_count is whole-trace, so the numerator must be
-    too). Guards the steady-state bypass path (xDiT / HYPERLOOM_BYPASS_STEADY_STATE)."""
-    # One recorded kernel per graph launch (coverage 1.0 on the full trace),
-    # spread far apart in time so a narrow window contains only the first replay.
+    """Regression: recorded-launch coverage must be computed over the FULL event"""
+    # One recorded kernel per graph launch (coverage 1.0 on the full trace), spread far apart in time so a narrow
+    # window contains only the first replay.
     k_events = [
         ("graph_k0", 100.0, 5, 1000.0, 1100.0),
         ("graph_k1", 100.0, 6, 3_000_000.0, 3_000_100.0),
@@ -1116,17 +1079,14 @@ def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
     )
     cov = out["graph_coverage"]
     assert cov["graph_launch_count"] == 4
-    # whole-trace scope: all four launches recorded a kernel, not just the one in
-    # the window -> coverage 1.0 -> NOT under-recorded.
+    # whole-trace scope: all four launches recorded a kernel, not just the one in the window -> coverage 1.0 -> NOT
+    # under-recorded.
     assert cov["graph_launches_with_kernels"] == 4
     assert cov["graph_under_recorded"] is False
 
 
 def _graph_launch_stripped_events():
-    """The graph-under-recorded kernels WITHOUT the hipGraphLaunch runtime events
-    -- i.e. what a steady-state chunk can look like after the splitter drops the
-    launch records. Detection must see this as non-graph (so probing the chunk
-    instead of the raw trace would miss the artifact)."""
+    """The graph-under-recorded kernels WITHOUT the hipGraphLaunch runtime events"""
     return [
         {"cat": "kernel", "ph": "X", "name": "graph_fused_attn", "ts": 1100, "dur": 100, "args": {"correlation": 5}},
         {
@@ -1147,8 +1107,7 @@ def test_graph_launch_events_required_for_detection(tmp_path):
     raw_cov = bta._reader.analyze_trace(str(raw), top_k=0)["graph_coverage"]
     assert raw_cov["graph_mode"] is True
     assert raw_cov["graph_under_recorded"] is True
-    # Chunk with the launch runtime events stripped -> looks non-graph, so the
-    # artifact would be missed. This is why the guard must probe the RAW trace.
+    # Chunk with the launch runtime events stripped -> looks non-graph, so the artifact would be missed.
     chunk = tmp_path / "chunk.trace.json"
     chunk.write_bytes(json.dumps({"traceEvents": _graph_launch_stripped_events()}).encode("utf-8"))
     chunk_cov = bta._reader.analyze_trace(str(chunk), top_k=0)["graph_coverage"]
@@ -1190,12 +1149,7 @@ def test_clean_trace_raises_no_duration_warning(tmp_path, capsys):
 
 
 def test_denoise_steps_come_from_profiler_steps_not_annotations(tmp_path, capsys):
-    """Regression: the divisor must be denoise steps, not annotation windows.
-
-    ``annotation_window_count`` counts user_annotation ranges. Under
-    source-level instrumentation there are far more of those than denoise
-    steps, and using them silently scaled every per-step figure.
-    """
+    """Regression: the divisor must be denoise steps, not annotation windows."""
     events = list(_TRACE_EVENTS)
     # 3 real denoise steps ...
     for i in range(3):
@@ -1212,12 +1166,7 @@ def test_denoise_steps_come_from_profiler_steps_not_annotations(tmp_path, capsys
 
 
 def test_explicit_denoise_steps_wins_and_is_flagged(tmp_path, capsys):
-    """An operator's explicit --num-denoise-steps is authoritative.
-
-    Hyperloom cannot know what a user's ``prof.step()`` brackets, so a declared
-    count must win over the trace-inferred one -- and the reported value must
-    match the divisor actually used, which previously disagreed.
-    """
+    """An operator's explicit --num-denoise-steps is authoritative."""
     events = list(_TRACE_EVENTS) + [
         {"cat": "gpu_user_annotation", "ph": "X", "name": "ProfilerStep#0", "ts": 1000, "dur": 1}
     ]
@@ -1231,12 +1180,7 @@ def test_explicit_denoise_steps_wins_and_is_flagged(tmp_path, capsys):
 
 
 def test_denoise_steps_read_the_file_the_reader_analyzed(tmp_path, capsys):
-    """Directory input must not count markers in a different file.
-
-    ``count_profiler_steps`` globs ``*.json`` and takes the first, so a stray
-    ``config.json`` sorts ahead of the real trace and returns 0 while the
-    reader resolved the actual trace.
-    """
+    """Directory input must not count markers in a different file."""
     d = tmp_path / "torch_trace"
     d.mkdir()
     (d / "config.json").write_text(json.dumps({"not": "a trace", "pad": "x" * 10}), encoding="utf-8")

@@ -29,14 +29,7 @@ _SPEC.loader.exec_module(forge_fusion)
 
 @pytest.fixture(autouse=True)
 def _isolate_environ():
-    """Restore ``os.environ`` after every test.
-
-    The Claude branch of ``_inject_author_gateway_env`` (exercised directly and
-    via ``main``) mutates ``os.environ`` in place by design; the Codex branch is
-    a no-op. ``monkeypatch`` does not revert keys the function writes directly,
-    so without this snapshot the Claude auth aliases and stability variables
-    pollute later auth/endpoint tests in a full-suite run.
-    """
+    """Restore ``os.environ`` after every test."""
     saved = dict(os.environ)
     try:
         yield
@@ -77,15 +70,14 @@ def test_build_cmd_maps_core_options(tmp_path):
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--output-dir") + 1] == str(tmp_path)
     assert cmd[cmd.index("--agent-backend") + 1] == "claude"
-    # The model flag is spelled the way forge-loop spells it; forge-fuse rejects
-    # the old --llm-model outright rather than ignoring it.
+    # The model flag is spelled the way forge-loop spells it; forge-fuse rejects the old --llm-model outright rather
+    # than ignoring it.
     assert cmd[cmd.index("--model") + 1] == "claude-opus-4-6"
     assert "--llm-model" not in cmd
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
-    # Multi-patch (one independent sibling per recipe) is now the default; the
-    # combine escape hatch must be requested explicitly, so the flag is absent
-    # unless a caller opts in.
+    # Multi-patch (one independent sibling per recipe) is now the default; the combine escape hatch must be requested
+    # explicitly, so the flag is absent unless a caller opts in.
     assert "--fuse-all-confirmed" not in cmd
     assert "--tp" not in cmd
     assert "--block-size" not in cmd
@@ -123,8 +115,7 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/api/v1/llm-proxy")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-token")
-    # IS_SANDBOX is only set when running as root (SWSPLAT-42390): simulate root
-    # so the sandbox default is exercised.
+    # IS_SANDBOX is only set when running as root (SWSPLAT-42390): simulate root so the sandbox default is exercised.
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
 
     forge_fusion._inject_author_gateway_env("claude")
@@ -139,8 +130,8 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
 
 
 def test_inject_author_gateway_env_skips_sandbox_when_non_root(monkeypatch):
-    # SWSPLAT-42390: as a non-root user, IS_SANDBOX must NOT be set (we do not
-    # defeat claude's bypassPermissions guard for sessions that never needed it).
+    # SWSPLAT-42390: as a non-root user, IS_SANDBOX must NOT be set (we do not defeat claude's bypassPermissions guard
+    # for sessions that never needed it).
     for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "IS_SANDBOX"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/api/v1/llm-proxy/v1")
@@ -396,11 +387,7 @@ def test_run_with_tree_timeout_reaps_on_timeout():
 
 
 def _patch_file(output_dir) -> str:
-    """A real patch file, which is what KernelForge's manifest actually names.
-
-    ``artifacts.patch`` is a path, not the diff text, and integrate reads it off
-    disk -- so a fixture holding the text would not exercise what is checked.
-    """
+    """A real patch file, which is what KernelForge's manifest actually names."""
     path = Path(output_dir) / "fusion.patch"
     path.write_text("diff --git a/foo.py b/foo.py\n", encoding="utf-8")
     return str(path)
@@ -439,11 +426,7 @@ def test_normalize_manifest_kept_writes_keep_result(tmp_path):
 
 
 def test_normalize_manifest_refuses_a_keep_integrate_cannot_apply(tmp_path):
-    """Integrate needs a patch and a target file, and returns without them.
-
-    Reported as ok this is lost twice: nothing adopts it, and the status also
-    satisfies the KERNEL-entry idempotency gate, so it is never retried either.
-    """
+    """Integrate needs a patch and a target file, and returns without them."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -501,12 +484,7 @@ def test_normalize_manifest_checks_each_artifact_it_hands_to_integrate(tmp_path,
 
 
 def _multi_patch_manifest(output_dir, *, patches: list) -> dict:
-    """A multi-patch run: a top-level ``patches[]`` list is the source of truth.
-
-    ``kept`` follows from the list being non-empty; the singular ``artifacts``
-    slot mirrors the STRONGEST sibling (patches[0]) so a singular-only reader still
-    lands the best patch.
-    """
+    """A multi-patch run: a top-level ``patches[]`` list is the source of truth."""
     strongest = patches[0] if patches else {}
     return {
         "schema_version": 2,
@@ -527,8 +505,8 @@ def _multi_patch_manifest(output_dir, *, patches: list) -> dict:
             "changes": [],
             "repo_root": strongest.get("kernel_repo", ""),
         },
-        # Names the top RECIPE, which on this path can differ from the strongest
-        # sibling's target file -- the normalizer realigns it.
+        # Names the top RECIPE, which on this path can differ from the strongest sibling's target file -- the
+        # normalizer realigns it.
         "fusion": {"source_file": str(output_dir / "top_recipe.py")},
     }
 
@@ -591,8 +569,8 @@ def test_normalize_manifest_empty_patches_is_a_clean_no_op(tmp_path):
     assert result["kept"] is False
     assert result["decision"] == "REVERT"
     assert result["patches"] == []
-    # ``complete`` (not ``failed``) so the KERNEL-entry idempotency gate is satisfied
-    # -- an honest "ran, found nothing" is not a retryable outage.
+    # ``complete`` (not ``failed``) so the KERNEL-entry idempotency gate is satisfied -- an honest "ran, found
+    # nothing" is not a retryable outage.
     assert result["status"] == "complete"
     assert result["requires_e2e_validation"] is False
 
@@ -653,8 +631,8 @@ def test_salvage_carries_every_sibling_the_manifest_recorded(tmp_path):
     result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
 
     assert result["patches"] == patches
-    # The consumer routes salvage through the nomination contract, so an absent
-    # ``patches`` key would queue nothing at all.
+    # The consumer routes salvage through the nomination contract, so an absent ``patches`` key would queue nothing at
+    # all.
     outcome = parse_outcome(result)
     assert outcome.schema_error == ""
     assert [p.kernel_name for p in outcome.patches] == ["fuse_a", "fuse_b"]
@@ -693,11 +671,7 @@ def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
 
 
 def test_normalize_manifest_keeps_a_claimed_compile_pass(tmp_path):
-    """A compile-pass claim reports no fusion_loop, and used to be read as a miss.
-
-    The claim is the cheapest win available -- the framework already shipped the
-    kernel, just switched off -- and its patch was being discarded.
-    """
+    """A compile-pass claim reports no fusion_loop, and used to be read as a miss."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -716,8 +690,7 @@ def test_normalize_manifest_keeps_a_claimed_compile_pass(tmp_path):
     # The edit lives in the framework source, so there is no runtime flag to set.
     assert result["env_flags"] == {}
     assert result["baseline_env_flags"] == {}
-    # The number is a serving ratio; say so rather than let it pass for a
-    # microbenchmark one.
+    # The number is a serving ratio; say so rather than let it pass for a microbenchmark one.
     assert result["kernel_speedup"] == 1.09
     assert result["serving_speedup"] == 1.09
     assert result["compile_pass_flag"] == "VLLM_FUSE_RMSNORM"
@@ -741,13 +714,7 @@ def test_normalize_manifest_reverts_a_compile_pass_that_did_not_pay(tmp_path):
 
 
 def test_normalize_manifest_reports_an_llm_outage_as_infrastructure(tmp_path):
-    """`llm_unavailable` means the model was never reached, so it is not a verdict.
-
-    The generic no-KEEP shape would call it ``complete``/``no_improvement``, which
-    records an outage as an optimization result AND satisfies the KERNEL-entry
-    idempotency gate -- one gateway blip would then skip fusion for the whole
-    remaining session.
-    """
+    """`llm_unavailable` means the model was never reached, so it is not a verdict."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -785,11 +752,7 @@ def test_normalize_manifest_reports_an_llm_outage_as_infrastructure(tmp_path):
 
 
 def test_an_llm_outage_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
-    """The load-bearing consequence: `status` decides whether fusion runs again.
-
-    ``_fusion_required_before_kernel_opt`` skips fusion once ``last_fusion.status``
-    is one of ok/complete/kept, so an outage must NOT report one of those.
-    """
+    """The load-bearing consequence: `status` decides whether fusion runs again."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -803,13 +766,7 @@ def test_an_llm_outage_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path
 
 
 def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
-    """A KEEP outranks the outage verdict, however the manifest ends up shaped.
-
-    forge-fusion only overrides the verdict when discovery raised -- and then it has
-    no recipes, so no loop and no validation -- but that invariant lives in another
-    repository and nothing here can enforce it. Being wrong would throw away a
-    measured patch, so the guard is local.
-    """
+    """A KEEP outranks the outage verdict, however the manifest ends up shaped."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -838,8 +795,7 @@ def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
 
 
 def test_an_llm_outage_verdict_is_matched_tolerantly(tmp_path):
-    """Matching must not fail open: a stray space would fall back to the
-    no_improvement mapping, i.e. straight back into the bug this prevents."""
+    """Matching must not fail open: a stray space would fall back to the"""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -854,12 +810,7 @@ def test_an_llm_outage_verdict_is_matched_tolerantly(tmp_path):
 
 
 def _aborted_manifest(reason, **loop_extra):
-    """A manifest for a run that located a recipe, then died before attempting it.
-
-    This is exactly the shape observed on the fleet: discovery succeeded, so
-    ``verdict`` is ``candidate`` and ``fusion.env_flag`` names a real flag, while
-    ``fusion_loop`` reports zero attempts and no promoted flag.
-    """
+    """A manifest for a run that located a recipe, then died before attempting it."""
     loop = {"termination_reason": reason, "attempts": 0, "best": None, "best_env_flag": None}
     loop.update(loop_extra)
     return {
@@ -877,13 +828,7 @@ def _aborted_manifest(reason, **loop_extra):
 
 
 def test_normalize_manifest_reports_a_harness_author_abort_as_infrastructure(tmp_path):
-    """``harness_author_failed`` means the loop never ran, so it is not a verdict.
-
-    The generic no-KEEP shape would call it ``complete``/``no_improvement``, which
-    records an abort as an optimization result AND satisfies the KERNEL-entry
-    idempotency gate -- one failed authoring turn would then skip fusion for the
-    whole remaining session, even though the recipe had already been located.
-    """
+    """``harness_author_failed`` means the loop never ran, so it is not a verdict."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -899,19 +844,15 @@ def test_normalize_manifest_reports_a_harness_author_abort_as_infrastructure(tmp
     assert result["requires_e2e_validation"] is False
     assert result["error_class"] == "harness_author_failed"
     assert "harness_author_failed" in result["error"]
-    # The located recipe is named for the operator, but never as a confirmed flag:
-    # nothing measured it, and ``env_flags`` means "flags this run confirmed".
+    # The located recipe is named for the operator, but never as a confirmed flag: nothing measured it, and
+    # ``env_flags`` means "flags this run confirmed".
     assert "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE" in result["error"]
     assert result["env_flags"] == {}
     assert result["baseline_env_flags"] == {}
 
 
 def test_an_abort_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
-    """The load-bearing consequence: ``status`` decides whether fusion runs again.
-
-    ``_fusion_required_before_kernel_opt`` skips fusion once ``last_fusion.status``
-    is one of ok/complete/kept, so an abort must NOT report one of those.
-    """
+    """The load-bearing consequence: ``status`` decides whether fusion runs again."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -924,12 +865,7 @@ def test_an_abort_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
 
 
 def test_a_missing_git_workspace_abort_takes_the_same_path(tmp_path):
-    """The handling keys on the termination reason, not on one known failure.
-
-    ``no_git_workspace`` aborts the loop just as early and reaches the same
-    normalization, so fixing only the reason that happened to be observed would
-    leave an identical defect one code path away.
-    """
+    """The handling keys on the termination reason, not on one known failure."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -944,12 +880,7 @@ def test_a_missing_git_workspace_abort_takes_the_same_path(tmp_path):
 
 
 def test_an_abort_never_discards_a_validated_fusion(tmp_path):
-    """A KEEP outranks the abort reason, however the manifest ends up shaped.
-
-    A loop that kept a fusion by definition attempted one, so the two should never
-    co-occur -- but that invariant lives in another repository, and being wrong
-    would throw away a measured patch, so the guard is local.
-    """
+    """A KEEP outranks the abort reason, however the manifest ends up shaped."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = _aborted_manifest(
@@ -977,12 +908,7 @@ def test_an_abort_never_discards_a_validated_fusion(tmp_path):
 
 
 def test_a_loop_that_ran_still_reports_no_improvement(tmp_path):
-    """Regression guard: only a loop that never attempted is an abort.
-
-    A loop that ran and found nothing worth keeping is a real result and must keep
-    reporting ``complete``/``no_improvement`` with its promoted flags, or the fix
-    would turn every honest no-improvement into a retry.
-    """
+    """Regression guard: only a loop that never attempted is an abort."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = _aborted_manifest("exhausted", attempts=1, best_env_flag="QWEN3_FUSED_QK_NORM_ROPE_KVCACHE")
@@ -998,8 +924,7 @@ def test_a_loop_that_ran_still_reports_no_improvement(tmp_path):
 
 @pytest.mark.parametrize("reason", ["  harness_author_failed  ", "Harness_Author_Failed", "NO_GIT_WORKSPACE"])
 def test_an_abort_reason_is_matched_tolerantly(tmp_path, reason):
-    """Matching must not fail open: stray case or spacing would fall back to the
-    no_improvement mapping, i.e. straight back into the bug this prevents."""
+    """Matching must not fail open: stray case or spacing would fall back to the"""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(json.dumps(_aborted_manifest(reason)), encoding="utf-8")
@@ -1012,11 +937,7 @@ def test_an_abort_reason_is_matched_tolerantly(tmp_path, reason):
 
 @pytest.mark.parametrize("attempts", ["0", None, "", "not-a-number"])
 def test_a_non_numeric_attempt_count_does_not_fail_open(tmp_path, attempts):
-    """``attempts`` crosses a repo boundary, so its type is not guaranteed.
-
-    Reading it truthily would make the string ``"0"`` count as an attempt and drop
-    the run back into ``complete``/``no_improvement`` -- the bug this prevents.
-    """
+    """``attempts`` crosses a repo boundary, so its type is not guaranteed."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = _aborted_manifest("harness_author_failed", attempts=attempts)
@@ -1029,13 +950,7 @@ def test_a_non_numeric_attempt_count_does_not_fail_open(tmp_path, attempts):
 
 
 def test_an_abort_never_discards_a_measured_compile_pass(tmp_path):
-    """A compile-pass claim is a real serving A/B, however the loop ended.
-
-    ``fusion_loop`` and ``compile_pass`` are documented as mutually exclusive, but
-    that invariant lives in another repository -- the same reason the KEEP path
-    below verifies its artifacts rather than assuming them. Firing the abort
-    branch here would throw away a measurement and mark a concluded run retryable.
-    """
+    """A compile-pass claim is a real serving A/B, however the loop ended."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = _aborted_manifest("harness_author_failed")
@@ -1051,13 +966,7 @@ def test_an_abort_never_discards_a_measured_compile_pass(tmp_path):
 
 
 def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monkeypatch, capsys):
-    """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit
-    that still carries a valid manifest.
-
-    The wrapper mirrors the child's exit code, and the handler prefers the sentinel
-    over ``rc``; this pins that contract so a later "just trust rc" simplification
-    cannot silently degrade the outage into a generic handler failure.
-    """
+    """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit"""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     input_json = tmp_path / "input.json"
@@ -1095,8 +1004,7 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
 
 
 def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
-    """A run that DID reach the model and found nothing is unchanged: it is a real
-    conclusion, and re-running it in the same session would buy nothing."""
+    """A run that DID reach the model and found nothing is unchanged: it is a real"""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -1113,8 +1021,7 @@ def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
 
 
 def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
-    """kernel_repo must come from the root forge-fusion exported against (authoritative
-    for a non-git pip framework), NOT a git toplevel that would break patch apply."""
+    """kernel_repo must come from the root forge-fusion exported against (authoritative"""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {

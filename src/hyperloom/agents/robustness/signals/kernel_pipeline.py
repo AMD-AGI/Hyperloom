@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-pipeline / external-backend health signals.
-
-* **``ray_pending_starvation``** — non-zero ``ray status`` Pending across
-  ``min_pending_ticks`` consecutive ticks (cluster quota ledger wedged).
-* **``geak_budget_starvation``** — same kernel_id's GEAK attempt SIGTERM'd across
-  ``min_geak_sigterm_attempts`` rows; budget too short for ``select_patch``.
-* **``kernel_opt_no_progress``** — ``min_kernels_with_no_progress`` kernel_ids where
-  no backend attempt reached a >=1.2x microbench speedup and no integrate row recorded a
-  KEEP decision (>=2 distinct backends tried); prune kernel_opt toward params/sweep.
-"""
+"""Kernel-pipeline / external-backend health signals."""
 
 from __future__ import annotations
 
@@ -44,14 +35,12 @@ class KernelPipelineConfig:
     min_pending_ticks: int = 3
     # Same kernel_id has GEAK backend SIGTERM'd this many times.
     min_geak_sigterm_attempts: int = 2
-    # kernel_ids with no >=1.2x microbench speedup and no KEEP integrate
-    # decision across the recent oob_attempts window.
+    # kernel_ids with no >=1.2x microbench speedup and no KEEP integrate decision across the recent oob_attempts
+    # window.
     min_kernels_with_no_progress: int = 3
 
 
-# ---------------------------------------------------------------------------
 # Ray pending starvation (stateful — counts consecutive ticks)
-# ---------------------------------------------------------------------------
 
 
 class RayPendingDetector:
@@ -63,14 +52,7 @@ class RayPendingDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the detector and restore persisted pending counters.
-
-        Args:
-            config (KernelPipelineConfig | None): Tunables; defaults to
-                :class:`KernelPipelineConfig` when ``None``.
-            state_view (DetectorStateView | None): Disk-backed state view used
-                to load/persist ``consecutive_hits`` and ``last_pending``.
-        """
+        """Initialise the detector and restore persisted pending counters."""
         self._config = config or KernelPipelineConfig()
         self._state_view = state_view
         # Disk-backed counter so the multi-tick threshold survives ticks.
@@ -100,19 +82,7 @@ class RayPendingDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Advance the pending streak and fire once it crosses threshold.
-
-        Resets the streak when Ray data is missing, the head is unhealthy, or
-        the pending count is at/below the configured threshold.
-
-        Args:
-            ctx (ReactorContext): Reactor context for the current tick.
-            data (SourceData): Collected source data including ``local_ray``.
-
-        Returns:
-            list[Symptom]: A single ``ray_pending_starvation`` symptom once the
-                consecutive-tick threshold is crossed, otherwise an empty list.
-        """
+        """Advance the pending streak and fire once it crosses threshold."""
         ray_info = data.local_ray
         if not isinstance(ray_info, dict) or not ray_info:
             # No Ray data this tick → don't accumulate.
@@ -160,27 +130,14 @@ class RayPendingDetector:
         ]
 
 
-# ---------------------------------------------------------------------------
 # GEAK budget starvation
-# ---------------------------------------------------------------------------
 
 
 def _geak_budget_symptoms(
     data: SourceData,
     cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
-    """Fire ``geak_budget_starvation`` for kernels whose GEAK runs SIGTERM.
-
-    Args:
-        data (SourceData): Collected source data including the decision-audit
-            ``oob_attempts``.
-        cfg (KernelPipelineConfig): Tunables (provides the SIGTERM-attempt
-            threshold).
-
-    Returns:
-        list[Symptom]: One ``geak_budget_starvation`` symptom per offending
-            kernel, possibly empty.
-    """
+    """Fire ``geak_budget_starvation`` for kernels whose GEAK runs SIGTERM."""
     audit = data.local_decision_audit
     if not isinstance(audit, dict):
         return []
@@ -231,34 +188,14 @@ def _geak_budget_symptoms(
     return out
 
 
-# ---------------------------------------------------------------------------
 # Kernel-opt no-progress
-# ---------------------------------------------------------------------------
 
 
 def _kernel_opt_no_progress_symptoms(
     data: SourceData,
     cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
-    """Identify kernels where no backend attempt reached a >=1.2x microbench
-    speedup and no integrate row recorded a KEEP decision.
-
-    Only kernels with at least two distinct backends attempted count, so
-    one-shot kernels that haven't had time to fail are not flagged.
-    ``oob_attempts`` rows carry no decision field, so the speedup threshold is
-    the only per-attempt progress signal.
-
-    Args:
-        data (SourceData): Collected source data including the decision-audit
-            ``oob_attempts`` and ``recent_integrate``.
-        cfg (KernelPipelineConfig): Tunables (provides the no-progress kernel
-            count threshold).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``kernel_opt_no_progress``
-            symptom when enough kernels show no progress, otherwise an empty
-            list.
-    """
+    """Identify kernels where no backend attempt reached a >=1.2x microbench"""
     audit = data.local_decision_audit
     if not isinstance(audit, dict):
         return []
@@ -311,8 +248,8 @@ def _kernel_opt_no_progress_symptoms(
             if str(entry.get("decision") or "") == "KEEP":
                 roll["has_keep"] = True
 
-    # Only count kernels with at least 2 distinct backends attempted —
-    # one-shot kernels haven't had time to fail across the pipeline.
+    # Only count kernels with at least 2 distinct backends attempted — one-shot kernels haven't had time to fail
+    # across the pipeline.
     bad_kernels = [roll for roll in rollups.values() if not roll["has_keep"] and len(roll["backends"]) >= 2]
     if len(bad_kernels) < cfg.min_kernels_with_no_progress:
         return []
@@ -345,9 +282,7 @@ def _kernel_opt_no_progress_symptoms(
     ]
 
 
-# ---------------------------------------------------------------------------
 # Public entry point — module-level helper (the stateful rule lives in the class)
-# ---------------------------------------------------------------------------
 
 
 def evaluate_kernel_pipeline_signals(
@@ -356,19 +291,7 @@ def evaluate_kernel_pipeline_signals(
     *,
     config: KernelPipelineConfig | None = None,
 ) -> list[Symptom]:
-    """Evaluate the stateless kernel-pipeline signals.
-
-    ``ray_pending_starvation`` is stateful and lives in
-    :class:`RayPendingDetector`.
-
-    Args:
-        ctx: Reactor context for the current tick.
-        data: Collected source data.
-        config: Optional configuration; a default is used when ``None``.
-
-    Returns:
-        The kernel-pipeline symptoms, possibly empty.
-    """
+    """Evaluate the stateless kernel-pipeline signals."""
     cfg = config or KernelPipelineConfig()
     out: list[Symptom] = []
     out.extend(_geak_budget_symptoms(data, cfg))

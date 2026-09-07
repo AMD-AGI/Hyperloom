@@ -5,9 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tests for the canonical analysis.md renderer (_analysis_md) and the report
-structure it guarantees for the bypass route that consumes it.
-"""
+"""Tests for the canonical analysis.md renderer (_analysis_md) and the report"""
 
 from __future__ import annotations
 
@@ -116,8 +114,7 @@ def test_extra_sections_appended_under_divider():
     assert md.index("## Top Hot Kernels") < md.index("## Route Extra")
 
 
-# The canonical spine: section headings + table-header rows every report
-# rendered through _analysis_md must carry.
+# The canonical spine: section headings + table-header rows every report rendered through _analysis_md must carry.
 _CANONICAL_SPINE = (
     "# Performance Analysis Report",
     "> Generated via ",
@@ -147,8 +144,8 @@ def test_bypass_report_carries_the_canonical_spine():
 
 
 def test_category_vocabulary_is_canonical():
-    # Category display uses one canonical vocabulary; the raw upstream spelling
-    # (lowercase ``gemm``, ``Others``) must not reach the report.
+    # Category display uses one canonical vocabulary; the raw upstream spelling (lowercase ``gemm``, ``Others``) must
+    # not reach the report.
     bypass_spine = _bypass_md().split("Additional route-specific detail below")[0]
     assert "| Others |" not in bypass_spine
     assert "| gemm |" not in bypass_spine

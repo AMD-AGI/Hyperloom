@@ -5,20 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Build (and cache) a kernel-name -> source-file index for the v2 resolver.
-
-The index answers "which native source file (and line) defines kernel
-``<base_name>`` in the *currently installed* tree?". It is built once per
-container by scanning the discovered ``csrc`` dirs for ``__global__`` kernel
-definitions, and cached keyed by a version fingerprint so later runs are ~free.
-
-``symbol_index`` maps a base kernel name (the demangled ``__global__`` identifier)
-to the list of ``{file, line, framework}`` records that define it. Finding the kernel
-wherever the installed version put it is what makes moves/renames self-healing.
-
-Triton/Python launchers (``.py``) are intentionally NOT indexed here; the
-resolver resolves those lazily via ``ast`` (vLLM ships thousands of ``.py``).
-"""
+"""Build (and cache) a kernel-name -> source-file index for the v2 resolver."""
 
 from __future__ import annotations
 
@@ -39,23 +26,14 @@ except ImportError:  # flat top-level import (bypass route puts tools/ on sys.pa
 
 log = logging.getLogger(__name__)
 
-# ``FrameworkRoot`` is referenced via the module (``source_env.FrameworkRoot``) to
-# keep a single import style for ``source_env`` across both branches above.
+# ``FrameworkRoot`` is referenced via the module (``source_env.FrameworkRoot``) to keep a single import style for
+# ``source_env`` across both branches above.
 
-# Native source extensions to scan. Kept in sync with
-# ``_bypass_source_resolver._NATIVE_SOURCE_EXTS`` (the editability filter): a
-# ``__global__`` def indexed from an extension the resolver would later reject as
-# non-editable is dead weight, so both lists must agree.
+# Native source extensions to scan.
 _NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h")
 
-# --- kernel-definition scanning ---------------------------------------------
-# A definition head is ``__global__`` <attrs / return type> NAME ( params ).
-# The tricky part is attributes that carry their own parentheses -- notably
-# ``__launch_bounds__(NUM_THREADS)`` (on ~40% of aiter kernels) and
-# ``__attribute__((...))``. A naive ``__global__[^()]*?NAME(`` regex stops at the
-# attribute's ``(`` and captures the *attribute* as the kernel name. So we scan
-# token by token from ``__global__``, skip any attribute call (balanced parens),
-# and take the first remaining identifier that is directly followed by ``(``.
+# --- kernel-definition scanning --------------------------------------------- A definition head is ``__global__``
+# <attrs / return type> NAME ( params ).
 _GLOBAL_TOKEN_RE = re.compile(r"\b__global__\b")
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 _ATTR_KEYWORDS = frozenset(
@@ -77,13 +55,7 @@ def _skip_balanced_parens(text: str, open_pos: int) -> int:
 
 
 def _iter_global_defs(text: str):
-    """Yield ``(name, name_pos)`` for each ``__global__`` kernel *definition*.
-
-    Only definitions (a parameter list immediately followed by a ``{`` body) are
-    yielded. Forward declarations (``... );``), and ``__global__`` text living
-    inside comments or string literals, are rejected so the index never points a
-    rewrite at a header declaration or dead code.
-    """
+    """Yield ``(name, name_pos)`` for each ``__global__`` kernel *definition*."""
     n = len(text)
     for gm in _GLOBAL_TOKEN_RE.finditer(text):
         pos = gm.end()
@@ -105,10 +77,8 @@ def _iter_global_defs(text: str):
                 if ident in _ATTR_KEYWORDS:
                     pos = _skip_balanced_parens(text, after)
                     continue
-                # Definition, not a declaration: the first non-space character
-                # after the matching ``)`` must open a body ``{``. A ``;`` (fwd
-                # decl) or anything else (a match inside a comment/string) is
-                # skipped -- this ``__global__`` yields no name.
+                # Definition, not a declaration: the first non-space character after the matching ``)`` must open a
+                # body ``{``.
                 cursor = _skip_balanced_parens(text, after)
                 while cursor < n and text[cursor].isspace():
                     cursor += 1
@@ -182,13 +152,7 @@ def build_index(frameworks: dict[str, source_env.FrameworkRoot]) -> SourceIndex:
 
 # --- cache ------------------------------------------------------------------
 def _cache_path(fingerprint: str) -> Path:
-    """Cache file path (dir from ``$HYPERLOOM_KSI_CACHE_DIR`` or a temp subdir).
-
-    When falling back to the system temp root (typically a shared, world-writable
-    ``/tmp`` on a multi-user host), the subdir is scoped to the current user and
-    created owner-only (0o700), so users cannot collide on or shadow each other's
-    cache. An explicit ``$HYPERLOOM_KSI_CACHE_DIR`` is used verbatim.
-    """
+    """Cache file path (dir from ``$HYPERLOOM_KSI_CACHE_DIR`` or a temp subdir)."""
     raw = os.environ.get("HYPERLOOM_KSI_CACHE_DIR", "").strip()
     if raw:
         d = Path(raw)
@@ -205,7 +169,6 @@ def _cache_path(fingerprint: str) -> Path:
             os.chmod(d, 0o700)
     except OSError:
         # Best-effort: the on-disk index cache is an optimization, not required.
-        # If the dir can't be created, _save_cache no-ops and the index rebuilds.
         pass
     return d / f"ksi_{fingerprint}.json"
 
@@ -235,21 +198,12 @@ def _save_cache(index: SourceIndex) -> None:
         log.debug("kernel index: cache write failed (%s): %s", index.fingerprint, exc)
 
 
-# Process-level singleton for the no-argument (production) call. Both the bypass
-# route (per candidate) and the TraceLens route otherwise re-run
-# ``discover_frameworks()`` + ``fingerprint()`` + ``json.load`` on every resolve;
-# memoizing here makes "built once per container, later resolves ~free" true.
+# Process-level singleton for the no-argument (production) call.
 _PROCESS_INDEX: SourceIndex | None = None
 
 
 def load_or_build(frameworks: dict[str, source_env.FrameworkRoot] | None = None) -> SourceIndex:
-    """Return a cached index for the current versions, or build + cache one.
-
-    On the no-argument production path the result is memoized in-process, so
-    repeated resolves within one run do not re-discover frameworks or re-read the
-    on-disk cache. ``build_ms`` is ``0.0`` on a cache hit and the real build time
-    on a miss.
-    """
+    """Return a cached index for the current versions, or build + cache one."""
     global _PROCESS_INDEX
     if frameworks is None and _PROCESS_INDEX is not None:
         return _PROCESS_INDEX

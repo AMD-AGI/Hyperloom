@@ -5,13 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for kernel-source discovery (``source_env``).
-
-Covers version fallback, native ``csrc`` detection, ``*_meta`` canonicalization,
-and auto-enumeration of arbitrary kernel libraries via a temporary
-``site-packages`` on ``sys.path``. No installed framework required; runnable
-directly via ``python3 test_source_env.py`` (no pytest).
-"""
+"""Unit tests for kernel-source discovery (``source_env``)."""
 
 from __future__ import annotations
 
@@ -47,8 +41,8 @@ def _on_syspath(path: Path):
         try:
             sys.path.remove(str(path))
         except ValueError:
-            # Idempotent teardown: the entry may already be gone (nested contexts
-            # or other cleanup removed it); a missing entry is not an error here.
+            # Idempotent teardown: the entry may already be gone (nested contexts or other cleanup removed it); a
+            # missing entry is not an error here.
             pass
 
 

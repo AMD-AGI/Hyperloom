@@ -5,12 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the variant-discriminating TraceShapeManifest producer.
-
-Covers the frozen P0-A / WP-1 contract with synthetic ``analyze_trace``-shaped
-inputs (no GPU, no trace files needed) plus one reader->producer end-to-end
-check that the ``kernel_launches`` enrichment feeds the manifest.
-"""
+"""Unit tests for the variant-discriminating TraceShapeManifest producer."""
 
 from __future__ import annotations
 
@@ -113,9 +108,9 @@ def test_dims_extraction_from_shapes():
 
 
 def test_dims_extraction_aiter_blockscale_weight_nk_layout():
-    """Real aiter::gemm_a8w8_blockscale_ck operand order:
-    [A[M,K], B(weight)[N,K], x_scale[M,K/128], w_scale[N/128,K/128], out[M,N], scalar].
-    N must be the weight dim that is not K (Qwen3-14B qkv/o/gate_up/down)."""
+    """Real aiter::gemm_a8w8_blockscale_ck operand order: [A[M,K], B(weight)[N,K], x_scale[M,K/128],
+    w_scale[N/128,K/128], out[M,N], scalar].
+    """
     cases = [
         ([[8192, 5120], [5120, 5120], [8192, 40], [40, 40], [8192, 5120]], 5120),  # o_proj/attn
         ([[8192, 5120], [34816, 5120], [8192, 40], [272, 40], [8192, 34816]], 34816),  # gate_up
@@ -330,8 +325,7 @@ def test_empty_launches_produce_no_rows():
 
 
 def test_reader_enriches_launches_and_feeds_producer(tmp_path):
-    """A tiny real trace flows through the reader and its enriched launches build
-    a manifest with resolved shapes/dtypes (proves the additive reader change)."""
+    """A tiny real trace flows through the reader and its enriched launches build"""
     events = [
         {
             "cat": "cpu_op",

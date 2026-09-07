@@ -1,12 +1,4 @@
-"""Shared fixtures for the quantization-agent tests.
-
-Two helpers are exposed here:
-
-* ``build_workspace`` — turn a small dict of artifact stubs into a
-  workspace dir, no Quark / SDK needed.
-* ``FakeSDK`` — a callable matching the injection seam in
-  ``driver.runner.run_one_attempt`` (``sdk_query_factory`` + ``sdk_options_cls``).
-"""
+"""Shared fixtures for the quantization-agent tests."""
 
 from __future__ import annotations
 
@@ -18,8 +10,7 @@ from typing import Any, AsyncIterator, Callable
 import pytest
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# workspace builder
+# ───────────────────────────────────────────────────────────────────────────── workspace builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Validation-report snippets keyed by short tag.
@@ -97,11 +88,7 @@ def _make_quantized_dir(
 
 @dataclass
 class WorkspaceBuilder:
-    """Fluent builder mirroring the artifact fields SKILL.md writes.
-
-    Defaults to a fully-successful run. Tests subtract or override pieces to
-    simulate failure modes.
-    """
+    """Fluent builder mirroring the artifact fields SKILL.md writes."""
 
     workspace: Path
     include_manifest: bool = True
@@ -196,8 +183,7 @@ def build_workspace(tmp_path: Path) -> Callable[..., Path]:
     return _factory
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# fake SDK
+# ───────────────────────────────────────────────────────────────────────────── fake SDK
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -208,9 +194,7 @@ class FakeMessage:
 
 @dataclass
 class FakeOptions:
-    """Captures kwargs passed to ``sdk_options_cls``, playing the role of
-    ``claude_agent_sdk.ClaudeAgentOptions`` without touching network.
-    """
+    """Captures kwargs passed to ``sdk_options_cls``, playing the role of"""
 
     kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -220,12 +204,7 @@ class FakeOptions:
 
 @dataclass
 class FakeSDK:
-    """Stub for ``sdk_query_factory`` — records prompts and replays scripted
-    responses.
-
-    ``side_effect`` (when set) is raised on the next call. ``scripted_chunks``
-    yields each string as a separate message.
-    """
+    """Stub for ``sdk_query_factory`` — records prompts and replays scripted"""
 
     scripted_chunks: list[str] = field(default_factory=lambda: ["fake-sdk: ok"])
     side_effect: Exception | None = None

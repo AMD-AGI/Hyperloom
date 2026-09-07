@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for Ray fd-limit preflight before ``ray start``.
-
-Ensure the child raylet does not inherit the low container default."""
+"""Regression tests for Ray fd-limit preflight before ``ray start``."""
 
 from __future__ import annotations
 
@@ -35,12 +33,7 @@ def _extract_shell_function(name: str) -> str:
 
 
 class _FakeResource:
-    """Stand-in for the stdlib ``resource`` module with in-memory rlimits.
-
-    Records every ``getrlimit`` / ``setrlimit`` into ``events`` so a test
-    can assert ordering relative to the ``ray start`` subprocess. A process
-    may raise its soft limit only up to the hard limit (raising the hard
-    limit raises ``ValueError`` here)."""
+    """Stand-in for the stdlib ``resource`` module with in-memory rlimits."""
 
     RLIMIT_NOFILE = 7
     RLIM_INFINITY = -1
@@ -51,8 +44,7 @@ class _FakeResource:
         self._events = events
 
     def _exceeds_hard(self, value: int) -> bool:
-        """True when ``value`` is above the current hard cap, treating
-        ``RLIM_INFINITY`` (-1) as +infinity on either side."""
+        """True when ``value`` is above the current hard cap, treating"""
         if self._hard == self.RLIM_INFINITY:
             return False
         if value == self.RLIM_INFINITY:
@@ -154,10 +146,7 @@ def test_ensure_fd_limit_noop_when_already_high(monkeypatch):
 
 
 def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
-    """When the hard cap < target, raise soft to the hard cap and warn.
-
-    Unprivileged-container case: only ``docker --ulimit nofile=...`` can lift
-    the hard cap, so the runtime raises soft as high as allowed and warns."""
+    """When the hard cap < target, raise soft to the hard cap and warn."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=4096, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -178,9 +167,7 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
 
 
 def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeypatch):
-    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no
-    ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1)
-    and emit NO warning."""
+    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as \"no"""
     events: list = []
     fake = _FakeResource(soft=1024, hard=_FakeResource.RLIM_INFINITY, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -202,8 +189,7 @@ def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeyp
 
 
 def test_ensure_fd_limit_unlimited_soft_is_noop(monkeypatch):
-    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated
-    as already-sufficient: no setrlimit, no warning."""
+    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated"""
     events: list = []
     fake = _FakeResource(
         soft=_FakeResource.RLIM_INFINITY,
@@ -264,11 +250,7 @@ def test_force_restart_local_cluster_runs_fd_preflight_before_ray_start(monkeypa
 
 
 def test_ray_status_timeout_is_treated_as_down(monkeypatch):
-    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS.
-
-    Treat timeout as "no usable cluster" so startup can rebuild a local head
-    instead of carrying a stale GCS address into a long optimizer session.
-    """
+    """A stale ``ray_current_cluster`` can make ``ray status`` hang on dead GCS."""
     monkeypatch.delenv("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", raising=False)
     calls: list = []
 
@@ -299,8 +281,9 @@ def test_ensure_ray_cluster_clears_stale_ray_before_start(monkeypatch):
 
 
 def test_ensure_ray_cluster_binds_dashboard_to_loopback(monkeypatch):
-    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0,
-    so the unauthenticated Ray Jobs endpoint is not exposed on the pod network."""
+    """The local head must bind the dashboard/jobs API to loopback, not 0.0.0.0, so the unauthenticated Ray Jobs
+    endpoint is not exposed on the pod network.
+    """
     events: list = []
     fake = _FakeResource(soft=1048576, hard=1048576, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -382,15 +365,7 @@ def _arg_value(start_cmd: tuple, flag: str):
 
 
 class TestLocalHeadPortIsolation:
-    """Free-port isolation for spur host-network co-location.
-
-    Co-scheduled sessions share only the host network, so the sole collision is
-    Ray's fixed default ports (GCS 6379 / dashboard 8265 / client 10001): the
-    later head connects to the earlier head's GCS and aborts with a session-name
-    mismatch. Each head is bound to FREE probed ports; rendezvous is via the
-    container-private ``/tmp/ray/ray_current_cluster`` (no ``--temp-dir``, no
-    ``RAY_ADDRESS`` pin), so ``ray.init(address="auto")`` still discovers it.
-    """
+    """Free-port isolation for spur host-network co-location."""
 
     @pytest.fixture(autouse=True)
     def _clean_ray_env(self, monkeypatch):

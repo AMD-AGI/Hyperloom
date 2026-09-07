@@ -5,15 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Build downstream artifacts (candidates / summary / kernel_roofline) for the
-bypass analysis backend from the classified device-kernel aggregates.
-
-Primary ranking unit is the device kernel (full coverage; robust to cudagraph),
-classified by :mod:`_bypass_classify`, enriched with a best-effort launching op
-name. Schema mirrors the ``kernel_candidates.json`` / ``summary.json`` /
-``kernel_roofline.json`` contract. Roofline hardware fields are estimated from
-the analytical model.
-"""
+"""Build downstream artifacts (candidates / summary / kernel_roofline) for the"""
 
 from __future__ import annotations
 
@@ -72,21 +64,17 @@ _BOUND_PREFIX: dict[str, str] = {"compute_bound": "Compute-bound", "memory_bound
 
 
 def _build_suggestion(category: str, bound_type: str) -> str:
-    """Deterministic optimization hint from ``category`` + ``bound_type``.
-
-    Category->text lookup optionally prefixed with the analytical bound; feeds
-    the specialist prompt's ``action`` slot.
-    """
+    """Deterministic optimization hint from ``category`` + ``bound_type``."""
     action = _ACTION_BY_CATEGORY.get(category, _ACTION_BY_CATEGORY["Others"])
     prefix = _BOUND_PREFIX.get(bound_type, "")
     return f"{prefix}: {action}" if prefix else action
 
 
-# torch ``Input type`` token -> compact dtype suffix for the shape-string
-# contract (e.g. ``(15360,2048) bf16``); unmapped/empty types emit a bare shape.
+# torch ``Input type`` token -> compact dtype suffix for the shape-string contract (e.g. ``(15360,2048) bf16``);
+# unmapped/empty types emit a bare shape.
 _DTYPE_SUFFIX: dict[str, str] = {
-    # Suffixes MUST match the shared harness dtype_map + roofline peak table; a
-    # compact "f16"/"f32" makes the harness emit an invalid ``torch.f16``.
+    # Suffixes MUST match the shared harness dtype_map + roofline peak table; a compact "f16"/"f32" makes the harness
+    # emit an invalid ``torch.f16``.
     "c10::bfloat16": "bf16",
     "bfloat16": "bf16",
     "c10::half": "fp16",
@@ -110,12 +98,7 @@ _DTYPE_SUFFIX: dict[str, str] = {
 
 
 def _format_operand_shape(dims: Any, dtype: Any) -> str | None:
-    """Render one operand as a ``(d0,d1,...) <dtype>`` string (or ``None``).
-
-    Scalar / empty / non-integer operands return ``None`` (dropped from the
-    shape string), matching the downstream harness contract. A 1-D operand keeps
-    the trailing comma (``(d,)``) so it round-trips as a tuple.
-    """
+    """Render one operand as a ``(d0,d1,...) <dtype>`` string (or ``None``)."""
     if not isinstance(dims, (list, tuple)) or not dims:
         return None
     try:
@@ -128,22 +111,7 @@ def _format_operand_shape(dims: Any, dtype: Any) -> str | None:
 
 
 def _trace_shape_entries(op_shapes: Any, op_dtypes: Any, call_count: int) -> list[dict[str, Any]]:
-    """Build the downstream ``input_shapes`` contract from Kineto Input Dims/type.
-
-    Converts a call's per-arg dims (``op_shapes``) + dtypes (``op_dtypes``) into
-    ``[{"call_num", "shape"}]`` where ``shape`` is the ``<br>``-joined operand
-    strings the GEAK harness (``_build_configs`` / ``_parse_shape_string``) and
-    TraceLens candidates consume. Returns ``[]`` when no operand is renderable.
-
-    Args:
-        op_shapes: List of per-arg dimension lists (Kineto ``Input Dims``).
-        op_dtypes: List of per-arg dtype tokens (Kineto ``Input type``), aligned
-            by argument index with ``op_shapes``.
-        call_count: Number of launches (stamped as ``call_num``).
-
-    Returns:
-        A one-entry ``[{"call_num", "shape"}]`` list, or ``[]``.
-    """
+    """Build the downstream ``input_shapes`` contract from Kineto Input Dims/type."""
     dtypes = op_dtypes if isinstance(op_dtypes, (list, tuple)) else []
     operands: list[str] = []
     for i, dims in enumerate(op_shapes if isinstance(op_shapes, (list, tuple)) else []):
@@ -161,12 +129,7 @@ _TILE_NAME_RE = re.compile(r"BLOCK_SIZE_([A-Za-z]+)_(\d+)")
 
 
 def _launch_grid_shape_entries(grid: Any, block: Any, call_count: int) -> list[dict[str, Any]]:
-    """Build a shape entry from a kernel's launch geometry (grid/block).
-
-    Fallback for kernels whose correlation->cpu_op chain is broken (Triton
-    direct-launch, graph replay): the launch grid/block is coarse geometry, not
-    dispatch-grade operand dims. Returns ``[]`` when no positive dimension is present.
-    """
+    """Build a shape entry from a kernel's launch geometry (grid/block)."""
 
     def _dims(v: Any) -> list[int]:
         out: list[int] = []
@@ -191,11 +154,7 @@ def _launch_grid_shape_entries(grid: Any, block: Any, call_count: int) -> list[d
 
 
 def _tile_name_shape_entries(kernel_name: str, call_count: int) -> list[dict[str, Any]]:
-    """Extract a tile shape from a Triton autotune kernel name (``BLOCK_SIZE_*``).
-
-    Lowest-priority fallback: yields a ``M32<br>N32<br>K256``-style tile shape
-    when the name encodes it. Returns ``[]`` when no tile token is present.
-    """
+    """Extract a tile shape from a Triton autotune kernel name (``BLOCK_SIZE_*``)."""
     matches = _TILE_NAME_RE.findall(kernel_name or "")
     if not matches:
         return []
@@ -204,14 +163,7 @@ def _tile_name_shape_entries(kernel_name: str, call_count: int) -> list[dict[str
 
 
 def _source_type_for_op(op_name: str) -> str:
-    """Best-effort source-type guess from a launching op name.
-
-    Args:
-        op_name: Resolved launching op name (may be empty).
-
-    Returns:
-        ``"python"`` / ``"hip_cpp"`` / ``"unknown"``.
-    """
+    """Best-effort source-type guess from a launching op name."""
     n = (op_name or "").lower()
     if not n:
         return "unknown"
@@ -238,27 +190,7 @@ _NATIVE_SOURCE_EXTS = (
 
 
 def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group routable candidates that share an editable source into task groups.
-
-    Only candidates that are both ``reusable_native_kernel`` and carry a resolved
-    ``source_file`` participate: an unresolved (empty) source is not a shared
-    function, so those stay standalone (per-kernel dispatch, unchanged). Every
-    group is keyed by operation plus source: repeated shapes of one operator
-    share a task, while different operators in one translation unit stay
-    independent.
-
-    Each group carries compact ``rows``:
-    ``kernel_id`` / ``name`` / ``device_kernel_name`` / ``shapes`` / ``call_count``
-    / ``duration_us`` / ``percent_of_total`` / ``gpu_pct`` / ``bound_type``. Groups
-    are ranked by aggregate GPU time; the heaviest row is the primary.
-
-    Args:
-        hot_kernels: The candidate rows from :func:`build_candidates`.
-
-    Returns:
-        Ordered task-group dicts (``tg001`` first = heaviest), or ``[]`` when no
-        candidate is routable-with-source.
-    """
+    """Group routable candidates that share an editable source into task groups."""
     buckets: dict[str, dict[str, Any]] = {}
     for c in hot_kernels:
         if not c.get("reusable_native_kernel"):
@@ -356,16 +288,7 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _source_type_from_path(path: str) -> str:
-    """Derive source type from a resolved source file's extension.
-
-    Args:
-        path: Resolved editable source path.
-
-    Returns:
-        ``"hip_cpp"`` for native device code, ``"python"`` for a ``.py`` source,
-        or ``""`` when the extension is unrecognized (caller falls back to the
-        op-name heuristic).
-    """
+    """Derive source type from a resolved source file's extension."""
     low = (path or "").lower()
     if low.endswith(_NATIVE_SOURCE_EXTS):
         return "hip_cpp"
@@ -406,28 +329,7 @@ def partition_kernels(
     hot_kernels: list[dict[str, Any]],
     is_routable: Callable[[dict[str, Any]], bool],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split a hot-kernel list into ``(routable, skipped)`` one way, everywhere.
-
-    The three ``skipped_kernels`` producers used to each build the list by hand,
-    with subtly different comprehensions; a reader could not trust that
-    ``hot_kernels == routable + skipped`` held. This is the single partition path
-    they now share.
-
-    The ``routability`` test is the *caller's* -- the strict dispatch predicate
-    (reusable + resolved source + dispatch-grade shape) and the coarse
-    reusability predicate mean different things and are contracted separately, so
-    each site passes its own ``is_routable``. What is unified is the *shape* of
-    the split: ``skipped`` is always the exact ``kernel_id`` complement of
-    ``routable`` within ``hot_kernels``, so the two lists partition the input with
-    no overlap and no leakage by construction.
-
-    Args:
-        hot_kernels: The full ranked hotspot set; each row carries ``kernel_id``.
-        is_routable: Predicate deciding whether a row belongs in ``routable``.
-
-    Returns:
-        ``(routable_kernels, skipped_kernels)`` -- a partition of ``hot_kernels``.
-    """
+    """Split a hot-kernel list into ``(routable, skipped)`` one way, everywhere."""
     routable: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for row in hot_kernels:
@@ -445,20 +347,7 @@ def build_candidates(
     top_k: int = 15,
     discover_benchmarks: bool = False,
 ) -> dict[str, Any]:
-    """Turn classified top device kernels into the candidate payload.
-
-    Args:
-        analyze_out: Result of :func:`_bypass_trace_reader.analyze_trace`.
-        framework: Serving framework tag.
-        target_platform: GPU platform tag.
-        top_k: Max number of hot-kernel candidates to emit.
-
-    Returns:
-        A dict with ``hot_kernels`` (the FULL ranked hotspot set), plus
-        ``routable_kernels`` / ``skipped_kernels`` (a partition of ``hot_kernels``:
-        routable = reusable-with-resolved-source = dispatchable) and
-        ``task_groups``.
-    """
+    """Turn classified top device kernels into the candidate payload."""
     kernels = analyze_out.get("kernels") or []
     hot_kernels: list[dict[str, Any]] = []
     for idx, k in enumerate(kernels[: top_k if top_k and top_k > 0 else len(kernels)], start=1):
@@ -468,25 +357,14 @@ def build_candidates(
         kernel_id = f"k{idx:03d}"
         display = op_name or _short_name(kname)
 
-        # Source resolution. Priority: (1) a Triton .py kernel_file from the
-        # trace's cpu_op args, with the exact @triton.jit def line pinned via AST
-        # (resolve_triton_py, method "trace_kernel_file[_ast]"); (2) native
-        # .cu/.hip active-finder lookup by device kernel symbol (resolve_source ->
-        # source_resolver, method "symbol_index"); (3) repo-scan by device kernel
-        # name; else unresolved. There is no static op_to_source map.
+        # Source resolution.
         source_file, source_line, source_method = resolve_triton_py(
             k.get("op_kernel_file", "") or "",
             k.get("op_kernel_backend", "") or "",
             symbol=kname,
         )
-        # Native lookup is driven by the device symbol (kname), not op_name:
-        # the finder ignores op_name, and device kernels with no correlated
-        # cpu_op (common under HIP graphs) arrive with op_name="". Gating on
-        # kname keeps those resolvable.
-        #
-        # finder_patchable carries the finder's authoritative patchability
-        # verdict onto the candidate (op_to_source_* below); it stays None for a
-        # Triton/repo-scan hit, which the classifier handles instead.
+        # Native lookup is driven by the device symbol (kname), not op_name: the finder ignores op_name, and device
+        # kernels with no correlated cpu_op (common under HIP graphs) arrive with op_name="".
         finder_patchable: bool | None = None
         finder_status = ""
         finder_reason = ""
@@ -497,29 +375,24 @@ def build_candidates(
                 finder_patchable = True
                 finder_status = "resolved"
             elif method == "non_patchable":
-                # A positive "known not rewritable" verdict (e.g. a CK template
-                # instantiation), NOT a miss. Record it and DO NOT fall through
-                # to the repo-scan tier, which could otherwise override the
-                # finder with a coincidental kernel-name hit.
+                # A positive "known not rewritable" verdict (e.g. a CK template instantiation), NOT a miss.
                 source_method = method
                 finder_patchable = False
                 finder_status = "non_rewritable"
                 finder_reason = (
                     "non-patchable kernel (symbol-detected: CK template / no single editable __global__ source)"
                 )
-        # Repo-scan is the last resort, and only for a genuine miss -- never when
-        # the finder already returned an authoritative non_patchable verdict.
+        # Repo-scan is the last resort, and only for a genuine miss -- never when the finder already returned an
+        # authoritative non_patchable verdict.
         if not source_file and kname and source_method != "non_patchable":
             source_file, method = resolve_by_kernel_name(kname)
             if source_file:
                 source_method = method
 
-        # Shape resolution waterfall (provenance records the source):
-        #   1. torch_trace      -- this kernel's own cpu_op Input Dims (precise)
-        #   2. capture_backfill -- same-name kernel's capture-time shape
-        #   3. launch_grid      -- this kernel's launch grid/block geometry
-        #   4. tile_name        -- BLOCK_SIZE_* tile embedded in the kernel name
-        #   5. unresolved       -- none of the above
+        # Shape resolution waterfall (provenance records the source): 1. torch_trace -- this kernel's own cpu_op Input
+        # Dims (precise) 2. capture_backfill -- same-name kernel's capture-time shape 3. launch_grid -- this kernel's
+        # launch grid/block geometry 4. tile_name -- BLOCK_SIZE_* tile embedded in the kernel name 5. unresolved --
+        # none of the above
         _count = k.get("count") or 0
         op_shapes = k.get("op_shapes") or []
         op_dtypes = k.get("op_dtypes") or []
@@ -543,8 +416,8 @@ def build_candidates(
         if not shape_provenance:
             shape_provenance = "unresolved"
 
-        # Benchmark discovery is opt-in; a routable kernel's on-disk
-        # test/benchmark can seed downstream harness generation.
+        # Benchmark discovery is opt-in; a routable kernel's on-disk test/benchmark can seed downstream harness
+        # generation.
         bench_files: list[str] = []
         kernel_repo = ""
         if discover_benchmarks and kc.reusable and source_file:
@@ -574,25 +447,22 @@ def build_candidates(
             "compute_utilization_pct": None,
             "bandwidth_utilization_pct": None,
             "rocprof_roofline": None,
-            # Placeholder roofline: bound_type/AI/util above are structural
-            # defaults, NOT measured. ``roofline_source`` tracks derivation:
-            # placeholder -> analytical -> rocprof.
+            # Placeholder roofline: bound_type/AI/util above are structural defaults, NOT measured.
             "roofline_measured": False,
             "roofline_source": _RL_PLACEHOLDER,
             "library": "",
             "backend": framework,
             "framework": framework,
             "source_file": source_file,
-            # AST-pinned @triton.jit def line for .py sources (None when unpinned
-            # or for native .cu kernels resolved by the symbol index).
+            # AST-pinned @triton.jit def line for .py sources (None when unpinned or for native .cu kernels resolved
+            # by the symbol index).
             "source_line": source_line,
             "source_resolution_method": source_method,
             "source_type": source_type,
             "kernel_kind": kernel_kind,
             "reusable_native_kernel": kc.reusable,
-            # Non-reusable keeps the classifier reason; a reusable kernel with a
-            # finder non_patchable verdict reports that verdict; a reusable
-            # kernel with no resolved source is simply not dispatchable.
+            # Non-reusable keeps the classifier reason; a reusable kernel with a finder non_patchable verdict reports
+            # that verdict; a reusable kernel with no resolved source is simply not dispatchable.
             "skip_reason": (
                 kc.skip_reason
                 if not kc.reusable
@@ -603,35 +473,27 @@ def build_candidates(
                 )
             ),
             "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
-            # Seeds for the GEAK harness + rocprof enrichment (only when
-            # discover_benchmarks is set).
+            # Seeds for the GEAK harness + rocprof enrichment (only when discover_benchmarks is set).
             "benchmark_files": bench_files,
             "kernel_repo": kernel_repo,
-            # ``shapes`` / ``input_shapes`` use the downstream contract form
-            # (the kernel-opt gate + GEAK harness require this format).
+            # ``shapes`` / ``input_shapes`` use the downstream contract form (the kernel-opt gate + GEAK harness
+            # require this format).
             "shapes": shape_entries,
             "input_shapes": shape_entries,
             "input_dtypes": op_dtypes,
             "shape_provenance": shape_provenance,
-            # launch_grid / tile_name shapes are geometry, so the kernel-opt gate
-            # rejects them. Mark whether the shape actually satisfies dispatch so
-            # the report and routing do not claim a geometry-only kernel is ready.
+            # launch_grid / tile_name shapes are geometry, so the kernel-opt gate rejects them.
             "shape_dispatchable": shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
         }
-        # Carry the finder's authoritative patchability verdict (method
-        # "symbol_index") so the downstream gate honors it instead of
-        # re-deriving from heuristics, and so a non_patchable verdict is not
-        # silently indistinguishable from an unresolved miss.
+        # Carry the finder's authoritative patchability verdict (method "symbol_index") so the downstream gate honors
+        # it instead of re-deriving from heuristics, and so a non_patchable verdict is not silently indistinguishable
+        # from an unresolved miss.
         if finder_patchable is not None:
             cand["op_to_source_status"] = finder_status
             cand["op_to_source_patchable"] = finder_patchable
             cand["op_to_source_reason"] = finder_reason
-        # Analytical roofline: derive bound_type / AI / efficiency from captured
-        # shapes + measured time for EVERY estimable kernel (rocprof enrichment
-        # later refines it to a measured roofline). Only precise operand shapes
-        # (torch_trace / capture_backfill) feed the AI math; launch-grid and
-        # tile-name fallbacks are geometry, not operand dims, so they would
-        # poison the roofline -- skip analytical estimation for them.
+        # Analytical roofline: derive bound_type / AI / efficiency from captured shapes + measured time for EVERY
+        # estimable kernel (rocprof enrichment later refines it to a measured roofline).
         _roofline_shape = (
             shape_entries[0]["shape"] if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE else ""
         )
@@ -644,14 +506,12 @@ def build_candidates(
         )
         if rl:
             cand.update(rl)
-        # A reusable kernel with a resolved source but only a geometry shape
-        # (launch_grid / tile_name) is visible but not auto-dispatchable: the
-        # kernel-opt gate requires operand dims. Surface that in skip_reason so
-        # it is not silently presented as ready to optimize.
+        # A reusable kernel with a resolved source but only a geometry shape (launch_grid / tile_name) is visible but
+        # not auto-dispatchable: the kernel-opt gate requires operand dims.
         if kc.reusable and source_file and not cand["shape_dispatchable"]:
             cand["skip_reason"] = f"shape not dispatchable (provenance={shape_provenance}); need operand dims"
-        # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no
-        # analytical efficiency, headroom=1 so it degrades to gpu_pct.
+        # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency, headroom=1 so
+        # it degrades to gpu_pct.
         eff = cand.get("efficiency_percent")
         eff = float(eff) if isinstance(eff, (int, float)) else 0.0
         headroom = 1.0 - min(max(eff, 0.0), 100.0) / 100.0
@@ -662,8 +522,8 @@ def build_candidates(
         cand["recommended_actions"] = [suggestion]
         hot_kernels.append(cand)
 
-    # Group repeated shapes of one operator and editable source into one task;
-    # stamp that shared contract onto each member.
+    # Group repeated shapes of one operator and editable source into one task; stamp that shared contract onto each
+    # member.
     task_groups = _build_task_groups(hot_kernels)
     kid_to_group = {kid: g for g in task_groups for kid in g["kernel_ids"]}
     for c in hot_kernels:
@@ -671,22 +531,14 @@ def build_candidates(
         if g is not None:
             c["task_group"] = g
 
-    # 1-based rank by optimization ROI, stamped WITHOUT reordering hot_kernels
-    # (that list stays gpu_pct-sorted).
+    # 1-based rank by optimization ROI, stamped WITHOUT reordering hot_kernels (that list stays gpu_pct-sorted).
     for rank, c in enumerate(
         sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1
     ):
         c["priority_rank"] = rank
 
-    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt:
-    # reusable + resolved source + a dispatch-grade operand shape. A geometry-only
-    # (launch_grid/tile_name) shape is rejected by the kernel-opt gate, so those
-    # kernels stay in ``skipped_kernels`` and never re-enter the untried queue.
-    # ``hot_kernels`` stays the FULL ranked hotspot set.
-    # Complement within ``hot_kernels`` (via the shared partition helper) so the
-    # contract ``hot_kernels == routable_kernels + skipped_kernels`` holds. This
-    # site's routability is the strict dispatch predicate: reusable + resolved
-    # source + a dispatch-grade operand shape.
+    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt: reusable + resolved source + a
+    # dispatch-grade operand shape.
     routable_kernels, skipped_kernels = partition_kernels(
         hot_kernels,
         lambda c: bool(c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")),
@@ -711,21 +563,10 @@ def build_summary(
     generated_at: str,
     trace_health_warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build the routed-vs-skipped audit ``summary.json`` payload.
+    """Build the routed-vs-skipped audit ``summary.json`` payload."""
 
-    Args:
-        candidates: Output of :func:`build_candidates`.
-        framework: Serving framework tag.
-        target_platform: GPU platform tag.
-        generated_at: ISO timestamp string.
-        trace_health_warnings: Optional health warnings to record.
-
-    Returns:
-        The ``summary.json`` payload dict.
-    """
-
-    # ``tasks`` / ``skipped`` reuse the SAME split build_candidates computed so
-    # summary.json never disagrees with kernel_candidates.json.
+    # ``tasks`` / ``skipped`` reuse the SAME split build_candidates computed so summary.json never disagrees with
+    # kernel_candidates.json.
     def _audit_row(c: dict[str, Any]) -> dict[str, Any]:
         return {
             "kernel_id": c["kernel_id"],
@@ -748,9 +589,8 @@ def build_summary(
         row = _audit_row(c)
         row["skip_reason"] = c["skip_reason"]
         skipped.append(row)
-    # Reusable kernels that resolved a source but were held out of ``tasks``
-    # because their shape is geometry-only (launch_grid/tile_name). Surfaced for
-    # audit so the count reconciles with the "auto-dispatchable" report wording.
+    # Reusable kernels that resolved a source but were held out of ``tasks`` because their shape is geometry-only
+    # (launch_grid/tile_name).
     geometry_only_skipped_count = sum(
         1
         for c in candidates.get("skipped_kernels") or []
@@ -780,8 +620,8 @@ def build_summary(
         "skipped": skipped,
         "task_groups": group_entries,
         "task_count": len(tasks),
-        # ``tasks`` already excludes geometry-only kernels, so dispatchable_count
-        # == task_count; kept explicit so the audit view states dispatchability.
+        # ``tasks`` already excludes geometry-only kernels, so dispatchable_count == task_count; kept explicit so the
+        # audit view states dispatchability.
         "dispatchable_count": len(tasks),
         "geometry_only_skipped_count": geometry_only_skipped_count,
         "skipped_count": len(skipped),
@@ -791,15 +631,7 @@ def build_summary(
 
 
 def _category_rollup(analyze_out: dict[str, Any]) -> list[dict[str, Any]]:
-    """Aggregate GPU time by category over *all* device kernels.
-
-    Uses the full kernel list (not just top-K) so category shares are complete;
-    requires the reader to have been called with ``top_k=0``.
-
-    Returns:
-        Category rows sorted by GPU time desc, each with category / gpu_ms /
-        gpu_pct / kernel_count.
-    """
+    """Aggregate GPU time by category over *all* device kernels."""
     kernels = analyze_out.get("kernels") or []
     total_us = sum(float(k.get("gpu_time_us") or 0.0) for k in kernels) or 1.0
     cat_us: dict[str, float] = defaultdict(float)
@@ -872,14 +704,7 @@ def _join_list(value: Any) -> str:
 
 
 def build_metrics_rows(candidates: dict[str, Any]) -> list[dict[str, Any]]:
-    """Flatten ALL hot kernels (routable + skipped) into per-kernel metric rows.
-
-    Args:
-        candidates: Output of :func:`build_candidates`.
-
-    Returns:
-        One flat dict per hot kernel keyed by :data:`_METRICS_COLUMNS`.
-    """
+    """Flatten ALL hot kernels (routable + skipped) into per-kernel metric rows."""
     rows: list[dict[str, Any]] = []
     for c in candidates.get("hot_kernels") or []:
         shapes = c.get("shapes") or []
@@ -918,14 +743,7 @@ def build_metrics_rows(candidates: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_category_summary(candidates: dict[str, Any]) -> list[dict[str, Any]]:
-    """Aggregate hot kernels by category (the CSV 'summary' view).
-
-    Args:
-        candidates: Output of :func:`build_candidates`.
-
-    Returns:
-        One row per category (keyed by :data:`_SUMMARY_COLUMNS`), GPU%-descending.
-    """
+    """Aggregate hot kernels by category (the CSV 'summary' view)."""
     agg: dict[str, dict[str, Any]] = {}
     for c in candidates.get("hot_kernels") or []:
         cat = c.get("kernel_category") or "Others"
@@ -1000,23 +818,7 @@ def render_analysis_md(
     metrics_csv_path: str = "",
     summary_csv_path: str = "",
 ) -> str:
-    """Render the human/downstream ``analysis.md`` report (bypass route).
-
-    Structured (not LLM prose); mirrors the golden section layout but is not
-    consumed by ``parse_analysis_md``.
-
-    Args:
-        candidates: Output of :func:`build_candidates`.
-        analyze_out: Output of :func:`_bypass_trace_reader.analyze_trace`
-            (must be produced with ``top_k=0`` for a complete category rollup).
-        model_name: Model identifier for the title.
-        framework: Serving framework tag.
-        target_platform: GPU platform tag.
-        throughput_unit: ``tok/s`` (text-gen) or ``img/s`` (xDiT).
-
-    Returns:
-        The full markdown report text.
-    """
+    """Render the human/downstream ``analysis.md`` report (bypass route)."""
     timeline = analyze_out.get("timeline") or {}
     attribution = analyze_out.get("attribution") or {}
     hot = candidates.get("hot_kernels") or []
@@ -1045,8 +847,7 @@ def render_analysis_md(
         "exposed_memcpy_pct": memcpy_pct,
     }
 
-    # Top Hot Kernels rows. Displayed Eff% is the binding-side roofline
-    # attainment.
+    # Top Hot Kernels rows.
     hot_rows = [
         {
             "name": c.get("name"),
@@ -1061,11 +862,11 @@ def render_analysis_md(
         for c in hot
     ]
 
-    # One P-item per routable candidate (ranked by optimization ROI). %E2E and
-    # launcher Kernel Path are not modelled by bypass.
+    # One P-item per routable candidate (ranked by optimization ROI). %E2E and launcher Kernel Path are not modelled
+    # by bypass.
     routable = [c for c in hot if c.get("reusable_native_kernel")]
-    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape;
-    # a geometry-only (launch_grid/tile_name) shape does not satisfy the gate.
+    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape; a geometry-only (launch_grid/tile_name)
+    # shape does not satisfy the gate.
     dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
     p_items = []
     for i, c in enumerate(routable, start=1):
@@ -1147,11 +948,7 @@ def _render_bypass_extra_sections(
     metrics_csv_path: str,
     summary_csv_path: str,
 ) -> str:
-    """Render the bypass-only richer sections appended after the shared spine.
-
-    Covers category rollup, optimization-priority Top-N, per-candidate
-    optimization prose, task groups, per-kernel detail, appendix, and CSV links.
-    """
+    """Render the bypass-only richer sections appended after the shared spine."""
     L: list[str] = []
 
     # Top Operations (category rollup) + analytical bound distribution.
@@ -1351,23 +1148,7 @@ def build_workload_roofline_totals(
     *,
     target_platform: str,
 ) -> dict[str, Any]:
-    """Aggregate the analytical roofline over ALL analyzed device kernels.
-
-    The per-kernel candidate list is capped at ``top_k``; the WORKLOAD roofline
-    must instead cover every device kernel so it is not truncated to the hottest
-    few. Classifies + computes the analytical roofline inline for each kernel and
-    accumulates the same totals shape as
-    :func:`diffusion_roofline.aggregate_bypass_candidates`, weighting
-    ``sigma_ideal`` by the binding-side attainment.
-
-    Args:
-        analyze_out: Result of :func:`_bypass_trace_reader.analyze_trace`.
-        target_platform: GPU platform tag for the peak lookup.
-
-    Returns:
-        Workload totals keyed like ``aggregate_unified`` /
-        ``aggregate_bypass_candidates``.
-    """
+    """Aggregate the analytical roofline over ALL analyzed device kernels."""
     sigma_actual = 0.0
     sigma_ideal = 0.0
     compute_us = 0.0
@@ -1380,10 +1161,8 @@ def build_workload_roofline_totals(
         sigma_actual += dur
         kc = classify_kernel(k.get("name", "") or "", op_name=k.get("op_name", "") or "")
         _count = k.get("count") or 0
-        # Match the candidate-side waterfall for dispatch-grade shapes: own
-        # cpu_op dims, then the same-name capture-time backfill. Geometry
-        # fallbacks (launch_grid/tile_name) are intentionally excluded so they
-        # do not poison the analytical roofline.
+        # Match the candidate-side waterfall for dispatch-grade shapes: own cpu_op dims, then the same-name
+        # capture-time backfill.
         shape_entries = _trace_shape_entries(k.get("op_shapes") or [], k.get("op_dtypes") or [], _count)
         if not shape_entries:
             shape_entries = _trace_shape_entries(k.get("backfill_shapes") or [], k.get("backfill_dtypes") or [], _count)
@@ -1427,18 +1206,7 @@ def build_kernel_roofline(
     analysis_md_path: str,
     kernel_candidates_path: str,
 ) -> dict[str, Any]:
-    """Build the per-kernel roofline sidecar payload.
-
-    Hardware roofline fields are estimated from the analytical model.
-
-    Args:
-        candidates: Output of :func:`build_candidates`.
-        analysis_md_path: Path to the written ``analysis.md``.
-        kernel_candidates_path: Path to the written ``kernel_candidates.json``.
-
-    Returns:
-        The ``kernel_roofline.json`` payload dict.
-    """
+    """Build the per-kernel roofline sidecar payload."""
     rows = []
     for c in candidates.get("hot_kernels") or []:
         rows.append(
@@ -1450,8 +1218,7 @@ def build_kernel_roofline(
                 "gpu_pct": c["gpu_pct"],
                 "call_count": c["call_count"],
                 "bound_type": c["bound_type"],
-                # bottleneck falls back to bound_type; roofline_name has no
-                # analytical analogue so it stays null.
+                # bottleneck falls back to bound_type; roofline_name has no analytical analogue so it stays null.
                 "bottleneck": c.get("bottleneck") or c.get("bound_type"),
                 "roofline_name": c.get("roofline_name"),
                 "suggestion": c.get("suggestion") or "",
@@ -1480,22 +1247,10 @@ def build_kernel_roofline(
 
 
 def build_fusion(analyze_out: dict[str, Any]) -> dict[str, Any]:
-    """Build the kernel-fusion opportunity payload from the launch sequence.
-
-    Classifies each time-ordered launch (device name + launching op) and finds
-    fusable clusters + adjacent transitions (see :mod:`_bypass_fusion`). Returns
-    an empty payload when the reader did not emit ``kernel_launches``.
-
-    Args:
-        analyze_out: Result of :func:`_bypass_trace_reader.analyze_trace`
-            (with ``emit_launches=True``).
-
-    Returns:
-        The ``kernel_sequence`` payload dict.
-    """
+    """Build the kernel-fusion opportunity payload from the launch sequence."""
     launches = analyze_out.get("kernel_launches") or []
-    # Memoize classification by (device name, op name): few distinct kernels but
-    # many launches, so caching keeps this O(distinct) not O(launches x rules).
+    # Memoize classification by (device name, op name): few distinct kernels but many launches, so caching keeps this
+    # O(distinct) not O(launches x rules).
     _cat_cache: dict[tuple[str, str], str] = {}
 
     def _category(name: str, op_name: str) -> str:

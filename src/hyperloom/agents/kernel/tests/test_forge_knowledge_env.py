@@ -58,12 +58,7 @@ def test_local_child_env_keeps_pr_service_url_without_recipe_token(
 
 
 def test_child_env_carries_the_card_the_run_measured_on() -> None:
-    """KernelForge files its experience under the card, not the gfx target.
-
-    Several cards build for one target, so the target cannot stand in for the
-    model. Without the model KernelForge declines to read or write, and the run
-    accumulates nothing while still looking healthy.
-    """
+    """KernelForge files its experience under the card, not the gfx target."""
     env: dict[str, str] = {}
     forge_submit._apply_gpu_type_env(env, "mi355x")
 
@@ -71,12 +66,7 @@ def test_child_env_carries_the_card_the_run_measured_on() -> None:
 
 
 def test_child_env_drops_an_inherited_gpu_type_that_names_a_target() -> None:
-    """``GPU_TYPE`` is also accepted here as a way to name a gfx target.
-
-    Inherited unchecked, the child would file its experience under ``gfx950`` as
-    though a compilation target were a card. Better to hand over nothing: the
-    refusal is reported, a wrong address is not.
-    """
+    """``GPU_TYPE`` is also accepted here as a way to name a gfx target."""
     env = {"GPU_TYPE": "gfx950"}
     forge_submit._apply_gpu_type_env(env, "")
 

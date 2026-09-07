@@ -71,14 +71,7 @@ _SHELL_COMMAND_NAMES = {"bash", "dash", "sh", "zsh", "ksh"}
 
 
 def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[str]:
-    """Return a rebuild argv, never a shell command string.
-
-    A string rebuild_command is tokenised with shlex and run argv-only
-    (shell=False) instead of ``bash -lc <str>``, so it cannot inject shell
-    control operators. A legitimate argv (already a list, or a plain-command
-    string like ``ninja -C build``) is unaffected; only commands that rely on
-    shell syntax are rejected.
-    """
+    """Return a rebuild argv, never a shell command string."""
     if not rebuild_command:
         return []
     if isinstance(rebuild_command, str):
@@ -103,16 +96,7 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
 
 
 def known_target_roots() -> tuple[str, ...]:
-    """Resolved framework roots (importlib/glob when orchestrator is importable).
-
-    Resolves once and caches the result. Falls back to
-    :data:`_FALLBACK_KNOWN_TARGET_ROOTS` plus the FlyDSL roots when the
-    orchestrator package is not importable (standalone CLI use).
-
-    Returns:
-        tuple[str, ...]: Absolute path-prefix strings for the recognised
-            reusable framework source roots (aiter / sglang / vllm / flydsl).
-    """
+    """Resolved framework roots (importlib/glob when orchestrator is importable)."""
     global _CACHED_KNOWN_TARGET_ROOTS
     if _CACHED_KNOWN_TARGET_ROOTS is not None:
         return _CACHED_KNOWN_TARGET_ROOTS
@@ -144,17 +128,7 @@ _MN_POD_BACKUP_DIR_DEFAULT = "/var/kernel_patch_backups"
 
 
 def _is_multi_node() -> bool:
-    """Report whether a multi-node RayJob is active.
-
-    Relies solely on the trusted in-process ``$INFERENCE_OPTIMIZER_NODES``
-    signal that the optimizer CLI exports at launch (inherited by this
-    process). No state file is read, so a co-tenant cannot force multi-node
-    fan-out by planting a world-writable ``multi_node_state.json``.
-
-    Returns:
-        ``True`` when ``$INFERENCE_OPTIMIZER_NODES`` is ``>= 2``; ``False``
-        otherwise (including when the env var is unset or non-numeric).
-    """
+    """Report whether a multi-node RayJob is active."""
     try:
         return int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "0") or 0) >= 2
     except ValueError:
@@ -170,22 +144,7 @@ def _dispatch_multinode_apply(
     jit_build_dir: str = "",
     timeout_sec: int = 180,
 ) -> dict[str, Any]:
-    """Fan a patch out to every pod (head + workers).
-
-    Args:
-        target_file: The file to patch on each pod.
-        patch_path: Path to the patch file to apply.
-        kernel_id: Identifier of the kernel being patched.
-        backup_dir_on_pod: Directory on each pod to store backups.
-        timeout_sec: Subprocess timeout in seconds.
-
-    Returns:
-        The parsed JSON result from the multi-node dispatch.
-
-    Raises:
-        RuntimeError: On subprocess failure, non-JSON output, or a pod status
-            other than ``ok`` (so the caller can roll back the local copy).
-    """
+    """Fan a patch out to every pod (head + workers)."""
     cmd = [
         sys.executable,
         "-m",
@@ -236,18 +195,7 @@ def _dispatch_multinode_revert(
     records_by_host: dict[str, list[dict[str, Any]]] | None = None,
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
-    """Restore the original file on every pod that received the apply.
-
-    Best-effort: failures are reported in the result rather than raised.
-
-    Args:
-        target_path: The patched file path to restore on each pod.
-        backup_map: Mapping of pod identifier to its backup path.
-        timeout_sec: Subprocess timeout in seconds.
-
-    Returns:
-        The parsed JSON result, or an empty dict when output is not JSON.
-    """
+    """Restore the original file on every pod that received the apply."""
     cmd = [
         sys.executable,
         "-m",
@@ -323,30 +271,13 @@ def _dispatch_multinode_finalize(
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize a filename component to a safe, short identifier.
-
-    Non-alphanumeric characters (other than ``._-``) become underscores and the
-    result is truncated to 80 characters.
-
-    Args:
-        value (str): The raw string to sanitize.
-
-    Returns:
-        str: A filesystem-safe identifier, or ``"kernel_agent"`` when empty.
-    """
+    """Sanitize a filename component to a safe, short identifier."""
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
     return cleaned[:80] or "kernel_agent"
 
 
 def _path_hash(path: Path) -> str:
-    """Return a short, stable hash for ``path`` to disambiguate backups.
-
-    Args:
-        path (Path): The path to hash.
-
-    Returns:
-        str: The first 16 hex characters of the SHA-256 of the path string.
-    """
+    """Return a short, stable hash for ``path`` to disambiguate backups."""
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
 
 
@@ -354,23 +285,7 @@ _MAX_BACKUP_DIR_ATTEMPTS: int = 200
 
 
 def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
-    """Create a backup directory this apply alone owns.
-
-    Suffixes ``-2``, ``-3``, … when an earlier attempt already claimed the name,
-    which a constant or absent ``kernel_id`` would otherwise reuse.
-    ``mkdir(exist_ok=False)`` makes the claim atomic against a concurrent caller.
-
-    Args:
-        backup_root (Path): Directory the per-attempt backups live under.
-        kernel_id (str): Kernel identifier; falls back to the target's stem.
-        target (Path): File being replaced.
-
-    Returns:
-        Path: The newly created backup directory.
-
-    Raises:
-        RuntimeError: If every suffix is taken.
-    """
+    """Create a backup directory this apply alone owns."""
     base = Path(backup_root) / f"{_safe_name(kernel_id or target.stem)}_{_path_hash(target)}"
     for suffix in range(1, _MAX_BACKUP_DIR_ATTEMPTS + 1):
         candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
@@ -383,17 +298,7 @@ def _claim_backup_dir(backup_root: Path, kernel_id: str, target: Path) -> Path:
 
 
 def _copy_to_backup(path: Path, backup_dir: Path, group: str) -> dict[str, str]:
-    """Copy a file into the backup tree and return the manifest entry.
-
-    Args:
-        path (Path): The file to back up.
-        backup_dir (Path): Root of the backup tree.
-        group (str): Sub-directory grouping (e.g. ``"source"`` / ``"artifacts"``).
-
-    Returns:
-        dict[str, str]: A manifest entry with ``path`` (original) and
-            ``backup_path`` (backup copy) keys.
-    """
+    """Copy a file into the backup tree and return the manifest entry."""
     dst = backup_dir / group / f"{_path_hash(path)}_{path.name}"
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, dst)
@@ -405,22 +310,7 @@ _source_text_looks_complete = source_text_looks_complete
 
 
 def _validate_patch_source(patch: Path, target: Path) -> None:
-    """Validate that ``patch`` is a complete drop-in replacement for ``target``.
-
-    Checks that the patch is not a text artifact, that its suffix matches the
-    target's, that it reads as text and looks like a complete source file, that
-    it is compatible with the target (see
-    :func:`_validate_replacement_compatibility`), and that Python patches
-    compile.
-
-    Args:
-        patch (Path): The candidate replacement source file.
-        target (Path): The file that would be replaced.
-
-    Raises:
-        ValueError: If the patch is incompatible, not a complete source file,
-            or not decodable as text.
-    """
+    """Validate that ``patch`` is a complete drop-in replacement for ``target``."""
     patch_suffix = patch.suffix.lower()
     target_suffix = target.suffix.lower()
     if patch_suffix in TEXT_ARTIFACT_SUFFIXES:
@@ -442,17 +332,7 @@ def _validate_patch_source(patch: Path, target: Path) -> None:
 
 
 def _host_entry_functions(source_text: str) -> set[str]:
-    """Extract public host (non-``__global__``) entry function names.
-
-    Scans for C/C++ free-function definitions with common return types,
-    excluding ``__global__`` kernels, leading-underscore helpers, and ``main``.
-
-    Args:
-        source_text (str): The C/C++/HIP source text to scan.
-
-    Returns:
-        set[str]: The set of discovered host entry-function names.
-    """
+    """Extract public host (non-``__global__``) entry function names."""
     names: set[str] = set()
     pattern = re.compile(
         r"(?m)^\s*(?!__global__)(?:template\s*<[^>]+>\s*)?"
@@ -468,20 +348,7 @@ def _host_entry_functions(source_text: str) -> set[str]:
 
 
 def _validate_replacement_compatibility(patch_text: str, target_text: str, target: Path) -> None:
-    """Guard against patches that break the target's integration contract.
-
-    Rejects patches that introduce standalone PYBIND11/TORCH_LIBRARY
-    registrations absent from the target, drop a required ``namespace aiter``,
-    or omit any host entry function the target exposes.
-
-    Args:
-        patch_text (str): The candidate replacement source text.
-        target_text (str): The current target source text.
-        target (Path): The target path (used in error messages).
-
-    Raises:
-        ValueError: If the patch is incompatible with the target's contract.
-    """
+    """Guard against patches that break the target's integration contract."""
     if "PYBIND11_MODULE" in patch_text and "PYBIND11_MODULE" not in target_text:
         raise ValueError("patch creates a standalone PYBIND11 module but target is a framework source file")
     if "TORCH_LIBRARY" in patch_text and "TORCH_LIBRARY" not in target_text:
@@ -500,19 +367,7 @@ def _validate_replacement_compatibility(patch_text: str, target_text: str, targe
 
 
 def _unquote_git_path(raw: str) -> str:
-    """Decode a git diff header path, handling C-style quoting.
-
-    Git emits paths with special characters as C-quoted strings (e.g.
-    ``"b/\\303\\251.py"``). A naive ``..``/absolute check on the still-quoted
-    string can be bypassed, so decode it first.
-
-    Args:
-        raw (str): The raw token following a header keyword (already
-            whitespace-trimmed).
-
-    Returns:
-        str: The decoded path, or the input unchanged when it is not quoted.
-    """
+    """Decode a git diff header path, handling C-style quoting."""
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
         try:
             return raw[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
@@ -522,45 +377,12 @@ def _unquote_git_path(raw: str) -> str:
 
 
 def _strip_ab_prefix(path: str) -> str:
-    """Drop a leading ``a/`` or ``b/`` git diff prefix.
-
-    Args:
-        path (str): A diff header path.
-
-    Returns:
-        str: The path without its ``a/``/``b/`` prefix.
-    """
+    """Drop a leading ``a/`` or ``b/`` git diff prefix."""
     return re.sub(r"^[ab]/", "", path)
 
 
 def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
-    """Parse a unified diff into a list of per-path deploy descriptors.
-
-    The patch is read as a *manifest* of intended filesystem changes — the set
-    of touched paths and each path's disposition — never as an instruction to be
-    replayed. Recognises the full git header vocabulary so nothing is silently
-    skipped: plain modifications, ``new file`` / ``--- /dev/null`` additions,
-    ``deleted file`` / ``+++ /dev/null`` deletions, ``rename from/to`` (mapped to
-    delete-source + add-dest), ``copy from/to``, ``old mode/new mode`` chmod-only
-    entries, and ``GIT binary patch`` blocks (flagged, content sourced from the
-    snapshot).
-
-    Args:
-        patch_text (str): The full unified diff text.
-
-    Returns:
-        list[dict[str, Any]]: One descriptor per affected path. Each has
-            ``op`` (``"write"`` or ``"delete"``), ``path`` (repo-relative
-            target), ``mode`` (octal string or ``""``), ``binary`` (bool), and
-            ``is_new`` (bool: the path is created by the patch — ``--- /dev/null``,
-            a ``new file mode`` header, or a rename/copy destination — so it must
-            not be pre-seeded with a base). A rename yields two descriptors: a
-            ``delete`` of the source and a ``write`` of the dest.
-
-    Raises:
-        ValueError: When the patch is empty/unparseable, or a section's
-            disposition cannot be determined.
-    """
+    """Parse a unified diff into a list of per-path deploy descriptors."""
     if not patch_text or not patch_text.strip():
         raise ValueError("empty patch: nothing to apply")
 
@@ -589,8 +411,8 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
             src = _unquote_git_path(rename_from.group(1).strip())
             dst = _unquote_git_path(rename_to.group(1).strip())
             descriptors.append({"op": "delete", "path": src, "mode": "", "binary": False, "is_new": False})
-            # The rename destination is produced by the apply; it must not be
-            # pre-seeded from a base (treated as a create).
+            # The rename destination is produced by the apply; it must not be pre-seeded from a base (treated as a
+            # create).
             descriptors.append({"op": "write", "path": dst, "mode": mode, "binary": binary, "is_new": True})
             continue
         if copy_to:
@@ -612,8 +434,6 @@ def parse_patch_manifest(patch_text: str) -> list[dict[str, Any]]:
             continue
 
         # Addition (--- /dev/null) or modification: dest comes from the +++ line.
-        # A creation is signalled by ``--- /dev/null`` or a ``new file mode``
-        # header; modifications carry an ``a/<path>`` on the ``---`` line.
         is_new = minus_path == "/dev/null" or bool(new_mode_m)
         target = _strip_ab_prefix(plus_path)
         if not target:
@@ -634,26 +454,7 @@ def _contained_dest(
     *,
     deploy_roots: Iterable[Path] | None = None,
 ) -> Path:
-    """Resolve ``rel_path`` under its coordinate and authorized deploy roots.
-
-    Rejects absolute paths and any ``..`` traversal, and confirms the resolved
-    destination stays inside ``repo_root``. When ``deploy_roots`` is provided,
-    it must also stay inside an explicitly authorized framework root.
-
-    Args:
-        repo_root (Path): The framework repo root that destinations must stay in.
-        rel_path (str): Repo-relative target path from the patch manifest.
-        deploy_roots (Iterable[Path] | None): Authorized framework roots.
-            ``None`` preserves coordinate-only validation for legacy callers;
-            an empty iterable rejects every destination.
-
-    Returns:
-        Path: The validated absolute destination path.
-
-    Raises:
-        ValueError: If the path is absolute, contains ``..``, or escapes
-            ``repo_root``.
-    """
+    """Resolve ``rel_path`` under its coordinate and authorized deploy roots."""
     if rel_path.startswith("/"):
         raise ValueError(f"absolute path not allowed in patch: {rel_path}")
     if ".." in Path(rel_path).parts:
@@ -675,16 +476,7 @@ def _contained_dest(
 
 
 def _within_root(path: Path, root: Path) -> bool:
-    """Return True when ``path`` (symlinks resolved) stays inside ``root``.
-
-    Args:
-        path (Path): candidate path (need not exist).
-        root (Path): the containment root.
-
-    Returns:
-        bool: True when the resolved ``path`` equals or is nested under the
-            resolved ``root``; False on any resolution error or escape.
-    """
+    """Return True when ``path`` (symlinks resolved) stays inside ``root``."""
     try:
         p = path.resolve()
         r = root.resolve()
@@ -701,33 +493,7 @@ def apply_snapshot(
     backup_dir: str | Path,
     deploy_roots: Iterable[str | Path] | None = None,
 ) -> dict[str, Any]:
-    """Apply a content-addressed snapshot atomically (all-or-nothing).
-
-    Each descriptor asserts a final filesystem state rather than replaying a
-    diff: ``write`` copies the byte-exact file from ``snapshot_dir`` onto the
-    live repo, ``delete`` removes the live file. The whole set is staged with a
-    full pre-flight (containment + source existence) before any write; if any
-    single operation fails, every already-touched path is restored from backup
-    and the call returns ``status="failed"`` — the repo is never left partially
-    applied. There is no fuzzy fallback.
-
-    Args:
-        descriptors (list[dict[str, Any]]): Output of
-            :func:`parse_patch_manifest`.
-        snapshot_dir (str | Path): Directory holding byte-exact final contents
-            for every ``write`` path (mirrored at the same relative path).
-        repo_root (str | Path): Framework repo root the targets live under.
-        backup_dir (str | Path): Where per-path backups + the revert manifest
-            are written.
-        deploy_roots (Iterable[str | Path] | None): Authorized framework roots
-            under which every write/delete destination must remain. ``None``
-            preserves the legacy coordinate-root-only contract.
-
-    Returns:
-        dict[str, Any]: ``status="ok"`` with ``source_backups`` (the revert
-            manifest entries) and ``touched`` paths, or ``status="failed"`` with
-            an ``error`` and the offending path.
-    """
+    """Apply a content-addressed snapshot atomically (all-or-nothing)."""
     root = Path(repo_root)
     allowed_roots = None if deploy_roots is None else [Path(path) for path in deploy_roots]
     symlink_roots = [root] if allowed_roots is None else allowed_roots
@@ -836,27 +602,11 @@ def apply_snapshot(
 
 
 def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
-    """Clear Python / Triton / Inductor caches around a Python patch.
-
-    Removes ``__pycache__`` dirs near the target plus the well-known Triton and
-    torch-inductor cache directories so a re-import recompiles the patched
-    kernel.
-
-    Args:
-        target (Path): The patched Python source file.
-
-    Returns:
-        dict[str, Any]: ``{"status": "ok", "removed": [...]}`` listing the
-            paths that were removed.
-    """
+    """Clear Python / Triton / Inductor caches around a Python patch."""
     removed: list[str] = []
 
     def remove_path(path: Path) -> None:
-        """Remove a file or directory, recording success and ignoring errors.
-
-        Args:
-            path (Path): The file or directory to remove.
-        """
+        """Remove a file or directory, recording success and ignoring errors."""
         try:
             if path.is_dir():
                 shutil.rmtree(path)
@@ -885,10 +635,9 @@ def _clear_python_kernel_caches(target: Path) -> dict[str, Any]:
     return {"status": "ok", "removed": removed}
 
 
-# aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so).
-# aiter device sources ship either in-tree (``/aiter/csrc/``) or in the sibling
-# split wheel (``/aiter_meta/csrc/``); both feed the same importable ``aiter``
-# JIT build, so the rebuild gates must recognise both layouts.
+# aiter JIT cache invalidation around rebuilds (setup.py develop won't invalidate jit/build/ .so). aiter device
+# sources ship either in-tree (``/aiter/csrc/``) or in the sibling split wheel (``/aiter_meta/csrc/``); both feed the
+# same importable ``aiter`` JIT build, so the rebuild gates must recognise both layouts.
 _AITER_CSRC_MARKERS = ("/aiter/csrc/", "/aiter_meta/csrc/")
 _REBUILD_MODE_COMMAND = "command"
 _REBUILD_MODE_NONE = "none"
@@ -911,14 +660,7 @@ def _isolated_aiter_pkg_root() -> Path | None:
 
 
 def _flydsl_root_for(target_file: Path) -> Path | None:
-    """The FlyDSL checkout root containing ``target_file``, else ``None``.
-
-    Matches case-insensitively, as the surrounding patchability and apply
-    gates do, but returns the matching prefix of ``target_file`` rather than
-    the matched root: the root list carries a lower-cased variant of every env
-    root, and handing back a spelling that does not exist on disk would send
-    snapshot mode into a fabricated tree.
-    """
+    """The FlyDSL checkout root containing ``target_file``, else ``None``."""
     raw = str(target_file).replace(os.sep, "/")
     norm = raw.lower()
     for root in _fallback_flydsl_roots():
@@ -932,9 +674,8 @@ def _installed_kernel_package(
     target_file: Path,
 ) -> tuple[Path, str] | None:
     """Return ``(site-packages root, package name)`` for an allowed framework."""
-    # Preserve the lexical install path: venv/site-packages is commonly a
-    # symlink, and resolving it here would make strategy classification disagree
-    # with the path matching performed by _detect_strategy.
+    # Preserve the lexical install path: venv/site-packages is commonly a symlink, and resolving it here would make
+    # strategy classification disagree with the path matching performed by _detect_strategy.
     target = target_file.absolute()
     for parent in target.parents:
         if parent.name in _ALLOWED_KERNEL_DEPLOY_PACKAGES and parent.parent.name in {"site-packages", "dist-packages"}:
@@ -957,12 +698,7 @@ def _editable_kernel_deploy_roots() -> list[Path]:
 
 
 def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
-    """Return the package root shared by installed ``aiter`` and ``aiter_meta``.
-
-    AITER wheels split runtime Python/JIT code into ``aiter`` and device sources
-    into the sibling ``aiter_meta`` package. Both are runtime-JIT inputs and must
-    share one deployment/rebuild strategy.
-    """
+    """Return the package root shared by installed ``aiter`` and ``aiter_meta``."""
     installed = _installed_kernel_package(target_file)
     if installed is None or installed[1] not in {"aiter", "aiter_meta"}:
         return None
@@ -970,15 +706,7 @@ def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
 
 
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
-    """Report whether a file resides under an ``aiter/csrc/`` tree.
-
-    Args:
-        target_file: The file path to test.
-
-    Returns:
-        ``True`` if the path is under an ``aiter/csrc/`` (in-tree) or
-        ``aiter_meta/csrc/`` (split-wheel) directory.
-    """
+    """Report whether a file resides under an ``aiter/csrc/`` tree."""
     norm = str(target_file).replace(os.sep, "/")
     return any(marker in norm for marker in _AITER_CSRC_MARKERS)
 
@@ -990,12 +718,7 @@ def _target_uses_aiter_jit(target_file: Path) -> bool:
 
 
 def _aiter_jit_build_dir() -> Path | None:
-    """Locate the importable aiter package's ``jit/build`` directory.
-
-    Returns:
-        The ``<aiter>/jit/build`` path, or ``None`` when aiter is not
-        importable.
-    """
+    """Locate the importable aiter package's ``jit/build`` directory."""
     try:
         spec = importlib.util.find_spec("aiter")
     except (ImportError, ValueError):
@@ -1014,19 +737,7 @@ def _invalidate_aiter_jit_build(
     *,
     jit_build_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Move aiter ``jit/build/`` aside so a post-rebuild import re-JITs.
-
-    Args:
-        target_file: The file being patched (gates the operation).
-        backup_dir: Directory to move the ``jit/build`` tree into.
-        jit_build_dir: Authoritative JIT build path from the apply strategy.
-            Falls back to runtime discovery for non-runtime-JIT strategies.
-
-    Returns:
-        A status dict with ``status`` of ``ok`` (cache moved), ``clean``
-        (authoritative cache absent/empty), ``skipped``, or ``failed`` and
-        supporting fields.
-    """
+    """Move aiter ``jit/build/`` aside so a post-rebuild import re-JITs."""
     if jit_build_dir is None and not _target_is_in_aiter_csrc(target_file):
         return {
             "status": "skipped",
@@ -1081,18 +792,14 @@ def _invalidate_aiter_jit_build(
 
 
 def _trusted_aiter_jit_build_dir(path: Path) -> bool:
-    """Validate a strategy-persisted AITER JIT destination.
-
-    Accepts both shapes apply can pin: a wheel install under site-packages and
-    the editable checkout :data:`_EDITABLE_AITER_ROOT`.
-    """
+    """Validate a strategy-persisted AITER JIT destination."""
     # A manifest path is untrusted: an unresolvable one reads as not trusted.
     try:
         resolved = path.resolve()
     except (OSError, RuntimeError):
         return False
-    # Classify on the lexical path: site-packages is commonly a symlink, and the
-    # resolved spelling no longer carries that marker.
+    # Classify on the lexical path: site-packages is commonly a symlink, and the resolved spelling no longer carries
+    # that marker.
     root = _installed_aiter_runtime_root(path) or _EDITABLE_AITER_ROOT
     if resolved != (root / "aiter" / "jit" / "build").resolve():
         return False
@@ -1105,21 +812,7 @@ def _restore_aiter_jit_build(
     expected_jit_build_dir: str | Path | None = None,
     backup_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Restore an aiter ``jit/build`` backup, reversing the invalidation.
-
-    Any regenerated ``jit/build`` directory is removed first.
-
-    Args:
-        jit_build_backup: The backup record returned by
-            :func:`_invalidate_aiter_jit_build`.
-        expected_jit_build_dir: Apply-time strategy path. Runtime-JIT restores
-            use this instead of rediscovering aiter from the current process.
-        backup_root: Apply manifest's backup directory. The recorded backup
-            must remain contained under this root.
-
-    Returns:
-        A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
-    """
+    """Restore an aiter ``jit/build`` backup, reversing the invalidation."""
     if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no backup recorded"}
     src_raw = str(jit_build_backup.get("src") or "").strip()
@@ -1137,7 +830,6 @@ def _restore_aiter_jit_build(
             "error": f"untrusted jit/build backup path: {backup_path}",
         }
     # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
-    # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
     expected_raw = str(expected_jit_build_dir or "").strip()
     expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
     if expected_raw and not _trusted_aiter_jit_build_dir(expected):
@@ -1190,37 +882,13 @@ _MD_NAME_RE = re.compile(r"""(?m)^\s*MD_NAME\s*=\s*["']([^"']+)["']""")
 
 
 def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
-    """Report whether a file lives under an ``aiter/csrc/cpp_itfs/`` tree.
-
-    Strict subset of :func:`_target_is_in_aiter_csrc`: these are the
-    runtime-compiled kernels whose served ``.so`` lives in
-    ``$HOME/.aiter/build`` rather than in ``<aiter>/jit/build`` or the
-    statically-linked wheel. Matches the editable checkout
-    (``/sgl-workspace/aiter/csrc/cpp_itfs/...``), the dist-packages layout
-    (``.../aiter/csrc/cpp_itfs/...``), and the split-wheel layout
-    (``.../aiter_meta/csrc/cpp_itfs/...``).
-
-    Args:
-        target_file: The file path to test.
-
-    Returns:
-        ``True`` if the path is under an ``aiter/csrc/cpp_itfs/`` directory.
-    """
+    """Report whether a file lives under an ``aiter/csrc/cpp_itfs/`` tree."""
     norm = str(target_file).replace(os.sep, "/")
     return any(marker in norm for marker in _AITER_CPP_ITFS_MARKERS)
 
 
 def _aiter_cpp_itfs_build_dir() -> Path:
-    """Resolve aiter's cpp_itfs runtime ``BUILD_DIR``.
-
-    Mirrors aiter ``csrc/cpp_itfs/utils.py``: ``$AITER_ROOT_DIR/build`` with
-    ``$AITER_ROOT_DIR`` defaulting to ``$HOME/.aiter``. Honouring both env
-    vars keeps non-default deployments + unit tests correct without importing
-    aiter into this standalone tool.
-
-    Returns:
-        The resolved cpp_itfs ``build`` directory path.
-    """
+    """Resolve aiter's cpp_itfs runtime ``BUILD_DIR``."""
     root = os.environ.get("AITER_ROOT_DIR", "").strip()
     if not root:
         home = Path(os.environ.get("HOME", "~")).expanduser()
@@ -1229,22 +897,7 @@ def _aiter_cpp_itfs_build_dir() -> Path:
 
 
 def _cpp_itfs_module_names(target_file: Path) -> list[str]:
-    """Collect ``MD_NAME`` prefixes for the cpp_itfs module(s) a source feeds.
-
-    The cpp_itfs ``.py`` driver next to the patched source declares
-    ``MD_NAME = "pa_ragged"`` (etc.), which becomes the
-    ``<md_name>_<hash>`` runtime-cache folder prefix. A single shared
-    ``.cuh`` (e.g. ``pa_kernels.cuh``) is pulled into several drivers in the
-    same directory, so we collect EVERY ``MD_NAME`` declared in the target's
-    directory.
-
-    Args:
-        target_file: The patched source file whose directory is scanned.
-
-    Returns:
-        The discovered ``MD_NAME`` prefixes. An empty list tells the caller to
-        fall back to clearing the whole cpp_itfs build root.
-    """
+    """Collect ``MD_NAME`` prefixes for the cpp_itfs module(s) a source feeds."""
     names: set[str] = set()
     search_dir = target_file.parent
     try:
@@ -1269,26 +922,7 @@ def _invalidate_aiter_cpp_itfs_cache(
     *,
     build_dir_override: Path | None = None,
 ) -> dict[str, Any]:
-    """Move aiter cpp_itfs runtime-cache dirs aside so the re-baseline server
-    runtime-recompiles the patched kernel from clean state.
-
-    No-op (``skipped``, ``is_cpp_itfs=False``) for non-cpp_itfs targets. For
-    cpp_itfs targets the affected ``<build_dir>/<md_name>_*`` dirs (scoped by
-    ``MD_NAME`` when determinable, else every child of the build root) are
-    MOVED into ``backup_dir/cpp_itfs_cache/`` so the operation is reversible.
-    The record always carries ``is_cpp_itfs`` + ``build_dir`` +
-    ``module_names`` + ``invalidated_unix`` (even when nothing was cached
-    yet) so integrate can later verify a fresh rebuild actually landed.
-
-    Args:
-        target_file: The file being patched (gates the operation).
-        backup_dir: Directory to move affected cache dirs into.
-        build_dir_override: Test-only override for the cpp_itfs build root.
-
-    Returns:
-        A status dict (``ok`` / ``skipped`` / ``failed``) recording what was
-        moved and the invalidation metadata.
-    """
+    """Move aiter cpp_itfs runtime-cache dirs aside so the re-baseline server"""
     if not _target_is_in_aiter_cpp_itfs(target_file):
         return {
             "status": "skipped",
@@ -1368,26 +1002,14 @@ def _invalidate_aiter_cpp_itfs_cache(
 
 
 def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any]:
-    """Reverse :func:`_invalidate_aiter_cpp_itfs_cache` (revert path).
-
-    Moves each backed-up cache dir back to its original location, removing
-    any dir the re-baseline server regenerated there first so the pre-patch
-    runtime cache is restored bit-for-bit.
-
-    Args:
-        cache_backup: The backup record from
-            :func:`_invalidate_aiter_cpp_itfs_cache`.
-
-    Returns:
-        A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
-    """
+    """Reverse :func:`_invalidate_aiter_cpp_itfs_cache` (revert path)."""
     if not isinstance(cache_backup, dict) or cache_backup.get("status") != "ok":
         return {"status": "skipped", "reason": "no cpp_itfs cache backup recorded"}
     moved = cache_backup.get("moved") or []
     if not moved:
         return {"status": "skipped", "reason": "nothing was moved"}
-    # ``src`` is an ``rmtree`` target read from an untrusted manifest; only the
-    # aiter cpp_itfs runtime build dir is a legitimate restore location.
+    # ``src`` is an ``rmtree`` target read from an untrusted manifest; only the aiter cpp_itfs runtime build dir is a
+    # legitimate restore location.
     build_dir = _aiter_cpp_itfs_build_dir()
     restored: list[str] = []
     for entry in moved:
@@ -1425,32 +1047,14 @@ def _restore_aiter_cpp_itfs_cache(cache_backup: dict[str, Any]) -> dict[str, Any
 
 
 def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
-    """Assert the re-baseline actually runtime-recompiled the patched kernel.
-
-    After :func:`_invalidate_aiter_cpp_itfs_cache` moved the stale cache
-    aside, a faithful re-baseline must repopulate
-    ``<build_dir>/<md_name>_*/lib.so`` (the served binary) with an mtime at
-    or after the invalidation. If no such fresh ``lib.so`` exists, the server
-    dlopened a stale binary (or the kernel was never exercised) and the
-    measured gain is meaningless -- the integrate KEEP/REVERT gate uses this
-    to flag/abort instead of scoring a stale binary.
-
-    Args:
-        cache_backup: The invalidation record from
-            :func:`_invalidate_aiter_cpp_itfs_cache`.
-
-    Returns:
-        A dict ``{"verified": bool, ...}``. ``verified`` is ``True`` for
-        non-cpp_itfs targets so the caller's gate is a strict no-op off the
-        cpp_itfs path.
-    """
+    """Assert the re-baseline actually runtime-recompiled the patched kernel."""
     if not isinstance(cache_backup, dict) or not cache_backup.get("is_cpp_itfs"):
         return {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
     build_dir_raw = cache_backup.get("build_dir", "")
     since = float(cache_backup.get("invalidated_unix") or 0.0)
     module_names = list(cache_backup.get("module_names") or [])
-    # Path("") is Path("."), so an empty/missing build_dir must be rejected
-    # before globbing — otherwise verify walks the process CWD.
+    # Path("") is Path("."), so an empty/missing build_dir must be rejected before globbing — otherwise verify walks
+    # the process CWD.
     if not str(build_dir_raw).strip():
         return {
             "verified": False,
@@ -1487,29 +1091,7 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
 
 
 def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[str, Any]:
-    """Determine the rebuild strategy for a patch target.
-
-    Matches the target against the known framework roots (aiter / sglang /
-    vllm) to pick the rebuild command and artifact roots, and decides whether
-    the target feeds a compiled runtime. Python codegen under AITER ``csrc``
-    requires the same rebuild/JIT invalidation as a native source.
-
-    Args:
-        target_file (Path): The file being patched.
-        allow_unknown_target (bool): When ``True``, targets outside the known
-            roots are accepted (rooted at the target's parent) instead of
-            raising.
-
-    Returns:
-        dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
-            (str), ``rebuild_mode`` (str), ``rebuild_command`` (list[str]) and
-            ``artifact_roots`` (list[Path]). Runtime-JIT strategies also carry
-            the authoritative ``jit_build_dir``.
-
-    Raises:
-        ValueError: When the target is outside the known roots and
-            ``allow_unknown_target`` is ``False``.
-    """
+    """Determine the rebuild strategy for a patch target."""
     lower = str(target_file).lower()
     if not allow_unknown_target and not any(_within_root(target_file, Path(root)) for root in known_target_roots()):
         raise ValueError(f"target_file is outside known reusable source roots: {target_file}")
@@ -1551,17 +1133,15 @@ def _detect_strategy(target_file: Path, *, allow_unknown_target: bool) -> dict[s
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
     elif flydsl_root := _flydsl_root_for(target_file):
-        # FlyDSL compiles at import time, so there is nothing to rebuild; the
-        # root only has to be right for cache invalidation and rebuild cwd.
+        # FlyDSL compiles at import time, so there is nothing to rebuild; the root only has to be right for cache
+        # invalidation and rebuild cwd.
         root = flydsl_root
     elif installed_aiter_root:
         root = installed_aiter_root
         deploy_roots = _installed_kernel_deploy_roots(installed_aiter_root)
         rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
         jit_build_dir = str(installed_aiter_root / "aiter" / "jit" / "build")
-        # Runtime-JIT artifacts live under jit/build and are moved aside as one
-        # tree below. Recursively copying wheel .so/.co files here is redundant
-        # and can consume gigabytes per integration attempt.
+        # Runtime-JIT artifacts live under jit/build and are moved aside as one tree below.
         artifact_roots = []
     elif installed_kernel:
         root = installed_kernel[0]
@@ -1598,20 +1178,7 @@ def _discover_artifacts(
     *,
     max_artifacts: int = 400,
 ) -> list[Path]:
-    """Collect compiled-artifact files to back up before a rebuild.
-
-    Includes any explicitly provided artifact paths, then walks each root for
-    files with a compiled-artifact suffix, deduplicating and capping the total.
-
-    Args:
-        roots (Iterable[Path]): Directories to scan recursively for artifacts.
-        explicit_artifact_paths (Iterable[str] | None): Caller-specified
-            artifact files to always include.
-        max_artifacts (int): Maximum number of artifacts to collect.
-
-    Returns:
-        list[Path]: The discovered artifact file paths.
-    """
+    """Collect compiled-artifact files to back up before a rebuild."""
     seen: set[Path] = set()
     artifacts: list[Path] = []
     for raw in explicit_artifact_paths or []:
@@ -1632,20 +1199,7 @@ def _discover_artifacts(
 
 
 def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, Any]:
-    """Run a rebuild command and capture its result.
-
-    The subprocess runs with ``/opt/venv/bin`` prepended to ``PATH``.
-
-    Args:
-        command (list[str]): The rebuild command argv; empty means skip.
-        cwd (Path): Working directory for the rebuild.
-        timeout_sec (int): Subprocess timeout in seconds.
-
-    Returns:
-        dict[str, Any]: A result dict with ``status`` (``ok`` / ``failed`` /
-            ``skipped``), ``returncode``, captured ``stdout_tail`` /
-            ``stderr_tail``, and the ``command`` / ``cwd`` used.
-    """
+    """Run a rebuild command and capture its result."""
     if not command:
         return {"status": "skipped", "reason": "no rebuild command"}
     proc = subprocess.run(
@@ -1716,40 +1270,20 @@ def _rebuild_ok_to_proceed(result: dict[str, Any]) -> bool:
 
 
 def _revert_backup_trusted(backup_path: str, backup_root: Path) -> bool:
-    """True when a manifest ``backup_path`` is a real backup under ``backup_root``.
-
-    The manifest JSON is untrusted at revert time; every ``copy2`` source must
-    stay inside the apply-time backup tree so a tampered entry cannot read an
-    arbitrary host file. Legitimate entries (written by ``_copy_to_backup``)
-    always satisfy this.
-    """
+    """True when a manifest ``backup_path`` is a real backup under ``backup_root``."""
     if not backup_path:
         return False
     return _within_root(Path(backup_path), backup_root)
 
 
 def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
-    """Revert a previously applied kernel patch from its manifest.
-
-    Restores backed-up artifacts and source, clears Python caches when the
-    target is Python, restores any aiter ``jit/build`` backup, and fans out a
-    best-effort revert to multi-node pods. The manifest is updated in place
-    with the reverted status.
-
-    Args:
-        manifest_path (str | Path): Path to the apply manifest JSON file.
-
-    Returns:
-        dict[str, Any]: A result dict with ``status``, ``manifest_path``,
-            ``restored_paths``, ``reverted_at`` and, when fan-out ran, a
-            ``multinode_revert`` block.
-    """
+    """Revert a previously applied kernel patch from its manifest."""
     manifest_file = Path(manifest_path)
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError(f"manifest is not a JSON object: {manifest_file}")
-    # The manifest is untrusted at revert time: confine every copy source to
-    # the apply-time backup tree (this manifest's own directory).
+    # The manifest is untrusted at revert time: confine every copy source to the apply-time backup tree (this
+    # manifest's own directory).
     backup_root = manifest_file.resolve().parent
     restored: list[str] = []
     skipped_untrusted_backups: list[dict[str, str]] = []
@@ -2002,22 +1536,7 @@ def _multi_root_strategies(
     *,
     allow_unknown_target: bool,
 ) -> list[dict[str, Any]]:
-    """Compute the set of distinct rebuild strategies across edited files.
-
-    A multi-file patch can touch files in several framework roots (e.g. a
-    ``csrc/*.cu`` plus an ``aiter/ops/triton/*.py``). Driving rebuild off the
-    primary target alone would skip compilation for companion compiled files, so
-    derive ``compiled``/rebuild from the **whole** edited set.
-
-    Args:
-        live_paths (Iterable[Path]): The live target paths the patch writes.
-        allow_unknown_target (bool): Passed through to :func:`_detect_strategy`.
-
-    Returns:
-        list[dict[str, Any]]: One strategy dict per distinct root that needs a
-            rebuild (compiled roots only), each as returned by
-            :func:`_detect_strategy`.
-    """
+    """Compute the set of distinct rebuild strategies across edited files."""
     seen: set[str] = set()
     strategies: list[dict[str, Any]] = []
     for p in live_paths:
@@ -2051,50 +1570,7 @@ def apply_kernel_patch(
     repo_root: str | Path | None = None,
     producer_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Apply an optimized kernel file with backup, rebuild, and fan-out.
-
-    Two modes:
-
-    - **snapshot mode** (``snapshot_dir`` given): ``patch_path`` is a unified
-      diff used only as a *manifest* of intended changes; the byte-exact final
-      contents come from ``snapshot_dir``. The whole multi-file set lands
-      atomically (all-or-nothing) or the repo is left untouched — see
-      :func:`apply_snapshot`. This is the path that satisfies the "entire patch
-      lands byte-for-byte or nothing changes" contract.
-    - **legacy full-source mode** (no ``snapshot_dir``): ``patch_path`` is a
-      complete replacement file for a single ``target_file`` (whole-file copy).
-
-    Both back up the prior state, rebuild compiled targets, fan out to multi-node
-    pods, and revert automatically on rebuild failure.
-
-    Args:
-        patch_path (str | Path): The replacement source file, or (snapshot mode)
-            the unified diff manifest.
-        target_file (str | Path): The primary file (drives timing/rebuild root).
-        backup_root (str | Path): Root directory for backups and the manifest.
-        kernel_id (str): Identifier for the kernel being patched.
-        artifact_paths (Iterable[str] | None): Explicit compiled artifacts to
-            back up in addition to discovered ones.
-        rebuild_command (list[str] | str | None): Override rebuild argv; a
-            string is shlex-split and run argv-only (shell=False), never via
-            ``bash -lc``. Commands using shell control operators, or invoking
-            ``bash``/``sh`` with ``-c``/``-lc``, return ``status='failed'``
-            with ``error_class='invalid_rebuild_command'``.
-        rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
-        skip_rebuild (bool): When ``True``, skip the rebuild step.
-        allow_unknown_target (bool): Allow targets outside the known roots.
-        dry_run (bool): Prepare backups/manifest only, without applying.
-        snapshot_dir (str | Path | None): When set, enables snapshot mode and
-            holds byte-exact final contents mirrored at each write path.
-        producer_manifest (str | Path | None): Canonical producer manifest
-            recorded for deployment provenance.
-
-    Returns:
-        dict[str, Any]: A result dict with ``status`` and, on success, the
-            manifest path, target, backup dir, compiled flag, artifact count,
-            cache-clear / rebuild / jit-build records, and an optional
-            ``multinode`` block.
-    """
+    """Apply an optimized kernel file with backup, rebuild, and fan-out."""
     if snapshot_dir is not None:
         return _apply_kernel_patch_snapshot(
             patch_path=patch_path,
@@ -2124,9 +1600,8 @@ def apply_kernel_patch(
     except Exception as exc:  # noqa: BLE001
         return {"status": "failed", "error": str(exc)}
 
-    # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an
-    # invalid (shell-control) command fails all-or-nothing instead of aborting
-    # after the patch is already copied onto the live target / fanned out.
+    # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an invalid (shell-control) command fails
+    # all-or-nothing instead of aborting after the patch is already copied onto the live target / fanned out.
     try:
         coerced_rebuild_command = _coerce_rebuild_command(rebuild_command) if rebuild_command else []
     except ValueError as exc:
@@ -2294,12 +1769,11 @@ def apply_kernel_patch(
                 "revert": revert,
             }
 
-        # aiter cpp_itfs kernels runtime-compile into $HOME/.aiter/build/ with a param-hashed
-        # dir name, so pristine + patched collide; move the cache aside for a clean re-baseline.
+        # aiter cpp_itfs kernels runtime-compile into $HOME/.aiter/build/ with a param-hashed dir name, so pristine +
+        # patched collide; move the cache aside for a clean re-baseline.
         cpp_itfs_cache_backup = _invalidate_aiter_cpp_itfs_cache(target, backup_dir)
         if cpp_itfs_cache_backup.get("status") == "failed":
-            # Refuse to re-baseline against a stale runtime cache. The manifest
-            # owns both local and per-pod source/JIT backups.
+            # Refuse to re-baseline against a stale runtime cache.
             revert = revert_kernel_patch(manifest_path)
             return {
                 "status": "failed",
@@ -2379,19 +1853,7 @@ def _apply_kernel_patch_snapshot(
     repo_root: str | Path | None = None,
     producer_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Snapshot-mode apply: land an entire multi-file patch atomically.
-
-    See :func:`apply_kernel_patch` for the contract. The diff at ``patch_path``
-    is parsed only as a manifest; contents come from ``snapshot_dir``. Rebuild,
-    JIT/cpp_itfs invalidation, and multi-node fan-out are driven off the
-    **whole** edited set so companion compiled files and worker pods are not
-    missed, and all-or-nothing spans apply → rebuild (a rebuild failure restores
-    every touched path).
-
-    Returns:
-        dict[str, Any]: Result dict mirroring the legacy mode plus
-            ``touched`` (the applied paths).
-    """
+    """Snapshot-mode apply: land an entire multi-file patch atomically."""
     patch = Path(patch_path).resolve()
     target = Path(target_file).resolve()
     if not patch.is_file():
@@ -2415,8 +1877,7 @@ def _apply_kernel_patch_snapshot(
     except ValueError as exc:
         return {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
 
-    # Resolve repo-relative patch paths against the explicit root, else the strategy
-    # root. Never guess ``target.parent`` — a wrong root breaks the byte-for-byte contract.
+    # Resolve repo-relative patch paths against the explicit root, else the strategy root.
     resolved_root = str(repo_root or "") or primary_strategy["root"]
     if not resolved_root:
         return {
@@ -2516,8 +1977,7 @@ def _apply_kernel_patch_snapshot(
             break
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    # Post-apply verification: written paths byte-identical to snapshot, deleted paths
-    # gone. Any mismatch -> full restore.
+    # Post-apply verification: written paths byte-identical to snapshot, deleted paths gone.
     snap = Path(snapshot_dir)
     for desc in descriptors:
         dest = _contained_dest(
@@ -2597,8 +2057,8 @@ def _apply_kernel_patch_snapshot(
                     "records_by_host": records_by_host,
                     "per_node": per_node_all,
                 }
-                # Persist after every file so a later dispatch failure can
-                # revert all already-patched files on every pod.
+                # Persist after every file so a later dispatch failure can revert all already-patched files on every
+                # pod.
                 manifest["multinode"] = multinode_info
                 manifest_path.write_text(
                     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -2756,15 +2216,7 @@ def _apply_kernel_patch_snapshot(
 
 
 def main() -> int:
-    """Run the apply/revert CLI and print the JSON result.
-
-    Parses ``apply`` / ``revert`` subcommands, dispatches to
-    :func:`apply_kernel_patch` or :func:`revert_kernel_patch`, and prints the
-    result document.
-
-    Returns:
-        int: ``0`` when the result status is ``"ok"``, otherwise ``1``.
-    """
+    """Run the apply/revert CLI and print the JSON result."""
     parser = argparse.ArgumentParser(description="Apply or revert a kernel patch")
     sub = parser.add_subparsers(dest="command", required=True)
     apply_p = sub.add_parser("apply")

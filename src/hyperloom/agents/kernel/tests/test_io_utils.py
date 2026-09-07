@@ -44,11 +44,7 @@ def test_atomic_write_json_creates_parents_and_roundtrips(tmp_path):
 
 
 def test_atomic_write_json_pins_utf8_on_the_temp_file(tmp_path, monkeypatch):
-    """``ensure_ascii=False`` callers put non-ASCII in the payload, so the temp
-    file cannot be left on a locale-derived encoding -- under an ASCII default it
-    raised UnicodeEncodeError and lost the report. Asserted on the call rather
-    than by forcing a locale, which the interpreter resolves too early to patch.
-    """
+    """``ensure_ascii=False`` callers put non-ASCII in the payload, so the temp"""
     seen: dict[str, object] = {}
     real = tempfile.NamedTemporaryFile
 
@@ -120,8 +116,8 @@ def test_read_json_roundtrip_and_tolerant_defaults(tmp_path):
     path = tmp_path / "cfg.json"
     path.write_text('{"b": 2, "a": 1}', encoding="utf-8")
     assert io.read_json(path) == {"a": 1, "b": 2}
-    # Missing / malformed / directory / falsy inputs fall back to the default
-    # (None by default; the callers that want {} pass it explicitly).
+    # Missing / malformed / directory / falsy inputs fall back to the default (None by default; the callers that want
+    # {} pass it explicitly).
     assert io.read_json(tmp_path / "missing.json") is None
     assert io.read_json(tmp_path / "missing.json", default={}) == {}
     bad = tmp_path / "bad.json"
@@ -191,8 +187,8 @@ def test_truthy_variants(value, expected):
     assert io.truthy(value) is expected
 
 
-# Byte-consistency contract: the kernel-agent ``_io_utils`` mirror must stay
-# behaviourally aligned with ``hyperloom.common`` for the primitives it duplicates.
+# Byte-consistency contract: the kernel-agent ``_io_utils`` mirror must stay behaviourally aligned with
+# ``hyperloom.common`` for the primitives it duplicates.
 
 
 def test_truthy_matches_common_env_bool_vocabulary():

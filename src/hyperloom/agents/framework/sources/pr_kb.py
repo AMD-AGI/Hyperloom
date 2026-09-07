@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PR KB (gbrain) candidate discovery backend.
-
-Enumerates candidate PRs from the gbrain PR KB for ``request.repo_url``:
-index page (structured) ∪ semantic ``search`` (scoped to this repo's meta
-prefix), with a ``list_pages`` fallback when both yield nothing. Merged +
-deduped by PR number. Best-effort: any gbrain failure yields ``[]`` so the
-dispatcher falls back to PR Monitor / GitHub.
-"""
+"""PR KB (gbrain) candidate discovery backend."""
 
 from __future__ import annotations
 
@@ -37,14 +30,7 @@ def _candidate(repo_url: str, repo_n: str, number: int, *, title: str = "", labe
 
 
 def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
-    """Enumerate PR KB candidates for ``request.repo_url`` (index ∪ query).
-
-    Args:
-        request: The explore request (repo_url + gap_description drive it).
-
-    Returns:
-        Deduped gbrain_pr_kb candidates; ``[]`` when disabled/unconfigured/unreachable.
-    """
+    """Enumerate PR KB candidates for ``request.repo_url`` (index ∪ query)."""
     if (os.environ.get("PR_KB_ENABLE", "1") or "1").strip() == "0":
         return []
     client = build_gbrain_page_client_from_env()
@@ -92,8 +78,8 @@ def enumerate_pr_kb(request: ExploreRequest) -> list[Candidate]:
         if num not in by_number:
             by_number[num] = _candidate(request.repo_url, repo_n, num, title=str(hit.get("title") or ""))
 
-    # list_pages fallback — enumerate meta pages directly and client-side
-    # filter by this repo's meta prefix (best-effort; no server-side filter).
+    # list_pages fallback — enumerate meta pages directly and client-side filter by this repo's meta prefix
+    # (best-effort; no server-side filter).
     if not by_number:
         list_cap = 500
         try:

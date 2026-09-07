@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for gateway attribution headers.
-
-The riskiest behaviour here is not the rendering but the merge: the variables
-these headers travel in already carry gateway auth in production, so the tests
-pin that an existing setting survives injection verbatim -- including a
-``${VAR}`` reference, which ``codex_session`` must still be able to recognize
-afterwards.
-
-Shape tests register their own preset rather than leaning on ``litellm``, so they
-describe the mechanism and do not have to change when a gateway's headers do.
-"""
+"""Unit tests for gateway attribution headers."""
 
 from __future__ import annotations
 
@@ -139,14 +129,14 @@ class TestValueHygiene:
         assert "$" not in headers["x-litellm-tags"]
 
     def test_a_value_cannot_forge_extra_tags(self) -> None:
-        # The gateway splits this header on "," and "=": a value carrying either
-        # would arrive as tags nobody wrote, under keys nobody chose.
+        # The gateway splits this header on "," and "=": a value carrying either would arrive as tags nobody wrote,
+        # under keys nobody chose.
         headers = llm_attribution.call_headers(component="geak,team=other", env=_env())
         assert "component=geak_team_other" in headers["x-litellm-tags"]
 
     def test_separators_are_replaced_so_distinct_values_stay_distinct(self) -> None:
-        # Dropping them instead would collapse "a,b" and "ab" onto one tag, and
-        # merge two producers' spend into a rollup belonging to neither.
+        # Dropping them instead would collapse "a,b" and "ab" onto one tag, and merge two producers' spend into a
+        # rollup belonging to neither.
         first = llm_attribution.call_headers(component="a,b", env=_env())
         second = llm_attribution.call_headers(component="ab", env=_env())
         assert first["x-litellm-tags"] != second["x-litellm-tags"]
@@ -163,13 +153,7 @@ class TestPresets:
         }
 
     def test_every_shipped_preset_emits_something(self) -> None:
-        """Importing the module already validated these; this states the floor.
-
-        The per-header rules are exercised below against deliberately bad
-        entries. What is left to check here is that a preset exists at all, so
-        an entry emptied by a refactor cannot pass validation by having nothing
-        left to validate.
-        """
+        """Importing the module already validated these; this states the floor."""
         assert llm_attribution.PRESETS
         for gateway, headers in llm_attribution.PRESETS.items():
             assert headers, f"{gateway} preset emits nothing"
@@ -183,13 +167,7 @@ class TestPresets:
         ],
     )
     def test_an_unusable_preset_header_is_refused(self, header: AttributionHeader, reason: str) -> None:
-        """Adding a gateway is the only way to reach these, so they fail loudly.
-
-        Each of the three would otherwise surface far from its cause: a name
-        Codex cannot write as a TOML key raises on the first Codex child, an
-        unknown shape raises from inside rendering, and a header selecting
-        nothing renders empty and is silently dropped.
-        """
+        """Adding a gateway is the only way to reach these, so they fail loudly."""
         with pytest.raises(ValueError, match=reason):
             llm_attribution._validate_presets({"acme": (header,)})
 
@@ -205,8 +183,8 @@ class TestMergePreservesExistingSetting:
         assert parsed["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=geak"
 
     def test_env_reference_is_not_expanded(self) -> None:
-        # codex_session matches ${VAR} against the raw text to forward the
-        # variable name instead of materializing the secret.
+        # codex_session matches ${VAR} against the raw text to forward the variable name instead of materializing the
+        # secret.
         env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: ${GATEWAY_KEY}"}
         llm_attribution.inject_env(env, component="geak", source=_env())
         assert "${GATEWAY_KEY}" in env[_ANTHROPIC]
@@ -228,8 +206,7 @@ class TestMergePreservesExistingSetting:
 
 
 class TestOpenAIFallbackIsNotBroken:
-    """resolve_openai_client_config reads Anthropic headers only while the
-    OpenAI variable parses empty; creating it would drop gateway auth."""
+    """resolve_openai_client_config reads Anthropic headers only while the"""
 
     def test_openai_variable_is_not_created_when_it_would_end_the_fallback(self) -> None:
         env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
@@ -276,14 +253,7 @@ class TestPublishedPhase:
 
 
 class TestNestedInjectionRefines:
-    """A child names itself and keeps the ambient fields it cannot restate.
-
-    The spawn sites that need this run *inside* the child -- kernelforge drives
-    the CLI from the forge loop, one process below whoever built its env -- and
-    there the phase and the action are both empty, because one is a module
-    global and the other a context variable. Without inheritance a child that
-    injected would trade them for the component it gained.
-    """
+    """A child names itself and keeps the ambient fields it cannot restate."""
 
     #: A child environment as it reaches the second process: gateway auth the
     #: operator set, plus the tag its parent wrote on the way out.
@@ -298,8 +268,8 @@ class TestNestedInjectionRefines:
             source=_env(),
             **parent,
         )
-        # The child is a new interpreter: no published phase, no session id, and
-        # CLAW_SESSION_ID is on no env_safety allowlist so it does not travel.
+        # The child is a new interpreter: no published phase, no session id, and CLAW_SESSION_ID is on no env_safety
+        # allowlist so it does not travel.
         llm_attribution.set_current_phase("")
         return child
 
@@ -332,8 +302,8 @@ class TestNestedInjectionRefines:
         assert "component=forge" not in tags
 
     def test_the_parents_purpose_does_not_leak_into_the_child(self) -> None:
-        # Inheriting operation= would label the child's calls with work the
-        # parent was doing, which is worse than saying nothing.
+        # Inheriting operation= would label the child's calls with work the parent was doing, which is worse than
+        # saying nothing.
         child = self._spawned()
         llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
         assert "operation=" not in self._tags(child)
@@ -375,25 +345,22 @@ class TestNestedInjectionRefines:
         assert "phase=" not in self._tags(env)
 
     def test_a_bare_trace_id_alone_is_not_taken_for_a_session(self) -> None:
-        # Nothing is lost by declining it: a tag this module wrote always
-        # carries the combined header, because application is never empty.
+        # Nothing is lost by declining it: a tag this module wrote always carries the combined header, because
+        # application is never empty.
         env = {_ANTHROPIC: "x-litellm-trace-id: operator-trace"}
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
         assert "operator-trace" not in self._tags(env)
 
     def test_an_inherited_reference_is_never_left_to_be_expanded(self) -> None:
-        # A recovered value is re-rendered into a tag this process sends, and
-        # whoever reads that header next expands ${VAR} -- which would put this
-        # process's gateway secret into a tag the gateway itself logs. Asserted
-        # against the unexpanded setting, since reading it back expands it.
+        # A recovered value is re-rendered into a tag this process sends, and whoever reads that header next expands
+        # ${VAR} -- which would put this process's gateway secret into a tag the gateway itself logs.
         env = {_ANTHROPIC: "x-litellm-tags: application=hyperloom,session=${GATEWAY_KEY}"}
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
         assert "${" not in env[_ANTHROPIC]
 
     def test_the_self_describing_tag_outranks_a_bare_trace_id(self) -> None:
-        # x-litellm-trace-id carries a bare value, so an operator's own tracing
-        # header is indistinguishable from ours; letting it win would make their
-        # trace id the run's session and misjoin every reconciliation.
+        # x-litellm-trace-id carries a bare value, so an operator's own tracing header is indistinguishable from ours;
+        # letting it win would make their trace id the run's session and misjoin every reconciliation.
         tag = "x-litellm-tags: application=hyperloom,session=real-run"
         env = {_ANTHROPIC: f"{tag}\nx-litellm-trace-id: operator-trace"}
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
@@ -412,13 +379,7 @@ class TestNestedInjectionRefines:
 
 
 class TestSelfInjectionDoesNotAccumulate:
-    """Writing the tag into our own environment must not pin ambient state.
-
-    ``forge_fusion`` injects into ``os.environ`` itself so the CLI it spawns
-    later inherits the tag. That tag then outlives every scope in this process,
-    so reading our own ``phase``/``type`` back out of it would label unrelated
-    later calls with the first action the process happened to run.
-    """
+    """Writing the tag into our own environment must not pin ambient state."""
 
     def _tags(self, env: dict[str, str]) -> str:
         return parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"]
@@ -458,8 +419,8 @@ class TestInheritanceReadsBothVariables:
         return parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"]
 
     def test_a_partly_written_variable_does_not_hide_the_other(self) -> None:
-        # Reading only the first variable that parses would drop exactly the
-        # ambient fields inheritance exists to carry.
+        # Reading only the first variable that parses would drop exactly the ambient fields inheritance exists to
+        # carry.
         env = {
             _ANTHROPIC: "x-litellm-tags: application=hyperloom,session=sess-1",
             _OPENAI: "x-litellm-tags: application=hyperloom,session=sess-1,phase=KERNEL_AGENT,type=kernel_opt",
@@ -479,8 +440,8 @@ class TestNoGatewaySelected:
         assert env == {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
 
     def test_the_json_encoding_survives_an_injection(self) -> None:
-        # One arbiter decides the encoding for both reading and writing, so a
-        # setting stored as JSON is still JSON afterwards.
+        # One arbiter decides the encoding for both reading and writing, so a setting stored as JSON is still JSON
+        # afterwards.
         env = {_ANTHROPIC: json.dumps({"Ocp-Apim-Subscription-Key": "secret"})}
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
         decoded = json.loads(env[_ANTHROPIC])
@@ -532,8 +493,8 @@ class TestActionScope:
         assert "type=kernel_opt" in headers["x-all"]
 
     def test_no_action_label_outside_an_action(self, every_field: dict[str, str]) -> None:
-        # The orchestration call that *chooses* the action runs here, and
-        # claiming it belonged to the previous action would misreport it.
+        # The orchestration call that *chooses* the action runs here, and claiming it belonged to the previous action
+        # would misreport it.
         assert "type=" not in llm_attribution.call_headers(component="orchestration", env=every_field)["x-all"]
 
     def test_the_label_is_dropped_once_the_action_returns(self, every_field: dict[str, str]) -> None:
@@ -549,11 +510,7 @@ class TestActionScope:
         assert "type=kernel_opt" in headers["x-all"]
 
     async def test_concurrent_actions_never_see_each_others_label(self, every_field: dict[str, str]) -> None:
-        """The reason this is a context variable and not a module global.
-
-        Both actions are inside their scope before either reads, so a
-        process-wide value would hand both of them whichever ran last.
-        """
+        """The reason this is a context variable and not a module global."""
         seen: dict[str, str] = {}
         entered = {"baseline": asyncio.Event(), "kernel_opt": asyncio.Event()}
 
@@ -568,8 +525,8 @@ class TestActionScope:
         assert "type=kernel_opt" in seen["kernel_opt"]
 
     async def test_a_child_environment_carries_the_running_action(self, every_field: dict[str, str]) -> None:
-        # GEAK and the specialists are spawned as children, so the label has to
-        # survive the env hand-off rather than only the in-process path.
+        # GEAK and the specialists are spawned as children, so the label has to survive the env hand-off rather than
+        # only the in-process path.
         child: dict[str, str] = {}
         with llm_attribution.current_action_scope("kernel_opt"):
             llm_attribution.inject_env(child, component="geak", source=every_field)

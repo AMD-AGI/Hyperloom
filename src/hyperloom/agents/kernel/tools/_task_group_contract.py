@@ -18,12 +18,7 @@ OPERATOR_IDENTITY_VERSION = 3
 
 
 def _strip_dispatch_decoration(operation: str) -> str:
-    """Remove how-a-kernel-was-launched decoration from a traced operation name.
-
-    The launch API, C return type and synthetic-op suffix describe the dispatch,
-    not the operator, so keying on them splits one kernel into a task group per
-    launch path and ports its source once per group.
-    """
+    """Remove how-a-kernel-was-launched decoration from a traced operation name."""
     value = str(operation or "").strip()
     value = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", value).strip()
     value = re.sub(
@@ -61,24 +56,7 @@ def normalize_operation_key(operation: str) -> str:
 
 
 def logical_operator_name(candidate: dict[str, Any] | None) -> str:
-    """Return the stable logical operation for Forge, launch API stripped.
-
-    The trace names a candidate after both rows it occupies -- the CPU-side
-    launch call and the device kernel -- so the same kernel reads
-    ``hipModuleLaunchKernel->_gqa_sparse_fwd_kernel`` in one analysis and
-    ``_gqa_sparse_fwd_kernel`` in another, depending on whether the profiler
-    happened to record the parent that pairs them. Which of those a run sees is
-    not a property of the kernel, and Forge keys its experience store on this
-    name: two profiles of one configuration then write two identities, and the
-    warm-start read of either reports no prior record.
-
-    So the launch call comes off. ``native_operation_key`` already owns that
-    normalization for the task-group identity, along with demangling and
-    return-type removal, and both shapes of the name reduce to the same key
-    under it. How the kernel was launched stays worth knowing -- it is what
-    tells a shapeless candidate from a recorded one -- but it belongs beside the
-    identity rather than inside it.
-    """
+    """Return the stable logical operation for Forge, launch API stripped."""
     candidate = candidate or {}
     task_group = candidate.get("task_group")
     identity = task_group.get("operator_identity") if isinstance(task_group, dict) else None
@@ -93,11 +71,7 @@ def logical_operator_name(candidate: dict[str, Any] | None) -> str:
 
 
 def native_operation_key(operation: str) -> str:
-    """Return a stable native operator identity across template instances.
-
-    Adds Itanium demangling to the shared normalization; every other step is
-    language-independent and lives in :func:`normalize_operation_key`.
-    """
+    """Return a stable native operator identity across template instances."""
     normalized = normalize_operation_key(operation)
     if not normalized.startswith(("_Z", "__Z")):
         return normalized

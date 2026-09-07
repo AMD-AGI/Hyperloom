@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""TraceLens SDK model id normalization.
-
-``_resolve_tracelens_model`` must map the runtime image's dot-form
-``ANTHROPIC_MODEL`` (e.g. ``Claude-Opus-4.7``) to the dash form
-(``claude-opus-4-7``) strict gateways (e.g. SAFE) accept, instead of
-forwarding it raw and 400-ing with ``Invalid model name``.
-"""
+"""TraceLens SDK model id normalization."""
 
 from __future__ import annotations
 
@@ -51,8 +45,7 @@ def test_dot_form_opus_normalized_on_safe(tl_module, monkeypatch):
 
 
 def test_gateway_detected_via_llm_gateway_key(tl_module, monkeypatch):
-    """LLM_GATEWAY_KEY marks a strict gateway on its own, so the dot-form model id
-    is normalized."""
+    """LLM_GATEWAY_KEY marks a strict gateway on its own, so the dot-form model id"""
     monkeypatch.setenv("OPENAI_BASE_URL", "https://internal.example.invalid/api/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-test")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")

@@ -2,77 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Sweep the AMD compute-partition modes and report which one the workload wants.
-
-Sets each requested mode on one card in turn, runs the same fixed benchmark on
-every partition that mode creates, and sums the result. The comparison it prints
-is the one an operator needs before committing a multi-hour optimization
-session: under which shape does this workload go fastest, and what does that
-cost in per-request latency.
-
-**The fan-out is the whole point.** A partition gets a fraction of the card, so
-a benchmark that loads one partition and ignores the rest measures a fraction of
-the card. Measured on this node, one MI355X in ``CPX`` presents eight 32-CU
-partitions -- a single-partition run reports roughly an eighth of the card's
-throughput, making ``CPX`` look catastrophic when in aggregate it may well win.
-Every figure here is therefore the sum over a mode's partitions with all of them
-loaded at once, and a mode whose partitions cannot all be loaded is reported as
-unmeasured rather than as slow.
-
-**Why the privileged set lives here and not in the optimizer.** Changing the
-mode is a card-wide privileged operation that evicts every process holding a GPU
-context. That is reasonable between benchmarks in an operator-run script and
-unreasonable inside an optimization loop that also runs agent-authored code, so
-``hyperloom`` itself only ever *reads* the mode -- see
-``hyperloom.common.gpu_partition`` -- and refuses at launch any session whose
-streams will not fit one partition. This script is the other half of that
-split: the boundary that establishes the shape the optimizer then treats as
-fixed for the whole session.
-
-**Device indices are not portable between tools, so partitions are matched on CU
-count.** Measured on an 8-card MI355X node with card 0 in ``CPX``: ``amd-smi``
-orders by PCI address and calls the eight partitions devices 0-7, while HSA/HIP
-enumerates whole cards first and calls them devices 7-14. A device list computed
-with one tool and handed to the other is wrong, and wrong invisibly -- the
-benchmark runs to completion, on the wrong silicon. Partitions are selected here
-the way :func:`~hyperloom.common.gpu_partition.partition_device_predicate`
-documents: by matching the expected CU count, in the HIP index space the
-benchmark itself will use, and narrowed to the card being swept so that an
-identical CU count on a neighbouring card cannot be mistaken for a partition.
-
-Only the target card is repartitioned; the rest of the node is left alone. That
-keeps total silicon constant across the sweep, which is what makes the modes
-comparable to each other.
-
-Usage::
-
-    # print the plan, touch nothing
-    python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
-
-    # sweep the modes the card reports it supports
-    python3 scripts/partition_mode_sweep.py \\
-        --benchmark-config /path/to/benchmark.yaml \\
-        --modes SPX,DPX,QPX,CPX \\
-        --output-dir /shared/partition-sweep
-
-    # arbitrary workload; {device} and {output_dir} are substituted per partition
-    python3 scripts/partition_mode_sweep.py \\
-        --benchmark-command 'my_bench --gpu {device} --out {output_dir}' \\
-        --per-stream-gib 20.7
-
-Exit codes:
-
-    0  the sweep completed and a winner was reported
-    1  the sweep ran but no mode produced a valid measurement
-    2  the request was refused before anything was changed
-    3  the sweep finished but the card could not be restored to its entry mode
-    4  the sweep stopped on an error it does not model, after reporting whatever
-       it had already measured and restoring the card
-
-Every path out of a started sweep goes through the restore and the report,
-including an unexpected exception, so ``3`` stays reachable and the modes
-measured before a failure are never lost to it.
-"""
+"""Sweep the AMD compute-partition modes and report which one the workload wants."""
 
 from __future__ import annotations
 
@@ -160,17 +90,7 @@ class SweepError(RuntimeError):
 
 @dataclass(frozen=True)
 class HsaAgent:
-    """One GPU agent as HSA/HIP enumerates it.
-
-    Attributes:
-        index: Position among GPU agents, which is the index
-            ``ROCR_VISIBLE_DEVICES`` and HIP both use.
-        cu: Compute units the agent reports.
-        bus: PCI bus byte, identifying the physical card. Partitions of one card
-            share it and differ only in PCI function.
-        device: PCI device number.
-        function: PCI function number.
-    """
+    """One GPU agent as HSA/HIP enumerates it."""
 
     index: int
     cu: int
@@ -212,12 +132,7 @@ class ModeResult:
 
     @property
     def measured(self) -> bool:
-        """Whether every partition returned a usable measurement.
-
-        Deliberately all-or-nothing. A mode with six of eight partitions
-        reporting is not a slower mode, it is an unmeasured one, and summing the
-        six would understate it by a quarter while looking like a result.
-        """
+        """Whether every partition returned a usable measurement."""
         return bool(self.runs) and all(run.ok for run in self.runs)
 
     def total(self, fields: Sequence[str] = _THROUGHPUT_FIELDS) -> float | None:
@@ -229,11 +144,7 @@ class ModeResult:
         return None
 
     def worst_latency_ms(self) -> float | None:
-        """The slowest partition's mean latency.
-
-        The worst partition rather than the average of them, because a request
-        landing on the slow one is not consoled by the mean.
-        """
+        """The slowest partition's mean latency."""
         for name in _LATENCY_FIELDS:
             values = [to_float(run.measurement.get(name)) for run in self.runs]
             present = [v for v in values if v is not None]
@@ -246,28 +157,12 @@ class ModeResult:
 
 
 def _sudo_prefix(use_sudo: bool) -> list[str]:
-    """Return the privilege prefix for a mutating call.
-
-    ``-n`` matters: an unattended sweep that stops at an interactive password
-    prompt hangs until someone notices, with nothing in the output saying why.
-    """
+    """Return the privilege prefix for a mutating call."""
     return ["sudo", "-n"] if use_sudo else []
 
 
 def _amd_smi_json(args: Sequence[str], timeout_s: float = _READ_TIMEOUT_S, *, sudo: bool = False) -> object:
-    """Run an ``amd-smi`` subcommand with ``--json`` and parse its output.
-
-    Args:
-        args: Subcommand and flags.
-        timeout_s: Per-call timeout.
-        sudo: Route through ``sudo -n``. Needed for the profile query, which
-            degrades every field to ``"N/A"`` rather than failing when it lacks
-            privilege.
-
-    Raises:
-        SweepError: If ``amd-smi`` is missing, fails, times out, or returns
-            output that is not JSON.
-    """
+    """Run an ``amd-smi`` subcommand with ``--json`` and parse its output."""
     cmd = [*_sudo_prefix(sudo), "amd-smi", *args, "--json"]
     try:
         proc = subprocess.run(  # nosec B603 B607 - fixed argv, no shell.
@@ -325,12 +220,7 @@ def read_mode(gpu_id: int) -> str:
 
 
 def supported_modes(payload: object) -> tuple[str, ...]:
-    """Extract the modes a card reports it can enter, in profile order.
-
-    An empty result means "the card did not say", not "the card supports
-    nothing": the profile query returns ``"N/A"`` for everything when run
-    without privilege, and those two cases must not collapse into one answer.
-    """
+    """Extract the modes a card reports it can enter, in profile order."""
     rows: list[dict] = []
     if isinstance(payload, dict):
         raw = payload.get("partition_profiles")
@@ -340,9 +230,8 @@ def supported_modes(payload: object) -> tuple[str, ...]:
         rows = [r for r in payload if isinstance(r, dict)]
     seen: list[str] = []
     for row in rows:
-        # The table is sparse: a profile's first row names it, and the rows
-        # after it continue the same profile with its other resources under
-        # blank identity fields. Only named rows describe a profile.
+        # The table is sparse: a profile's first row names it, and the rows after it continue the same profile with
+        # its other resources under blank identity fields.
         mode = str(row.get("accelerator_type") or "").strip().upper().rstrip("*")
         if mode and mode != "N/A" and mode in MODE_PARTITION_COUNTS and mode not in seen:
             seen.append(mode)
@@ -350,14 +239,7 @@ def supported_modes(payload: object) -> tuple[str, ...]:
 
 
 def _live_processes(listing: object, *, gpu_id: int) -> int:
-    """Count the entries of one card's ``process_list`` that are real processes.
-
-    The idle sentinel turns up at either depth -- as the whole ``process_list``,
-    or as the lone entry's ``process_info`` -- and a process turns up either
-    wrapped in ``process_info`` or as the entry itself. All four were observed.
-    Anything else raises, because a shape this function does not recognise is
-    indistinguishable from an idle card once it has been counted as zero.
-    """
+    """Count the entries of one card's ``process_list`` that are real processes."""
     if isinstance(listing, str):
         entries: list[object] = [listing]
     elif isinstance(listing, list):
@@ -371,9 +253,7 @@ def _live_processes(listing: object, *, gpu_id: int) -> int:
     for entry in entries:
         info = entry.get("process_info", entry) if isinstance(entry, dict) else entry
         if isinstance(info, str):
-            # Only the known idle sentinel means idle. An unrecognised string
-            # counts as a process: over-counting refuses a sweep, under-counting
-            # evicts somebody's work.
+            # Only the known idle sentinel means idle.
             if _NO_PROCESS_MARKER not in info.lower():
                 live += 1
         elif isinstance(info, dict):
@@ -388,25 +268,7 @@ def _live_processes(listing: object, *, gpu_id: int) -> int:
 
 
 def resident_processes(payload: object) -> dict[int, int]:
-    """Count real processes holding a context on each GPU.
-
-    ``amd-smi`` reports an idle GPU as a ``process_list`` holding the *string*
-    ``"No running processes detected"`` rather than an empty list, so a naive
-    length check finds one process on every idle card and this sweep would
-    refuse to start on a free node.
-
-    Every departure from the documented shape raises instead of being skipped.
-    This count is the only thing between a payload this parser does not
-    understand and an ``amd-smi set`` that evicts whatever is running, and a
-    parser that answers ``{}`` for a payload it cannot read reports a busy node
-    as a free one -- the single wrong answer here that destroys work. Refusing
-    costs an operator one ``--allow-busy``; guessing costs somebody a job.
-
-    Raises:
-        SweepError: If the payload is not a list of per-GPU rows, or a row is
-            missing ``gpu`` or ``process_list``, or either field has a type
-            this parser does not model.
-    """
+    """Count real processes holding a context on each GPU."""
     if not isinstance(payload, list):
         raise SweepError(
             f"amd-smi process returned {type(payload).__name__}, not the expected list of "
@@ -428,12 +290,7 @@ def resident_processes(payload: object) -> dict[int, int]:
 
 
 def card_bus(payload: object, gpu_id: int) -> int:
-    """Read the PCI bus byte of one card from an ``amd-smi list`` payload.
-
-    The bus identifies the physical card and does not change when it is
-    repartitioned, so it is captured once and used afterwards to tell this
-    card's partitions from an identically-shaped neighbour.
-    """
+    """Read the PCI bus byte of one card from an ``amd-smi list`` payload."""
     rows = payload if isinstance(payload, list) else []
     for row in rows:
         if not isinstance(row, dict):
@@ -458,29 +315,7 @@ def set_mode(
     drain_timeout_s: float = _DRAIN_TIMEOUT_S,
     settle_s: float = _SETTLE_S,
 ) -> str:
-    """Set one card's compute-partition mode and verify it took effect.
-
-    The verification is the point. ``amd-smi set`` reports success for a change
-    that has only been staged, and it exits zero on some permission failures, so
-    a caller trusting the exit code goes on to benchmark the old topology while
-    labelling the results with the new mode -- a wrong number with a reassuring
-    log line above it.
-
-    Args:
-        gpu_id: Card to reconfigure.
-        mode: Target mode.
-        sudo: Whether to route the set through ``sudo -n``.
-        drain_timeout_s: How long to keep retrying while the card reports
-            resident processes. Zero fails on the first refusal.
-        settle_s: Pause before reading back, so the new devices have appeared.
-
-    Returns:
-        The mode read back from the card, equal to ``mode`` on success.
-
-    Raises:
-        SweepError: If the mode is unknown, the set fails, or the read-back
-            disagrees with what was asked for.
-    """
+    """Set one card's compute-partition mode and verify it took effect."""
     canonical = parse_mode(mode)
     if canonical not in MODE_PARTITION_COUNTS:
         raise SweepError(f"unknown compute-partition mode {mode!r}")
@@ -537,19 +372,7 @@ def set_mode(
 
 
 def parse_hsa_agents(text: str) -> tuple[HsaAgent, ...]:
-    """Parse ``rocminfo`` output into GPU agents in HIP index order.
-
-    HIP indices are what the benchmark will use, and they are not ``amd-smi``
-    indices: on this node under ``CPX``, ``amd-smi`` calls card 0's partitions
-    devices 0-7 while HSA calls them 7-14, because HSA enumerates whole cards
-    first. Reading the order from HSA is the only way to hand the benchmark a
-    device it agrees with.
-
-    Within an agent block ``BDFID`` appears *before* ``Compute Unit``, so a
-    line-at-a-time parser that prints on ``BDFID`` attributes every agent the
-    previous one's CU count. Fields are therefore collected per block and only
-    interpreted once the block ends.
-    """
+    """Parse ``rocminfo`` output into GPU agents in HIP index order."""
     agents: list[HsaAgent] = []
     block: dict[str, str] = {}
     index = 0
@@ -606,14 +429,7 @@ def read_hsa_agents() -> tuple[HsaAgent, ...]:
 
 
 def partition_cu_on_bus(agents: Sequence[HsaAgent], bus: int) -> int:
-    """The CU count the swept card's devices report, once they agree.
-
-    Every GPU device on the swept card's bus is one of its partitions, and a
-    mode's partitions are identical, so a disagreement means the enumeration was
-    read while the card was still transitioning. Nothing measured against a
-    half-applied topology is worth keeping, so that is an error rather than a
-    figure to pick from.
-    """
+    """The CU count the swept card's devices report, once they agree."""
     counts = {a.cu for a in agents if a.bus == bus}
     if not counts:
         raise SweepError(f"HIP reports no GPU on bus {bus:02x}")
@@ -626,14 +442,7 @@ def partition_cu_on_bus(agents: Sequence[HsaAgent], bus: int) -> int:
 
 
 def card_total_gib(device_gib: float | None, device_mode: str) -> float | None:
-    """Scale one device's HBM back up to the whole card's.
-
-    The reading is per device, so under a split mode it is one partition's share
-    and has to be multiplied by the partition count to describe the card. Doing
-    that once at entry means each mode's per-partition memory is a division of
-    the same known total, rather than a fresh probe whose device-index mapping
-    changes with every set.
-    """
+    """Scale one device's HBM back up to the whole card's."""
     if not device_gib or device_gib <= 0:
         return None
     return device_gib * MODE_PARTITION_COUNTS.get(parse_mode(device_mode), 1)
@@ -645,26 +454,7 @@ def select_partition_devices(
     *,
     bus: int,
 ) -> tuple[int, ...]:
-    """Return the HIP indices of the swept card's partitions.
-
-    Selection is by CU count, never by index, and is narrowed to one PCI bus.
-    Both halves matter: the CU match is what distinguishes a partition from a
-    whole card, and the bus match is what stops seven untouched 256-CU
-    neighbours being mistaken for partitions when the mode under test is
-    ``SPX``, whose "partition" is a whole card.
-
-    Args:
-        agents: GPU agents in HIP order.
-        layout: The mode's expected shape.
-        bus: PCI bus of the card being swept.
-
-    Returns:
-        HIP indices, ascending, one per partition.
-
-    Raises:
-        SweepError: If the number found is not the number the mode implies,
-            which is what a set that did not really take looks like from here.
-    """
+    """Return the HIP indices of the swept card's partitions."""
     is_partition = partition_device_predicate(layout.cu_per_partition)
     found = tuple(a.index for a in agents if a.bus == bus and is_partition(a.cu))
     if len(found) != layout.partitions:
@@ -689,11 +479,7 @@ def build_partition_command(
     layout: PartitionLayout,
     partition_index: int,
 ) -> list[str]:
-    """Substitute per-partition values into a benchmark command template.
-
-    Substitution is per already-split token, so a path containing a space cannot
-    turn into two arguments and no shell is involved at any point.
-    """
+    """Substitute per-partition values into a benchmark command template."""
     values = {
         "device": str(device),
         "output_dir": str(output_dir),
@@ -734,19 +520,7 @@ def partition_env(
     device: int,
     streams_per_partition: int,
 ) -> dict[str, str]:
-    """Environment for one partition's benchmark process.
-
-    Pins the process to its partition and publishes the session shape in the
-    same variables the optimizer publishes, so a benchmark entrypoint written
-    against that contract behaves identically whether it was launched by a
-    session or by this sweep.
-
-    ``HIP_VISIBLE_DEVICES`` and ``CUDA_VISIBLE_DEVICES`` are removed rather than
-    set. Leaving an inherited one alongside ``ROCR_VISIBLE_DEVICES`` means two
-    masks apply in sequence, and the second is interpreted as an index into the
-    first -- so a stale ``HIP_VISIBLE_DEVICES=0`` silently redirects every
-    partition's work onto whichever device the first mask selected.
-    """
+    """Environment for one partition's benchmark process."""
     env = dict(base)
     env["ROCR_VISIBLE_DEVICES"] = str(device)
     env.pop("HIP_VISIBLE_DEVICES", None)
@@ -760,12 +534,7 @@ def partition_env(
 
 
 def read_measurement(output_dir: Path) -> dict[str, Any]:
-    """Parse one partition's benchmark report using the in-tree extractor.
-
-    Imported here rather than at module scope: the extractor pulls in the
-    orchestrator, and the pure logic in this file -- command construction,
-    device selection, mode gating -- is worth testing without that weight.
-    """
+    """Parse one partition's benchmark report using the in-tree extractor."""
     reports = sorted(output_dir.rglob("benchmark_report.json"))
     if not reports:
         return {}
@@ -790,13 +559,7 @@ def run_mode(
     timeout_s: float,
     base_env: dict[str, str] | None = None,
 ) -> list[PartitionRun]:
-    """Run the benchmark on every partition at once and collect each result.
-
-    All partitions are launched before any is waited on, which is the only
-    arrangement that measures what partitioning is for. Running them in sequence
-    would measure one partition at a time on an otherwise idle card and report a
-    fraction of the mode's throughput.
-    """
+    """Run the benchmark on every partition at once and collect each result."""
     base = dict(os.environ if base_env is None else base_env)
     runs: list[PartitionRun] = []
     procs: list[tuple[PartitionRun, subprocess.Popen[str] | None, Any]] = []
@@ -957,13 +720,7 @@ def summary_json(results: Sequence[ModeResult], *, entry_mode: str, gpu_id: int)
 
 
 def resolve_modes(requested: str | None, available: Sequence[str]) -> tuple[str, ...]:
-    """Parse the requested mode list, defaulting to what the card reports.
-
-    Raises:
-        SweepError: If a requested mode is not a mode, or the card says it
-            cannot enter it. A card that reported no profiles at all is not
-            second-guessed -- the request stands and the set will judge it.
-    """
+    """Parse the requested mode list, defaulting to what the card reports."""
     if not (requested or "").strip():
         if available:
             return tuple(available)
@@ -974,9 +731,7 @@ def resolve_modes(requested: str | None, available: Sequence[str]) -> tuple[str,
         )
     modes: list[str] = []
     for raw in str(requested).replace(",", " ").split():
-        # parse_mode refuses an unknown spelling with PartitionError. Converted
-        # here so that every way of mistyping --modes leaves by the same door as
-        # the other usage errors, rather than as a traceback.
+        # parse_mode refuses an unknown spelling with PartitionError.
         try:
             mode = parse_mode(raw)
         except PartitionError as exc:
@@ -995,18 +750,7 @@ def resolve_modes(requested: str | None, available: Sequence[str]) -> tuple[str,
 
 
 def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
-    """Put the card back in the mode it was found in. True if it could not be.
-
-    Raises nothing, because it is called from a ``finally``: an exception here
-    would replace whatever sent the sweep into the restore and would take the
-    report down with it, losing both the diagnosis and the modes already
-    measured.
-
-    A read-back that fails is treated as "mode unknown" and the set is attempted
-    regardless. The alternative is skipping the restore because the check that
-    would have proved it necessary is the thing that broke, which leaves a card
-    in a shape nobody asked for.
-    """
+    """Put the card back in the mode it was found in. True if it could not be."""
     try:
         if read_mode(gpu_id) == entry_mode:
             return False
@@ -1103,11 +847,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
             available = ()
         modes = resolve_modes(args.modes, available)
         # Scoped to the swept card because that is the only card a set touches.
-        # A neighbour's benchmark is not a reason to refuse, and refusing on one
-        # left --allow-busy as the only way forward -- which drops the guard on
-        # the target card too, the one card it exists to protect. Skipped
-        # entirely when no set will follow, so a payload it cannot read never
-        # blocks a caller it was not protecting.
         if not (args.allow_busy or args.dry_run):
             busy = resident_processes(_amd_smi_json(["process"]))
             if args.gpu not in busy:
@@ -1126,10 +865,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     except Exception:
-        # Nothing has been set at this point, so there is no card to restore --
-        # but the exit code still has to mean something. 2 is for a refusal this
-        # script decided on, so an unmodelled failure gets its own code rather
-        # than borrowing that one.
+        # Nothing has been set at this point, so there is no card to restore -- but the exit code still has to mean
+        # something. 2 is for a refusal this script decided on, so an unmodelled failure gets its own code rather than
+        # borrowing that one.
         traceback.print_exc()
         print("ERROR: unexpected error while reading the card; nothing was changed.", file=sys.stderr)
         return 4
@@ -1202,14 +940,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
                 result.error = str(exc)
                 print(f"  failed: {exc}")
             except Exception as exc:
-                # Everything this script anticipates arrives as a SweepError or a
-                # PartitionError. Anything else is a bug here or an amd-smi
-                # behaviour not modelled, which means the assumptions driving
-                # privileged sets no longer hold -- so stop sweeping. Stopping by
-                # breaking rather than propagating is the point: the card still
-                # gets restored, and the modes already measured still get
-                # reported. Letting it escape lost the table, the summary file,
-                # and the exit code that says the card was left wrong.
+                # Everything this script anticipates arrives as a SweepError or a PartitionError.
                 unexpected = f"{type(exc).__name__}: {exc}"
                 result.error = f"unexpected error: {unexpected}"
                 print(f"  aborted: {result.error}", file=sys.stderr)
@@ -1227,15 +958,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
         )
         print(f"wrote {summary}")
     except Exception as exc:
-        # A full disk or an unrenderable result must not cost the caller the exit
-        # code, which is the one thing it cannot reconstruct for itself -- least
-        # of all the code saying the card was left in the wrong mode.
+        # A full disk or an unrenderable result must not cost the caller the exit code, which is the one thing it
+        # cannot reconstruct for itself -- least of all the code saying the card was left in the wrong mode.
         traceback.print_exc()
         print(f"ERROR: could not write the report to {summary}: {exc}", file=sys.stderr)
         unexpected = unexpected or f"{type(exc).__name__}: {exc}"
 
-    # A card left in the wrong shape outranks everything else: it mislabels
-    # whatever runs on the node next, not just this sweep.
+    # A card left in the wrong shape outranks everything else: it mislabels whatever runs on the node next, not just
+    # this sweep.
     if restore_failed:
         return 3
     if unexpected:

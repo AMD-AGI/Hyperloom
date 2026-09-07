@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enablement discovery + authoring operations.
-
-Two halves of the enablement flow that both build on a
-:class:`.enablement.FailureSignature`:
-
-* **Discovery** — given a failure signature, decide which repos to scout for an
-  enabling PR (the serving framework plus the ROCm / HIP / aiter bridge repos)
-  and rank candidate PR titles by enablement intent ("enable / support / add /
-  fix / port to ROCm"). See :func:`build_search_plan`, :func:`rank_titles`,
-  :func:`score_enablement_title`.
-* **Authoring** — turn a request + ranked candidates into the
-  :class:`EnablementMandate` (allowed source roots + task description + patch
-  invariants) handed to the patch-authoring specialist. See
-  :func:`build_mandate`.
-
-Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
-the local filesystem (source-root probe + installed package version) unless
-``root_hints`` is passed explicitly.
-"""
+"""Enablement discovery + authoring operations."""
 
 from __future__ import annotations
 
@@ -32,9 +14,7 @@ from .keywords import extract_keywords, score_title_with_anti_signal
 from .repo_map import bridge_repo_urls
 
 
-# ---------------------------------------------------------------------------
 # Discovery: repo selection + enablement-intent ranking
-# ---------------------------------------------------------------------------
 
 
 # Words in a PR title that signal it enables something previously broken.
@@ -59,8 +39,7 @@ ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
     }
 )
 
-# Per-kind seed keywords appended to the auto-extracted set. Keys are failure
-# ``kind`` ids.
+# Per-kind seed keywords appended to the auto-extracted set.
 _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
     "missing_model_arch": ("model", "architecture", "support", "add"),
     "unsupported_dtype": ("dtype", "fp8", "quant", "support"),
@@ -77,32 +56,14 @@ _KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class EnablementSearchPlan:
-    """Where to look and what to match for an enablement failure.
-
-    Attributes:
-        repos: Repo URLs to enumerate PRs from (framework first, then the
-            bridge repos for the signature's ``bridge_layer`` — empty for
-            ``framework`` / unknown layers), order-preserving and deduped.
-        keywords: Ranking keywords (auto-extracted + per-kind seeds + the
-            offending symbol/model tokens).
-    """
+    """Where to look and what to match for an enablement failure."""
 
     repos: tuple[str, ...] = ()
     keywords: tuple[str, ...] = ()
 
 
 def _symbol_tokens(symbol: str) -> list[str]:
-    """Split an offending symbol / arch name into lowercase word tokens.
-
-    Handles CamelCase (``Glm5ForCausalLM`` -> glm, for, causal, lm),
-    snake_case and ``::`` C++ qualifiers.
-
-    Args:
-        symbol: The offending symbol/arch string.
-
-    Returns:
-        list[str]: Lowercased 2+ char tokens (may be empty).
-    """
+    """Split an offending symbol / arch name into lowercase word tokens."""
     if not symbol:
         return []
     spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", symbol)
@@ -116,19 +77,7 @@ def build_search_plan(
     framework_repo_url: str,
     model: str = "",
 ) -> EnablementSearchPlan:
-    """Build the repo set + ranking keywords for an enablement failure.
-
-    Includes the framework repo plus the bridge repos (ROCm / HIP / aiter) for
-    the signature's ``bridge_layer``.
-
-    Args:
-        signature: The classified failure.
-        framework_repo_url: Canonical serving-framework repo URL.
-        model: Model id/path — mined for extra keyword signal.
-
-    Returns:
-        EnablementSearchPlan: The deduped repo list and ranking keywords.
-    """
+    """Build the repo set + ranking keywords for an enablement failure."""
     repos: list[str] = []
     if framework_repo_url.strip():
         repos.append(framework_repo_url.strip())
@@ -151,20 +100,7 @@ def score_enablement_title(
     *,
     intent_weight: float = 1.0,
 ) -> float:
-    """Rank a candidate PR title for enablement relevance.
-
-    Combines the anti-signal-aware gap-keyword overlap
-    (:func:`.keywords.score_title_with_anti_signal`) with a boost for
-    enablement-intent words (:data:`ENABLEMENT_INTENT_TERMS`).
-
-    Args:
-        title: The PR title.
-        plan: The search plan carrying ranking keywords.
-        intent_weight: Weight per enablement-intent token hit.
-
-    Returns:
-        float: The combined score (>= 0.0); callers may drop ``0.0``.
-    """
+    """Rank a candidate PR title for enablement relevance."""
     if not title:
         return 0.0
     base = score_title_with_anti_signal(title, plan.keywords)
@@ -177,23 +113,12 @@ def rank_titles(
     titles: Sequence[str],
     plan: EnablementSearchPlan,
 ) -> list[tuple[str, float]]:
-    """Score and sort candidate titles by enablement relevance, descending.
-
-    Args:
-        titles: Candidate PR titles.
-        plan: The search plan carrying ranking keywords.
-
-    Returns:
-        list[tuple[str, float]]: ``(title, score)`` pairs, highest first;
-        ties keep input order (stable sort).
-    """
+    """Score and sort candidate titles by enablement relevance, descending."""
     scored = [(t, score_enablement_title(t, plan)) for t in titles]
     return sorted(scored, key=lambda pair: pair[1], reverse=True)
 
 
-# ---------------------------------------------------------------------------
 # Authoring: the mandate handed to the patch-authoring sub-agent
-# ---------------------------------------------------------------------------
 
 
 # Source-root families the authored patch may target (fallback when discovery fails).
@@ -212,12 +137,7 @@ def _resolve_package_version(package: str) -> str:
 
 
 def _resolve_actual_root_hints(framework: str) -> list[str]:
-    """Return concrete source-root strings for the mandate (never empty).
-
-    Calls probe_framework_source_roots_for_env() and falls back to the generic
-    prose hints when discovery yields nothing.  Also appends version info for the
-    target framework package.
-    """
+    """Return concrete source-root strings for the mandate (never empty)."""
     try:
         from hyperloom.orchestrator.framework.paths import (
             probe_framework_source_roots_for_env,
@@ -238,9 +158,8 @@ def _resolve_actual_root_hints(framework: str) -> list[str]:
             ver = _resolve_package_version(pkg_name)
             if ver:
                 hints.append(f"({pkg_name} installed version: {ver})")
-            # Always include the ROCm/HIP root hint (authoring sub-agent always
-            # has /opt/rocm in scope for ROCm-side fixes, regardless of whether
-            # probe discovered it or not).
+            # Always include the ROCm/HIP root hint (authoring sub-agent always has /opt/rocm in scope for ROCm-side
+            # fixes, regardless of whether probe discovered it or not).
             if not any(_ROCM_HIP_ROOT_HINT in h for h in hints):
                 hints.append(_ROCM_HIP_ROOT_HINT)
             # Keep the generic framework hint as context even when real paths exist.
@@ -274,9 +193,8 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
-# Environment-setup authorization: the specialist MAY run dependency/tool
-# installs during validation, and must record each verbatim in
-# ``specialist_done.setup_commands`` so integrate_patch can replay them.
+# Environment-setup authorization: the specialist MAY run dependency/tool installs during validation, and must record
+# each verbatim in ``specialist_done.setup_commands`` so integrate_patch can replay them.
 ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "You MAY install missing/stale packages or CLI tools when that is what the "
     "model needs to build or run — e.g. `pip install -U transformers`, "
@@ -293,13 +211,7 @@ ENABLEMENT_SETUP_GUIDANCE: tuple[str, ...] = (
     "If NO environment setup is needed (a pure source fix), leave `setup_commands` empty.",
 )
 
-# Serial-enablement progress contract. A brand-new architecture or a large
-# capability gap rarely becomes fully runnable inside a single budget window.
-# The integrate side REWARDS partial progress: a patch that only advances the
-# boot to a *new, deeper* failure is KEPT and stacked as a base for the next
-# round (see ``enablement.enablement_made_progress`` and ``integrate_patch``
-# ``status="advanced"``). Advancing the boot ONE step is therefore an explicit,
-# valid deliverable rather than grounds for returning ``empty=true``.
+# Serial-enablement progress contract.
 ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "INCREMENTAL PROGRESS IS A FIRST-CLASS DELIVERABLE. Enablement gaps are "
     "serial: clearing one boot failure usually reveals a deeper one. You do NOT "
@@ -321,15 +233,7 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
 )
 
 
-# Targeted-build request contract. A pure source patch (a unified diff against
-# the installed tree) cannot deliver a *compiled* component (a new AITER
-# FP4/MLA/NSA op, sgl-kernel) or a from-source framework build (a newer vLLM
-# that natively implements a brand-new architecture). Historically the
-# specialist had no way to ask for one — it could only author a patch or return
-# empty — so genuinely-new architectures dead-ended at the arch-registry alias.
-# This contract lets the specialist REQUEST an off-loop targeted build; the
-# Coordinator enqueues it on the isolated, ROCm-safe build lane (isolated venv +
-# pinned ROCm torch constraints), gated by the runnable-decision probe.
+# Targeted-build request contract.
 ENABLEMENT_BUILD_REQUEST_GUIDANCE: tuple[str, ...] = (
     "REQUESTING A COMPILED / FROM-SOURCE BUILD. If clearing this gap needs a "
     "*compiled* component (a new AITER FP4/MLA/NSA op, sgl-kernel) or a "
@@ -404,9 +308,6 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
 
 
 # Hard-won operational heuristics, distilled from repeated enablement rounds.
-# Unlike the patch invariants (hard rules) and ladder rungs (methodology),
-# these are judgment calls the specialist should weigh before reaching for a
-# fix — read before you start.
 ENABLEMENT_HEURISTICS: tuple[str, ...] = (
     "`--enforce-eager` / `--disable-cuda-graph` (or any equivalent force-eager "
     "flag) is a DANGEROUS lever. Disabling graph capture papers over many "
@@ -430,14 +331,7 @@ ENABLEMENT_HEURISTICS: tuple[str, ...] = (
 
 
 def build_enablement_ladder_book(signature: FailureSignature | None = None) -> str:
-    """Render the advisory enablement methodology (the "ladder book").
-
-    Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
-    ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
-    environment-setup / incremental-progress / targeted-build guidance. When a
-    ``signature`` is given, a one-line entry-rung hint is added; it never routes
-    deterministically.
-    """
+    """Render the advisory enablement methodology (the \"ladder book\")."""
     lines: list[str] = ["ENABLEMENT METHODOLOGY (advisory — you decide how to apply it):", ""]
     lines.extend(_LADDER_TWO_AXES)
     lines.append("")
@@ -473,17 +367,7 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
 
 @dataclass(frozen=True)
 class EnablementMandate:
-    """A fully-specified authoring task for the enablement specialist.
-
-    Attributes:
-        framework: Target serving framework.
-        model: Model id/path that must become runnable.
-        signature: The classified failure driving the fix.
-        allowed_root_hints: Human-readable source-root families in scope.
-        candidate_refs: Ranked bridging PR/ref hints (best first).
-        task_description: The rendered specialist mandate (prompt body).
-        invariants: The patch invariants (see :data:`ENABLEMENT_PATCH_INVARIANTS`).
-    """
+    """A fully-specified authoring task for the enablement specialist."""
 
     framework: str
     model: str
@@ -501,20 +385,7 @@ def _render_task_description(
     allowed_root_hints: Sequence[str],
     source_context: str = "",
 ) -> str:
-    """Render the specialist mandate text for an enablement failure.
-
-    Args:
-        req: The enablement request (framework/model/opt-in).
-        sig: The classified failure signature.
-        candidate_refs: Ranked bridging refs (best first).
-        allowed_root_hints: Source-root families in scope.
-        source_context: Optional snippet of source lines near the offending
-            site, injected verbatim to ground the authoring sub-agent. Empty
-            omits the block.
-
-    Returns:
-        str: A multi-line prompt body for the authoring sub-agent.
-    """
+    """Render the specialist mandate text for an enablement failure."""
     lines: list[str] = []
     lines.append(
         f"GOAL: make model `{req.model}` run correctly under the `{req.framework}` backend. "
@@ -562,23 +433,7 @@ def build_mandate(
     source_context: str = "",
     root_hints: Sequence[str] | None = None,
 ) -> EnablementMandate:
-    """Build an :class:`EnablementMandate` from a request + candidates.
-
-    Args:
-        req: The enablement request.
-        signature: Pre-computed signature; defaults to ``req.signature``.
-        candidate_refs: Ranked bridging refs to suggest (best first).
-        source_context: Optional source snippet near the offending site to
-            ground the authoring sub-agent (best-effort; empty omits it).
-        root_hints: Explicit source-root hints; when ``None`` (default) they
-            are resolved via :func:`_resolve_actual_root_hints` (which calls
-            ``probe_framework_source_roots_for_env()`` and falls back to the
-            generic prose constants on failure).
-
-    Returns:
-        EnablementMandate: The authoring contract, ready to hand to the
-        specialist runner.
-    """
+    """Build an :class:`EnablementMandate` from a request + candidates."""
     sig = signature if signature is not None else req.signature
     if root_hints is not None:
         hints: list[str] = list(root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]

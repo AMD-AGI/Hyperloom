@@ -5,13 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for the bypass op->source resolver.
-
-Covers the editability filter, kernel-name demangling, the active-finder
-delegation (native ``.cu``/``.hip`` via the symbol index), Triton ``.py`` def-line
-pinning via AST, the trace ``kernel_file`` fast-path, and the repo-scan fallback.
-There is no static ``op_to_source.json`` and no mapping-driven path.
-"""
+"""Unit tests for the bypass op->source resolver."""
 
 from __future__ import annotations
 
@@ -199,8 +193,8 @@ def test_repo_scan_disabled_by_env(monkeypatch, repo_dir):
 
 
 def test_repo_index_marks_duplicate_name_ambiguous(monkeypatch, repo_dir):
-    # Same kernel name defined in two files: the index maps it to "" and
-    # resolve_by_kernel_name refuses to guess (no arbitrary first-seen file).
+    # Same kernel name defined in two files: the index maps it to "" and resolve_by_kernel_name refuses to guess (no
+    # arbitrary first-seen file).
     (repo_dir / "a.py").write_text("@triton.jit\ndef dup_k(x):\n    pass\n", encoding="utf-8")
     (repo_dir / "b.py").write_text("@triton.jit\ndef dup_k(x):\n    pass\n", encoding="utf-8")
     monkeypatch.setattr(resolver, "_repo_scan_roots", lambda: (str(repo_dir),))

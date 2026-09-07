@@ -1,13 +1,4 @@
-"""Canonical ``analysis.md`` renderer for the trace-analysis routes that build
-the report themselves rather than having a model write it (today: bypass).
-
-The report is human/downstream-readable and is NOT the LLM-agent parser
-contract. This module is the single source of truth for its section structure
-and table schemas: a route normalizes its own data into the inputs below and
-unmodeled cells render as an em dash rather than a fabricated value.
-Route-specific detail is appended verbatim via ``extra_sections`` after the
-shared sections, under a divider.
-"""
+"""Canonical ``analysis.md`` renderer for the trace-analysis routes that build"""
 
 from __future__ import annotations
 
@@ -78,30 +69,7 @@ def render_report(
     p_items: list[dict[str, Any]],
     extra_sections: str = "",
 ) -> str:
-    """Render the canonical ``analysis.md`` body.
-
-    Args:
-        route: Route id for the provenance line (e.g. ``bypass``).
-        model_name: Model identifier for the title (blank -> ``Workload``).
-        provenance_detail: Route-specific trailing sentence for the provenance line.
-        exec_summary: ``{total_gpu_time_ms, gpu_busy_pct, gpu_idle_pct,
-            gpu_memcpy_ms, top_bottleneck_category, attribution_pct}`` (any may be
-            ``None`` -> em dash).
-        system_signals: ``{idle_pct, exposed_comm_pct, exposed_memcpy_pct}`` (any
-            may be ``None`` -> row shows an em dash / is still emitted).
-        idle_threshold: Idle-gate threshold for the idle-signal note.
-        hot_kernels: Rows with ``name, time_us, gpu_pct, efficiency_percent,
-            arithmetic_intensity, bound_type, category, source_file`` (ranked as
-            given).
-        p_items: ``{rank, category, rows[...]}`` groups; each row carries
-            ``name, time_us, gpu_pct, e2e_pct, call_count, flops_per_byte,
-            efficiency_percent, bound_type, args, source_file, kernel_path``.
-        extra_sections: Pre-rendered markdown appended after the shared sections
-            (route-specific detail), under a divider.
-
-    Returns:
-        The full canonical markdown report text.
-    """
+    """Render the canonical ``analysis.md`` body."""
     lines: list[str] = []
     title = f"# Performance Analysis Report \u2014 {model_name}" if model_name else "# Performance Analysis Report"
     lines.append(title)

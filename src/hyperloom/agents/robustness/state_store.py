@@ -1,37 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cross-tick state persistence for stateful subsystems.
-
-The subprocess-per-tick transport loses any in-memory detector / ladder /
-throttle state between ticks, breaking "N consecutive ticks", rolling-window,
-and cooldown rules. :class:`DetectorStateStore` is the disk-backed layer.
-One JSON file per session lives at::
-
-    <session_dir>/agents/robustness/detector_state.json
-
-with a flat namespaced layout::
-
-    {
-      "gpu_leak":                 {"consecutive_hits": 2},
-      "ray_pending":              {"consecutive_hits": 1, "last_pending": 3},
-      "aiter_jit":                {"last_so_count": 173, "last_build_count": 4, "stale_build_streak": 0},
-      "progress":                 {"gain_history": [0.0, 0.1, 0.2, ...]},
-      "preflight_model_gpu_fit":  {"fired_fingerprint": [...]},
-      "preflight_amdahl":         {"fired_mtime": 1700000000.0},
-      "tracelens_cli_latch":      {"fired": true},
-      "action_ladder":            {"last_emitted": {"key|tuple": 17, ...}},
-      "rca_throttle":             {"last_called_unix": {"key|tuple": 1700000003.5, ...}}
-    }
-
-Slot names are owned by ``SignalSpec.state_view_key`` in
-:mod:`signals.classifier` plus the two ``view()`` calls in :mod:`factory`.
-
-Owners hold a thin :class:`DetectorStateView` handle exposing ``load() /
-save(dict)`` against their own slot. The store flushes atomically via
-``tmpfile + os.replace``; the reactor calls :meth:`flush_atomic` once per
-successful tick (off the event loop so fsync doesn't block the tick budget).
-"""
+"""Cross-tick state persistence for stateful subsystems."""
 
 from __future__ import annotations
 
@@ -53,13 +23,7 @@ _DEFAULT_SUBDIR: str = "agents/robustness"
 
 
 class DetectorStateStore:
-    """JSON-backed namespaced key-value store.
-
-    All writes go to an in-memory ``dict[str, dict[str, Any]]`` and are
-    materialised by :meth:`flush_atomic` (called once per tick by the
-    reactor). Reads always hit the in-memory copy — load happens once
-    in the constructor.
-    """
+    """JSON-backed namespaced key-value store."""
 
     def __init__(
         self,
@@ -68,14 +32,7 @@ class DetectorStateStore:
         subdir: str = _DEFAULT_SUBDIR,
         filename: str = _STATE_FILENAME,
     ) -> None:
-        """Initialise the store and eagerly load any existing state.
-
-        Args:
-            session_dir (Path): Root session directory.
-            subdir (str): Subdirectory under ``session_dir`` for robustness
-                artefacts.
-            filename (str): Name of the JSON state file within ``subdir``.
-        """
+        """Initialise the store and eagerly load any existing state."""
         self._dir = Path(session_dir) / subdir
         self._path = self._dir / filename
         self._data: dict[str, dict[str, Any]] = {}
@@ -84,24 +41,12 @@ class DetectorStateStore:
 
     @property
     def file_path(self) -> Path:
-        """On-disk path of the backing JSON state file.
-
-        Returns:
-            Path: The full path to the state file.
-        """
+        """On-disk path of the backing JSON state file."""
         return self._path
 
-    # ------------------------------------------------------------------
     # I/O
-    # ------------------------------------------------------------------
     def _load(self) -> None:
-        """Load and normalise the on-disk state into memory.
-
-        Missing files, read errors, malformed JSON, and non-object
-        top-levels all degrade to an empty in-memory store rather than
-        raising. Per-slot values that are not dicts are dropped so
-        consumers always read ``dict[str, Any]``.
-        """
+        """Load and normalise the on-disk state into memory."""
         if not self._path.is_file():
             return
         try:
@@ -134,12 +79,7 @@ class DetectorStateStore:
                 self._data[str(key)] = value
 
     def flush_atomic(self) -> None:
-        """Atomically write the current in-memory state to disk.
-
-        Uses ``tmpfile + os.replace`` so concurrent readers (e.g. an
-        operator running ``finalize`` while the reactor is mid-tick)
-        never see a partially-written file.
-        """
+        """Atomically write the current in-memory state to disk."""
         if not self._dirty:
             return
         try:
@@ -169,69 +109,30 @@ class DetectorStateStore:
                 exc,
             )
 
-    # ------------------------------------------------------------------
     # slot API
-    # ------------------------------------------------------------------
     def load_slot(self, name: str) -> dict[str, Any]:
-        """Return a copy of the slot's content (empty dict if absent).
-
-        Args:
-            name (str): Slot namespace to read.
-
-        Returns:
-            dict[str, Any]: A shallow copy of the slot's content; an empty
-            dict when the slot is absent.
-        """
+        """Return a copy of the slot's content (empty dict if absent)."""
         return dict(self._data.get(name) or {})
 
     def save_slot(self, name: str, payload: dict[str, Any]) -> None:
-        """Replace the slot's content (does not flush to disk).
-
-        Marks the store dirty so the next :meth:`flush_atomic` persists it.
-
-        Args:
-            name (str): Slot namespace to write.
-            payload (dict[str, Any]): New slot content; copied before store.
-
-        Raises:
-            TypeError: If ``payload`` is not a dict.
-        """
+        """Replace the slot's content (does not flush to disk)."""
         if not isinstance(payload, dict):
             raise TypeError(f"save_slot payload must be a dict, got {type(payload).__name__}")
         self._data[name] = dict(payload)
         self._dirty = True
 
     def view(self, name: str) -> "DetectorStateView":
-        """Return a per-slot handle for a detector / ladder / throttle.
-
-        Args:
-            name (str): Slot namespace the view is bound to.
-
-        Returns:
-            DetectorStateView: A handle exposing ``load`` / ``save`` for the
-            named slot.
-        """
+        """Return a per-slot handle for a detector / ladder / throttle."""
         return DetectorStateView(store=self, slot=name)
 
-    # ------------------------------------------------------------------
     # introspection (tests / operators)
-    # ------------------------------------------------------------------
     def snapshot(self) -> dict[str, dict[str, Any]]:
-        """Return a deep-ish copy of all slots for tests / operators.
-
-        Returns:
-            dict[str, dict[str, Any]]: Mapping of slot name to a copy of its
-            content.
-        """
+        """Return a deep-ish copy of all slots for tests / operators."""
         return {k: dict(v) for k, v in self._data.items()}
 
 
 class DetectorStateView:
-    """Per-slot accessor passed to a single detector / ladder / throttle.
-
-    Owners don't know (and shouldn't care) what other slots exist; they
-    just call :meth:`load` / :meth:`save` against their own namespace.
-    """
+    """Per-slot accessor passed to a single detector / ladder / throttle."""
 
     __slots__ = ("_store", "_slot")
 
@@ -241,30 +142,16 @@ class DetectorStateView:
         store: DetectorStateStore,
         slot: str,
     ) -> None:
-        """Bind a view to one slot of a store.
-
-        Args:
-            store (DetectorStateStore): Backing store.
-            slot (str): Slot namespace this view reads and writes.
-        """
+        """Bind a view to one slot of a store."""
         self._store = store
         self._slot = slot
 
     def load(self) -> dict[str, Any]:
-        """Load this view's slot content.
-
-        Returns:
-            dict[str, Any]: The slot's content, or an empty dict when the
-            slot is absent.
-        """
+        """Load this view's slot content."""
         return self._store.load_slot(self._slot)
 
     def save(self, payload: dict[str, Any]) -> None:
-        """Save content into this view's slot.
-
-        Args:
-            payload (dict[str, Any]): New slot content.
-        """
+        """Save content into this view's slot."""
         self._store.save_slot(self._slot, payload)
 
 

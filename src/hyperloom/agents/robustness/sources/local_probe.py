@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Local fallback source.
-
-Wraps best-effort host-local probes (Coordinator SQLite read, disk
-usage, ``ps``/``rocm-smi``/``nvidia-smi``, log tail + error-pattern
-extraction, HTTP server probe). A failing sub-probe returns empty data
-without raising; :class:`LocalProbeSource` raises
-:class:`SourceUnavailable` only when *every* sub-probe yields nothing,
-so :class:`DegradeRouter` does not flap. Cluster-wide metrics and
-node-level fault detection are out of scope.
-"""
+"""Local fallback source."""
 
 from __future__ import annotations
 
@@ -37,15 +28,9 @@ from .base import SourceData, SourceUnavailable
 log = logging.getLogger(__name__)
 
 
-# Inference-server commands, kept apart from the rest because "is a server
-# supposed to be answering right now" is a different question from "what is
-# running": a health probe against a port with no server behind it is an
-# expected refusal, not a wedged server.
-#
-# The single source of truth for that distinction. ``LocalProbeConfig`` and the
-# agent-level ``Config`` knob both default to this tuple rather than restating
-# it, so a framework added in one place cannot show up matched-but-not-a-server
-# in the other and silently disable ``local_server_unreachable``.
+# Inference-server commands, kept apart from the rest because "is a server supposed to be answering right now" is a
+# different question from "what is running": a health probe against a port with no server behind it is an expected
+# refusal, not a wedged server.
 _SERVER_PROCESS_PATTERNS: tuple[str, ...] = (
     # SGLang
     "sglang.srt",
@@ -62,8 +47,7 @@ _OTHER_PROCESS_PATTERNS: tuple[str, ...] = (
     # Magpie / InferenceX benchmark harness
     "Magpie",
     "inferencex",
-    # Ray + per-task workers. ``ray::IDLE`` is the parked worker name only;
-    # a worker running a serving actor renames itself after the actor class.
+    # Ray + per-task workers.
     "ray::IDLE",
     "ray::ServingActor",
     "raylet",
@@ -77,8 +61,7 @@ _OTHER_PROCESS_PATTERNS: tuple[str, ...] = (
 _DEFAULT_PROCESS_PATTERNS: tuple[str, ...] = _SERVER_PROCESS_PATTERNS + _OTHER_PROCESS_PATTERNS
 
 
-# Log error markers. Order matters: first matching pattern per line wins, so
-# specific patterns must come before generic ones.
+# Log error markers.
 _DEFAULT_LOG_ERROR_PATTERNS: tuple[str, ...] = (
     r"runtime\.cli .* timed out after \d+s",
     r"RuntimeError: Engine core initialization failed",
@@ -130,8 +113,8 @@ class LocalProbeConfig:
     # Surface ``/dev/shm`` alongside ``/`` so signals fire shm_pressure separately.
     disk_mountpoints: tuple[str, ...] = ("/", "/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     process_patterns: tuple[str, ...] = _DEFAULT_PROCESS_PATTERNS
-    # The subset of ``process_patterns`` that names an inference server, i.e.
-    # something a health probe may hold accountable for answering a port.
+    # The subset of ``process_patterns`` that names an inference server, i.e. something a health probe may hold
+    # accountable for answering a port.
     server_process_patterns: tuple[str, ...] = _SERVER_PROCESS_PATTERNS
     coordinator_event_limit: int = 200
     log_error_patterns: tuple[str, ...] = _DEFAULT_LOG_ERROR_PATTERNS
@@ -162,56 +145,23 @@ class LocalProbeConfig:
 
     @property
     def coordinator_db_path(self) -> Path | None:
-        """Path to the Coordinator session DB under ``session_dir``.
-
-        Returns:
-            Path | None: ``<session_dir>/storage/coordinator.db`` when a
-            session directory is configured, else ``None``.
-        """
+        """Path to the Coordinator session DB under ``session_dir``."""
         if self.session_dir is None:
             return None
         return self.session_dir / "storage" / "coordinator.db"
 
 
 class LocalProbeSource:
-    """Minimum-effort local data source for the reactor.
-
-    Each :meth:`fetch` call runs the configured sub-probes
-    sequentially. CPU-bound bits (sqlite, subprocess) are off-loaded
-    to a thread pool so the tick stays responsive.
-    """
+    """Minimum-effort local data source for the reactor."""
 
     name = "local-probe"
 
     def __init__(self, config: LocalProbeConfig | None = None) -> None:
-        """Store the probe configuration.
-
-        Args:
-            config (LocalProbeConfig | None): Probe configuration; a
-                default :class:`LocalProbeConfig` is used when ``None``.
-        """
+        """Store the probe configuration."""
         self._config = config or LocalProbeConfig()
 
     async def fetch(self, ctx: Any) -> SourceData:
-        """Run every configured sub-probe and assemble a snapshot.
-
-        Each sub-probe is best-effort: failures yield empty data rather
-        than raising. CPU-bound probes run in a thread pool to keep the
-        tick responsive. :class:`SourceUnavailable` is only raised when
-        *all* sub-probes come back empty, so the DegradeRouter does not
-        thrash between sources.
-
-        Args:
-            ctx (Any): The per-tick reactor context (unused by the local
-                probe but part of the :class:`Source` contract).
-
-        Returns:
-            SourceData: A snapshot populated with whatever local signals
-            were collected.
-
-        Raises:
-            SourceUnavailable: When no sub-probe produced any data.
-        """
+        """Run every configured sub-probe and assemble a snapshot."""
         cfg = self._config
         coordinator_events = await asyncio.to_thread(
             _read_coordinator_events,
@@ -339,30 +289,11 @@ class LocalProbeSource:
         )
 
 
-# ---------------------------------------------------------------------------
 # Sub-probes (all sync; called via asyncio.to_thread)
-# ---------------------------------------------------------------------------
 
 
 def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
-    """Summarize in-flight task progress from the session SQLite DB.
-
-    Freshness comes from the progress notes ``TaskRegistry.record_progress``
-    appends to a task's ``history``, not from ``updated_at``: that column also
-    moves when a task merely enters ``running``, and a state transition is no
-    evidence that anything is still happening. A note that names no owning
-    agent is counted as running work but vouches for nobody.
-
-    Args:
-        db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
-            missing file short-circuits to ``{}``.
-
-    Returns:
-        dict[str, Any]: ``{running, by_agent}`` where ``by_agent`` maps an
-        owning agent to ``{last_progress_unix, task, oldest_progress_unix,
-        oldest_task}`` — the freshest and the quietest of the units it owns —
-        or ``{}`` when the DB is unreadable or nothing is running.
-    """
+    """Summarize in-flight task progress from the session SQLite DB."""
     if db_path is None or not db_path.exists():
         return {}
     try:
@@ -374,9 +305,8 @@ def _read_task_progress(db_path: Path | None) -> dict[str, Any]:
         conn.row_factory = sqlite3.Row
         rows = _try_select(
             conn,
-            # Ordered so the fold below is reproducible: the merge itself is
-            # order-independent, but a snapshot whose row order is SQLite's
-            # discretion cannot be reasoned about or pinned by a test.
+            # Ordered so the fold below is reproducible: the merge itself is order-independent, but a snapshot whose
+            # row order is SQLite's discretion cannot be reasoned about or pinned by a test.
             "SELECT task_id, kind, history FROM tasks WHERE state='running' ORDER BY task_id",
             (),
         )
@@ -406,19 +336,7 @@ def _merge_agent_progress(
     ts: float,
     task: str,
 ) -> None:
-    """Fold one unit's heartbeat into ``agent``'s freshest/quietest pair.
-
-    Both ends are kept because the dispatcher runs units concurrently. The
-    freshest answers "is this agent's work progressing"; keeping only that one
-    left a sibling unit that had not reported in hours with no trace in the
-    snapshot at all.
-
-    Args:
-        by_agent (dict[str, dict[str, Any]]): Accumulator, updated in place.
-        agent (str): The agent the note attributed itself to.
-        ts (float): Unix timestamp of the note.
-        task (str): Kind (or id) of the unit that reported it.
-    """
+    """Fold one unit's heartbeat into ``agent``'s freshest/quietest pair."""
     known = by_agent.get(agent)
     if known is None:
         by_agent[agent] = {
@@ -437,16 +355,7 @@ def _merge_agent_progress(
 
 
 def _latest_progress_note(history_json: Any) -> tuple[float, str] | None:
-    """Extract the newest attributed heartbeat from a task's ``history`` column.
-
-    Args:
-        history_json (Any): Raw ``tasks.history`` JSON text.
-
-    Returns:
-        tuple[float, str] | None: ``(unix_ts, owning_agent)`` for the newest
-        entry carrying a ``progress`` note that names its agent, or ``None``
-        when the task has never reported one.
-    """
+    """Extract the newest attributed heartbeat from a task's ``history`` column."""
     if not isinstance(history_json, str):
         return None
     rows = _json_loads_or_none(history_json)
@@ -470,22 +379,7 @@ def _read_coordinator_events(
     db_path: Path | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Read recent Coordinator events from the session SQLite DB.
-
-    Opens the DB read-only and selects from the ``events`` table,
-    decoding any JSON ``payload`` column. Any error (missing file, open
-    failure, bad query) yields an empty list.
-
-    Args:
-        db_path (Path | None): Path to ``coordinator.db``; ``None`` or a
-            missing file short-circuits to ``[]``.
-        limit (int): Maximum number of most-recent events to return.
-
-    Returns:
-        list[dict[str, Any]]: Event rows projected to
-        ``{id, agent, topic, payload, ts}``, in chronological (ascending seq)
-        order, or ``[]``.
-    """
+    """Read recent Coordinator events from the session SQLite DB."""
     if db_path is None or not db_path.exists():
         return []
     try:
@@ -528,16 +422,7 @@ def _try_select(
     sql: str,
     params: tuple,
 ) -> list[sqlite3.Row]:
-    """Run one SELECT, degrading a foreign schema to no evidence.
-
-    Args:
-        conn (sqlite3.Connection): Open read-only connection.
-        sql (str): The SELECT to run.
-        params (tuple): Bound parameters.
-
-    Returns:
-        list[sqlite3.Row]: The rows, or ``[]`` when the statement fails.
-    """
+    """Run one SELECT, degrading a foreign schema to no evidence."""
     try:
         return list(conn.execute(sql, params).fetchall())
     except sqlite3.Error as exc:
@@ -546,19 +431,7 @@ def _try_select(
 
 
 def _maybe_decode_json(value: Any) -> Any:
-    """Best-effort decode of a possibly-JSON event payload.
-
-    Bytes are UTF-8 decoded first; strings are parsed as JSON when
-    possible. Values that are neither, or that fail to parse, are
-    returned unchanged.
-
-    Args:
-        value (Any): The raw payload column value.
-
-    Returns:
-        Any: The decoded object, the original string when not JSON, or
-        ``None`` when bytes cannot be decoded.
-    """
+    """Best-effort decode of a possibly-JSON event payload."""
     if isinstance(value, (bytes, bytearray)):
         try:
             value = value.decode("utf-8", errors="replace")
@@ -575,18 +448,7 @@ def _maybe_decode_json(value: Any) -> Any:
 
 
 def _sample_disk(mountpoints: tuple[str, ...]) -> dict[str, Any]:
-    """Sample disk usage for each mountpoint via ``shutil.disk_usage``.
-
-    Mountpoints that raise :class:`OSError` (missing / unmounted) are
-    skipped so the rest still report.
-
-    Args:
-        mountpoints (tuple[str, ...]): Filesystem paths to sample.
-
-    Returns:
-        dict[str, Any]: Map of mountpoint to
-        ``{total_gb, used_gb, free_gb, used_pct}`` rounded to 2 dp.
-    """
+    """Sample disk usage for each mountpoint via ``shutil.disk_usage``."""
     out: dict[str, Any] = {}
     for mp in mountpoints:
         try:
@@ -609,27 +471,7 @@ def _sample_processes(
     patterns: tuple[str, ...],
     server_patterns: tuple[str, ...] = _SERVER_PROCESS_PATTERNS,
 ) -> list[dict[str, Any]] | None:
-    """List local processes whose command matches any pattern.
-
-    Runs ``ps -eo pid=,rss=,cmd=`` and keeps lines whose command contains one
-    of ``patterns``. An empty list means "nothing matched"; ``None`` means the
-    probe could not answer at all. Consumers must not read the second as the
-    first — an absent ``ps`` would otherwise become evidence that no server is
-    running, and mute a signal that has nothing to do with this probe.
-
-    Args:
-        patterns (tuple[str, ...]): Substrings matched against each
-            process command line; empty disables the probe.
-        server_patterns (tuple[str, ...]): The subset naming an inference
-            server; matches are flagged ``is_server``.
-
-    Returns:
-        list[dict[str, Any]] | None: One ``{pid, rss_mb, cmd, is_server, cwd}``
-        entry per matching process, where ``is_server`` marks an inference
-        server as opposed to a harness, Ray, or build process and ``cwd`` is
-        what ties a process to a session on a shared node; ``None`` when
-        the probe is disabled, ``ps`` is absent, times out, or exits non-zero.
-    """
+    """List local processes whose command matches any pattern."""
     if not patterns:
         return None
     try:
@@ -675,20 +517,7 @@ def _sample_processes(
 
 
 def _process_cwd(pid: int) -> str:
-    """Read a process's working directory from ``/proc/<pid>/cwd``.
-
-    A run's harness is launched with its working directory inside the session
-    and children inherit it, which is what lets a consumer tell one session's
-    processes from another's on a shared node.
-
-    Args:
-        pid (int): The process to inspect.
-
-    Returns:
-        str: The resolved directory, or ``""`` when it cannot be read — another
-        user's process, a process that exited between ``ps`` and this call, or a
-        sandbox with no ``/proc``. Unknown, never "somewhere else".
-    """
+    """Read a process's working directory from ``/proc/<pid>/cwd``."""
     try:
         return os.readlink(f"/proc/{pid}/cwd")
     except OSError as exc:
@@ -697,15 +526,7 @@ def _process_cwd(pid: int) -> str:
 
 
 def _sample_gpu() -> dict[str, Any]:
-    """Best-effort GPU snapshot using rocm-smi or nvidia-smi.
-
-    Tries rocm-smi first and falls back to nvidia-smi.
-
-    Returns:
-        dict[str, Any]: The first non-empty snapshot (``{"gpus": [...],
-        "tool": ...}``), or ``{}`` on any failure (binary missing,
-        non-zero exit, parse error).
-    """
+    """Best-effort GPU snapshot using rocm-smi or nvidia-smi."""
     snap = _sample_rocm_smi()
     if snap:
         return snap
@@ -713,17 +534,7 @@ def _sample_gpu() -> dict[str, Any]:
 
 
 def _sample_rocm_smi() -> dict[str, Any]:
-    """Sample AMD GPUs via ``rocm-smi --csv``.
-
-    Returns ``{}`` when ``rocm-smi`` is missing, times out, or exits
-    non-zero. When the CSV parses to no devices the raw text is kept
-    under ``raw_csv`` so RCA still has something to inspect.
-
-    Returns:
-        dict[str, Any]: ``{"gpus": [...], "tool": "rocm-smi"}`` on a
-        successful parse, ``{"raw_csv": ..., "tool": "rocm-smi"}`` on
-        parser drift, or ``{}`` on failure.
-    """
+    """Sample AMD GPUs via ``rocm-smi --csv``."""
     if not shutil.which("rocm-smi"):
         return {}
     try:
@@ -776,22 +587,7 @@ _ROCM_BYTE_TO_MB_FIELDS: frozenset[str] = frozenset(
 
 
 def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
-    """Parse rocm-smi CSV output into ``gpus[]``.
-
-    rocm-smi emits one or more blocks separated by blank lines.  Each
-    block starts with a header row whose first column is ``device``
-    and is followed by per-device rows (``cardN``).  We accumulate all
-    metrics into a single dict per device keyed by ``gpu_id``.
-    ``util_mem_pct`` is derived from VRAM used/total when rocm-smi omits
-    the percentage column, so the GPU-leak detector still fires on AMD.
-
-    Args:
-        text (str): The raw rocm-smi CSV output.
-
-    Returns:
-        list[dict[str, Any]]: One snapshot dict per device that yielded
-        at least one parsed metric, ordered by ``gpu_id``.
-    """
+    """Parse rocm-smi CSV output into ``gpus[]``."""
     by_id: dict[int, dict[str, Any]] = {}
     current_columns: list[str] | None = None
     for raw in text.splitlines():
@@ -841,16 +637,7 @@ def _parse_rocm_smi_csv(text: str) -> list[dict[str, Any]]:
 
 
 def _sample_nvidia_smi() -> dict[str, Any]:
-    """Sample NVIDIA GPUs via ``nvidia-smi --query-gpu``.
-
-    Returns ``{}`` when ``nvidia-smi`` is missing, times out, exits
-    non-zero, or no row parses.
-
-    Returns:
-        dict[str, Any]: ``{"gpus": [...], "tool": "nvidia-smi"}`` with
-        one row per device (``gpu_id``, utilisation, temperature, VRAM),
-        or ``{}`` on failure.
-    """
+    """Sample NVIDIA GPUs via ``nvidia-smi --query-gpu``."""
     if not shutil.which("nvidia-smi"):
         return {}
     try:
@@ -893,21 +680,7 @@ def _sample_nvidia_smi() -> dict[str, Any]:
 
 
 def _tail_log(path: Path | None, max_lines: int) -> list[str]:
-    """Return the last ``max_lines`` lines of a log file.
-
-    Reads the file backwards in 4 KiB blocks so large logs are not
-    fully loaded. Any read error yields an empty list.
-
-    Args:
-        path (Path | None): Log file to tail; ``None`` / missing yields
-            ``[]``.
-        max_lines (int): Maximum trailing lines to return; ``<= 0``
-            yields ``[]``.
-
-    Returns:
-        list[str]: Up to ``max_lines`` trailing lines, decoded as UTF-8
-        with replacement.
-    """
+    """Return the last ``max_lines`` lines of a log file."""
     if path is None or not path.exists() or max_lines <= 0:
         return []
     try:
@@ -936,33 +709,7 @@ def _tail_logs(
     max_extra_logs: int,
     max_lines: int,
 ) -> list[str]:
-    """Multi-source log tail (D2).
-
-    Returns the union of (a) primary ``server_log_path`` lines and
-    (b) the most recently-modified files matched by
-    ``extra_server_log_globs`` under ``session_dir``. Each source is
-    capped at ``max_lines``, so the result is bounded by
-    ``max_lines * (1 + max_extra_logs)``; the caller further trims to its
-    own scan window.
-
-    Lines from extra logs are tagged ``[<filename>]`` so
-    :data:`signals.local_health._log_error_symptoms` can attribute
-    pattern hits to the right variant.
-
-    Args:
-        primary_path (Path | None): The legacy single server log path.
-        session_dir (Path | None): Session root the extra globs are
-            resolved against.
-        extra_globs (tuple[str, ...]): Glob patterns for extra per-run
-            server logs.
-        max_extra_logs (int): Max extra log files scanned per tick,
-            chosen by most-recent mtime.
-        max_lines (int): Max trailing lines taken from each source;
-            ``<= 0`` yields ``[]``.
-
-    Returns:
-        list[str]: Primary lines followed by tagged extra-log lines.
-    """
+    """Multi-source log tail (D2)."""
     if max_lines <= 0:
         return []
     primary = _tail_log(primary_path, max_lines) if primary_path else []
@@ -1008,21 +755,7 @@ def _extract_log_errors(
     patterns: tuple[str, ...],
     window: int,
 ) -> list[dict[str, Any]]:
-    """Scan the last ``window`` log lines for fatal error patterns.
-
-    Patterns are compiled case-insensitively; the first matching
-    pattern per line wins (so caller ordering decides specificity).
-
-    Args:
-        tail (list[str]): Recent log lines to scan.
-        patterns (tuple[str, ...]): Regex patterns tried per line, in
-            priority order.
-        window (int): Only the last ``window`` lines are scanned.
-
-    Returns:
-        list[dict[str, Any]]: One ``{pattern, line}`` entry per matching
-        line, with ``line`` trimmed to 240 chars.
-    """
+    """Scan the last ``window`` log lines for fatal error patterns."""
     if not tail or not patterns:
         return []
     compiled = []
@@ -1048,26 +781,7 @@ async def _probe_local_servers(
     targets: tuple[str, ...],
     timeout_s: float,
 ) -> list[dict[str, Any]]:
-    """Issue a tiny GET against each target URL.
-
-    Used to detect "process is alive but server is wedged" — a common
-    failure mode in single-mode dev where the inference server
-    deadlocks and stops accepting requests.  Connection refused, timeout
-    and other transport errors each carry a distinct ``error`` string;
-    ``status`` stays ``error`` for every transport failure and is only set
-    to ``ok`` / ``http_error`` when a response is received.
-
-    Args:
-        targets (tuple[str, ...]): URLs to probe; empty disables the
-            probe.
-        timeout_s (float): Per-request timeout in seconds (floored at
-            0.2s).
-
-    Returns:
-        list[dict[str, Any]]: One entry per target with ``url``,
-        ``reachable``, ``status`` and either ``status_code`` or
-        ``error``.
-    """
+    """Issue a tiny GET against each target URL."""
     if not targets:
         return []
     results: list[dict[str, Any]] = []
@@ -1098,22 +812,7 @@ _RAY_PENDING_RE = re.compile(
 
 
 def _parse_ray_pending_count(text: str) -> int:
-    """Sum the pending-task counts in the ``Demands:`` section of ``ray status``.
-
-    The regex anchors each digit to either a line start or a colon and
-    requires the ``pending task[s]`` / ``pending actor[s]`` suffix that
-    Ray's autoscaler emits for queued demands. This excludes hex digits
-    embedded inside node IDs (line ``1 node_<64-char-hex>``), which
-    never satisfy both the colon/line-start anchor *and* the
-    ``task|actor`` suffix.
-
-    Args:
-        text (str): The full ``ray status`` stdout.
-
-    Returns:
-        int: The summed pending task / actor count, or 0 when the text
-        is empty or has no matching demand lines.
-    """
+    """Sum the pending-task counts in the ``Demands:`` section of ``ray status``."""
     if not text:
         return 0
     total = 0
@@ -1126,27 +825,7 @@ def _parse_ray_pending_count(text: str) -> int:
 
 
 def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
-    """Best-effort ``ray status`` probe for liveness + queued demand.
-
-    Args:
-        timeout_s (float): Subprocess timeout in seconds (floored at
-            0.5s).
-
-    Returns:
-        ``{}`` when ``ray`` is not on ``$PATH`` (silent on smoke-test pods), or
-        when ``ray status`` exits non-zero with a traceback indicating the CLI
-        shim itself crashed (broken install, not a dead head — ``ray_head_dead``
-        is deliberately suppressed).
-        ``{"healthy": False, "reason": str, "stderr": str,
-          "returncode": int|None}`` when ``ray status`` cannot be run or
-        exits non-zero for any other reason.
-        ``{"healthy": True, "pending_tasks": int, "stdout_head": str,
-          "returncode": 0}`` on success.
-
-    ``pending_tasks`` is taken from the ``Demands:`` section only via
-    :func:`_parse_ray_pending_count`, avoiding the Ray dashboard /
-    state-API dependency (port 8265) not enabled in production pods.
-    """
+    """Best-effort ``ray status`` probe for liveness + queued demand."""
     if not shutil.which("ray"):
         return {}
     try:
@@ -1208,21 +887,7 @@ def _probe_ray_head(timeout_s: float) -> dict[str, Any]:
 
 
 def _sample_fd_usage(pid: int | None) -> dict[str, Any]:
-    """Read FD usage + hard limit for ``pid`` (defaults to current PID).
-
-    Linux exposes the open-FD count through ``/proc/<pid>/fd/`` (each
-    entry is one FD) and the per-process limit through
-    ``/proc/<pid>/limits``. Both files are zero-overhead reads.
-
-    Args:
-        pid (int | None): Target process id; defaults to the current
-            process when ``None``.
-
-    Returns:
-        dict[str, Any]: ``{pid, used, limit, used_pct}`` (``limit`` /
-        ``used_pct`` may be ``None`` when the hard limit is unknown), or
-        ``{}`` when ``/proc`` is unreadable (containers, sandboxes).
-    """
+    """Read FD usage + hard limit for ``pid`` (defaults to current PID)."""
     target_pid = pid if pid is not None else os.getpid()
     fd_dir = Path(f"/proc/{target_pid}/fd")
     limits_path = Path(f"/proc/{target_pid}/limits")
@@ -1260,24 +925,7 @@ def _sample_fd_usage(pid: int | None) -> dict[str, Any]:
 
 
 def _sample_aiter_jit(jit_dir: Path | None) -> dict[str, Any]:
-    """Count compiled ``.so`` artefacts under aiter's JIT cache.
-
-    Mirrors ``baseline.py:_resolve_aiter_jit_dir`` heuristics without a
-    cross-package import.
-
-    Args:
-        jit_dir (Path | None): Explicit JIT cache dir; when ``None`` the
-            dir is resolved from env / the aiter package location.
-
-    Returns:
-        dict[str, Any]: ``{}`` when no directory resolves. Otherwise:
-
-        * ``so_count``    — total ``*.so`` files under ``jit_dir``
-          (excludes ``build/`` staging).
-        * ``build_count`` — files under ``jit_dir/build/`` (in-flight
-          compilation; usually 0 on a warm host).
-        * ``jit_dir``     — absolute path probed.
-    """
+    """Count compiled ``.so`` artefacts under aiter's JIT cache."""
     resolved = _resolve_aiter_jit_dir(jit_dir)
     if resolved is None:
         return {}
@@ -1297,21 +945,7 @@ def _sample_aiter_jit(jit_dir: Path | None) -> dict[str, Any]:
 
 
 def _resolve_aiter_jit_dir(explicit: Path | None) -> Path | None:
-    """Find the aiter JIT cache root.
-
-    Order:
-    1. ``explicit`` (caller-supplied) → use if exists.
-    2. ``$INFERENCE_OPTIMIZER_AITER_JIT_DIR`` env (matches upstream).
-    3. ``importlib.util.find_spec("aiter")`` → ``<pkg>/jit``.
-
-    Args:
-        explicit (Path | None): Caller-supplied candidate dir, tried
-            first when it exists.
-
-    Returns:
-        Path | None: The resolved JIT cache directory, or ``None`` when
-        none of the candidates exist.
-    """
+    """Find the aiter JIT cache root."""
     if explicit is not None and Path(explicit).is_dir():
         return Path(explicit)
     env_dir = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
@@ -1333,9 +967,7 @@ def _resolve_aiter_jit_dir(explicit: Path | None) -> Path | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Decision-audit probe (reads persisted decision artefacts)
-# ---------------------------------------------------------------------------
 
 
 def _sample_decision_audit(
@@ -1343,38 +975,7 @@ def _sample_decision_audit(
     max_integrate: int,
     max_oob_attempts: int,
 ) -> dict[str, Any]:
-    """Collect persisted decision artefacts for the G-section signals.
-
-    Three independent slices are gathered defensively — any missing
-    file becomes an empty value and the rest still surface, so a host
-    that runs without the external ``report_back`` pipeline (no
-    ``ci_metrics.json``) still gets G1-G3 audit on the integrate
-    artefacts.
-
-    Args:
-        session_dir (Path | None): Session root; ``None`` yields ``{}``.
-        max_integrate (int): Max recent ``runs/integrate/*/result.json``
-            files to read.
-        max_oob_attempts (int): Max tail entries from
-            ``optimization_attempts.jsonl``.
-
-    Returns:
-        dict[str, Any]: ``{}`` when ``session_dir`` is ``None``,
-        otherwise a dict with the slices below.
-
-    Returned shape::
-
-        {
-            "recent_integrate": [{kernel_id, task_id, decision, gain_pct,
-                                  patch_path, patch_size_bytes,
-                                  base_tput, new_tput, dispatched_count,
-                                  result_path, mtime}, ...],
-            "ci_metrics": {raw json} | {},
-            "ci_metrics_path": str | "",
-            "oob_attempts": [{kernel_id, backend, report_text,
-                              microbench_speedup, ts, source_file}, ...],
-        }
-    """
+    """Collect persisted decision artefacts for the G-section signals."""
     if session_dir is None:
         return {}
     out: dict[str, Any] = {
@@ -1391,17 +992,7 @@ def _scan_integrate_results(
     session_dir: Path,
     max_files: int,
 ) -> list[dict[str, Any]]:
-    """Read the most recent ``runs/integrate/*/result.json`` files.
-
-    Args:
-        session_dir (Path): Session root containing ``runs/integrate``.
-        max_files (int): Max files to read, newest by mtime first.
-
-    Returns:
-        list[dict[str, Any]]: Normalised integrate entries (see
-        :func:`_normalise_integrate_entry`), or ``[]`` when the
-        directory is absent or unreadable.
-    """
+    """Read the most recent ``runs/integrate/*/result.json`` files."""
     integrate_root = session_dir / "runs" / "integrate"
     if not integrate_root.is_dir():
         return []
@@ -1435,21 +1026,7 @@ def _normalise_integrate_entry(
     *,
     result_path: Path,
 ) -> dict[str, Any] | None:
-    """Project a raw integrate ``result.json`` dict into the audit shape.
-
-    Resolves the patch size from ``patch_path`` when present and coerces
-    throughput / gain fields to floats. Entries without a string
-    ``decision`` are dropped.
-
-    Args:
-        data (dict[str, Any]): Parsed ``result.json`` contents.
-        result_path (Path): Path the entry was read from; used for the
-            ``result_path`` and ``mtime`` fields.
-
-    Returns:
-        dict[str, Any] | None: The normalised entry, or ``None`` when
-        ``decision`` is missing / not a string.
-    """
+    """Project a raw integrate ``result.json`` dict into the audit shape."""
     decision = data.get("decision")
     if not isinstance(decision, str):
         return None
@@ -1489,21 +1066,7 @@ def _scan_oob_attempts(
     session_dir: Path,
     max_entries: int,
 ) -> list[dict[str, Any]]:
-    """Read the tail of the newest ``optimization_attempts.jsonl``.
-
-    Scans ``kernel-agent/runs/*/optimization_attempts.jsonl`` newest
-    first and returns rows from the first file that yields any, capping
-    to the most recent ``max_entries``.
-
-    Args:
-        session_dir (Path): Session root containing ``kernel-agent``.
-        max_entries (int): Max tail entries to keep.
-
-    Returns:
-        list[dict[str, Any]]: Projected attempt rows (``kernel_id``,
-        ``backend``, ``report_text``, ``microbench_speedup``, ``ts``,
-        ``source_file``), or ``[]`` when none are found.
-    """
+    """Read the tail of the newest ``optimization_attempts.jsonl``."""
     root = session_dir / "kernel-agent" / "runs"
     if not root.is_dir():
         return []
@@ -1556,18 +1119,7 @@ _CI_METRICS_CANDIDATE_RELPATHS: tuple[str, ...] = (
 def _load_ci_metrics(
     session_dir: Path,
 ) -> tuple[Path | None, dict[str, Any]]:
-    """Load the first present ``ci_metrics`` JSON under the session.
-
-    Tries each candidate relpath in :data:`_CI_METRICS_CANDIDATE_RELPATHS`
-    order and returns the first that exists and parses to a dict.
-
-    Args:
-        session_dir (Path): Session root searched for the metrics files.
-
-    Returns:
-        tuple[Path | None, dict[str, Any]]: ``(path, data)`` for the
-        first match, or ``(None, {})`` when none is found.
-    """
+    """Load the first present ``ci_metrics`` JSON under the session."""
     for relpath in _CI_METRICS_CANDIDATE_RELPATHS:
         candidate = session_dir / relpath
         if not candidate.is_file():
@@ -1584,18 +1136,7 @@ def _load_ci_metrics(
 
 
 def _json_loads_or_none(text: str) -> Any:
-    """Parse JSON text, returning ``None`` instead of raising on error.
-
-    ``RecursionError`` is caught alongside the decode errors: the probe reads
-    blobs written by other processes, and a deeply nested one would otherwise
-    take down the whole tick rather than just the sub-probe that read it.
-
-    Args:
-        text (str): The JSON text to parse.
-
-    Returns:
-        Any: The decoded object, or ``None`` when empty or invalid.
-    """
+    """Parse JSON text, returning ``None`` instead of raising on error."""
     if not text:
         return None
     import json
@@ -1606,26 +1147,11 @@ def _json_loads_or_none(text: str) -> Any:
         return None
 
 
-# ---------------------------------------------------------------------------
 # C — preflight probe (manifest + kernel_breakdown)
-# ---------------------------------------------------------------------------
 
 
 def _load_manifest_extras(session_dir: Path | None) -> dict[str, Any]:
-    """Read ``manifest.json`` for the C-section preflight signals.
-
-    Returns the raw dict so the signal layer can pick fields without
-    leaking knowledge of the manifest schema into the probe.
-
-    Args:
-        session_dir (Path | None): Session root containing
-            ``manifest.json``; ``None`` yields ``{}``.
-
-    Returns:
-        dict[str, Any]: The parsed manifest dict, or ``{}`` when the
-        file is absent (resume from a half-init session), unreadable, or
-        not a JSON object.
-    """
+    """Read ``manifest.json`` for the C-section preflight signals."""
     if session_dir is None:
         return {}
     candidate = session_dir / "manifest.json"
@@ -1653,22 +1179,7 @@ _AMDAHL_TIER_FAMILIES: dict[str, str] = {
 
 
 def _load_kernel_breakdown(session_dir: Path | None) -> dict[str, Any]:
-    """Read ``profiles/kernel_breakdown.json`` and aggregate by tier.
-
-    The full per-kernel list is huge; the C2 detector only needs the
-    aggregate so we pre-collapse it. Tiers fall back to the canonical
-    name when no mapping exists, keeping new tiers from surfacing as
-    silent drops.
-
-    Args:
-        session_dir (Path | None): Session root containing
-            ``profiles/kernel_breakdown.json``; ``None`` yields ``{}``.
-
-    Returns:
-        dict[str, Any]: ``{tier_pcts: {triton, vendor, ...},
-        total_kernels, total_gpu_pct, kernel_breakdown_path, mtime}``,
-        or ``{}`` when the file is absent / unreadable / not a list.
-    """
+    """Read ``profiles/kernel_breakdown.json`` and aggregate by tier."""
     if session_dir is None:
         return {}
     candidate = session_dir / "profiles" / "kernel_breakdown.json"
@@ -1706,28 +1217,14 @@ def _load_kernel_breakdown(session_dir: Path | None) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
 # E — critic-health probe (judge_bundle.json + workdir count)
-# ---------------------------------------------------------------------------
 
 
 def _sample_critic_workdir(
     session_dir: Path | None,
     max_judges: int,
 ) -> dict[str, Any]:
-    """Scan ``critic-workdir/<turn>/judge_bundle.json`` for critic-health signals.
-
-    Args:
-        session_dir (Path | None): Session root containing
-            ``critic-workdir``; ``None`` yields ``{}``.
-        max_judges (int): Max recent turn directories scanned for judge
-            bundles.
-
-    Returns:
-        dict[str, Any]: ``{recent_judges: [...], workdir_count: int,
-        workdir_root: str}``, or ``{}`` when the critic-workdir tree
-        doesn't exist (smoke run / critic disabled).
-    """
+    """Scan ``critic-workdir/<turn>/judge_bundle.json`` for critic-health signals."""
     if session_dir is None:
         return {}
     root = session_dir / "critic-workdir"
@@ -1784,31 +1281,14 @@ def _sample_critic_workdir(
     }
 
 
-# ---------------------------------------------------------------------------
 # State-integrity probe (state.json / WAL / agent JSONLs / PID)
-# ---------------------------------------------------------------------------
 
 
 def _sample_state_integrity(
     session_dir: Path | None,
     optimizer_runs_dirname: str,
 ) -> dict[str, Any]:
-    """Aggregate the I1-I4 state-integrity slots into one payload.
-
-    Individual sub-slots that fail (missing file / no PID file) surface
-    their own error markers so the signal layer can branch on absence
-    without mistaking it for healthy state.
-
-    Args:
-        session_dir (Path | None): Session root; ``None`` yields ``{}``.
-        optimizer_runs_dirname (str): Sub-directory under ``session_dir``
-            where ``run_*.pid`` files live.
-
-    Returns:
-        dict[str, Any]: ``{state_json, wal, agents, coordinator}``
-        aggregating the four state slots, or ``{}`` when ``session_dir``
-        is missing.
-    """
+    """Aggregate the I1-I4 state-integrity slots into one payload."""
     if session_dir is None:
         return {}
     return {
@@ -1823,17 +1303,7 @@ def _sample_state_integrity(
 
 
 def _probe_state_json(session_dir: Path) -> dict[str, Any]:
-    """Return ``state.json`` health: validity / size / mtime / error.
-
-    Args:
-        session_dir (Path): Session root containing ``state.json``.
-
-    Returns:
-        dict[str, Any]: ``{valid, path, ...}``; on success also carries
-        ``size_bytes``, ``mtime`` and ``stop_reason``, otherwise an
-        ``error`` marker (``missing`` / ``read_failed`` /
-        ``json_parse_failed``).
-    """
+    """Return ``state.json`` health: validity / size / mtime / error."""
     path = session_dir / "state.json"
     if not path.is_file():
         return {"valid": False, "error": "missing", "path": str(path)}
@@ -1870,15 +1340,7 @@ def _probe_state_json(session_dir: Path) -> dict[str, Any]:
 
 
 def _probe_wal_size(session_dir: Path) -> dict[str, Any]:
-    """``storage/coordinator.db-wal`` size — WAL bloat signal source.
-
-    Args:
-        session_dir (Path): Session root containing ``storage/``.
-
-    Returns:
-        dict[str, Any]: ``{db_path, wal_path, wal_bytes, db_bytes}``;
-        byte counts are 0 when the corresponding file is absent.
-    """
+    """``storage/coordinator.db-wal`` size — WAL bloat signal source."""
     db_path = session_dir / "storage" / "coordinator.db"
     wal_path = session_dir / "storage" / "coordinator.db-wal"
     out: dict[str, Any] = {
@@ -1901,15 +1363,7 @@ def _probe_wal_size(session_dir: Path) -> dict[str, Any]:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """``os.kill(pid, 0)`` — POSIX existence probe.
-
-    Args:
-        pid (int): The process id to probe.
-
-    Returns:
-        bool: ``True`` when the process exists; ``False`` on any error
-        (PID missing, permission denied, non-Linux).
-    """
+    """``os.kill(pid, 0)`` — POSIX existence probe."""
     try:
         os.kill(pid, 0)
         return True
@@ -1918,16 +1372,7 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 def _probe_agent_files(session_dir: Path) -> dict[str, Any]:
-    """Per-agent inbox/outbox sizes for I4 bloat detection.
-
-    Args:
-        session_dir (Path): Session root containing the ``agents/`` tree.
-
-    Returns:
-        dict[str, Any]: ``{<role>: {inbox_bytes, outbox_bytes,
-        inbox_path, outbox_path}}`` for roles with non-zero mailboxes,
-        or ``{}`` when the tree is absent.
-    """
+    """Per-agent inbox/outbox sizes for I4 bloat detection."""
     agents_root = session_dir / "agents"
     if not agents_root.is_dir():
         return {}
@@ -1968,21 +1413,7 @@ def _probe_coordinator_pid(
     session_dir: Path,
     optimizer_runs_dirname: str,
 ) -> dict[str, Any]:
-    """Cross-reference ``optimizer_runs/run_*.pid`` against ``os.kill(pid, 0)``.
-
-    The PID file is dropped by the SKILL.md launcher template; absence
-    is not itself an error (operator may have launched without ``setsid``).
-    Mismatch is the I5 ``coordinator_zombie`` signal.
-
-    Args:
-        session_dir (Path): Session root containing the runs directory.
-        optimizer_runs_dirname (str): Sub-directory holding
-            ``run_*.pid`` files.
-
-    Returns:
-        dict[str, Any]: ``{recorded_pid, alive, pid_file}``; fields stay
-        ``None`` / ``""`` when no usable PID file is found.
-    """
+    """Cross-reference ``optimizer_runs/run_*.pid`` against ``os.kill(pid, 0)``."""
     runs_dir = session_dir / optimizer_runs_dirname
     out: dict[str, Any] = {
         "recorded_pid": None,
@@ -2018,27 +1449,14 @@ def _probe_coordinator_pid(
     return out
 
 
-# ---------------------------------------------------------------------------
 # J — external-deps probe (gateway / mounts / TraceLens CLI)
-# ---------------------------------------------------------------------------
 
 
 async def _probe_external_deps(
     gateway_probe_url_override: str,
     http_timeout_s: float,
 ) -> dict[str, Any]:
-    """Async wrapper that runs the external-dependency probes once per tick.
-
-    Args:
-        gateway_probe_url_override (str): Explicit gateway probe URL;
-            when empty it is derived from ``$OPENAI_BASE_URL`` +
-            ``/models``.
-        http_timeout_s (float): Timeout for the gateway HTTP probe.
-
-    Returns:
-        dict[str, Any]: ``{gateway, mounts, tracelens_cli}``, or ``{}``
-        when all three sub-probes are empty.
-    """
+    """Async wrapper that runs the external-dependency probes once per tick."""
     gateway_url = gateway_probe_url_override
     if not gateway_url:
         base = os.environ.get("OPENAI_BASE_URL", "").strip()
@@ -2060,23 +1478,7 @@ async def _probe_gateway_health(
     url: str,
     timeout_s: float,
 ) -> dict[str, Any]:
-    """GET ``$OPENAI_BASE_URL/models`` with the same auth headers as LLM callers.
-
-    A 401 here (with the same token + custom headers that critic +
-    kernel-agent use) means the upstream gateway has revoked / lost the
-    key. Matching the main LLM auth resolver avoids false gateway alerts on
-    gateways that require ``Ocp-Apim-Subscription-Key`` for ``/models``.
-
-    Args:
-        url (str): The gateway ``/models`` URL to probe.
-        timeout_s (float): Request timeout in seconds (floored at 0.5s).
-
-    Returns:
-        dict[str, Any]: ``{url, reachable, status, ...}`` with either a
-        ``status_code`` (and classified ``status``: ``ok`` /
-        ``unauthorized`` / ``http_error`` / ``server_error``) or an
-        ``error`` marker on transport failure.
-    """
+    """GET ``$OPENAI_BASE_URL/models`` with the same auth headers as LLM callers."""
     out: dict[str, Any] = {
         "url": url,
         "reachable": False,
@@ -2110,12 +1512,7 @@ async def _probe_gateway_health(
 
 
 def _gateway_probe_headers(url: str) -> dict[str, str]:
-    """Build direct HTTP headers for the external gateway health probe.
-
-    Mirrors the OpenAI/Codex client auth: the operator's ``OPENAI_CUSTOM_HEADERS``
-    plus a Bearer token. Header injection is env-driven, so a gateway that needs
-    a subscription key must carry it in ``OPENAI_CUSTOM_HEADERS``.
-    """
+    """Build direct HTTP headers for the external gateway health probe."""
     del url  # headers are env-driven
     try:
         cfg = resolve_openai_client_config(env=dict(os.environ))
@@ -2136,20 +1533,7 @@ _EXTERNAL_MOUNT_ENVS: tuple[tuple[str, str], ...] = (
 
 
 def _probe_external_mounts() -> list[dict[str, Any]]:
-    """``os.stat`` each external mount, recording reachability and latency.
-
-    Mount paths are read from the env names in
-    :data:`_EXTERNAL_MOUNT_ENVS` at probe time so an operator can
-    relocate them without a rebuild; unset envs are skipped rather than
-    falling back to a default path.
-
-    Latency is classified against the ``ExternalDepsConfig`` thresholds
-    in the signal layer.
-
-    Returns:
-        list[dict[str, Any]]: One ``{env_name, path, ok, error,
-        latency_ms}`` entry per configured mount.
-    """
+    """``os.stat`` each external mount, recording reachability and latency."""
     out: list[dict[str, Any]] = []
     for env_name, default_path in _EXTERNAL_MOUNT_ENVS:
         raw = os.environ.get(env_name, default_path) or ""
@@ -2189,13 +1573,7 @@ _TRACELENS_CLI_NAMES: tuple[str, ...] = (
 
 
 def _probe_tracelens_cli() -> dict[str, Any]:
-    """Detect both TraceLens CLI names — boot-time presence check.
-
-    Returns:
-        dict[str, Any]: ``{cli_names: [...], found: {name: bool},
-        any_present: bool}`` reflecting which CLI names resolve via
-        :func:`shutil.which`.
-    """
+    """Detect both TraceLens CLI names — boot-time presence check."""
     found: dict[str, bool] = {}
     for name in _TRACELENS_CLI_NAMES:
         found[name] = shutil.which(name) is not None

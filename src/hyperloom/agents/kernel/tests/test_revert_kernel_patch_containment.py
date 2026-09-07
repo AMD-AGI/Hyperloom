@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Revert-time backup-path containment tests for revert_kernel_patch.
-
-The manifest is untrusted at revert time, so every ``copy2`` source
-(``backup_path``) must stay under the apply-time backup tree (the manifest's
-own directory). A tampered ``backup_path`` pointing at an arbitrary host file
-must not be copied onto the restore target, while a legitimate manifest reverts
-unchanged.
-
-Note: the restore *target* itself is intentionally not framework-root-gated
-here, because apply accepts arbitrary targets under ``allow_unknown_target``;
-gating the target would break those legitimate reverts.
-"""
+"""Revert-time backup-path containment tests for revert_kernel_patch."""
 
 from __future__ import annotations
 

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`.
-
-The engines call through ``hyperloom.common.llm_config``. Those entry points are
-patched by name, and deliberately with ``raising=True``: they are this repo's
-own symbols, so a rename should fail the patch here rather than leave the suite
-silently stubbing nothing and passing against the real transport.
-"""
+"""Unit tests for :class:`LlmRcaEngine` and :class:`RcaThrottle`."""
 
 from __future__ import annotations
 
@@ -60,11 +54,7 @@ class _StubClient:
 
 
 class _StubAnthropicCompletion:
-    """Stands in for ``llm_config.aanthropic_completion`` and records its params.
-
-    The Anthropic engine holds no client of its own now: llm_config owns
-    transport selection, so the seam is the entry point rather than an object.
-    """
+    """Stands in for ``llm_config.aanthropic_completion`` and records its params."""
 
     def __init__(self, *, reply: _Reply | None = None, error: Exception | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -133,11 +123,7 @@ def _install_chat(
 
 
 def _install_client_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any]]]:
-    """Patch the OpenAI client factory; return its construction kwargs.
-
-    Only the OpenAI engine builds a client. The Anthropic engine calls
-    llm_config's single-shot entry point, which owns its own transport.
-    """
+    """Patch the OpenAI client factory; return its construction kwargs."""
     built: dict[str, list[dict[str, Any]]] = {"openai": []}
 
     def _openai(**kwargs: Any) -> _StubClient:
@@ -270,11 +256,7 @@ async def test_llm_engine_builds_its_client_from_the_openai_factory(monkeypatch:
 async def test_anthropic_engine_calls_the_entry_point_without_in_process_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """llm_config resolves the credential, so only the budgets cross over.
-
-    Passing no base_url/api_key is the normal shape for a subscription-token
-    host, and the call must still be issued.
-    """
+    """llm_config resolves the credential, so only the budgets cross over."""
     built = _install_client_factories(monkeypatch)
     stub = _install_anthropic_completion(monkeypatch)
     monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
@@ -286,8 +268,8 @@ async def test_anthropic_engine_calls_the_entry_point_without_in_process_credent
     assert len(stub.calls) == 1
     assert built["openai"] == [], "the Anthropic engine must not build an OpenAI client"
     assert engine.client is None, "the Anthropic engine owns no client to leak"
-    # The CLI spends part of its budget spawning a process, so the HTTP-sized
-    # timeout is floored rather than forwarded.
+    # The CLI spends part of its budget spawning a process, so the HTTP-sized timeout is floored rather than
+    # forwarded.
     assert stub.calls[0]["timeout_s"] >= 60.0
 
 
@@ -295,9 +277,9 @@ async def test_anthropic_engine_calls_the_entry_point_without_in_process_credent
 async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transport(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Config.discover may resolve the pair from provider-specific variables,
-    so the canonical names have to be overlaid before the transport reads
-    them — otherwise the CLI re-reads whatever the ambient environment holds."""
+    """Config.discover may resolve the pair from provider-specific variables, so the canonical names have to be
+    overlaid before the transport reads them — otherwise the CLI re-reads whatever the ambient environment holds.
+    """
     stub = _install_anthropic_completion(monkeypatch)
     monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: True)
 
@@ -316,8 +298,7 @@ async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transpor
 
 @pytest.mark.asyncio
 async def test_engine_disables_itself_after_a_missing_credential(monkeypatch: pytest.MonkeyPatch):
-    """A missing credential fails identically on every later tick, so it costs
-    one ERROR and stops the engine rather than a warning per symptom."""
+    """A missing credential fails identically on every later tick, so it costs"""
     calls: list[int] = []
 
     async def _raise(**_kw: Any) -> Any:
@@ -357,8 +338,7 @@ async def test_engine_keeps_retrying_after_a_transient_failure(monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch: pytest.MonkeyPatch):
-    """The claude CLI going missing mid-run is permanent for this process, and
-    is recognised by re-probing rather than by matching the error text."""
+    """The claude CLI going missing mid-run is permanent for this process, and"""
     ready = {"value": True}
 
     async def _raise(**_kw: Any) -> Any:
@@ -377,8 +357,7 @@ async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch:
 
 @pytest.mark.asyncio
 async def test_anthropic_engine_skips_when_no_transport_is_available(monkeypatch: pytest.MonkeyPatch):
-    """A host with no Anthropic credential — or a subscription token but no
-    claude CLI — must not retry a doomed call on every tick."""
+    """A host with no Anthropic credential — or a subscription token but no"""
     stub = _install_anthropic_completion(monkeypatch)
     monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: False)
 

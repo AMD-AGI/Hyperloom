@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavioural + static guards for ensure_geak()'s pip-install path.
-
-GEAK dropped its setup.sh and now ships as a pip package. ensure_geak() must:
-
-* install the GEAK package from the local ${GEAK_ROOT} checkout (NOT a
-  git+<remote>@<ref> URL), so the installed package matches the
-  interface/run_e2e.py we run and honours GEAK_REPO/GEAK_REF overrides
-  (local mirror / fork / SSH URL) that are not valid pip URLs;
-* pass GEAK_HOME=${GEAK_ROOT} so GEAK's bootstrap reuses our checkout;
-* skip the package install with a clear warning when the checkout carries no
-  pyproject.toml/setup.py, instead of failing obscurely;
-* never mention setup.sh again.
-
-The behavioural test extracts the real ensure_geak body from install.sh and
-runs it with stubbed log/warn/run (run only echoes, so nothing hits the
-network or pip).
-"""
+"""Behavioural + static guards for ensure_geak()'s pip-install path."""
 
 from __future__ import annotations
 

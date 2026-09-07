@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Robustness reactor role layer.
-
-Only the wire-format primitives (envelope + prompt_inputs) are re-exported here;
-the reactor lives in ``role.reactor`` to keep this module import-light for hosts
-that just need the JSON-IO surface.
-"""
+"""Robustness reactor role layer."""
 
 from .envelope import (
     Intent,

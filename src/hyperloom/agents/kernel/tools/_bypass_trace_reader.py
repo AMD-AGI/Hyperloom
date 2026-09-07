@@ -5,25 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Independent, low-memory reader/aggregator for Kineto torch-profiler traces.
-
-Used by the bypass analysis backend (``HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass``).
-It never imports or shells out to TraceLens.
-
-Design constraints:
-
-* **Streaming**: the ``traceEvents`` array is parsed element-by-element with
-  the C-accelerated ``json.JSONDecoder.raw_decode`` so peak memory stays flat
-  regardless of trace size (no full ``json.load``).
-* **Attribution**: GPU kernel device time is attributed back to the launching
-  ATen/framework operation via the standard Kineto correlation chain:
-  ``kernel.args.correlation`` -> ``cuda_runtime.args.correlation`` ->
-  ``cuda_runtime.args["External id"]`` -> ``cpu_op.args["External id"]``.
-  Kernels whose op cannot be resolved are aggregated under ``(unlinked)``.
-* **Aggregation scope**: whole trace, ranked by GPU-time share. Steady-state
-  windowing is a separate, optional stage; ranking by share is stable
-  regardless of windowing.
-"""
+"""Independent, low-memory reader/aggregator for Kineto torch-profiler traces."""
 
 from __future__ import annotations
 
@@ -34,8 +16,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
-# Stdlib-only sibling; keeps this reader independent of TraceLens while sharing
-# one capture-vs-workload rule with the TraceLens route.
+# Stdlib-only sibling; keeps this reader independent of TraceLens while sharing one capture-vs-workload rule with the
+# TraceLens route.
 from _capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 from _trace_rank import select_primary_trace, trace_rank as _rank_of
 
@@ -57,9 +39,7 @@ _TRACE_EXTS = (".trace.json.gz", ".pt.trace.json.gz", ".trace.json", ".json.gz",
 
 _DECODER = json.JSONDecoder()
 
-# Hard caps keep a corrupt trace from turning the streaming reader into an
-# unbounded accumulator. Kineto prefixes are normally a few KiB and individual
-# events a few KiB, so these retain generous headroom for embedded metadata.
+# Hard caps keep a corrupt trace from turning the streaming reader into an unbounded accumulator.
 _MAX_TRACE_PREFIX_CHARS = 16 * 1024 * 1024
 _MAX_EVENT_CHARS = 64 * 1024 * 1024
 _MAX_ANNOTATION_WINDOWS = 100_000
@@ -83,11 +63,9 @@ def _backfill_shape_signature(meta: dict[str, Any]) -> tuple[tuple[tuple[int, ..
     return (tuple(norm_shapes), norm_dtypes)
 
 
-# A graph trace is judged under-recorded when fewer than this fraction of its
-# graph-launch correlations actually recorded any kernel: activity-buffer
-# overflow drops whole replays, so recorded-launch coverage collapses toward
-# ~1/launch_count, whereas a fully-recorded (merely idle) workload keeps kernels
-# on essentially every launch.
+# A graph trace is judged under-recorded when fewer than this fraction of its graph-launch correlations actually
+# recorded any kernel: activity-buffer overflow drops whole replays, so recorded-launch coverage collapses toward
+# ~1/launch_count, whereas a fully-recorded (merely idle) workload keeps kernels on essentially every launch.
 _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX = 0.5
 
 
@@ -98,15 +76,7 @@ def _graph_under_recorded(
     graph_launches_with_kernels: int,
     graph_kernels: int,
 ) -> bool:
-    """Return whether a graph-mode trace likely under-recorded replays.
-
-    Keyed on *recorded-launch coverage* — the share of graph-launch correlations
-    that recorded at least one kernel — NOT on busy%. A low busy fraction alone
-    is ambiguous: a genuinely idle / sparse / host-bound workload whose replays
-    are all fully recorded also looks idle, and must still be gated by the
-    high-idle suppression. Only when the profiler dropped whole replays (coverage
-    far below 1.0) is idle% an unreliable capture artifact.
-    """
+    """Return whether a graph-mode trace likely under-recorded replays."""
     if not graph_mode or graph_launch_count < 2 or graph_kernels <= 0:
         return False
     coverage = graph_launches_with_kernels / graph_launch_count
@@ -131,24 +101,12 @@ def _trace_candidates(root: Path) -> list[Path]:
 
 
 def _is_capture_fragment(path: str | Path, root: str | Path | None = None) -> bool:
-    """True if ``path`` is a CUDA-graph capture shard, not a main trace.
-
-    Capture shards are device-kernel sparse and must not be mistaken for the
-    content-rich main profiler trace. Delegates to
-    :func:`_capture_shapes.is_capture_fragment` so this route and the TraceLens
-    route classify identically; the local copy this replaced only knew the
-    ``bs_<batch>_rank<n>`` / ``capture_traces/`` shapes and silently accepted a
-    ``graph_capture_profile/cuda_graph_capture-*`` sidecar as a workload trace.
-    """
+    """True if ``path`` is a CUDA-graph capture shard, not a main trace."""
     return _shared_is_capture_fragment(path, root)
 
 
 def _main_trace_candidates(candidates: list[Path], root: str | Path | None = None) -> list[Path]:
-    """Drop CUDA-graph capture shards, keeping only main workload traces.
-
-    Falls back to the full list when every candidate is a capture shard, so a
-    trace is always resolvable (the selection pool is never emptied).
-    """
+    """Drop CUDA-graph capture shards, keeping only main workload traces."""
     main = [c for c in candidates if not _is_capture_fragment(c, root)]
     return main or candidates
 
@@ -161,14 +119,7 @@ def _select_trace_file(
     preferred_rank: int = 0,
     tensor_parallel_size: int | None = None,
 ) -> Path | None:
-    """Deterministically pick one trace file from candidates.
-
-    Capture shards (see :func:`_is_capture_fragment`) are excluded first so the
-    content-rich main trace is never shadowed by a sparse ``bs_*_rank0`` shard.
-    Among the remaining main traces the order is: a ``merged-*`` trace (largest,
-    name tie-break) > the lowest-index rank trace (``rank_0`` first) > the
-    largest file. Ties always break by name so selection is reproducible.
-    """
+    """Deterministically pick one trace file from candidates."""
     candidates = _main_trace_candidates(candidates, root)
     if require_single_rank:
         return select_primary_trace(
@@ -193,19 +144,7 @@ def resolve_trace_file(
     preferred_rank: int = 0,
     tensor_parallel_size: int | None = None,
 ) -> Path | None:
-    """Resolve a trace input (file or directory) to a single trace file.
-
-    For a directory (e.g. a ``torch_trace/`` capture dir), selection is
-    deterministic, rank-aware, and skips sglang CUDA-graph capture shards (see
-    :func:`_select_trace_file`): a merged trace wins, else the lowest-index
-    per-rank trace, else the largest file.
-
-    Args:
-        trace_input: A trace file path or a directory containing trace files.
-
-    Returns:
-        The resolved trace file path, or ``None`` when nothing usable is found.
-    """
+    """Resolve a trace input (file or directory) to a single trace file."""
     p = Path(trace_input)
     if p.is_file():
         if require_single_rank:
@@ -231,12 +170,7 @@ def resolve_trace_file(
 
 
 def _trace_rank_count(trace_input: str | Path) -> int:
-    """Count distinct per-rank traces under ``trace_input``.
-
-    Returns the number of distinct ``rank_N`` indices found in a directory, or
-    ``1`` when the input is a single file or has no rank-tagged traces. Capture
-    shards are excluded so their ``rank0`` tag is not counted.
-    """
+    """Count distinct per-rank traces under ``trace_input``."""
     p = Path(trace_input)
     if p.is_file():
         return 1
@@ -248,23 +182,14 @@ def _trace_rank_count(trace_input: str | Path) -> int:
 
 
 def _open_trace_binary(path: Path):
-    """Open a trace file, transparently decompressing ``.gz``.
-
-    Returns:
-        A binary file object positioned at the start of the (decompressed)
-        JSON stream. Caller is responsible for closing it.
-    """
+    """Open a trace file, transparently decompressing ``.gz``."""
     if path.name.lower().endswith(".gz"):
         return gzip.open(path, "rb")
     return open(path, "rb")
 
 
 class _ObjectBalance:
-    """Resumable brace balancer for a single ``traceEvents`` element.
-
-    Only the recovery path of :func:`stream_events` needs it, so it keeps its
-    scan position across refills instead of restarting over the grown buffer.
-    """
+    """Resumable brace balancer for a single ``traceEvents`` element."""
 
     __slots__ = ("_depth", "_escaped", "_in_string", "_scan")
 
@@ -275,12 +200,7 @@ class _ObjectBalance:
         self._escaped = False
 
     def advance(self, buf: str) -> int | None:
-        """Consume newly buffered characters.
-
-        Returns:
-            The index one past the element's closing brace once the object
-            balances, or ``None`` when the buffer ends mid-object.
-        """
+        """Consume newly buffered characters."""
         scan = self._scan
         depth = self._depth
         in_string = self._in_string
@@ -318,22 +238,7 @@ def stream_events(
     *,
     errors: list[str] | None = None,
 ) -> Iterator[dict]:
-    """Yield each object inside the ``traceEvents`` array, one at a time.
-
-    Locates the ``traceEvents`` array, then emits balanced ``{...}`` elements
-    via ``raw_decode``. Complete leading events remain recoverable from a
-    truncated file, while ``errors`` distinguishes that recovery from a clean
-    end of the array.
-
-    Args:
-        fileobj: A binary, possibly-decompressing file object.
-        bufsize: Read/refill chunk size in bytes (also the buffer-trim
-            threshold).
-        errors: Optional output list for structural stream errors.
-
-    Yields:
-        Parsed trace-event dicts.
-    """
+    """Yield each object inside the ``traceEvents`` array, one at a time."""
 
     def _record(message: str) -> None:
         """Append one structural error when the caller requested diagnostics."""
@@ -505,10 +410,8 @@ def stream_events(
             try:
                 obj, decoded_end = _DECODER.raw_decode(buf, object_start)
             except json.JSONDecodeError as exc:
-                # raw_decode cannot distinguish corrupt input from an object the
-                # buffer merely has not reached the end of yet, so balance braces
-                # to tell the two apart. Only this path pays for that scan, and
-                # it stops at the object's own end rather than the buffer's.
+                # raw_decode cannot distinguish corrupt input from an object the buffer merely has not reached the end
+                # of yet, so balance braces to tell the two apart.
                 object_end = balance.advance(buf)
                 if object_end is not None:
                     _record(f"traceEvents object malformed after {emitted} event(s): {exc.msg}")
@@ -543,22 +446,7 @@ def stream_events(
 
 
 def _stream_overlap_health(stream_events: dict[Any, list[tuple[float, float, str]]]) -> dict[str, Any]:
-    """Report device streams whose event durations physically cannot hold.
-
-    A hardware stream executes serially, so within a ``(pid, tid)`` row an
-    event's end must not run past the next event's start; where it does, the
-    duration is corrupt. The check is pairwise and the threshold is a share of
-    summed device time rather than of the wall span, since a corrupt event
-    inflates its own span. A corrupt duration on a stream's final event is not
-    detectable -- nothing follows it to contradict the value.
-
-    Args:
-        stream_events: ``(pid, tid) -> [(ts, end, name), ...]``, unsorted.
-
-    Returns:
-        The worst offending stream as a dict (including a ``severity`` grade),
-        or ``{}`` when every stream is self-consistent.
-    """
+    """Report device streams whose event durations physically cannot hold."""
     worst: dict[str, Any] = {}
     for key, events in stream_events.items():
         if len(events) < 2:
@@ -648,24 +536,7 @@ def select_steady_window(
     framework: str = "",
     min_repeats: int = 3,
 ) -> dict[str, Any] | None:
-    """Pick one representative steady-state iteration window from annotations.
-
-    Kineto emits ``gpu_user_annotation`` spans such as ``ProfilerStep#N`` (or, for
-    diffusion, a repeated per-step marker). This groups annotations by their
-    digit-stripped name, keeps the group that best looks like a repeating step
-    marker, drops the first occurrence (warm-up / torch.compile capture), and
-    returns the *median-duration* remaining occurrence as the steady window.
-
-    Args:
-        annotation_windows: The ``annotation_windows`` list from a trace pass.
-        framework: Framework hint; ``xdit`` diffusion steps are homogeneous, so
-            two repeats are enough to trust a window.
-        min_repeats: Minimum occurrences before a non-``xdit`` group is trusted.
-
-    Returns:
-        ``{start_us, end_us, step_name, step_count, method}`` or ``None`` when no
-        repeating steady window can be identified (caller falls back to full).
-    """
+    """Pick one representative steady-state iteration window from annotations."""
     if not annotation_windows:
         return None
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -685,8 +556,8 @@ def select_steady_window(
 
     is_xdit = (framework or "").lower() == "xdit"
     threshold = 2 if is_xdit else min_repeats
-    # Filter by threshold before ranking so a spurious low-count step-named
-    # annotation cannot win over a real high-count loop and then be rejected.
+    # Filter by threshold before ranking so a spurious low-count step-named annotation cannot win over a real
+    # high-count loop and then be rejected.
     qualified = [(n, w) for n, w in groups.items() if len(w) >= threshold]
     if not qualified:
         return None
@@ -720,34 +591,10 @@ def _finalize(
     graph_launch_count: int = 0,
     corr_to_launch_geom: dict[Any, tuple[Any, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build timeline + op/kernel aggregates from buffered device events.
-
-    Args:
-        k_events: Buffered kernels as ``(name, dur_us, correlation, ts, end)``.
-        m_events: Buffered memcpy/memset as ``(dur_us, ts, end)``.
-        corr_to_extid: ``correlation -> External id`` (from cuda_runtime events).
-        extid_to_opname: ``External id -> op name`` (from cpu_op events).
-        extid_to_opmeta: ``External id -> {shapes, dtypes, kernel_file,
-            kernel_backend}`` (from cpu_op args); powers per-kernel shape and
-            Triton-source enrichment on the hot-kernel rows.
-        window: Optional ``(start_us, end_us)`` steady-state filter; a device
-            event is kept when its start ``ts`` falls in ``[start, end)``.
-        top_k: Row cap for the returned lists (``<= 0`` keeps all).
-        emit_launches: When true, also emit the time-ordered per-launch rows.
-        graph_launch_corrs: Correlation ids belonging to graph replays.
-        graph_launch_count: Number of observed graph launches.
-        corr_to_launch_geom: ``correlation -> (grid, block)`` launch geometry.
-
-    Returns:
-        A dict with ``kernel_launches`` (when ``emit_launches``) / ``timeline`` /
-        ``ops`` / ``kernels`` / ``attribution`` / ``graph_coverage``.
-    """
-    # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow
-    # drops replays across the run), so the recorded-launch coverage must be
-    # computed over the full event stream -- BEFORE any steady-window filter --
-    # to stay scope-consistent with ``graph_launch_count`` (also whole-trace).
-    # Otherwise a window holding one replay of a fully-recorded N-launch trace
-    # would read as 1/N and be misflagged as under-recorded.
+    """Build timeline + op/kernel aggregates from buffered device events."""
+    # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
+    # recorded-launch coverage must be computed over the full event stream -- BEFORE any steady-window filter -- to
+    # stay scope-consistent with ``graph_launch_count`` (also whole-trace).
     _graph_corrs_full = graph_launch_corrs or frozenset()
     graph_launch_corrs_with_kernels: set[int] = {
         e[2] for e in k_events if e[2] is not None and e[2] in _graph_corrs_full
@@ -760,12 +607,7 @@ def _finalize(
         m_events = [e for e in m_events if ws <= e[1] < we]
 
     def _clip(a: float, b: float) -> tuple[float, float] | None:
-        """Clip an interval to the steady window so occupancy math (busy/idle)
-        stays within the window span. Returns ``None`` for an empty result.
-
-        Kernel/memcpy durations stay unclipped (GPU-time share ranks by full
-        cost) while wall-clock occupancy must not exceed the window.
-        """
+        """Clip an interval to the steady window so occupancy math (busy/idle)"""
         if window is None:
             return (a, b)
         lo, hi = max(ws, a), min(we, b)
@@ -800,8 +642,7 @@ def _finalize(
 
     # --- op-level attribution (kernel -> cuda_runtime -> cpu_op) ---
     op_agg: dict[str, _Agg] = {}
-    # Kernel name -> {launching op name -> attributed GPU us}, to pick a majority
-    # op name for each hot kernel.
+    # Kernel name -> {launching op name -> attributed GPU us}, to pick a majority op name for each hot kernel.
     kern_op: dict[str, dict[str, float]] = {}
     # Kernel name -> {launching op name -> op meta} (first-seen shape/dtype/file).
     kern_op_meta: dict[str, dict[str, dict[str, Any]]] = {}
@@ -809,19 +650,17 @@ def _finalize(
     attributed_kernels = 0
     unlinked_us = 0.0
     unlinked_kernels = 0
-    # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a
-    # correlation matching a graph-launch runtime event (which has no External id),
-    # so they resolve to no cpu_op but are not a genuine attribution failure.
+    # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a correlation matching a graph-launch
+    # runtime event (which has no External id), so they resolve to no cpu_op but are not a genuine attribution
+    # failure.
     graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
     geom = corr_to_launch_geom or {}
-    # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the
-    # majority capture-time shape wins; multiple distinct shapes mark ambiguous.
+    # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the majority capture-time shape wins;
+    # multiple distinct shapes mark ambiguous.
     kern_name_backfill_by_sig: dict[str, dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]]] = {}
-    # Name-keyed launch geometry (grid/block): first launch that actually carries
-    # geometry wins. Order-independent, so a shapeless graph-replay launch seen
-    # first does not shadow a later eager launch that recorded grid/block.
+    # Name-keyed launch geometry (grid/block): first launch that actually carries geometry wins.
     kern_name_launch_geom: dict[str, tuple[Any, Any]] = {}
     for name, dur, corr, _ts, _end in k_events:
         extid = corr_to_extid.get(corr) if corr is not None else None
@@ -864,11 +703,7 @@ def _finalize(
                 kern_name_launch_geom[name] = g
 
     def _majority_op(kernel_name: str) -> str:
-        """Return the highest-GPU-time real launching op for a kernel name.
-
-        Ignores the synthetic ``(unlinked)`` and ``(graph)`` buckets; returns
-        ``""`` when no real op resolved.
-        """
+        """Return the highest-GPU-time real launching op for a kernel name."""
         best, best_dur = "", 0.0
         for op, d in (kern_op.get(kernel_name) or {}).items():
             if op not in ("(unlinked)", "(graph)") and d > best_dur:
@@ -885,8 +720,8 @@ def _finalize(
     kernel_union_ms = _union_ms(kernel_intervals)
     busy_ms = _union_ms(kernel_intervals + memcpy_intervals)
     if window is not None:
-        # Steady scope: total is the representative step's wall span, so idle%
-        # reflects gaps within the step rather than the active-kernel envelope.
+        # Steady scope: total is the representative step's wall span, so idle% reflects gaps within the step rather
+        # than the active-kernel envelope.
         total_ms = max(0.0, (window[1] - window[0]) / 1000.0)
     elif gpu_min_ts is not None and gpu_max_end is not None:
         total_ms = (gpu_max_end - gpu_min_ts) / 1000.0
@@ -894,10 +729,8 @@ def _finalize(
         total_ms = 0.0
     idle_ms = max(0.0, total_ms - busy_ms)
 
-    # Graph coverage health: under continuous graph replay roctracer's activity
-    # buffer overflows, so only ~1 replay's kernels are recorded. Flag when
-    # graphs are replaying yet recorded busy covers <50% of the wall span, or
-    # many launches map to a single recorded replay's worth of kernels.
+    # Graph coverage health: under continuous graph replay roctracer's activity buffer overflows, so only ~1 replay's
+    # kernels are recorded.
     graph_mode = graph_launch_count > 0
     busy_fraction = round(busy_ms / total_ms, 4) if total_ms > 0 else 0.0
     graph_launches_with_kernels = len(graph_launch_corrs_with_kernels)
@@ -934,8 +767,8 @@ def _finalize(
                 row["op_dtypes"] = meta.get("dtypes") or []
                 row["op_kernel_file"] = meta.get("kernel_file") or ""
                 row["op_kernel_backend"] = meta.get("kernel_backend") or ""
-                # Shape fallbacks for a kernel whose own launch had no cpu_op
-                # shape: (a) same-name capture-time shape, (b) launch geometry.
+                # Shape fallbacks for a kernel whose own launch had no cpu_op shape: (a) same-name capture-time shape,
+                # (b) launch geometry.
                 bf = kern_name_backfill_meta.get(nm) or {}
                 row["backfill_shapes"] = bf.get("shapes") or []
                 row["backfill_dtypes"] = bf.get("dtypes") or []
@@ -947,13 +780,8 @@ def _finalize(
         rows.sort(key=lambda r: r["gpu_time_ms"], reverse=True)
         return rows if top_k is None or top_k <= 0 else rows[:top_k]
 
-    # Time-ordered per-launch sequence (opt-in) for fusion analysis, which needs
-    # the kernel adjacency the name-aggregation discards.
-    #
-    # Each record additively carries the launching op's shape/dtype/source meta
-    # (when resolvable via the correlation chain). Existing consumers read only
-    # ``name``/``op_name``/``ts``/``dur``; the extra keys power the variant-
-    # discriminating TraceShapeManifest producer without changing that contract.
+    # Time-ordered per-launch sequence (opt-in) for fusion analysis, which needs the kernel adjacency the
+    # name-aggregation discards.
     kernel_launches: list[dict[str, Any]] = []
     if emit_launches:
         for _name, _dur, _corr, _ts, _e in k_events:
@@ -1026,34 +854,7 @@ def analyze_trace(
     require_single_rank: bool = False,
     tensor_parallel_size: int | None = None,
 ) -> dict[str, Any]:
-    """Stream a Kineto trace and return timeline + op/kernel aggregates.
-
-    Args:
-        trace_input: Trace file or capture directory.
-        top_k: How many top ops/kernels to include in the returned lists
-            (0 or negative means "all").
-        steady_state: When True, try to restrict aggregation to a single
-            representative steady-state iteration window (see
-            :func:`select_steady_window`); falls back to the whole trace when no
-            window is found. Ranking-by-share is stable either way.
-        framework: Framework hint forwarded to the steady-state window selector.
-
-    Returns:
-        A dict with keys:
-          ``trace_file`` (resolved path str), ``status``,
-          ``timeline`` (total/busy/idle/kernel/memcpy ms),
-          ``ops`` (op-level GPU-time aggregates, desc by gpu time),
-          ``kernels`` (device-kernel aggregates, desc by gpu time),
-          ``attribution`` (coverage stats + graph-mode signals),
-          ``graph_coverage`` (graph-mode / under-recording health signals),
-          ``annotation_windows`` (gpu_user_annotation name/ts/dur),
-          ``aggregation_scope`` (``steady_state`` or ``full_trace``),
-          ``steady_window`` (window meta when steady state was applied),
-          ``analyzed_rank`` (rank index of the selected trace, or ``None``),
-          ``rank_count`` (distinct per-rank traces found in the input dir),
-          ``event_total`` (events scanned).
-        On resolution failure, ``status='failed'`` with an ``error`` string.
-    """
+    """Stream a Kineto trace and return timeline + op/kernel aggregates."""
     tf = resolve_trace_file(
         trace_input,
         require_single_rank=require_single_rank,
@@ -1071,17 +872,16 @@ def analyze_trace(
     extid_to_opname: dict[int, str] = {}
     # Compact per-op meta (first-seen) for shape + Triton-source enrichment.
     extid_to_opmeta: dict[int, dict[str, Any]] = {}
-    # Launch geometry (grid/block) per correlation, kept so a kernel whose
-    # correlation->cpu_op shape chain is broken (Triton direct-launch,
-    # graph replay) can still surface a launch-grid shape fallback.
+    # Launch geometry (grid/block) per correlation, kept so a kernel whose correlation->cpu_op shape chain is broken
+    # (Triton direct-launch, graph replay) can still surface a launch-grid shape fallback.
     corr_to_launch_geom: dict[Any, tuple[Any, Any]] = {}
-    # Buffered device events so one pass serves both full-trace and steady-window
-    # aggregation without re-reading the trace.
+    # Buffered device events so one pass serves both full-trace and steady-window aggregation without re-reading the
+    # trace.
     k_events: list[tuple[str, float, Any, float, float]] = []
     m_events: list[tuple[float, float, float]] = []
     annotation_windows: list[dict[str, Any]] = []
-    # Correlations of CUDA/HIP graph-launch runtime events (no External id), so
-    # their replayed kernels are classified graph-attributed, not (unlinked).
+    # Correlations of CUDA/HIP graph-launch runtime events (no External id), so their replayed kernels are classified
+    # graph-attributed, not (unlinked).
     graph_launch_corrs: set[int] = set()
     # (pid, tid) -> [(ts, end, name), ...] for the duration-sanity check.
     stream_intervals: dict[Any, list[tuple[float, float, str]]] = {}
@@ -1147,9 +947,8 @@ def analyze_trace(
                 if cat == _GPU_KERNEL_CAT:
                     kargs = ev.get("args") or {}
                     corr = kargs.get("correlation")
-                    # Retain launch grid/block: for Triton (hipModuleLaunchKernel)
-                    # and graph-replay kernels the correlation->cpu_op shape chain
-                    # is broken, but the launch geometry is a shape fallback.
+                    # Retain launch grid/block: for Triton (hipModuleLaunchKernel) and graph-replay kernels the
+                    # correlation->cpu_op shape chain is broken, but the launch geometry is a shape fallback.
                     grid = kargs.get("grid")
                     block = kargs.get("block")
                     if grid is not None or block is not None:
@@ -1187,8 +986,8 @@ def analyze_trace(
     if stream_overlap:
         body["timeline"]["stream_overlap"] = stream_overlap
 
-    # Detect (relative to the input dir) whether the selected trace is a
-    # CUDA-graph capture shard, so the tool layer can surface a health warning.
+    # Detect (relative to the input dir) whether the selected trace is a CUDA-graph capture shard, so the tool layer
+    # can surface a health warning.
     _input_root = Path(trace_input)
     _input_root = _input_root if _input_root.is_dir() else None
 

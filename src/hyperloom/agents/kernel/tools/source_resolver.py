@@ -5,29 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Version-robust op -> editable-source resolver (the "active finder").
-
-This is the deterministic op->source resolution tier. On a miss the pipeline falls through to the
-downstream trace-stack / grep / LLM tiers. Instead of trusting absolute paths
-captured once at build time, the finder locates a kernel's source in the
-*currently installed* framework tree by its stable identity:
-
-* native kernels: demangle the device symbol -> base name -> look it up in the
-  live :mod:`kernel_source_index` (self-heals across file moves/renames and
-  across vLLM/aiter/sglang version drift);
-* non-patchable kernels (CK / Composable Kernel template instantiations) are
-  detected from the symbol's namespace and reported as such, so GEAK is not
-  asked to rewrite a source that has no single editable ``__global__``.
-
-Triton/TileLang ``.py`` kernels are resolved upstream directly from the trace's
-``kernel_file`` (see :func:`_bypass_source_resolver.resolve_triton_py`, which
-pins the exact ``@triton.jit`` def line via AST), so the finder does not need
-any launcher-path hints.
-
-Every resolve is timed. :func:`latency_report` returns average/percentile
-latency keyed by the detected framework versions, so the cost of the live lookup
-can be measured directly.
-"""
+"""Version-robust op -> editable-source resolver (the \"active finder\")."""
 
 from __future__ import annotations
 
@@ -62,26 +40,11 @@ __all__ = [
     "reset_latency",
 ]
 
-# CK (Composable Kernel) template instantiations have no single editable
-# ``__global__`` source, so they are gated non-patchable from the symbol alone
-# (no JSON). The marker is boundary-anchored to the ``ck`` / ``ck_tile``
-# namespace so unrelated names that merely end in "ck" (``block::``,
-# ``unpack::``, ``flashck::``) are NOT misclassified.
-#
-# Tradeoff (intentional behavior change vs the retired op_to_source.json): the
-# curated map marked its ~56 ``aiter_ck`` entries ``patchable: true`` and routed
-# them to the ck backend. Resolving from the device symbol alone, we
-# cannot recover that per-entry ck ownership, so a CK instantiation is
-# classified non-patchable and no longer reaches ``forge_submit._resolve_kernel_backend``
-# ck branch. This is deliberate: the symbol-based finder trades that
-# hand-maintained CK routing (which could not generalize across framework
-# versions) for coverage that self-heals. Restoring CK -> ck routing
-# would require a structured, symbol-derivable CK classifier and is left as a
-# separately reviewable follow-up rather than a static map.
+# CK (Composable Kernel) template instantiations have no single editable ``__global__`` source, so they are gated
+# non-patchable from the symbol alone (no JSON).
 _CK_DEMANGLED_RE = re.compile(r"(?:^|[^A-Za-z0-9_])ck(?:_tile)?::")
-# Mangled (Itanium) fallback for when ``c++filt`` is absent: the ``ck`` /
-# ``ck_tile`` namespace is length-prefixed (e.g. ``...2ck15kernel...`` /
-# ``...7ck_tileI...``), so classification does not depend on binutils.
+# Mangled (Itanium) fallback for when ``c++filt`` is absent: the ``ck`` / ``ck_tile`` namespace is length-prefixed
+# (e.g. ``...2ck15kernel...`` / ``...7ck_tileI...``), so classification does not depend on binutils.
 _CK_MANGLED_RE = re.compile(r"\d(?:ck_tile|ck)(?=[0-9IE])")
 
 # A plain C/C++ identifier (used by the fallback demangler).
@@ -101,21 +64,13 @@ class ResolveResult:
     reason: str = ""
 
     def as_legacy_tuple(self) -> tuple[str, str]:
-        """Legacy ``(source_file, method)`` shape for drop-in compatibility.
-
-        A hit keeps its ``method`` (``"symbol_index"``); ``"non_patchable"`` is
-        preserved even though its ``source_file`` is empty (so callers can tell
-        "known not rewritable" from "not found"); every other empty-source
-        outcome collapses to ``"unresolved"``.
-        """
+        """Legacy ``(source_file, method)`` shape for drop-in compatibility."""
         if self.source_file or self.method == "non_patchable":
             return (self.source_file, self.method)
         return ("", "unresolved")
 
 
-# ----------------------------------------------------------------------------
 # Latency instrumentation
-# ----------------------------------------------------------------------------
 @dataclass
 class _LatencyBucket:
     version_tag: str
@@ -124,8 +79,8 @@ class _LatencyBucket:
 
 
 _LATENCY: dict[str, _LatencyBucket] = {}
-# Cap retained samples per version so a long-lived session cannot grow the list
-# unboundedly; percentiles over the most recent window are what the report needs.
+# Cap retained samples per version so a long-lived session cannot grow the list unboundedly; percentiles over the most
+# recent window are what the report needs.
 _LATENCY_MAX_SAMPLES = 50_000
 
 
@@ -142,11 +97,7 @@ def reset_latency() -> None:
 
 
 def latency_report() -> dict[str, Any]:
-    """Summarize resolve latency per detected framework version.
-
-    Returns:
-        ``{version_tag: {count, avg_ms, p50_ms, p95_ms, max_ms, index_build_ms}}``.
-    """
+    """Summarize resolve latency per detected framework version."""
     out: dict[str, Any] = {}
     for tag, bucket in _LATENCY.items():
         s = sorted(bucket.samples)
@@ -170,16 +121,10 @@ def latency_report() -> dict[str, Any]:
     return out
 
 
-# ----------------------------------------------------------------------------
 # Symbol normalization
-# ----------------------------------------------------------------------------
 @functools.lru_cache(maxsize=8192)
 def _cxxfilt_base(mangled: str) -> str:
-    """Demangle via ``c++filt`` when available (``""`` on failure).
-
-    Cached: demangling is pure and the same mangled symbols recur across
-    candidates, so we pay the subprocess spawn at most once per symbol.
-    """
+    """Demangle via ``c++filt`` when available (``\"\"`` on failure)."""
     if not shutil.which("c++filt"):
         return ""
     try:
@@ -197,20 +142,15 @@ def _cxxfilt_base(mangled: str) -> str:
 
 def _base_from_demangled(name: str) -> str:
     """Extract the base kernel identifier from a demangled/plain symbol."""
-    # Keep only the head before params/templates, drop namespaces, then take the
-    # last token (drops any leading return type/qualifiers: "void ns::foo" -> "foo").
+    # Keep only the head before params/templates, drop namespaces, then take the last token (drops any leading return
+    # type/qualifiers: "void ns::foo" -> "foo").
     head = re.split(r"[(<]", name.strip(), maxsplit=1)[0].split("::")[-1]
     tokens = head.split()
     return tokens[-1] if tokens else ""
 
 
 def _base_from_mangled(mangled: str) -> str:
-    """Fallback: parse Itanium length-prefixed identifiers from a mangled name.
-
-    The length prefix bounds each identifier exactly (a leading ``<N>`` means the
-    next ``N`` characters are the name), so a trailing template marker ``I`` is not
-    glued on.
-    """
+    """Fallback: parse Itanium length-prefixed identifiers from a mangled name."""
     names: list[str] = []
     i, n = 0, len(mangled)
     while i < n:
@@ -236,17 +176,7 @@ def _base_from_mangled(mangled: str) -> str:
 
 @functools.lru_cache(maxsize=8192)
 def base_symbol(device_kernel_name: str) -> str:
-    """Reduce any device kernel symbol to its stable base name.
-
-    Handles already-demangled names, plain names, and Itanium-mangled names
-    (``_Z...``) via ``c++filt`` with a pure-Python fallback.
-
-    Args:
-        device_kernel_name: The raw symbol from the trace or JSON key.
-
-    Returns:
-        The base kernel identifier (the demangled kernel name), or ``""``.
-    """
+    """Reduce any device kernel symbol to its stable base name."""
     raw = (device_kernel_name or "").strip()
     if not raw:
         return ""
@@ -258,19 +188,9 @@ def base_symbol(device_kernel_name: str) -> str:
     return _base_from_demangled(raw)
 
 
-# ----------------------------------------------------------------------------
 # Non-patchable detection (symbol-derived, no external metadata)
-# ----------------------------------------------------------------------------
 def _non_patchable_kind(device_kernel_name: str) -> str:
-    """Return a non-patchable kind label from the symbol alone (``""`` if none).
-
-    CK (Composable Kernel) template instantiations have no single editable
-    ``__global__`` source, so they are detected from the symbol's namespace and
-    reported as ``"aiter_ck"`` (else ``""``). The match is boundary-anchored so
-    unrelated names ending in ``ck`` are not misclassified, and it falls back to
-    the mangled form when ``c++filt`` is unavailable so the verdict does not
-    depend on binutils being installed.
-    """
+    """Return a non-patchable kind label from the symbol alone (``\"\"`` if none)."""
     raw = (device_kernel_name or "").strip()
     if not raw:
         return ""
@@ -283,9 +203,7 @@ def _non_patchable_kind(device_kernel_name: str) -> str:
     return "aiter_ck" if _CK_DEMANGLED_RE.search(raw.lower()) else ""
 
 
-# ----------------------------------------------------------------------------
 # Resolution
-# ----------------------------------------------------------------------------
 def _rank_records(records: list[dict[str, object]], framework: str) -> list[dict[str, object]]:
     """Rank candidate definition records: framework hint > arch tag > path len."""
     arch = os.environ.get("HYPERLOOM_TARGET_ARCH", "").strip().lower()
@@ -318,26 +236,7 @@ def resolve(
     device_kernel_name: str = "",
     index: kernel_source_index.SourceIndex | None = None,
 ) -> ResolveResult:
-    """Resolve a kernel to its editable source in the installed tree (timed).
-
-    Resolution is driven entirely by the device kernel symbol against the live
-    :mod:`kernel_source_index` -- no static source mapping is involved:
-
-    1. symbol-derived non-patchable gate (CK template instantiations);
-    2. symbol-first lookup: base name -> ranked index records -> verified source.
-
-    Args:
-        op_name: Launching op name (e.g. ``<namespace>::<op>``); carried for
-            reporting/compatibility, not used for lookup.
-        framework: Serving framework hint (``vllm``/``sglang``) used to rank
-            candidate records when a symbol lives in more than one tree.
-        device_kernel_name: Device kernel symbol from the trace (authoritative).
-        index: Optional prebuilt index (built/cached if omitted).
-
-    Returns:
-        A :class:`ResolveResult` with the live file/line, patchability, method,
-        and the measured ``elapsed_ms``.
-    """
+    """Resolve a kernel to its editable source in the installed tree (timed)."""
     started = time.perf_counter()
     idx = index if index is not None else kernel_source_index.load_or_build()
 
@@ -346,8 +245,8 @@ def resolve(
         _record_latency(idx.version_tag, res.elapsed_ms)
         return res
 
-    # Cheap gate first (symbol-derived): CK template instantiations have no
-    # single editable source, so bail with a clear reason.
+    # Cheap gate first (symbol-derived): CK template instantiations have no single editable source, so bail with a
+    # clear reason.
     nonp_kind = _non_patchable_kind(device_kernel_name)
     if nonp_kind:
         return finish(
@@ -366,9 +265,8 @@ def resolve(
     base = base_symbol(device_kernel_name) if device_kernel_name else ""
     if base:
         records = _rank_records(idx.lookup(base), framework)
-        # A bare base name that maps to >1 definition is disambiguated only by
-        # the ranking heuristic (framework/arch/path), so leave a trace for
-        # anyone auditing a suspicious rewrite.
+        # A bare base name that maps to >1 definition is disambiguated only by the ranking heuristic
+        # (framework/arch/path), so leave a trace for anyone auditing a suspicious rewrite.
         if len(records) > 1:
             log.debug(
                 "active-finder: %d candidate records for base %r (framework=%r); ranking picked by heuristic",
@@ -415,17 +313,11 @@ def resolve_source(
     framework: str = "",
     device_kernel_name: str = "",
 ) -> tuple[str, str]:
-    """Resolve to the legacy ``(source_file, method)`` shape.
-
-    The sole entry point used by ``_bypass_source_resolver.resolve_source``; the
-    method is ``"symbol_index"`` on a hit, else ``"unresolved"`` / ``"non_patchable"``.
-    """
+    """Resolve to the legacy ``(source_file, method)`` shape."""
     return resolve(op_name, framework=framework, device_kernel_name=device_kernel_name).as_legacy_tuple()
 
 
-# ----------------------------------------------------------------------------
 # Latency benchmark CLI
-# ----------------------------------------------------------------------------
 def _sample_candidates(index: kernel_source_index.SourceIndex, top_k: int) -> list[dict[str, str]]:
     """Build sample candidates from the live index's base kernel symbols."""
     out: list[dict[str, str]] = []

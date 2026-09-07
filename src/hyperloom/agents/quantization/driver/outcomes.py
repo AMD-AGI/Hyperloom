@@ -1,17 +1,4 @@
-"""Outcome taxonomy for quantization-agent.
-
-Enumerates the 30 failure rows handled by the SKILL.md auto-recover /
-auto-fail / ask catalogs, plus
-the narrative success tag ``eval_gap_accepted`` and the upstream-mutation
-sentinel ``upstream_change_required`` (the resolution #30 takes when the LLM
-diagnoses that the fix would require editing files under ``quark_root``).
-
-The IDs here are the **vocabulary** that ``assessment.classify_attempt``
-emits and that ``Assessment.final`` / ``Assessment.attempts`` carry to the
-caller. Category sets (``AUTO_RECOVER`` / ``AUTO_FAIL`` / ``ASK``) drive the
-retry-loop branching in ``retry._decide_next_step`` (called from
-``retry.quantize_via_prompt``).
-"""
+"""Outcome taxonomy for quantization-agent."""
 
 from __future__ import annotations
 
@@ -22,11 +9,7 @@ except ImportError:  # pragma: no cover - Python 3.10 StrEnum shim
 
     class StrEnum(str, Enum):
         def __str__(self) -> str:
-            """Return the enum's string value (mirrors 3.11 ``StrEnum``).
-
-            Returns:
-                The enum member's string value.
-            """
+            """Return the enum's string value (mirrors 3.11 ``StrEnum``)."""
             return str(self.value)
 
 
@@ -77,13 +60,12 @@ class OutcomeId(StrEnum):
 
     # SDK / catch-all
     sdk_runtime_error = "sdk_runtime_error"  # #24  Auto-fail
-    # #30  catch-all, runtime-classified; retried like ASK (see the
-    # ASK_RETRYABLE branch in retry._decide_next_step, SKILL.md section 8)
+    # #30 catch-all, runtime-classified; retried like ASK (see the ASK_RETRYABLE branch in retry._decide_next_step,
+    # SKILL.md section 8)
     unclassified_failure = "unclassified_failure"
 
-    # Narrative / derived tags (not in the 30-row table):
-    #   eval_gap_accepted — success with gap within threshold
-    #   upstream_change_required — #30 diagnosed as needing a quark_root edit
+    # Narrative / derived tags (not in the 30-row table): eval_gap_accepted — success with gap within threshold
+    # upstream_change_required — #30 diagnosed as needing a quark_root edit
     eval_gap_accepted = "eval_gap_accepted"
     upstream_change_required = "upstream_change_required"
 
@@ -136,14 +118,12 @@ ASK: frozenset[OutcomeId] = frozenset(
 
 UNCLASSIFIED_FAILURE: OutcomeId = OutcomeId.unclassified_failure  # #30 sentinel
 
-# Outcomes that count as ``recovered=True`` when a multi-attempt trail ends on
-# them. ``None`` is clean success; ``eval_gap_accepted`` marks a gap accepted
-# after earlier attempts exceeded it.
+# Outcomes that count as ``recovered=True`` when a multi-attempt trail ends on them.
 SUCCESS_TAGS: frozenset[OutcomeId | None] = frozenset({None, OutcomeId.eval_gap_accepted})
 
 
-# Ask-class IDs that participate in Python-driven retry (the only outcomes that
-# increment ``requantize_attempts.txt``).
+# Ask-class IDs that participate in Python-driven retry (the only outcomes that increment
+# ``requantize_attempts.txt``).
 ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
     {
         OutcomeId.exec_oom,  # #3
@@ -154,8 +134,8 @@ ASK_RETRYABLE: frozenset[OutcomeId] = frozenset(
 )
 
 
-# Auto-recover outcomes that still demote to "failed" (not "partial") when the
-# MUST-have artifact is missing on the final attempt (model unusable).
+# Auto-recover outcomes that still demote to "failed" (not "partial") when the MUST-have artifact is missing on the
+# final attempt (model unusable).
 MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT: frozenset[OutcomeId] = frozenset(
     {
         OutcomeId.must_have_config_missing_or_invalid,

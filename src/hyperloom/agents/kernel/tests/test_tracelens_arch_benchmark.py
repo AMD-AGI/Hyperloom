@@ -1,9 +1,4 @@
-"""Unit tests for TraceLens arch JSON pre-report benchmarking.
-
-Cover both the TraceLens-internal (extension-enabled) and external
-(open-source-only) paths so the MAF backfill gate is validated for both
-deployments, plus the microbenchmark mechanics themselves.
-"""
+"""Unit tests for TraceLens arch JSON pre-report benchmarking."""
 
 from __future__ import annotations
 
@@ -205,8 +200,7 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
 def test_populate_skips_microbench_when_internal_extension_enabled(
     tmp_path: Path,
 ) -> None:
-    """Internal extension backfills MAF, so no microbenchmark runs even when
-    the bundled arch spec is missing."""
+    """Internal extension backfills MAF, so no microbenchmark runs even when"""
     calls: list[list[str]] = []
 
     def _run_command(cmd, *, cwd, timeout_s, env=None):
@@ -233,8 +227,7 @@ def test_populate_skips_microbench_when_internal_extension_enabled(
 def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
     tmp_path: Path,
 ) -> None:
-    """When the internal extension is enabled and a bundled spec exists, it is
-    returned as an artifact without running the microbenchmark."""
+    """When the internal extension is enabled and a bundled spec exists, it is"""
     bundled = tmp_path / "MI300X.json"
     bundled.write_text("{}", encoding="utf-8")
     calls: list[list[str]] = []
@@ -259,8 +252,7 @@ def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
 def test_populate_external_raises_on_microbench_failure(
     tmp_path: Path,
 ) -> None:
-    """Open-source path surfaces a non-zero microbenchmark exit code when the
-    hyperloom fallback is also unavailable."""
+    """Open-source path surfaces a non-zero microbenchmark exit code when the"""
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "write_hyperloom_arch_spec", return_value=None),
@@ -336,8 +328,7 @@ def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
 
 
 def _install_fake_tracelens(monkeypatch: pytest.MonkeyPatch, leaf: str, attr: str, value) -> None:
-    """Inject a fake ``TraceLens.…`` package tree so a lazy ``from … import``
-    succeeds without the real TraceLens being present."""
+    """Inject a fake ``TraceLens.…`` package tree so a lazy ``from … import``"""
     import sys
     import types
 
@@ -351,8 +342,7 @@ def _install_fake_tracelens(monkeypatch: pytest.MonkeyPatch, leaf: str, attr: st
 def test_get_check_gpu_idle_resolves_after_install(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A None cache (TraceLens not importable at process start) is re-resolved
-    once TraceLens is installed by tracelens_analysis.main()."""
+    """A None cache (TraceLens not importable at process start) is re-resolved"""
     monkeypatch.setattr(tab, "check_gpu_idle", None)
     sentinel = lambda *_a, **_k: (True, "idle")  # noqa: E731
     _install_fake_tracelens(
@@ -398,8 +388,7 @@ def test_get_collect_arch_jsons_resolves_after_install(
     ],
 )
 def test_resolve_arch_benchmark_timeout_s(tla, monkeypatch: pytest.MonkeyPatch, raw, expected) -> None:
-    """Malformed TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC falls back to the 600s
-    floor instead of raising ValueError before the microbenchmark."""
+    """Malformed TRACELENS_ARCH_BENCHMARK_TIMEOUT_SEC falls back to the 600s"""
     if raw is None:
         monkeypatch.delenv(tla.ARCH_BENCHMARK_TIMEOUT_ENV, raising=False)
     else:

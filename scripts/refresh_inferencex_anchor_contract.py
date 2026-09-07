@@ -2,26 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Re-verify Hyperloom's InferenceX patch anchors and refresh the contract record.
-
-Hyperloom patches InferenceX by matching exact upstream text, so bumping
-``INFERENCEX_REF`` -- or editing an anchor -- can silently take a patch offline.
-``test_inferencex_anchor_contract.py`` fails whenever either happens, and this is
-the tool it points at: it fetches the pinned files, confirms every anchor still
-matches exactly one site, and records the result. It also records the file the
-eval probe and the request bounds are appended to -- that one needs no anchor,
-but it does have to exist.
-
-It refuses to record a broken contract. If an anchor no longer matches, re-anchor
-it in ``_inferencex_patcher.py`` first, then run this again.
-
-Requires ``gh`` authenticated against the (private) InferenceX repo.
-
-Usage::
-
-    python scripts/refresh_inferencex_anchor_contract.py
-    python scripts/refresh_inferencex_anchor_contract.py --ref <commit>
-"""
+"""Re-verify Hyperloom's InferenceX patch anchors and refresh the contract record."""
 
 from __future__ import annotations
 
@@ -41,11 +22,7 @@ from hyperloom.inference_optimizer.tests.test_inferencex_anchor_contract import 
 
 
 def main() -> int:
-    """Refresh the anchor contract record.
-
-    Returns:
-        ``0`` on success, ``1`` when upstream could not be verified.
-    """
+    """Refresh the anchor contract record."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--ref",

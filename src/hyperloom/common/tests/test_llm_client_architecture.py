@@ -1,42 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Architecture guard: LLM provider access has exactly one sanctioned owner.
-
-Hyperloom must never make scattered, ad-hoc LLM API calls. Every LLM
-interaction goes through one of two sanctioned paths:
-
-* **agentic work** -- an agent runtime (Claude Agent SDK / Codex SDK), reached
-  through ``hyperloom.common.codex_session`` and the ``orchestrator/roles/``
-  backends built on top of it;
-* **single-shot inference** -- ``hyperloom.common.llm_config``, which is also
-  the only module allowed to construct a provider SDK client
-  (``get_openai_client`` / ``get_async_openai_client`` and their
-  ``get_anthropic_client`` counterparts) and the only module allowed to speak a
-  raw completion API.
-
-This module parses every first-party Python source file and fails when a module
-outside :data:`_ALLOWLISTED_OWNERS` imports or constructs a provider SDK
-client, calls a bare completion endpoint, or hand-rolls the provider HTTP
-protocol.
-
-Known violations
-----------------
-Retiring the pre-existing call sites was staged across several changes, so each
-surviving violation was pinned in :data:`_KNOWN_VIOLATIONS` as a
-``(repo-relative path, rule code) -> occurrence count`` map. The scan result is
-compared to that map for **exact equality**, which turns it into a ratchet:
-
-* a violation whose ``(path, rule)`` is not pinned fails the test, so no new
-  ad-hoc client can land;
-* pinning more occurrences than the tree actually contains fails the test too,
-  so migrating a call site without shrinking the map fails and forces the entry
-  to be dropped.
-
-Every call site has now been migrated, so the map is empty and the scan must
-find nothing. It can only ever shrink: never add an entry to unblock new code
--- route the new code through a sanctioned path instead.
-"""
+"""Architecture guard: LLM provider access has exactly one sanctioned owner."""
 
 from __future__ import annotations
 
@@ -46,9 +11,7 @@ from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
 # Rules
-# ---------------------------------------------------------------------------
 
 _RULES: dict[str, str] = {
     "LLM001": "imports a provider SDK client module/class",
@@ -68,8 +31,7 @@ _GUIDANCE = (
     "Provider client construction lives in hyperloom/common/llm_config.py and nowhere else."
 )
 
-# Top-level packages of provider SDKs. ``claude_agent_sdk`` is deliberately
-# absent: it is the sanctioned agent runtime, not a raw provider client.
+# Top-level packages of provider SDKs.
 _PROVIDER_SDK_MODULES = frozenset({"openai", "anthropic"})
 
 _PROVIDER_CLIENT_CLASSES = frozenset(
@@ -83,21 +45,15 @@ _PROVIDER_CLIENT_CLASSES = frozenset(
     }
 )
 
-# Endpoint path fragments that identify a hand-rolled provider HTTP call. The
-# workload-probe endpoint ``/v1/completions`` is intentionally not listed: those
-# probes talk to the inference server under optimization, not to an LLM
-# provider, so they are not LLM interactions.
+# Endpoint path fragments that identify a hand-rolled provider HTTP call.
 _HTTP_ENDPOINT_RULES: tuple[tuple[str, str], ...] = (
     ("/v1/messages", "LLM004"),
     ("/chat/completions", "LLM005"),
 )
 
-# ---------------------------------------------------------------------------
 # Scan surface
-# ---------------------------------------------------------------------------
 
-# First-party source trees. A new top-level tree of Hyperloom code has to be
-# added here, otherwise the guard silently stops covering it.
+# First-party source trees.
 _SCAN_ROOTS: tuple[str, ...] = (
     "src/hyperloom",
     "scripts",
@@ -106,10 +62,8 @@ _SCAN_ROOTS: tuple[str, ...] = (
     "OOB",  # optional component; not always present in a clone
 )
 
-# Directory names that never hold first-party sources: build output, caches,
-# and third-party checkouts an operator may materialize inside the repo (the
-# dependency checkout cache defaults to ``$REPO_ROOT/.cache``). ``ruff``'s
-# ``extend-exclude`` skips the vendored trees for the same reason.
+# Directory names that never hold first-party sources: build output, caches, and third-party checkouts an operator may
+# materialize inside the repo (the dependency checkout cache defaults to ``$REPO_ROOT/.cache``).
 _PRUNED_DIR_NAMES = frozenset(
     {
         ".cache",
@@ -133,8 +87,6 @@ _PRUNED_DIR_NAMES = frozenset(
 _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 
 # The only modules allowed to own provider access, as repo-relative POSIX paths.
-# Test files are allowlisted separately by :func:`_is_test_file`, because they
-# have to be able to build fakes and monkeypatch the real SDK symbols.
 _ALLOWLISTED_OWNERS = frozenset(
     {
         # Single-shot inference + the sole home of client construction.
@@ -144,15 +96,11 @@ _ALLOWLISTED_OWNERS = frozenset(
     }
 )
 
-# ---------------------------------------------------------------------------
-# Known violations -- see the module docstring. Empty, and shrink only.
-# ---------------------------------------------------------------------------
+# Known violations -- see the module docstring.
 
 _KNOWN_VIOLATIONS: dict[tuple[str, str], int] = {}
 
-# ---------------------------------------------------------------------------
 # Detector
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -191,11 +139,7 @@ def _docstring_nodes(tree: ast.AST) -> set[int]:
 
 
 def _has_http_post(tree: ast.AST) -> bool:
-    """True when the module issues an HTTP POST (``httpx.post`` / ``client.post``).
-
-    Deliberately shallow: it only gates the endpoint-literal rules so that a
-    module merely naming a provider route (docs, tables) is not reported.
-    """
+    """True when the module issues an HTTP POST (``httpx.post`` / ``client.post``)."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _called_name(node.func) == "post":
             return True
@@ -251,9 +195,7 @@ def _scan_source(text: str, path: str) -> list[_Violation]:
     return sorted(found, key=lambda v: (v.line, v.code, v.detail))
 
 
-# ---------------------------------------------------------------------------
 # Tree walk
-# ---------------------------------------------------------------------------
 
 
 def _find_repo_root() -> Path | None:
@@ -294,8 +236,8 @@ def _scan_tree() -> list[_Violation]:
         try:
             paths = sorted(root.rglob("*.py"))
         except OSError:
-            # A parallel test can tear down a fixture directory while this walk
-            # is in flight; skip the root rather than fail the architecture guard.
+            # A parallel test can tear down a fixture directory while this walk is in flight; skip the root rather
+            # than fail the architecture guard.
             continue
         for path in paths:
             relative = path.relative_to(_REPO_ROOT)
@@ -314,12 +256,7 @@ def _ratchet_problems(
     violations: list[_Violation],
     pinned_counts: dict[tuple[str, str], int],
 ) -> list[str]:
-    """Compare a scan against the pin map, both directions.
-
-    Returns one human-readable problem line per drifting ``(path, rule)``: an
-    unpinned or under-pinned occurrence is new debt, an over-pinned one is a
-    migrated violation whose pin has to go. Empty means the pin map is exact.
-    """
+    """Compare a scan against the pin map, both directions."""
     by_key: dict[tuple[str, str], list[_Violation]] = {}
     for violation in violations:
         by_key.setdefault((violation.path, violation.code), []).append(violation)
@@ -342,9 +279,7 @@ def _ratchet_problems(
     return problems
 
 
-# ---------------------------------------------------------------------------
 # The guard
-# ---------------------------------------------------------------------------
 
 
 def test_scan_reaches_the_source_tree() -> None:
@@ -371,12 +306,7 @@ def test_no_unsanctioned_llm_provider_access() -> None:
 
 
 def test_single_shot_owner_exists() -> None:
-    """The allowlist must not rot: the single-shot inference owner has to exist.
-
-    ``codex_session.py`` is allowlisted ahead of its arrival and so is not
-    asserted here; every other entry must be a real module, otherwise the
-    allowlist is protecting a path nobody uses.
-    """
+    """The allowlist must not rot: the single-shot inference owner has to exist."""
     assert _REPO_ROOT is not None
     owner = _REPO_ROOT / "src/hyperloom/common/llm_config.py"
     assert owner.is_file(), f"sanctioned single-shot inference owner is missing: {owner}"
@@ -396,9 +326,7 @@ def test_pinned_violations_are_scannable_paths() -> None:
         assert path not in _ALLOWLISTED_OWNERS, f"_KNOWN_VIOLATIONS pins an allowlisted owner: {path}"
 
 
-# ---------------------------------------------------------------------------
 # Ratchet self-tests -- the pin map has to bite in both directions.
-# ---------------------------------------------------------------------------
 
 _PROBE = _Violation("src/hyperloom/probe.py", 3, "LLM002", "OpenAI(...)")
 
@@ -432,9 +360,7 @@ def test_ratchet_rejects_a_partially_migrated_pin() -> None:
     assert "2 pinned, 1 found" in problem
 
 
-# ---------------------------------------------------------------------------
 # Detector self-tests -- a guard that cannot detect anything passes vacuously.
-# ---------------------------------------------------------------------------
 
 
 def _codes(source: str) -> list[str]:

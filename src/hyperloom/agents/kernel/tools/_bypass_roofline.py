@@ -5,18 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Analytical per-kernel roofline for the bypass analysis backend.
-
-Computes ``bound_type`` (compute- vs memory-bound), ``arithmetic_intensity``
-(FLOPs/byte), and efficiency/utilization for EVERY hot kernel whose operand
-shapes allow a FLOP/byte estimate, including vendor precompiled kernels. This is
-the only roofline source on the bypass route.
-
-GPU-free: it uses the kernel's real per-launch ``gpu_time_us`` plus FLOPs/bytes
-estimated from the captured operand shapes and a compact AMD peak-spec table.
-``arithmetic_intensity`` vs the machine balance point (peak_flops / peak_bw)
-gives the bound; ``estimated_flops / gpu_time`` vs peak gives efficiency.
-"""
+"""Analytical per-kernel roofline for the bypass analysis backend."""
 
 from __future__ import annotations
 
@@ -25,8 +14,7 @@ from typing import Any
 
 from _roofline_source import ANALYTICAL as _RL_ANALYTICAL
 
-# Compact AMD MAX-ACHIEVABLE (sustained) peak specs — same convention as the
-# session roofline ceiling.
+# Compact AMD MAX-ACHIEVABLE (sustained) peak specs — same convention as the session roofline ceiling.
 _PEAK_TFLOPS_MI300: dict[str, float] = {
     "bf16": 708.0,
     "bfloat16": 708.0,
@@ -107,10 +95,7 @@ def _dtype_bytes(tag: str) -> float:
 
 
 def _parse_operands(shape_str: str) -> list[tuple[tuple[int, ...], str]]:
-    """Parse ``"(M,K) bf16<br>(K,N) bf16"`` -> ``[((M,K),"bf16"), ((K,N),"bf16")]``.
-
-    Scalar/empty operands (``()``) are dropped.
-    """
+    """Parse ``\"(M,K) bf16<br>(K,N) bf16\"`` -> ``[((M,K),\"bf16\"), ((K,N),\"bf16\")]``."""
     operands: list[tuple[tuple[int, ...], str]] = []
     for tok in (shape_str or "").split("<br>"):
         m = _OPERAND_RE.search(tok)
@@ -136,26 +121,18 @@ def _numel(dims: tuple[int, ...]) -> int:
 
 
 def _sdpa_flops_bytes(four_d: list[tuple[int, ...]], dbytes: float) -> tuple[float, float, dict[str, Any]]:
-    """Attention FLOPs/bytes with operand-layout inference.
-
-    Two matmuls (QK^T, A·V) each cost ``B*H*Sq*Skv*D`` mul-adds -> total
-    ``4*B*H*Sq*Skv*D``. B (first) and D (last) dims of Q are layout-invariant; the
-    head count H is the value shared by Q's and K's two middle dims, resolving
-    (B,S,H,D) vs (B,H,S,D) and cross-attention. When Q/K middle dims coincide
-    (self-attention), prefer an explicit score operand (B,H,Sq,Skv); else fall
-    back to heads = the smaller middle dim and flag ``roofline_layout_inferred``.
-    """
+    """Attention FLOPs/bytes with operand-layout inference."""
     q = four_d[0]
     b, d = q[0], q[-1]
     meta: dict[str, Any] = {}
-    # Prefer an explicit score/attn-weight tensor (B,H,Sq,Skv): its last dim is a
-    # key length, not the head dim D, so it pins H/Sq/Skv unambiguously.
+    # Prefer an explicit score/attn-weight tensor (B,H,Sq,Skv): its last dim is a key length, not the head dim D, so
+    # it pins H/Sq/Skv unambiguously.
     score = next((t for t in four_d[1:] if t[0] == b and t[-1] != d), None)
     if score is not None:
         h, sq, skv = score[1], score[2], score[3]
     else:
-        # No score: head count is the value shared by Q's and K's two middle
-        # dims, resolving (B,S,H,D) vs (B,H,S,D) and cross-attn (Sq != Skv).
+        # No score: head count is the value shared by Q's and K's two middle dims, resolving (B,S,H,D) vs (B,H,S,D)
+        # and cross-attn (Sq != Skv).
         k = four_d[1] if len(four_d) >= 2 else q
         qmid, kmid = (q[1], q[2]), (k[1], k[2])
         common = set(qmid) & set(kmid)
@@ -176,13 +153,7 @@ def _sdpa_flops_bytes(four_d: list[tuple[int, ...]], dbytes: float) -> tuple[flo
 def _estimate_flops_bytes(
     category: str, operands: list[tuple[tuple[int, ...], str]], dbytes: float
 ) -> tuple[float, float, dict[str, Any]] | None:
-    """Estimate ``(flops, bytes, meta)`` for one representative call, or ``None``.
-
-    Category-specific closed forms from operand shapes. Returns ``None`` when the
-    operands do not support a trustworthy estimate (caller leaves it unknown).
-    ``meta`` carries optional provenance flags (e.g. ``roofline_layout_inferred``)
-    merged into the roofline output.
-    """
+    """Estimate ``(flops, bytes, meta)`` for one representative call, or ``None``."""
     if not operands:
         return None
     cat = (category or "").lower()
@@ -203,8 +174,7 @@ def _estimate_flops_bytes(
         return flops, nbytes, {}
 
     if cat == "convolution":
-        # input (N,C,H,W), weight (Cout, Cin/groups, R, S). Assume stride 1 / same
-        # spatial (stride/padding are not in Input Dims) — good enough for a bound.
+        # input (N,C,H,W), weight (Cout, Cin/groups, R, S).
         four_d = [d for d, _ in operands if len(d) == 4]
         if len(four_d) < 2:
             return None
@@ -212,9 +182,7 @@ def _estimate_flops_bytes(
         n, c, h, w = inp
         kk, wc, r, s = wt
         out_hw = h * w
-        # Per output element: wc (= Cin/groups) * R * S mul-adds. The weight's
-        # channel dim wc is correct for dense/grouped/depthwise convs; the input
-        # channel count c would overcount grouped/depthwise by the group count.
+        # Per output element: wc (= Cin/groups) * R * S mul-adds.
         flops = 2.0 * n * kk * out_hw * wc * r * s
         nbytes = dbytes * (_numel(inp) + _numel(wt) + n * kk * out_hw)
         return flops, nbytes, {}
@@ -245,21 +213,7 @@ def compute_roofline(
     gpu_type: str = "",
     dtype: str = "",
 ) -> dict[str, Any] | None:
-    """Analytical roofline for one kernel aggregate, or ``None`` when unestimable.
-
-    Args:
-        category: Kernel category (GEMM/Convolution/SDPA/Elementwise/...).
-        shape_str: One representative call's ``"(dims) dtype<br>..."`` string.
-        gpu_time_us: TOTAL device time for the aggregate (all launches).
-        call_count: Number of launches (to get per-call time for efficiency).
-        gpu_type: GPU key (mi300x/mi325x/mi355x); defaults to mi300x.
-        dtype: Compute dtype tag (defaults from the first operand / bf16).
-
-    Returns:
-        ``{bound_type, arithmetic_intensity, flops_per_byte, efficiency_percent,
-        compute_utilization_pct, bandwidth_utilization_pct, roofline_source}`` or
-        ``None`` when the shapes do not support an estimate.
-    """
+    """Analytical roofline for one kernel aggregate, or ``None`` when unestimable."""
     operands = _parse_operands(shape_str)
     if not operands:
         return None
@@ -289,8 +243,6 @@ def compute_roofline(
         **est_meta,
     }
     # Per-call achieved throughput from measured time -> efficiency.
-    # ``roofline_estimate_capped`` flags when a util exceeds 100% (FLOP/byte
-    # estimate over-shot) and was clamped.
     calls = max(int(call_count or 1), 1)
     per_call_s = (float(gpu_time_us) / calls) / 1e6 if gpu_time_us else 0.0
     if per_call_s > 0 and peak_flops > 0:
@@ -304,10 +256,8 @@ def compute_roofline(
         out["bandwidth_utilization_pct"] = round(min(raw_bw, 100.0), 3)
         if raw_bw > 100.0:
             out["roofline_estimate_capped"] = True
-    # Roofline attainment = utilization on the BINDING side (compute util when
-    # compute-bound, bandwidth util when memory-bound); cross-route comparable.
-    # ``efficiency_percent`` stays compute-side (drives the priority ranking) and
-    # so reads ~0 for memory-bound kernels.
+    # Roofline attainment = utilization on the BINDING side (compute util when compute-bound, bandwidth util when
+    # memory-bound); cross-route comparable.
     _attain = (
         out.get("compute_utilization_pct") if bound_type == "compute_bound" else out.get("bandwidth_utilization_pct")
     )

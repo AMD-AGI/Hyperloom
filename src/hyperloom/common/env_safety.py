@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared environment-variable safety helpers.
-
-The helpers in this module are deliberately stdlib-only so they can be used by
-CLI preflight, benchmark executors, and subprocess dispatchers without creating
-package import cycles.
-"""
+"""Shared environment-variable safety helpers."""
 
 from __future__ import annotations
 
@@ -95,10 +90,7 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(gh[pousr]_)[A-Za-z0-9_]{3,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
-    # AWS access-key id and compact JWT. Same two shapes the specialist
-    # transcript redactor already matches; kept here so a command that
-    # carries either form is masked whether it went through an assignment
-    # or not.
+    # AWS access-key id and compact JWT.
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
     (
@@ -119,24 +111,8 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         r"\1\2[REDACTED]",
     ),
-    # Shell commands quote the value (``PASSWORD="x"``), and a command that has
-    # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
-    # The opening quote is matched separately and re-emitted so the mask keeps
-    # the quoting intact; folding it into the value class instead would end the
-    # match on the first quote and leave the secret readable.
-    #
-    # ``TOKEN`` is a suffix of the identifier (optional ``_`` + digits so
-    # ``HF_TOKEN_2`` still matches), not a substring. A negative lookahead
-    # for IZER / TOKENS still left ``tokenized_requests`` and
-    # ``stop_token_ids`` matching — TOKEN is a generic word in this stack,
-    # and a half-redacted list (``stop_token_ids=[REDACTED], 154827]``) is
-    # worse than leaving the knob readable. ``AUTH`` is the same kind of
-    # suffix (``AUTH_KEY``) so ``Unauthorized:`` is not treated as a secret
-    # assignment. ``API_KEY`` / ``SECRET`` / ``PASSWORD`` / ``CREDENTIAL``
-    # still allow trailing name characters, so ``AWS_SECRET_ACCESS_KEY`` is
-    # unchanged. A backslash is only excluded from the value when it
-    # precedes a quote, so a JSON-escaped closer is left in place (the
-    # quoting stays balanced) while ``PASSWORD=C:\foo`` is still masked whole.
+    # Shell commands quote the value (``PASSWORD="x"``), and a command that has been through ``json.dumps`` carries an
+    # escaped quote (``PASSWORD=\"x\"``).
     (
         re.compile(
             r"(?i)(?<![A-Z0-9_./-])("
@@ -154,23 +130,17 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
-        # ANTHROPIC_AUTH_TOKEN is deliberately absent: no installer ever writes
-        # it (they persist the API-key spelling and actively remove this one),
-        # so anything read back here is a hand-written leftover -- and since it
-        # outranks a subscription token, reading it would silently move the run
-        # onto API billing.
+        # ANTHROPIC_AUTH_TOKEN is deliberately absent: no installer ever writes it (they persist the API-key spelling
+        # and actively remove this one), so anything read back here is a hand-written leftover -- and since it
+        # outranks a subscription token, reading it would silently move the run onto API billing.
         "ANTHROPIC_BASE_URL",
-        # Gateway auth header. Setup writes this one into .env (the AMD APIM
-        # subscription key), so the loader has to read it back or a
-        # header-authenticated gateway silently loses its credential whenever the
-        # shell has not exported it already. Its OpenAI-side counterpart below is
-        # operator-written only.
+        # Gateway auth header.
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
-        # Retired provider variables, still readable so a pre-migration .env can
-        # be normalized by hyperloom.common.llm_config.deepseek_compat_env.
+        # Retired provider variables, still readable so a pre-migration .env can be normalized by
+        # hyperloom.common.llm_config.deepseek_compat_env.
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
@@ -214,9 +184,8 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "AITER_",
     "FORGE_",
     "GEAK_",
-    # Not covered by "FORGE_": KernelForge's own knobs (writable-state root,
-    # rewrite handshake, mori KB opt-in) are spelled KERNELFORGE_*, and now that
-    # forge ships inside this distribution an operator configures them here.
+    # Not covered by "FORGE_": KernelForge's own knobs (writable-state root, rewrite handshake, mori KB opt-in) are
+    # spelled KERNELFORGE_*, and now that forge ships inside this distribution an operator configures them here.
     "KERNELFORGE_",
     "HF_",
     "HYPERLOOM_",
@@ -231,9 +200,8 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
-        # install.sh persists this next to the Anthropic URL and key, so the
-        # reader has to accept it or a header-authenticated gateway loses its
-        # credential on the way back in.
+        # install.sh persists this next to the Anthropic URL and key, so the reader has to accept it or a
+        # header-authenticated gateway loses its credential on the way back in.
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "GEAK_CLAUDE_BIN",
@@ -254,18 +222,15 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
         "KERNEL_AGENT_ROOT",
-        # KernelForge's writable-state root. Forge subprocesses resolve their
-        # experiments/caches/learned-KB under it, and without it here an operator
-        # setting it sees the child fall back to ~/.cache/hyperloom.
+        # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
         "MAGPIE_PATH",
         "MAGPIE_PYTHON",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
-        # install.sh never writes the OpenAI side itself, but the URL and key are
-        # already accepted from an operator-supplied env file; the header that
-        # authenticates the same endpoint is read on the same terms.
+        # install.sh never writes the OpenAI side itself, but the URL and key are already accepted from an
+        # operator-supplied env file; the header that authenticates the same endpoint is read on the same terms.
         "OPENAI_CUSTOM_HEADERS",
         "TRACELENS_INTERNAL_ROOT",
         "TRACELENS_ROOT",
@@ -277,9 +242,8 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
 # Single definition in ``hyperloom.common.visible_devices``.
 GPU_MASK_ENV_NAMES = _GPU_MASK_ENV_NAMES
 
-# Env names an untrusted external source (reference recipe, framework-switch
-# manifest) may never set: shell-unsafe vars plus the workload/benchmark keys the
-# optimizer's CLI flags own — setting one retargets the benchmark instead of
+# Env names an untrusted external source (reference recipe, framework-switch manifest) may never set: shell-unsafe
+# vars plus the workload/benchmark keys the optimizer's CLI flags own — setting one retargets the benchmark instead of
 # toggling a knob.
 BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     BLOCKED_UNTRUSTED_ENV_NAMES
@@ -305,8 +269,7 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             "PROFILE",
             "RESULT_DIR",
             "RESULT_FILENAME",
-            # Reroute traffic, model downloads or TLS trust. Kept out of
-            # BLOCKED_UNTRUSTED_ENV_NAMES because a local .env may set the proxies.
+            # Reroute traffic, model downloads or TLS trust.
             "CURL_CA_BUNDLE",
             "HF_ENDPOINT",
             "HTTP_PROXY",
@@ -320,16 +283,14 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     )
 )
 
-# Env names a per-variant override may never set. Workload pins stay allowed:
-# the sweep and shape-capture grids set them from code.
+# Env names a per-variant override may never set.
 BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
 
-# Credential-shaped name fragments, so an unlisted secret cannot be persisted
-# into a session YAML by name alone.
+# Credential-shaped name fragments, so an unlisted secret cannot be persisted into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
-# Masked out before matching, not exempted whole, so TOKENIZER_API_KEY still reads
-# as a credential while TOKENIZERS_PARALLELISM does not.
+# Masked out before matching, not exempted whole, so TOKENIZER_API_KEY still reads as a credential while
+# TOKENIZERS_PARALLELISM does not.
 _SECRET_FRAGMENT_EXEMPTIONS: tuple[str, ...] = ("TOKENIZER",)
 
 
@@ -356,11 +317,7 @@ def is_allowed_variant_env_key(key: object) -> bool:
 
 
 def is_python_package_root(path: object) -> bool:
-    """True when ``path`` is a ``site-packages``/``dist-packages`` dir.
-
-    Already on the import path, so keeping it off PYTHONPATH avoids shadowing an
-    isolated venv's packages; a source checkout root returns False.
-    """
+    """True when ``path`` is a ``site-packages``/``dist-packages`` dir."""
     name = str(path or "").strip().rstrip("/")
     if not name:
         return False
@@ -390,10 +347,7 @@ def filter_untrusted_env_mapping(
     *,
     allow_predicate,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Filter env overrides from state, LLM output, or shared env files.
-
-    Returns ``(allowed, dropped)`` where ``dropped`` maps key to a short reason.
-    """
+    """Filter env overrides from state, LLM output, or shared env files."""
     allowed: dict[str, str] = {}
     dropped: dict[str, str] = {}
     for key, value in (envs or {}).items():
@@ -417,12 +371,7 @@ def scrub_child_process_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
-    """Remove control-plane credentials from a benchmark environment in place.
-
-    Serving benchmarks target the local model server and do not need LLM-agent
-    credentials. Keeping those values out of the process tree also prevents
-    shell tracing and lm-eval command/result serialization from persisting them.
-    """
+    """Remove control-plane credentials from a benchmark environment in place."""
     scrub_child_process_env(env)
     for name in BENCHMARK_SECRET_ENV_NAMES:
         env.pop(name, None)
@@ -430,10 +379,7 @@ def scrub_benchmark_process_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def build_benchmark_env(*layers: Mapping[str, object] | None) -> dict[str, str]:
-    """Build a benchmark subprocess env: parent env under each layer, later winning.
-
-    Keys are upper-cased and values stringified for the YAML's plain scalars.
-    """
+    """Build a benchmark subprocess env: parent env under each layer, later winning."""
     env = os.environ.copy()
     for layer in layers:
         env.update({str(key).upper(): str(value) for key, value in (layer or {}).items()})
@@ -449,10 +395,7 @@ def redact_secret_values(text: str) -> str:
 
 
 def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> None:
-    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode.
-
-    Missing files and I/O errors are ignored so a logging path cannot fail a run.
-    """
+    """Stream-redact ``path`` with :func:`redact_secret_values` and restrict mode."""
     from pathlib import Path
 
     target = Path(path)

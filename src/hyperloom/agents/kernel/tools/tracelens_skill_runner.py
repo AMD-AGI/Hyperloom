@@ -2,14 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run the TraceLens analysis-orchestrator skill through an agent runtime.
-
-The LLM-backed path, kept outside ``tracelens_analysis.py`` so the
-deterministic CLI/csv fallback stays isolated. The skill itself is plain text
-and provider-neutral; only the runtime that executes it differs. Two are
-supported, both real agent SDKs: the Claude Agent SDK, and the Codex Agent SDK
-for deployments configured with the OpenAI side alone.
-"""
+"""Run the TraceLens analysis-orchestrator skill through an agent runtime."""
 
 from __future__ import annotations
 
@@ -50,9 +43,8 @@ sys.path.pop(0)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
 
-# The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs
-# without sub-agents, so the skill's tool names have to be mapped to Codex's
-# native shell and patch capabilities before the agent follows them.
+# The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs without sub-agents, so the skill's
+# tool names have to be mapped to Codex's native shell and patch capabilities before the agent follows them.
 _CODEX_DEVELOPER_INSTRUCTIONS = """\
 ## Codex runtime mapping
 Use shell commands to inspect, search and run files, and your native patch/edit
@@ -68,29 +60,15 @@ code.
 """
 
 
-# Per-message stream-idle timeout (seconds). The in-process Claude SDK query has
-# no client-side read timeout, so a stalled gateway stream would block forever;
-# we bound the wait for each next SDK message (inactivity, not total). Env-overridable.
+# Per-message stream-idle timeout (seconds).
 _DEFAULT_STREAM_IDLE_TIMEOUT_SEC = 300.0
 
-# While a tool call is in flight the SDK is silent by design, so the bound above
-# would kill a working run. Session 20260803T091144Z lost its roofline exactly
-# that way: the agent launched TraceLens_generate_perf_report_pytorch over a
-# 896 MB trace and was killed at 300s, while the same command run by hand was
-# still making progress 25 minutes in.
+# While a tool call is in flight the SDK is silent by design, so the bound above would kill a working run.
 _DEFAULT_TOOL_IDLE_TIMEOUT_SEC = 3600.0
 
 
 def _resolve_stream_idle_timeout_sec() -> float:
-    """Resolve the per-message SDK stream-idle timeout in seconds.
-
-    Reads ``HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC`` and falls back to
-    :data:`_DEFAULT_STREAM_IDLE_TIMEOUT_SEC`; floored at 30s. A value <= 0
-    disables the idle timeout (legacy unbounded behavior).
-
-    Returns:
-        float: The idle timeout in seconds (0 disables it).
-    """
+    """Resolve the per-message SDK stream-idle timeout in seconds."""
     raw = os.environ.get("HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC", "").strip()
     if not raw:
         return _DEFAULT_STREAM_IDLE_TIMEOUT_SEC
@@ -104,21 +82,7 @@ def _resolve_stream_idle_timeout_sec() -> float:
 
 
 def _resolve_tool_idle_timeout_sec(idle_timeout: float) -> float:
-    """Resolve the idle bound that applies while an agent tool call is running.
-
-    The SDK emits nothing between the ``ToolUseBlock`` that launches a tool and
-    the result that ends it, so the plain idle timeout cannot tell a dead
-    gateway from a working tool. Reads
-    ``HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC``; floored at 30s, and a value
-    <= 0 removes the bound while a tool is in flight.
-
-    Args:
-        idle_timeout: The between-messages idle timeout, used as a floor so the
-            tool bound is never the tighter of the two.
-
-    Returns:
-        float: The in-flight idle timeout in seconds (0 disables it).
-    """
+    """Resolve the idle bound that applies while an agent tool call is running."""
     raw = os.environ.get("HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC", "").strip()
     if not raw:
         return max(_DEFAULT_TOOL_IDLE_TIMEOUT_SEC, idle_timeout)
@@ -132,15 +96,7 @@ def _resolve_tool_idle_timeout_sec(idle_timeout: float) -> float:
 
 
 def _tool_call_transition(message: Any) -> str | None:
-    """Return ``"start"`` / ``"end"`` when a message brackets a tool call.
-
-    Args:
-        message: An SDK stream message.
-
-    Returns:
-        str | None: ``"start"`` when the message launches a tool, ``"end"`` when
-            it delivers a tool result or terminates the run, else ``None``.
-    """
+    """Return ``\"start\"`` / ``\"end\"`` when a message brackets a tool call."""
     name = type(message).__name__
     if name == "TaskStartedMessage":
         return "start"
@@ -188,18 +144,7 @@ UPSTREAM_CATEGORY_TO_GEAK: dict[str, str] = {
 
 
 def normalize_upstream_category(raw: str) -> str:
-    """Normalize a TraceLens category string to a GEAK-facing label.
-
-    The raw value is lower-cased and its separators collapsed to underscores
-    before lookup in :data:`UPSTREAM_CATEGORY_TO_GEAK`.
-
-    Args:
-        raw (str): The upstream TraceLens category string.
-
-    Returns:
-        str: The mapped GEAK-facing label, ``"unknown"`` when ``raw`` is empty,
-            or the original ``raw`` value when no mapping exists.
-    """
+    """Normalize a TraceLens category string to a GEAK-facing label."""
 
     if not raw:
         return "unknown"
@@ -213,40 +158,20 @@ class TraceLensSkillRunResult:
 
     output_dir: Path
     report_path: Path
-    # Which runner produced these artifacts, so callers report the provider that
-    # actually ran rather than assuming one. Required: a new runner that forgets
-    # to declare itself fails at construction instead of mislabelling its output.
+    # Which runner produced these artifacts, so callers report the provider that actually ran rather than assuming
+    # one.
     runner: str
     artifact_paths: dict[str, str] = field(default_factory=dict)
     raw_text: str = ""
 
 
 def shell_quote(path: Path | str) -> str:
-    """Shell-quote a path for safe inclusion in a command string.
-
-    Args:
-        path (Path | str): The path to quote.
-
-    Returns:
-        str: The string form of ``path`` quoted for POSIX shells.
-    """
+    """Shell-quote a path for safe inclusion in a command string."""
     return shlex.quote(str(path))
 
 
 def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
-    """Create the command-prefix cache expected by the TraceLens skill.
-
-    Writes a ``cache/cmd_prefix.txt`` file under ``output_dir`` whose contents
-    ``cd <tracelens_root> && {CMD}`` let the skill root every shell command at
-    the TraceLens project directory.
-
-    Args:
-        output_dir (Path): Directory under which the ``cache`` folder is created.
-        tracelens_root (Path): The TraceLens project root the prefix cd's into.
-
-    Returns:
-        Path: The path to the written ``cmd_prefix.txt`` file.
-    """
+    """Create the command-prefix cache expected by the TraceLens skill."""
 
     cache_dir = output_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -259,21 +184,7 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
 
 
 def infer_analysis_mode(framework: str, requested: str) -> str:
-    """Resolve the effective TraceLens analysis mode for a framework.
-
-    An explicit non-default ``requested`` mode always wins. Otherwise inference
-    frameworks (vllm/sglang/atom) default to ``"inference"`` grouping because
-    their traces share the chrome-trace shape produced by the torch profiler;
-    everything else falls back to the requested value or ``"default"``.
-
-    Args:
-        framework (str): The framework that produced the trace (e.g. ``vllm``).
-        requested (str): The caller-requested analysis mode, possibly empty or
-            ``"default"``.
-
-    Returns:
-        str: The resolved analysis mode string.
-    """
+    """Resolve the effective TraceLens analysis mode for a framework."""
     requested = (requested or "").strip().lower()
     if requested and requested != "default":
         return requested
@@ -283,23 +194,7 @@ def infer_analysis_mode(framework: str, requested: str) -> str:
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
-    """Find a graph-capture folder near a Magpie torch_trace input.
-
-    Scans the trace input directory and the first trace file's neighbourhood for
-    a subdirectory whose name matches the shared capture-directory shape, so a
-    layout that ranking already demotes is also a layout discovery can find.
-    Matching by shape rather than by two hard-coded names is what lets an
-    unpatched SGLang's ``graph_capture_profile/`` through: it was previously
-    missed here, so the capture folder went unpassed even on runs that had
-    correctly picked the workload trace.
-
-    Args:
-        trace_input (Path): The trace input path (file or directory).
-        trace_files (list[Path]): Discovered trace files; only the first is used.
-
-    Returns:
-        Path | None: The capture folder if one exists nearby, else ``None``.
-    """
+    """Find a graph-capture folder near a Magpie torch_trace input."""
 
     search_roots: list[Path] = []
     if trace_input.is_dir():
@@ -333,28 +228,7 @@ def build_orchestrator_prompt(
     analysis_mode: str,
     capture_folder: Path | None,
 ) -> str:
-    """Prompt an agent to execute the TraceLens standalone skill.
-
-    Provider-neutral: the same prompt drives the Claude SDK runner and the
-    Codex SDK runner.
-
-    Assembles the full natural-language instruction that pins every required
-    input (paths, platform, framework, analysis/execution mode, capture folder)
-    so the agent can run the analysis-orchestrator workflow without prompting.
-
-    Args:
-        skill_path (Path): Path to the TraceLens skill file to follow.
-        trace_path (Path): Path to the trace file to analyze.
-        output_dir (Path): Directory where TraceLens outputs must be written.
-        tracelens_root (Path): The TraceLens project root.
-        platform (str): The target platform string.
-        framework (str): The framework that produced the trace.
-        analysis_mode (str): The requested analysis mode (resolved internally).
-        capture_folder (Path | None): Graph-capture folder for inference runs.
-
-    Returns:
-        str: The fully assembled orchestrator prompt text.
-    """
+    """Prompt an agent to execute the TraceLens standalone skill."""
 
     analysis_mode = infer_analysis_mode(framework, analysis_mode)
     if analysis_mode == "inference" and capture_folder is not None:
@@ -408,16 +282,7 @@ When complete, respond with a short summary of the artifacts you wrote.
 
 
 def _import_sdk() -> tuple[Any, Any]:
-    """Import the Claude Agent SDK and return its query primitives.
-
-    Returns:
-        tuple[Any, Any]: The ``(query, ClaudeAgentOptions)`` callables from
-            ``claude_agent_sdk``.
-
-    Raises:
-        RuntimeError: If the SDK is not installed or lacks the expected
-            ``query`` / ``ClaudeAgentOptions`` attributes.
-    """
+    """Import the Claude Agent SDK and return its query primitives."""
     try:
         import claude_agent_sdk as sdk  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised via caller fallback
@@ -430,13 +295,7 @@ def _import_sdk() -> tuple[Any, Any]:
 
 
 def _should_use_codex_runner() -> bool:
-    """Return true when the Codex Agent SDK runner should run this skill.
-
-    An OpenAI-only deployment has no Claude credentials to drive the Claude
-    Agent SDK, so the Codex runner is the only one that can execute. The shape
-    test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge kernel_backend.
-    """
+    """Return true when the Codex Agent SDK runner should run this skill."""
     from hyperloom.common import llm_config  # local import: keep module import-light
 
     return llm_config.is_openai_only()
@@ -459,34 +318,7 @@ async def _run_tracelens_skill_codex(
     codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]],
     log: Callable[[str], None] | None,
 ) -> TraceLensSkillRunResult:
-    """Run the TraceLens skill on the Codex Agent SDK.
-
-    The session works out of ``tracelens_root``, matching the Claude path, so
-    the skill's command-prefix cache and the TraceLens CLIs' own relative paths
-    resolve identically on both runners. The write scope is that workspace plus
-    ``output_dir``; the rest of the host is readable but immutable. The
-    TraceLens checkout has to stay writable because its CLIs write caches and
-    intermediates into their own tree, so narrowing the workspace to
-    ``output_dir`` alone would break the analysis rather than harden it.
-
-    Args:
-        prompt (str): The orchestrator prompt.
-        output_dir (Path): Directory the report is written to.
-        prefix_path (Path): The command-prefix cache path, reported as an
-            artifact.
-        tracelens_root (Path): The TraceLens project root; the session cwd.
-        model (str): The Codex model id.
-        timeout_sec (float): Wall-clock budget for the turn.
-        codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]]): The
-            Codex turn entry point (injected by tests).
-        log (Callable[[str], None] | None): Optional logging callback.
-
-    Returns:
-        TraceLensSkillRunResult: The artifacts produced by the run.
-
-    Raises:
-        RuntimeError: If ``analysis.md`` was not written.
-    """
+    """Run the TraceLens skill on the Codex Agent SDK."""
     codex_error = ""
     result = CodexSessionResult()
     try:
@@ -544,45 +376,7 @@ async def run_tracelens_skill(
     codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
-    """Execute the standalone TraceLens skill on the configured agent runtime.
-
-    Prepares the command-prefix cache and orchestrator prompt, then dispatches
-    to the Codex Agent SDK when the deployment has only the OpenAI side
-    configured, and to the Claude Agent SDK otherwise. Either way the presence
-    of ``analysis.md`` is the source of truth: a runtime error after the report
-    was written is recorded as metadata rather than raised.
-
-    Args:
-        skill_path (Path): Path to the TraceLens skill file to follow.
-        trace_path (Path): Path to the trace file to analyze.
-        output_dir (Path): Directory where TraceLens outputs are written.
-        tracelens_root (Path): The TraceLens project root.
-        platform (str): The target platform string.
-        framework (str): The framework that produced the trace.
-        analysis_mode (str): The requested analysis mode.
-        capture_folder (Path | None): Graph-capture folder for inference runs.
-        budget_minutes (float): Time budget for the run. The Codex path spends
-            it as the turn's wall-clock timeout (floored at 60s, matching the
-            other TraceLens subprocess timeouts); the Claude path bounds each
-            SDK message by a stream-idle timeout instead.
-        model (str | None): Optional model override. Defaults to
-            ``claude-opus-5`` on the Claude SDK path, or ``$CODEX_MODEL`` /
-            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
-        sdk_query_factory (Callable[..., Any] | None): Optional injected query
-            factory (used by tests); imported from the SDK when ``None``.
-        sdk_options_cls (Any | None): Optional injected options class (used by
-            tests); imported from the SDK when ``None``.
-        codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]] | None):
-            Optional injected Codex turn entry point (used by tests); defaults
-            to :func:`hyperloom.common.codex_session.run_codex_turn`.
-        log (Callable[[str], None] | None): Optional logging callback.
-
-    Returns:
-        TraceLensSkillRunResult: The artifacts produced by the run.
-
-    Raises:
-        RuntimeError: If ``analysis.md`` is not written by the run.
-    """
+    """Execute the standalone TraceLens skill on the configured agent runtime."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
@@ -657,9 +451,8 @@ async def run_tracelens_skill(
     sdk_error = ""
     if log:
         log(f"TraceLens SDK runner: prefix cache={prefix_path}")
-    # Drive the SDK stream manually so each next message is bounded by a
-    # per-message idle timeout (inactivity, not a total budget); the in-process
-    # SDK has no client-side read timeout and would otherwise block on a stall.
+    # Drive the SDK stream manually so each next message is bounded by a per-message idle timeout (inactivity, not a
+    # total budget); the in-process SDK has no client-side read timeout and would otherwise block on a stall.
     idle_timeout = _resolve_stream_idle_timeout_sec()
     tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
     tool_in_flight = False
@@ -676,10 +469,8 @@ async def run_tracelens_skill(
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                # Stream went quiet past its bound: abort and tear the generator
-                # down so its transport/subprocess does not leak. Name the phase —
-                # silence during a tool call means the tool overran its bound, not
-                # that the gateway died.
+                # Stream went quiet past its bound: abort and tear the generator down so its transport/subprocess does
+                # not leak.
                 phase = "while a tool call was in flight" if tool_in_flight else "with no tool call in flight"
                 sdk_error = f"stream idle timeout: no SDK message for {wait_for:.0f}s {phase}"
                 if log:
@@ -781,14 +572,7 @@ _IMPACT_HIGH_RE = re.compile(
 
 
 def _parse_marker_attrs(blob: str) -> dict[str, str]:
-    """Parse ``key=value`` attributes from an HTML-comment marker blob.
-
-    Args:
-        blob (str): The inner text of a TraceLens marker comment.
-
-    Returns:
-        dict[str, str]: A mapping of attribute names to their string values.
-    """
+    """Parse ``key=value`` attributes from an HTML-comment marker blob."""
     return dict(re.findall(r"(\w+)=([^\s>]+)", blob))
 
 
@@ -797,18 +581,7 @@ def _extract_between(
     start_marker: str,
     end_markers: tuple[str, ...],
 ) -> str:
-    """Extract the substring between a start marker and the earliest end marker.
-
-    Args:
-        text: The text to search.
-        start_marker: Marker that begins the region.
-        end_markers: Candidate markers that end the region; the earliest match
-            wins.
-
-    Returns:
-        The trimmed substring, the tail when no end marker is found, or an
-        empty string when the start marker is absent.
-    """
+    """Extract the substring between a start marker and the earliest end marker."""
     start = text.find(start_marker)
     if start == -1:
         return ""
@@ -820,15 +593,7 @@ def _extract_between(
 
 
 def _extract_pitem_prose(body: str) -> dict[str, Any]:
-    """Extract prose and impact fields from a P-item body.
-
-    Args:
-        body: The Markdown body of a single P-item.
-
-    Returns:
-        A dict with ``identification``, ``reasoning_for_slowdown``,
-        ``resolution``, and impact estimates (defaulting to empty / 0.0).
-    """
+    """Extract prose and impact fields from a P-item body."""
     identification = _extract_between(
         body,
         _IDENTIFICATION_LABEL,
@@ -854,15 +619,7 @@ def _extract_pitem_prose(body: str) -> dict[str, Any]:
 
 
 def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
-    """Extract per-P-item category and impact metadata in priority order.
-
-    Args:
-        text: The full report text containing ``p_item`` markers.
-
-    Returns:
-        A list of dicts with ``category`` and ``impact_score*`` fields, one
-        per P-item marker.
-    """
+    """Extract per-P-item category and impact metadata in priority order."""
 
     items: list[dict[str, Any]] = []
     for match in _PITEM_MARKER_RE.finditer(text):
@@ -881,15 +638,7 @@ def _extract_pitem_categories(text: str) -> list[dict[str, Any]]:
 
 
 def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
-    """Split the report into compute-tier reasoning blocks.
-
-    Args:
-        text (str): The full ``analysis.md`` report text.
-
-    Returns:
-        list[tuple[int, str, str]]: One ``(rank, title, body)`` triple per
-            compute-tier reasoning-candidate block found.
-    """
+    """Split the report into compute-tier reasoning blocks."""
 
     blocks: list[tuple[int, str, str]] = []
     matches = list(_REASONING_MARKER_RE.finditer(text))
@@ -910,17 +659,7 @@ def _split_data_blocks(text: str) -> list[tuple[int, str, str]]:
 
 
 def _extract_data_table(body: str) -> list[list[str]]:
-    """Pull the 9-column markdown table that follows a ``**Data:**`` marker.
-
-    The table includes the raw header and data cells and ends at a blank line
-    or the next ``**Field:**`` marker.
-
-    Args:
-        body: The P-item body text to scan.
-
-    Returns:
-        The table rows as lists of cell strings.
-    """
+    """Pull the 9-column markdown table that follows a ``**Data:**`` marker."""
 
     marker = body.find("**Data:**")
     if marker < 0:
@@ -947,13 +686,7 @@ def _extract_data_table(body: str) -> list[list[str]]:
 
 
 def _parse_kernel_name_cell(raw: str) -> list[str]:
-    """Parse the ``Kernel Name`` cell into clean device kernel names.
-
-    The going-forward report may list several kernels per row as
-    ``Kernel 1: a<br>Kernel 2: b``; split those on ``<br>`` and strip the
-    ``Kernel N:`` labels. A single bare kernel name passes through. Placeholders
-    (``-`` / ``—``) and empties are dropped.
-    """
+    """Parse the ``Kernel Name`` cell into clean device kernel names."""
     if not raw:
         return []
     names: list[str] = []
@@ -975,27 +708,7 @@ def _row_to_candidate(
     impact: dict[str, float],
     prose: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Convert one parsed data-table row into a hot-kernel candidate dict.
-
-    Maps the 9 canonical columns into typed candidate fields, preserves any
-    trailing extra columns under ``tracelens_extra_columns``, resolves the
-    launcher path to an absolute source file where possible, and attaches the
-    shared P-item prose.
-
-    Args:
-        headers (list[str]): Lower-cased column header names for ``cells``.
-        cells (list[str]): The row's cell strings, aligned with ``headers``.
-        category (str): The TraceLens category for the owning P-item.
-        rank (int): The P-item rank (1-based).
-        title (str): The P-item title.
-        library (str): The library name parsed from the P-item title.
-        impact (dict[str, float]): Impact scores for the owning P-item.
-        prose (dict[str, Any] | None): Shared P-item prose to attach, if any.
-
-    Returns:
-        dict[str, Any] | None: The candidate dict, or ``None`` when the row is
-            malformed (cell count mismatch) or names a placeholder operation.
-    """
+    """Convert one parsed data-table row into a hot-kernel candidate dict."""
     if len(cells) != len(headers):
         return None
     record = dict(zip(headers, cells))
@@ -1008,16 +721,15 @@ def _row_to_candidate(
     args = record.get("args", "").replace("<br>", "\n").strip()
     shapes = [s.strip() for s in args.split("\n") if s.strip() and s.strip() not in {"-", "—"}]
     kernel_path = record.get("kernel path", "").strip()
-    # Share the launcher placeholder vocabulary so a sentinel such as TraceLens'
-    # "Not found" cannot survive as a fake source_file (see the constant).
+    # Share the launcher placeholder vocabulary so a sentinel such as TraceLens' "Not found" cannot survive as a fake
+    # source_file (see the constant).
     if kernel_path.lower() in _LAUNCHER_PATH_PLACEHOLDERS:
         kernel_path = ""
-    # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full
-    # list and use the first for matching. Placeholders normalize to "".
+    # Device kernel symbol(s) used to disambiguate dispatch ops; keep the full list and use the first for matching.
     device_kernel_names = _parse_kernel_name_cell(record.get("kernel name", ""))
     device_kernel_name = device_kernel_names[0] if device_kernel_names else ""
-    # Store only the path in source_file; line/function annotations have their
-    # own fields and otherwise make extension-based routing see an unknown file.
+    # Store only the path in source_file; line/function annotations have their own fields and otherwise make
+    # extension-based routing see an unknown file.
     resolved_source_file, resolved_line, resolved_func = _parse_launcher_path(kernel_path)
     if kernel_path:
         resolved = _resolve_launcher_to_abs_source(kernel_path)
@@ -1101,16 +813,7 @@ _EXPOSED_COMM_PCT_TABLE_RE = re.compile(
 
 
 def _extract_exec_summary_pct(md_path: Path, pattern: re.Pattern[str]) -> float | None:
-    """Extract one percentage row from an ``analysis.md`` Executive Summary table.
-
-    Args:
-        md_path: Path to the ``analysis.md`` report.
-        pattern: Row regex whose first group is the numeric percentage.
-
-    Returns:
-        The percentage, or ``None`` when the file or row is missing or
-        unparseable, so callers skip their gate gracefully.
-    """
+    """Extract one percentage row from an ``analysis.md`` Executive Summary table."""
     try:
         text = md_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -1127,60 +830,22 @@ def _extract_exec_summary_pct(md_path: Path, pattern: re.Pattern[str]) -> float 
 
 
 def extract_idle_pct_from_analysis_md(md_path: Path) -> float | None:
-    """Extract ``Idle %`` from an ``analysis.md`` Executive Summary table.
-
-    Used by the idle gate.
-
-    Args:
-        md_path: Path to the ``analysis.md`` report.
-
-    Returns:
-        The idle percentage, or ``None`` when missing/unparseable so callers
-        skip the gate gracefully.
-    """
+    """Extract ``Idle %`` from an ``analysis.md`` Executive Summary table."""
     return _extract_exec_summary_pct(md_path, _IDLE_PCT_TABLE_RE)
 
 
 def extract_compute_pct_from_analysis_md(md_path: Path) -> float | None:
-    """Extract ``Compute %`` from an ``analysis.md`` Executive Summary table.
-
-    Used by the low-compute gate.
-
-    Args:
-        md_path: Path to the ``analysis.md`` report.
-
-    Returns:
-        The compute percentage, or ``None`` when missing/unparseable so callers
-        skip the gate gracefully.
-    """
+    """Extract ``Compute %`` from an ``analysis.md`` Executive Summary table."""
     return _extract_exec_summary_pct(md_path, _COMPUTE_PCT_TABLE_RE)
 
 
 def extract_exposed_comm_pct_from_analysis_md(md_path: Path) -> float | None:
-    """Extract ``Exposed Communication %`` from an ``analysis.md`` summary table.
-
-    Context for the low-compute gate: it distinguishes a comm-dominated window
-    from a host-bound one.
-
-    Args:
-        md_path: Path to the ``analysis.md`` report.
-
-    Returns:
-        The exposed-communication percentage, or ``None`` when
-        missing/unparseable.
-    """
+    """Extract ``Exposed Communication %`` from an ``analysis.md`` summary table."""
     return _extract_exec_summary_pct(md_path, _EXPOSED_COMM_PCT_TABLE_RE)
 
 
 def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
-    """Compute the per-row sort key for the ``Lower Efficiency`` filter.
-
-    Args:
-        candidate: A candidate row carrying ``efficiency_percent``.
-
-    Returns:
-        The efficiency value, or ``inf`` so rows with no efficiency sort last.
-    """
+    """Compute the per-row sort key for the ``Lower Efficiency`` filter."""
     eff = candidate.get("efficiency_percent")
     try:
         value = float(eff)
@@ -1192,19 +857,7 @@ def _efficiency_sort_key(candidate: dict[str, Any]) -> float:
 
 
 def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
-    """Parse a TraceLens ``analysis.md`` report into hot-kernel rows.
-
-    Rows are returned in priority order (P-item, then lower efficiency
-    within each item).
-
-    Args:
-        md_path: Path to the ``analysis.md`` report.
-        top_k: Maximum number of hot-kernel rows to return.
-
-    Returns:
-        The hot-kernel rows, or an empty list when the report is missing or
-        unparseable.
-    """
+    """Parse a TraceLens ``analysis.md`` report into hot-kernel rows."""
 
     if not md_path.exists():
         return []
@@ -1228,10 +881,8 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
         if not rows:
             continue
         header_row = [cell.strip().lower() for cell in rows[0]]
-        # Validate by presence of every canonical column (matched by name), not by
-        # position, and tolerate inserted/appended extra columns. Normalize each
-        # header cell to its canonical name when it contains one (e.g. "kernel path
-        # (resolved)" -> "kernel path"); unknown extras are kept verbatim.
+        # Validate by presence of every canonical column (matched by name), not by position, and tolerate
+        # inserted/appended extra columns.
         if len(header_row) < canonical_width:
             continue
         normalized_header: list[str] = []
@@ -1241,9 +892,8 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
                 cell,
             )
             normalized_header.append(match)
-        # Accept extra/inserted columns but reject genuine reordering of the
-        # canonical columns: every canonical column must be present and appear in
-        # canonical relative order (extras may be interleaved anywhere).
+        # Accept extra/inserted columns but reject genuine reordering of the canonical columns: every canonical column
+        # must be present and appear in canonical relative order (extras may be interleaved anywhere).
         canonical_in_header = [c for c in normalized_header if c in headers_canonical]
         if canonical_in_header != headers_canonical:
             continue
@@ -1282,19 +932,14 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
     return candidates
 
 
-# Source-function aggregation: group candidates sharing an AST-resolved
-# (source_path, line, fn) triple; unparseable kernel_path falls back to per-kernel dispatch.
+# Source-function aggregation: group candidates sharing an AST-resolved (source_path, line, fn) triple; unparseable
+# kernel_path falls back to per-kernel dispatch.
 
 # Launcher path shapes: ``<path>(<line>): <func>`` (Python) or bare / ``<path>#L<line>`` (HIP).
 _LAUNCHER_PATH_RE = re.compile(
     r"(?P<path>.+?)\((?P<line>\d+)\)\s*:\s*(?P<func>[A-Za-z_][A-Za-z0-9_]*)\s*$",
 )
 # Placeholders for unresolved Kernel Paths; must not survive parsing.
-# ``not found`` is TraceLens' own sentinel for an unresolved launcher: it lands
-# in ``other_metrics.json`` whenever ``_find_entry_point`` cannot locate the op
-# in the call stack (every Synthetic Op), and the report agent copies it
-# verbatim into the Kernel Path cell. Letting it through makes it a truthy
-# ``source_file`` that silently skips the grep fallback downstream.
 _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
     {
         "",
@@ -1314,12 +959,7 @@ _LAUNCHER_PATH_PLACEHOLDERS: frozenset[str] = frozenset(
 
 
 def _launcher_frame_from_dict(obj: dict) -> str | None:
-    """Pull the first ``<path>(<line>): <func>`` frame out of a TraceLens launcher dict.
-
-    The dict shape is ``{'entry_point': '<frame>', 'wrappers': "[<frame>, ...]"}``.
-    Prefer ``entry_point``; fall back to the first parseable ``wrappers`` frame.
-    Returns ``None`` when no frame matches the launcher shape.
-    """
+    """Pull the first ``<path>(<line>): <func>`` frame out of a TraceLens launcher dict."""
     if not isinstance(obj, dict):
         return None
     entry = obj.get("entry_point")
@@ -1339,24 +979,11 @@ def _launcher_frame_from_dict(obj: dict) -> str | None:
 
 
 def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]:
-    """Parse a TraceLens kernel-path into its components.
-
-    Accepts ``<path>(<line>): <func>``, ``<path>#L<line>``, or a bare path.
-    Also accepts the newer TraceLens launcher *dict* (or its stringified repr)
-    ``{'entry_point': '<frame>', 'wrappers': "[...]"}``, from which the first
-    real source frame is extracted before parsing.
-
-    Args:
-        kernel_path: The kernel-path string (or launcher dict) to parse.
-
-    Returns:
-        A ``(path, line, function_name)`` tuple; placeholders and empty input
-        return ``("", None, None)``.
-    """
+    """Parse a TraceLens kernel-path into its components."""
     if not kernel_path:
         return "", None, None
-    # TraceLens may hand us the launcher as a dict (or stringified dict) whose
-    # real frame lives under entry_point/wrappers; reduce it to that frame first.
+    # TraceLens may hand us the launcher as a dict (or stringified dict) whose real frame lives under
+    # entry_point/wrappers; reduce it to that frame first.
     if isinstance(kernel_path, dict):
         frame = _launcher_frame_from_dict(kernel_path)
         if not frame:
@@ -1389,8 +1016,7 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     return text, None, None
 
 
-# Launcher path → absolute source file resolver. Strategy (most-specific first):
-# $HYPERLOOM_FRAMEWORK_SOURCE_ROOTS override, importlib find_spec, then this fallback table.
+# Launcher path → absolute source file resolver.
 _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
     "aiter": ("/sgl-workspace/aiter",),
     "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
@@ -1400,8 +1026,7 @@ _FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
         "/opt/venv/lib/python3.10/site-packages",
         "/sgl-workspace/vllm",
     ),
-    # atom fallback roots for CSV-only / static-analysis parses. Kept in sync
-    # with the reusable-source roots elsewhere, pinned by test_framework_paths_units.py.
+    # atom fallback roots for CSV-only / static-analysis parses.
     "atom": (
         "/app/ATOM",
         "/usr/local/lib/python3.12/dist-packages",
@@ -1414,13 +1039,7 @@ _FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
 
 
 def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
-
-    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
-
-    Returns:
-        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
-    """
+    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map."""
     raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
     if not raw:
         return {}
@@ -1438,14 +1057,7 @@ def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
 
 
 def _package_root_parent(pkg: str) -> str | None:
-    """Find the directory containing a package on the live ``sys.path``.
-
-    Args:
-        pkg: The importable package name.
-
-    Returns:
-        The directory containing ``pkg/``, or ``None`` when not importable.
-    """
+    """Find the directory containing a package on the live ``sys.path``."""
     try:
         spec = importlib.util.find_spec(pkg)
     except (ImportError, ValueError):
@@ -1463,21 +1075,13 @@ def _package_root_parent(pkg: str) -> str | None:
 def _resolve_launcher_to_abs_source(
     kernel_path: str,
 ) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute source file.
-
-    Args:
-        kernel_path: The TraceLens launcher-path to resolve.
-
-    Returns:
-        An ``(abs_file, line, function_name)`` tuple for an absolute path or a
-        resolvable framework-relative file, else ``None``.
-    """
+    """Resolve a TraceLens launcher-path to an absolute source file."""
     raw_path, line, func = _parse_launcher_path(kernel_path)
     if not raw_path:
         return None
     if os.path.isabs(raw_path):
-        # Keep container-resident paths even when this analysis host cannot stat
-        # them; the caller still needs the annotation split into separate fields.
+        # Keep container-resident paths even when this analysis host cannot stat them; the caller still needs the
+        # annotation split into separate fields.
         return raw_path, line, func
     head = raw_path.split("/", 1)[0]
     if not head or head.startswith("."):
@@ -1508,16 +1112,7 @@ def _resolve_launcher_to_abs_source(
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
-    """Find the line number of a named function definition via AST.
-
-    Args:
-        path: The source file to parse.
-        function_name: The function name to locate.
-
-    Returns:
-        The first matching ``def``/``async def`` line, or ``None`` when the
-        file is unreadable, unparseable, or the function is absent.
-    """
+    """Find the line number of a named function definition via AST."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
@@ -1533,21 +1128,9 @@ def _resolve_source_target(
     *,
     source_root: Path | None,
 ) -> dict[str, Any] | None:
-    """Resolve a candidate's launcher path to a source-target triple.
-
-    The AST-derived definition line overrides the reported call-site line when
-    resolvable.
-
-    Args:
-        candidate: The candidate dict carrying launcher/source paths.
-        source_root: Optional root to resolve relative paths against.
-
-    Returns:
-        A ``(source_path, definition_line, function_name)`` dict, or ``None``
-        when the path is unparseable.
-    """
-    # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates'
-    # source_file overwrite; fall back to source_file / kernel_path for non-TraceLens candidates.
+    """Resolve a candidate's launcher path to a source-target triple."""
+    # Prefer verbatim tracelens_launcher_path so AST resolution survives _finalize_candidates' source_file overwrite;
+    # fall back to source_file / kernel_path for non-TraceLens candidates.
     kernel_path = str(
         candidate.get("tracelens_launcher_path") or candidate.get("source_file") or candidate.get("kernel_path") or ""
     )
@@ -1594,18 +1177,7 @@ _NATIVE_SOURCE_SUFFIXES = (
 
 
 def _is_native_source(path: str) -> bool:
-    """True for C/C++/HIP/CUDA source files.
-
-    Native sources have no Python AST to resolve a stable ``def`` line, so
-    TraceLens reports the per-call call-site ``#L<line>``. Callers therefore
-    drop the line/function key components for these files.
-
-    Args:
-        path: The source file path to classify.
-
-    Returns:
-        ``True`` for C/C++/HIP/CUDA source files.
-    """
+    """True for C/C++/HIP/CUDA source files."""
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
 
@@ -1614,24 +1186,7 @@ def aggregate_by_source_function(
     *,
     source_root: Path | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Group TraceLens candidates into per-kernel ``task_group`` dicts.
-
-    Groups are sorted by aggregate time (descending). Native symbols are
-    normalized to their logical function before keying by operation and source,
-    so template/shape instances merge but different operators stay separate.
-    Python candidates key on the same versioned ``(kind, source, operation)``
-    identity used by the bypass path. Each group carries ``task_group_id``,
-    ``source_path``, ``definition_line``, ``function_name``, ``kernel_ids``,
-    ``primary_kernel_id``, ``rows``, and ``aggregate_*`` fields.
-
-    Args:
-        candidates: The TraceLens candidate rows to group.
-        source_root: Optional root to resolve relative source paths against.
-
-    Returns:
-        The task-group dicts. Unparseable candidates are left out for legacy
-        per-kernel dispatch.
-    """
+    """Group TraceLens candidates into per-kernel ``task_group`` dicts."""
     if not candidates:
         return []
     root: Path | None = None
@@ -1640,9 +1195,7 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    # Both TraceLens routes use the same versioned identity builder. Operation
-    # normalization keeps different kernels in one source separate while
-    # template/shape instances of one operator merge.
+    # Both TraceLens routes use the same versioned identity builder.
     groups: dict[str, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):

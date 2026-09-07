@@ -184,14 +184,7 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
 
 
 def test_classify_candidate_prescreen_is_framework_op():
-    """A pre-screen classifies as framework_op; the same action landing a patch does not.
-
-    Both arrive as ``integrate_patch`` -- one action lands every patch source
-    now -- so the top-level candidate id is the only thing separating "is this
-    candidate worth a bench" from "this patch is applied and measured". Reading
-    the action name alone would drop the patch-landing evidence bar for every
-    real patch.
-    """
+    """A pre-screen classifies as framework_op; the same action landing a patch does not."""
     from hyperloom.agents.critic.runtime.decision_reviewer import (
         _APPROVE_REQUIRES_BY_CLASS,
         ACTION_CLASS_FRAMEWORK_OP,
@@ -227,8 +220,7 @@ def test_classify_enablement_integrate_patch_is_enablement_landing():
         classify_proposal_action("integrate", {"params": {"framework_agent_authoring": True}})
         == ACTION_CLASS_ENABLEMENT_LANDING
     )
-    # The lighter bar excludes the pre-boot-impossible production evidence
-    # and the redundant rollback restatement.
+    # The lighter bar excludes the pre-boot-impossible production evidence and the redundant rollback restatement.
     reqs = _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_ENABLEMENT_LANDING]
     assert "comparable_before_after_benchmark" not in reqs
     assert "accuracy_gate_or_waiver" not in reqs
@@ -428,8 +420,7 @@ def _verdict_intent_for(intents: list[dict], target: str) -> dict:
 
 
 def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
-    """The Coordinator holds a reject to the verdict its rule declared, and it
-    can only do that if the code the Critic cited survives the commit path."""
+    """The Coordinator holds a reject to the verdict its rule declared, and it"""
     rev, _kb, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_code"))
     review = {

@@ -147,15 +147,14 @@ def test_a_accepts_kernel_with_runtime_lookalike_name_but_kernel_cat():
 
 
 def test_a_rejects_kernel_cat_when_name_is_runtime_api():
-    # Belt-and-braces: even with cat=kernel, names listed in
-    # RUNTIME_API_NAMES (caught by mis-tagged traces) are rejected.
+    # Belt-and-braces: even with cat=kernel, names listed in RUNTIME_API_NAMES (caught by mis-tagged traces) are
+    # rejected.
     weird = {"name": "hipDeviceSynchronize", "cat": "kernel", "dur": 1.0}
     assert tla.is_kernel_event(weird) is False
 
 
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
-    """Build a synthetic trace mirroring the resume4 shape and confirm
-    is_kernel_event rejects the sync events before they can reach top-K."""
+    """Build a synthetic trace mirroring the resume4 shape and confirm"""
     events = [
         # 5 host-side sync events, big durations (the buggy ones)
         {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
@@ -180,14 +179,12 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         assert "synchronize" not in n.lower()
 
 
-# The torch.profiler Chrome-trace category for a GPU kernel is literally
-# "kernel". Pin the torch convention so a rename cannot break GPU-kernel detection.
+# The torch.profiler Chrome-trace category for a GPU kernel is literally "kernel".
 def test_issue_769_kernel_event_uses_torch_cat_kernel():
     """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
     real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
     assert tla.is_kernel_event(real_kernel) is True
-    # The component-name string 'kernel_agent' must never be treated as a GPU
-    # kernel trace category.
+    # The component-name string 'kernel_agent' must never be treated as a GPU kernel trace category.
     not_a_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel_agent", "dur": 5.0}
     assert tla.is_kernel_event(not_a_kernel) is False
 
@@ -303,13 +300,7 @@ def test_unknown_source_root_is_not_reusable_native():
 
 
 def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
-    """A curated harness is found from the kernel name alone, with no repo root.
-
-    The hint is checkout-relative, so it is resolved against the search roots
-    rather than a pinned ``/sgl-workspace`` path, and only a file that is really
-    there is reported: a harness list naming paths nobody can open reads
-    downstream as a runnable harness.
-    """
+    """A curated harness is found from the kernel name alone, with no repo root."""
     harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
     harness.parent.mkdir(parents=True)
     harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
@@ -442,9 +433,8 @@ def test_load_op_category_map_missing_returns_empty(tmp_path):
 
 # ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
 
-# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in
-# ``ops_unique_args.csv`` (gate/up GEMM then down GEMM), as captured for the
-# Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
+# The two operand-tuple rows TraceLens writes for the fused-MoE expert kernel in ``ops_unique_args.csv`` (gate/up GEMM
+# then down GEMM), as captured for the Qwen3-30B-A3B MoE decode workload (conc 64, ISL/OSL 1024).
 _FUSED_MOE_OPS_UNIQUE_ARGS = (
     "name,op category,Input Dims,Input type\n"
     "sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427,MoE_fused,"
@@ -892,8 +882,7 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
         existing_report_path=analysis_md,
     )
 
-    # The returned trace_report_path must point at the upstream file,
-    # not at a Hyperloom-owned copy.
+    # The returned trace_report_path must point at the upstream file, not at a Hyperloom-owned copy.
     assert artifacts["trace_report_path"] == str(analysis_md)
     # And the legacy aliases must NOT exist on disk.
     assert not (tracelens_dir / "standalone_analysis.md").exists()
@@ -924,9 +913,8 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
 
 
-# ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL ranked hotspot
-# set (routable + non-routable) while ``routable_kernels`` / ``skipped_kernels``
-# carry the reusable / non-reusable subsets.
+# ``kernel_candidates.json`` exposes ``hot_kernels`` as the FULL ranked hotspot set (routable + non-routable) while
+# ``routable_kernels`` / ``skipped_kernels`` carry the reusable / non-reusable subsets.
 def _contract_candidates():
     return [
         {
@@ -1206,11 +1194,7 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 
 
 def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
-    """TraceLens SDK runner must not inherit stale global Claude settings.
-
-    Passing ``env`` and ``setting_sources=[]`` keeps the SDK child tied to the
-    active run contract rather than a stale ``~/.claude/settings.json`` token.
-    """
+    """TraceLens SDK runner must not inherit stale global Claude settings."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1281,11 +1265,7 @@ def _use_openai_only_env(monkeypatch) -> None:
 
 
 def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkeypatch):
-    """OpenAI-only deployments must run TraceLens on the Codex Agent SDK.
-
-    Hyperloom makes no bare LLM API calls, so this path must go through an
-    agent runtime whose tools, sandbox and turn management come from the SDK.
-    """
+    """OpenAI-only deployments must run TraceLens on the Codex Agent SDK."""
     import asyncio
 
     from hyperloom.common.codex_session import CodexSessionResult
@@ -1328,8 +1308,8 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert res.report_path == output_dir / "analysis.md"
     assert res.report_path.read_text(encoding="utf-8") == "# Codex TraceLens report\n"
-    # The result carries the runner that actually ran, so the caller reports the
-    # real provider instead of hardcoding one.
+    # The result carries the runner that actually ran, so the caller reports the real provider instead of hardcoding
+    # one.
     assert res.runner == "codex"
     assert res.raw_text == "wrote analysis.md"
     assert "tracelens_agent_report" in res.artifact_paths
@@ -1340,8 +1320,8 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert len(calls) == 1
     call = calls[0]
     assert call["model"] == "gpt-5.5"
-    # The session works out of the TraceLens root so the skill's command-prefix
-    # cache and relative paths resolve as they do on the Claude path.
+    # The session works out of the TraceLens root so the skill's command-prefix cache and relative paths resolve as
+    # they do on the Claude path.
     assert call["cwd"] == tmp_path
     # The output dir is the only extra writable root: nothing else is mutable.
     assert call["writable_roots"] == (output_dir,)
@@ -1487,10 +1467,7 @@ def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypa
 
 
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
-    """A gateway stream that goes silent mid-response must abort on the
-    per-message idle timeout instead of blocking forever. The runner records
-    the idle-timeout error and, since analysis.md was already written, still
-    returns it as the report."""
+    """A gateway stream that goes silent mid-response must abort on the"""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -1515,8 +1492,8 @@ def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch
     async def _stalling_query(*, prompt, options):
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "analysis.md").write_text("# partial report\n", encoding="utf-8")
-        # One chunk arrives, then the stream goes silent (partial response,
-        # stop_reason=None) — emulate by sleeping far past the idle timeout.
+        # One chunk arrives, then the stream goes silent (partial response, stop_reason=None) — emulate by sleeping
+        # far past the idle timeout.
         yield _Message(content=[_TextBlock("chunk-1")])
         await asyncio.sleep(60)
         yield _Message(content=[_TextBlock("never-reached")])
@@ -1552,7 +1529,6 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
     return res, _time.monotonic() - t0
 
 
-# ===========================================================================
 # analysis.md is the only contracted TraceLens output.
 def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     """SDK orchestrator sidecars must not be surfaced as Hyperloom inputs."""
@@ -1657,8 +1633,8 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         )
 
 
-# splitter CLI must match the real split_inference_trace_annotation interface
-# (positional trace_path, -o, --find-steady-state); the old --input/--platform form failed.
+# splitter CLI must match the real split_inference_trace_annotation interface (positional trace_path, -o,
+# --find-steady-state); the old --input/--platform form failed.
 def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
@@ -1676,12 +1652,7 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
 
 
 def _xdit_roofline_capture(trace_dir: Path) -> Path:
-    """Recreate an xDiT roofline capture directory as production writes it.
-
-    Names and sizes are taken from a real failing run: a 910 KB rank capture
-    with 30k kernel events, beside a trace_split/ directory of ~900-byte
-    per-phase fragments and annotation sidecars.
-    """
+    """Recreate an xDiT roofline capture directory as production writes it."""
     trace_dir.mkdir(parents=True, exist_ok=True)
     raw = trace_dir / "rank_0.trace.json.gz"
     with gzip.open(raw, "wt") as fh:
@@ -1703,13 +1674,7 @@ def _xdit_roofline_capture(trace_dir: Path) -> Path:
 
 
 def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path):
-    """The raw capture must lead, whatever the fragments are named.
-
-    Every file in this layout used to land in the same default bucket, so
-    alphabetical order decided -- and `decode_only_...` sorts ahead of
-    `rank_0.trace.json.gz`. The preflight then read a 900-byte fragment, found
-    no GPU kernels, and reported the whole capture as CPU-only.
-    """
+    """The raw capture must lead, whatever the fragments are named."""
     trace_dir = tmp_path / "torch_trace"
     raw = _xdit_roofline_capture(trace_dir)
 
@@ -1722,20 +1687,15 @@ def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path
 
 
 def test_the_leading_candidate_is_the_one_with_the_kernels(tmp_path):
-    """Ordering is only useful if it puts a probe-able trace first.
-
-    Ties the two halves of the fix together: whichever file discovery leads
-    with is the file the CPU-only preflight opens, so that file has to be the
-    one carrying GPU kernel events.
-    """
+    """Ordering is only useful if it puts a probe-able trace first."""
     trace_dir = tmp_path / "torch_trace"
     _xdit_roofline_capture(trace_dir)
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
 
     assert tla.count_gpu_kernel_events(traces[0]) == 64
-    # The fragment that used to be probed first really does look CPU-only, so
-    # the old ordering failed for a real reason and not a test artefact.
+    # The fragment that used to be probed first really does look CPU-only, so the old ordering failed for a real
+    # reason and not a test artefact.
     fragment = next(p for p in traces if p.name.startswith("decode_only_"))
     assert tla.count_gpu_kernel_events(fragment) == 0
 
@@ -1756,12 +1716,7 @@ def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_p
 
 
 def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
-    """The demotion must not depend on the splitter nesting its output.
-
-    Production nests fragments under trace_split/ today, but keying only on the
-    directory would leave a flat layout exactly as broken as before: the phase
-    names sort ahead of rank files on the first letter.
-    """
+    """The demotion must not depend on the splitter nesting its output."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     raw = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=40)
@@ -1776,12 +1731,7 @@ def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
 
 
 def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
-    """xDiT runs at TP=8, so a flat layout could present eight fragments first.
-
-    With the fragments still in the default bucket they would consume the whole
-    probe budget before any rank file was opened, and the run would fail with the
-    error this change exists to remove.
-    """
+    """xDiT runs at TP=8, so a flat layout could present eight fragments first."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     for rank in range(8):
@@ -1797,13 +1747,7 @@ def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
 
 
 def test_a_non_trace_sidecar_does_not_lead_discovery(tmp_path):
-    """execution_details.json is swept in by the *.json glob but is not a trace.
-
-    It sorts ahead of rank_0.trace.json.gz alphabetically, so before size
-    ordering it was trace_files[0] in every healthy nested capture: one wasted
-    probe, and a promotion logged on every run, which made the log line
-    meaningless exactly when it should have meant something.
-    """
+    """execution_details.json is swept in by the *.json glob but is not a trace."""
     trace_dir = tmp_path / "torch_trace"
     raw = _xdit_roofline_capture(trace_dir)
     sidecar = trace_dir / "trace_split" / "execution_details.json"
@@ -1864,8 +1808,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _json.dump(
             {
                 "traceEvents": [
-                    # At least one real GPU kernel event so the new fail-fast
-                    # validation lets the run continue into the splitter step.
+                    # At least one real GPU kernel event so the new fail-fast validation lets the run continue into
+                    # the splitter step.
                     {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
                 ]
             },
@@ -1912,9 +1856,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
             try:
                 tla.main()
             except SystemExit as exc:
-                # tla.main() may CLI-exit because the mocked run does not
-                # produce analysis.md. The test asserts the splitter command
-                # shape below, not the program's overall exit status.
+                # tla.main() may CLI-exit because the mocked run does not produce analysis.md.
                 _ = exc
     finally:
         _os.environ.clear()
@@ -1945,15 +1887,10 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "trace_split_no_steady_state" in result["error"]
 
 
-# Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
-# selection uses the analytic PD ratio instead of an empirical heuristic.
+# Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window selection uses the analytic PD
+# ratio instead of an empirical heuristic.
 def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None):
-    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs.
-
-    ``trace_factory`` builds the input trace from the staging directory when the
-    default single-kernel stub is not enough (for example a step-annotated trace
-    the pretrimmer can act on); it returns the path it wrote.
-    """
+    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
     import gzip
     import json as _json
     import os as _os
@@ -2038,15 +1975,7 @@ def _find_splitter_cmd(captured):
 
 
 def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
-    """Drive tla.main() with a capture *directory* and capture subprocess argvs.
-
-    A sibling of :func:`_drive_main_capturing_subprocess`, which always passes a
-    single file. Multi-rank selection only shows up when discovery has more than
-    one candidate to choose from.
-
-    ``extra_argv`` appends CLI flags, which is how the ``--skip-split`` route
-    that scriptable workloads actually take gets exercised.
-    """
+    """Drive tla.main() with a capture *directory* and capture subprocess argvs."""
     import os as _os
     from unittest.mock import patch
 
@@ -2098,11 +2027,7 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
 
 
 def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
-    """Write a rank trace with the given number of GPU kernels.
-
-    ``cpu_events`` pads with host-side events, which is what a CPU-only capture
-    actually looks like: a large file with no kernels in it.
-    """
+    """Write a rank trace with the given number of GPU kernels."""
     events = [{"cat": "kernel", "name": "void real_kernel<...>", "dur": 5.0} for _ in range(kernels)]
     events += [{"cat": "cpu_op", "name": f"aten::some_host_op_{i}", "dur": 1.0} for i in range(cpu_events)]
     with gzip.open(path, "wt") as fh:
@@ -2111,17 +2036,10 @@ def _rank_trace(path: Path, kernels: int, cpu_events: int = 0) -> Path:
 
 
 def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path):
-    """A CPU-only leading rank must not be what gets analysed.
-
-    The preflight probes several candidates, so it can pass on rank_1 while
-    rank_0 leads discovery. If the analysis kept using the first candidate, the
-    check would clear a capture on one rank's evidence and then hand TraceLens
-    the empty one -- quieter than the failure it replaced, and worse.
-    """
+    """A CPU-only leading rank must not be what gets analysed."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
-    # A CPU-only rank is a big file with no kernels in it, so size ordering puts
-    # it first on merit. Ordering cannot help here; only the promotion can.
+    # A CPU-only rank is a big file with no kernels in it, so size ordering puts it first on merit.
     empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
     assert empty.stat().st_size > populated.stat().st_size
@@ -2153,27 +2071,13 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
 
 
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
-    """Write a CUDA-graph capture sidecar in its production shape.
-
-    ``kernels`` defaults to 2 on purpose. A capture records the graph being
-    built, so a couple of launches still reach the device while the rest of the
-    file is host-side call tree — the run this guards against had 2 kernels in
-    1.49M events. A sidecar with *zero* kernels would already be stopped by the
-    CPU-only preflight; two is the count that gets through it.
-    """
+    """Write a CUDA-graph capture sidecar in its production shape."""
     path.parent.mkdir(parents=True, exist_ok=True)
     return _rank_trace(path, kernels=kernels, cpu_events=200)
 
 
 def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
-    """A directory holding nothing but graph-capture sidecars must not analyse.
-
-    The sidecars carry kernels, so the CPU-only preflight passes them and the
-    splitter is handed a file with no iteration loop in it. It then reports
-    ``trace_split_no_steady_state``, which reads as "the profiled window was too
-    short" and sends the next person to lengthen a capture that was never a
-    workload timeline. The rejection has to name the real cause instead.
-    """
+    """A directory holding nothing but graph-capture sidecars must not analyse."""
     trace_dir = tmp_path / "torch_trace"
     capture = trace_dir / "capture_traces"
     for bs in (2, 4, 8):
@@ -2196,12 +2100,7 @@ def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
 
 
 def test_capture_sidecars_beside_a_real_trace_still_analyse(tmp_path):
-    """The healthy layout must be unaffected.
-
-    A normal profile writes its annotated trace *beside* the capture sidecars,
-    which is why the rejection tests ``all`` and not ``any``. Getting this
-    backwards would disable roofline for every well-formed profile.
-    """
+    """The healthy layout must be unaffected."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
@@ -2225,12 +2124,7 @@ def test_lone_capture_sidecar_file_is_rejected_by_name(tmp_path, capsys):
 
 
 def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
-    """An ancestor named ``capture_traces`` must not condemn a real trace.
-
-    Paths arrive absolute, so an unbounded component test would reject every
-    candidate whenever the session happened to live under a directory of that
-    name — pointing ``--trace-input`` inside a previous capture, say.
-    """
+    """An ancestor named ``capture_traces`` must not condemn a real trace."""
     root = tmp_path / "capture_traces" / "torch_trace"
     root.mkdir(parents=True)
     real = _rank_trace(root / "rank_0.trace.json.gz", kernels=7)
@@ -2242,12 +2136,7 @@ def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
 
 
 def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
-    """``bs_`` without a batch number must not classify as a sidecar.
-
-    The classifier decides whether an input is rejected outright, not just how
-    it sorts, so matching three characters of a filename is too cheap a reason
-    to throw a real trace away. The sidecar shapes carry a batch number.
-    """
+    """``bs_`` without a batch number must not classify as a sidecar."""
     root = tmp_path / "torch_trace"
     root.mkdir()
     classify_root = tla._capture_classification_root(root)
@@ -2260,12 +2149,7 @@ def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
 
 
 def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
-    """Discovery ordering must keep sidecars behind the annotated trace.
-
-    The sort key and the preflight now share one classifier, so this pins the
-    ordering half: a sidecar that is *larger* than the real trace still sorts
-    behind it.
-    """
+    """Discovery ordering must keep sidecars behind the annotated trace."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
@@ -2282,8 +2166,8 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
         # Hyperloom-patched SGLang.
         ("capture_traces/bs_2_rank0.json.gz", True),
         ("capture_traces/bs_64_rank7.json.gz", True),
-        # Unpatched SGLang: neither the directory nor the filename matches the
-        # patched shape, and the ``cuda_`` prefix defeats a start-anchored test.
+        # Unpatched SGLang: neither the directory nor the filename matches the patched shape, and the ``cuda_`` prefix
+        # defeats a start-anchored test.
         ("graph_capture_profile/cuda_graph_capture-DecodeCudaGraphRunner-TP-3.json.gz", True),
         # vLLM.
         ("graph_capture_rank0.json.gz", True),
@@ -2294,22 +2178,13 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
     ],
 )
 def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpath, expected):
-    """The classifier keys on shape, so a new layout does not slip through.
-
-    Each entry is a layout a production profile actually wrote. An exact-name
-    whitelist passed the first two and missed the SGLang-without-patch one.
-    """
+    """The classifier keys on shape, so a new layout does not slip through."""
     path = tmp_path / relpath
     assert tla._is_capture_fragment(path, tmp_path) is expected
 
 
 def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
-    """``graph_capture`` anchors in a directory name, unlike in a filename.
-
-    A directory is named for what it holds, so an unanchored token would also
-    condemn ``torch_profiler_with_graph_capture/`` -- and the capture-only
-    preflight is an ``all(...)``, so one false positive rejects the whole input.
-    """
+    """``graph_capture`` anchors in a directory name, unlike in a filename."""
     safe = tmp_path / "torch_profiler_with_graph_capture" / "rank_0.trace.json.gz"
     assert tla._is_capture_fragment(safe, tmp_path) is False
     for capture_dir in ("graph_capture", "graph_capture_profile", "capture_traces"):
@@ -2317,13 +2192,7 @@ def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
 
 
 def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
-    """The capture folder must be locatable, not merely demoted during ranking.
-
-    Ranking keeps the sidecars out of the analysis input; discovery is what
-    hands them to TraceLens as ``--capture_folder``. Two hard-coded names meant
-    a run could pick the right workload trace and still lose its graph-capture
-    input.
-    """
+    """The capture folder must be locatable, not merely demoted during ranking."""
     trace_dir = tmp_path / "torch_trace"
     (trace_dir / "graph_capture_profile").mkdir(parents=True)
     real = _rank_trace(trace_dir / "1786735404.4274018-TP-0.trace.json.gz", kernels=4)
@@ -2338,14 +2207,7 @@ def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
 
 
 def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
-    """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace.
-
-    ``graph_capture_profile/`` matched no known capture shape, so its files
-    shared the default bucket with the workload traces, where the tie-break is
-    descending size. The capture is the larger file, so it led discovery, the
-    probe stopped on it, and the splitter cut a bs=1/conc=1 graph-capture window
-    that carried zero GPU events. The whole kernel phase was lost to it.
-    """
+    """GLM-5.2 regression: a 103 MB capture must not outrank a 20 MB trace."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     real = _rank_trace(trace_dir / "1786734684.9990146-TP-0.trace.json.gz", kernels=8)
@@ -2360,15 +2222,7 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
 
 
 def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
-    """The promotion must hold on the route xDiT actually takes.
-
-    Scriptable (xDiT/diffusion) workloads are dispatched with ``--skip-split``
-    (see ``request_handlers``), which bypasses the splitter entirely and feeds
-    the analysis path straight to the TraceLens skill. The other promotion tests
-    assert on splitter argv, so they cover the branch these sessions never
-    enter -- which is to say the regression this change exists to prevent was
-    untested on the one path that produced it.
-    """
+    """The promotion must hold on the route xDiT actually takes."""
     from unittest.mock import patch
 
     trace_dir = tmp_path / "torch_trace"
@@ -2376,14 +2230,8 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
 
-    # The skill runs in-process, so the analysed trace never reaches a
-    # subprocess argv the way the splitter's does -- the skill's own arguments
-    # are the only place the promotion is observable. ``seen`` is filled before
-    # the sentinel is raised, so the assertions below read state captured while
-    # the run was still healthy and do not depend on how main unwinds. Raising
-    # only avoids standing up the analysis.md fixtures the remainder of the run
-    # would demand, which this test asserts nothing about; main records the
-    # sentinel as an orchestrator failure and refuses the retired CSV parsers.
+    # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
+    # the skill's own arguments are the only place the promotion is observable.
     class _StopAfterSkillDispatch(Exception):
         """Ends the run once the skill's input trace has been recorded."""
 
@@ -2407,15 +2255,7 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
 
 
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
-    """An ancestor directory name must not flatten the whole ranking.
-
-    ``--trace-input`` is resolved to an absolute path, so a ``trace_split``
-    component is checked against every ancestor unless the test is anchored at
-    the capture root. Pointing at a capture that happens to sit below such a
-    directory would otherwise demote every candidate into the same bucket, at
-    which point ordering falls back to filename and the original bug is exactly
-    reproduced -- from nothing but a coincidence of naming.
-    """
+    """An ancestor directory name must not flatten the whole ranking."""
     trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"
     trace_dir.mkdir(parents=True)
     fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz", kernels=0)
@@ -2431,13 +2271,7 @@ def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_
 
 
 def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
-    """A corrupt trace and a CPU-only trace must not read as the same finding.
-
-    Both counted as zero kernels before, so a truncated rank_0 was described as
-    having "no GPU kernel events" -- sending the next reader to the profiler for
-    a file problem. That is the same misdirection this change was written to
-    remove, so it should not be reintroduced by the promotion that fixes it.
-    """
+    """A corrupt trace and a CPU-only trace must not read as the same finding."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     corrupt = trace_dir / "rank_0.trace.json.gz"
@@ -2454,14 +2288,7 @@ def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
 
 
 def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
-    """A run that switched its own input has to be explicable afterwards.
-
-    A CLI log line is not a contract: session breakdown and roofline snapshot
-    read ``trace_health_warnings`` and the artifact map, and neither recorded
-    which of the discovered traces was actually analysed. Without this, a
-    silently promoted run is indistinguishable downstream from one that used the
-    file discovery reported.
-    """
+    """A run that switched its own input has to be explicable afterwards."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
@@ -2478,17 +2305,13 @@ def test_promotion_is_recorded_as_a_trace_health_warning(tmp_path, capsys):
     )
     assert promoted[0]["analysed"] == populated.name
     assert promoted[0]["leading_candidate"] == "rank_0.trace.json.gz"
-    # The probe record is what distinguishes "rank_0 had no kernels" from
-    # "rank_0 could not be read", which are different problems.
+    # The probe record is what distinguishes "rank_0 had no kernels" from "rank_0 could not be read", which are
+    # different problems.
     assert "rank_0.trace.json.gz=0" in promoted[0]["probed"]
 
 
 def test_no_promotion_warning_when_the_leading_candidate_is_used(tmp_path, capsys):
-    """The warning must stay absent on the ordinary path.
-
-    An informational warning that fires on every healthy run is noise, and noise
-    in ``trace_health_warnings`` costs the Coordinator the signal.
-    """
+    """The warning must stay absent on the ordinary path."""
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=9)
@@ -2523,9 +2346,7 @@ def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
 
 
 def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
-    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO
-    env — the same variable Hyperloom propagates from the YAML config
-    into every Magpie subprocess. Locks down the env→splitter seam."""
+    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO"""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -2538,10 +2359,7 @@ def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
 
 
 def test_194_3_splitter_omits_R_when_unset(tmp_path):
-    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must
-    not see --R. The splitter's built-in default (`R=None`) keeps the
-    old heuristic path live for legacy traces that pre-date the
-    skill-aligned formulas."""
+    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must"""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -2598,16 +2416,15 @@ def test_parse_analysis_md_llama70b_fixture_yields_21_compute_candidates():
     assert p1_first["efficiency_peak_value"] == 708.0
     assert "TFLOPS" in p1_first["efficiency_peak_unit"]
     assert p1_first["impact_score"] == 15.12  # mid value from p_item marker
-    # Args is "<br>"-joined upstream; parser must normalise to a list of
-    # whitespace-trimmed shape strings without losing entries.
+    # Args is "<br>"-joined upstream; parser must normalise to a list of whitespace-trimmed shape strings without
+    # losing entries.
     assert p1_first["shapes"] == [
         "(24576,8192) bf16",
         "(8192,28672) bf16",
         "(24576,28672) bf16",
     ]
-    # Kernel Path is "—" for every row in this fixture; parser must keep the
-    # field as empty string (not the dash) so downstream "no source path"
-    # checks remain truthy.
+    # Kernel Path is "—" for every row in this fixture; parser must keep the field as empty string (not the dash) so
+    # downstream "no source path" checks remain truthy.
     assert p1_first["source_file"] == ""
 
     # Last candidate is the lone SDPA_bwd row (P3 in the report).
@@ -2900,8 +2717,8 @@ def test_parse_analysis_md_attaches_prose_from_fixture():
     )
 
 
-# parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical
-# ones (attention appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
+# parse_analysis_md — spec allows trailing category-specific extra columns after the 9 canonical ones (attention
+# appends 3, generic-op appends Sub-Category); the parser must accept them, not skip.
 _FIXTURE_QWEN3_ATTENTION_ANALYSIS_MD = (
     Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "tracelens_v03_qwen3_moe_attention_analysis.md"
 )
@@ -2925,8 +2742,8 @@ def test_parse_analysis_md_tolerates_attention_12_column_table_per_spec():
     assert "TB/s" in c["efficiency_peak_unit"]
     # impact_score is the mid value carried by the p_item marker.
     assert c["impact_score"] == 2.2
-    # Kernel Path is a real launcher string (not "—"), so source_file
-    # must round-trip the relative path (resolution happens downstream).
+    # Kernel Path is a real launcher string (not "—"), so source_file must round-trip the relative path (resolution
+    # happens downstream).
     assert "qwen3_moe.py" in c["source_file"]
     # The three trailing extra cells are spec-allowed extras, preserved under tracelens_extra_columns.
     extras = c.get("tracelens_extra_columns")
@@ -3101,8 +2918,7 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
-    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling
-    .cuh/.cpp.jinja) must be skipped, not edited."""
+    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling"""
     src = "/path/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
@@ -3127,9 +2943,7 @@ def test_library_token_pairing():
 
 
 def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
-    """aiter .cu/.cuh device sources are patchable even when source_type is
-    'unknown' (classifier ran before source_file resolved). Enables forge to
-    optimize aiter::mha_batch_prefill etc."""
+    """aiter .cu/.cuh device sources are patchable even when source_type is"""
     src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
@@ -3139,8 +2953,7 @@ def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypat
 
 
 def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
-    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled
-    CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
+    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled"""
     src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
@@ -3338,9 +3151,7 @@ def test_parse_launcher_path_swallows_deep_dict_repr():
     assert tlr._parse_launcher_path(payload) == ("", None, None)
 
 
-# ---------------------------------------------------------------------------
 # _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
-# Pins the three resolution paths (importlib spec, env override, hardcoded fallback) plus no-op cases.
 
 
 def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
@@ -3469,11 +3280,7 @@ def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatc
 
 
 def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
-    """When the first candidate root holds a stub that fails AST
-    validation, the resolver MUST keep walking the candidate list
-    instead of short-circuiting — otherwise a single bad spec
-    (shadowed pkg / stale wheel) permanently masks the real source on
-    the fallback path."""
+    """When the first candidate root holds a stub that fails AST"""
     bad_root = tmp_path / "bad"
     good_root = tmp_path / "good"
     bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
@@ -3926,13 +3733,11 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
         "case_003",
         "case_004",
     ]
-    # Each row preserves its own shape list verbatim — no merging,
-    # no de-duplication. Order is duration-desc post-aggregation so
-    # row[0]=k001, row[3]=k004.
+    # Each row preserves its own shape list verbatim — no merging, no de-duplication.
     assert g["rows"][0]["shapes"] == ["(64,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
     assert g["rows"][3]["shapes"] == ["(2048,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
-    # Cross-row distinctness: the "(640,2880)" shape only appears in
-    # k002's row, never bleeds into k001's or k003's row.
+    # Cross-row distinctness: the "(640,2880)" shape only appears in k002's row, never bleeds into k001's or k003's
+    # row.
     assert "(640,2880) bf16" in g["rows"][1]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
@@ -3957,8 +3762,7 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
 
 
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
-    """Candidates with empty / em-dash Kernel Path (LLama70B fixture
-    shape) produce zero groups — caller falls back to per-kernel."""
+    """Candidates with empty / em-dash Kernel Path (LLama70B fixture"""
     cands = [
         {"kernel_id": "k001", "name": "x", "tracelens_launcher_path": ""},
         {"kernel_id": "k002", "name": "y", "tracelens_launcher_path": "—"},
@@ -3969,9 +3773,7 @@ def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
 
 
 def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
-    """Candidates from raw-trace / csv fallback paths lack
-    ``tracelens_launcher_path`` but may carry a Python-shaped path in
-    ``source_file``; we still parse those when possible."""
+    """Candidates from raw-trace / csv fallback paths lack"""
     cands = [
         {
             "kernel_id": "k001",
@@ -3986,17 +3788,12 @@ def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
     assert groups[0]["function_name"] == "rms_norm"
 
 
-# ===========================================================================
-# task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST
-# def-line (TraceLens reports the per-call ``#L`` line), and C++ template/dtype
-# mangling varies the name. Native sources key on ``(normalized_op,
-# canonical_path)`` only, preserving the invariant that distinct base-name
-# kernels sharing a wrapper never merge.
-# ===========================================================================
+# task-group over-splitting: native (.cu/.hip/.cpp) kernels have no Python AST def-line (TraceLens reports the
+# per-call ``#L`` line), and C++ template/dtype mangling varies the name.
 def test_normalize_operation_key_strips_templates():
-    """Template/dtype args are dropped; distinct base names stay distinct;
-    nested templates are handled; an all-template name falls back to the
-    original so a group key never collapses to empty."""
+    """Template/dtype args are dropped; distinct base names stay distinct; nested templates are handled; an
+    all-template name falls back to the original so a group key never collapses to empty.
+    """
     normalize_operation_key = task_group_contract.normalize_operation_key
 
     assert normalize_operation_key("rmsnorm_kernel<bf16>") == "rmsnorm_kernel"
@@ -4011,12 +3808,7 @@ def test_normalize_operation_key_strips_templates():
 
 
 def test_operation_key_drops_launch_decoration_for_both_source_kinds():
-    """One kernel reached through two launch APIs is one operator.
-
-    The launch API, the C return type and the synthetic-op suffix describe how a
-    trace saw the dispatch, so keeping them splits a single kernel into one task
-    group per launch path and ports its source once per group.
-    """
+    """One kernel reached through two launch APIs is one operator."""
     normalize_operation_key = task_group_contract.normalize_operation_key
     native_operation_key = task_group_contract.native_operation_key
 
@@ -4064,8 +3856,7 @@ def test_py_task_group_merges_launch_paths_of_one_kernel():
 
 
 def test_is_native_source_detects_device_extensions():
-    """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive);
-    Python and unrelated files are not."""
+    """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive); Python and unrelated files are not."""
     for p in ("kern.cu", "a/b/kern.cuh", "x.hip", "y.cpp", "Z.CU", "k.cc"):
         assert tlr._is_native_source(p), p
     for p in ("model.py", "wrapper.pyi", "notes.txt", ""):
@@ -4073,8 +3864,7 @@ def test_is_native_source_detects_device_extensions():
 
 
 def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
-    """Profiler-derived names can begin with ``-``; grep must not treat them
-    as command-line options."""
+    """Profiler-derived names can begin with ``-``; grep must not treat them"""
     src = tmp_path / "kernel.py"
     src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
 
@@ -4083,9 +3873,7 @@ def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """A native .cu kernel invoked from two call sites reports two different
-    ``#L`` lines (no Python AST def-line exists). Native sources must key on
-    ``(op, path)`` only and collapse to one task_group."""
+    """A native .cu kernel invoked from two call sites reports two different"""
     src = tmp_path / "rmsnorm.cu"
     src.write_text(
         "__global__ void rmsnorm_kernel(float* x) { /* ... */ }\n",
@@ -4118,11 +3906,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """Three instantiations of ONE ``__global__`` template
-    (``add_rmsnorm_quant_kernel``) in ONE .cu, named with DIFFERENT
-    Itanium-mangled symbols and autoresolving to the SAME bare .cu path, must
-    collapse into ONE task_group: the mangled operation and per-call line are
-    NOT part of the native key."""
+    """Three instantiations of ONE ``__global__`` template"""
     src = tmp_path / "rmsnorm_quant_kernels.cu"
     src.write_text(
         "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"
@@ -4197,10 +3981,7 @@ def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
 
 
 def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
-    """Operation normalization applies to the Python track too: two
-    candidates sharing one wrapper whose names differ only by dtype
-    template args merge. Path/line/fn are identical here, so this
-    isolates normalization from the native call-site-line rule."""
+    """Operation normalization applies to the Python track too: two"""
     src = tmp_path / "layer.py"
     src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
     launcher = f"{src}(1): forward"
@@ -4226,9 +4007,7 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
 
 
 def test_aggregate_canonicalizes_native_source_path():
-    """The same .cu file reached via a non-normalized path
-    (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one
-    group rather than splitting on the literal path string."""
+    """The same .cu file reached via a non-normalized path"""
     cands = [
         {
             "kernel_id": "k001",
@@ -4251,11 +4030,8 @@ def test_aggregate_canonicalizes_native_source_path():
 
 
 # build_task_groups (tracelens_analysis.py wrapper)
-# ===========================================================================
 def test_build_task_groups_filters_non_reusable():
-    """build_task_groups skips candidates with reusable_native_kernel=False
-    so vendor / aten:: / runtime-generated kernels never appear in a
-    group's kernel_ids."""
+    """build_task_groups skips candidates with reusable_native_kernel=False"""
     cands = [
         {
             "kernel_id": "k001",
@@ -4334,8 +4110,7 @@ def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch
     assert tla._default_workspace_path() == "/legacy/workspace"
 
 
-# Idle-% sanity gate on the Executive Summary. High idle => pivot to params;
-# default threshold 80% (overridable via HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD).
+# Idle-% sanity gate on the Executive Summary.
 
 _EXEC_SUMMARY_LOW_IDLE = """\
 # Workload Analysis
@@ -4553,9 +4328,6 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.
-# ---------------------------------------------------------------------------
-# _extract_total_time_us_from_gpu_timeline
-# ---------------------------------------------------------------------------
 
 
 def test_extract_total_time_us_from_gpu_timeline(tmp_path):
@@ -4573,9 +4345,7 @@ def test_extract_total_time_us_returns_none_when_missing(tmp_path):
     assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
 
 
-# ---------------------------------------------------------------------------
 # gpu_timeline cell reads + low-compute gate evaluation
-# ---------------------------------------------------------------------------
 
 
 def _write_gpu_timeline(tmp_path, body: str):
@@ -4587,12 +4357,10 @@ def _write_gpu_timeline(tmp_path, body: str):
 @pytest.mark.parametrize(
     "body",
     [
-        # Duration column renamed beyond the known aliases: the row is found,
-        # the number is not. Column drift is not hypothetical -- the row
-        # *labels* already needed multi-spelling tolerance.
+        # Duration column renamed beyond the known aliases: the row is found, the number is not.
         "type,duration,percent\ntotal_time,18186.6,100.0\n",
-        # Row truncated: DictReader yields None for the missing cell, and
-        # float(None) raises TypeError rather than ValueError.
+        # Row truncated: DictReader yields None for the missing cell, and float(None) raises TypeError rather than
+        # ValueError.
         "type,time ms,percent\ntotal_time\n",
         # Present but blank.
         "type,time ms,percent\ntotal_time,,100.0\n",
@@ -4601,13 +4369,7 @@ def _write_gpu_timeline(tmp_path, body: str):
     ],
 )
 def test_unreadable_total_time_cell_is_none_not_zero(tmp_path, body):
-    """An unreadable window total must fail open, never read as ``0 ms``.
-
-    The total is the ``gpu_pct`` denominator, so defaulting a missing or
-    unparseable cell to 0 would skew every reported share, silently and with
-    ``status`` still ``ok``, instead of letting the caller fall back to summing
-    the candidates.
-    """
+    """An unreadable window total must fail open, never read as ``0 ms``."""
     _write_gpu_timeline(tmp_path, body)
     assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
 
@@ -4620,12 +4382,7 @@ def test_known_duration_column_spellings_are_read(tmp_path, column):
 
 
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
-    """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy.
-
-    A collective that spin-waits on peer ranks is charged as GPU-busy, so the
-    idle gate sees 0.02% and lets the window through. The compute share is what
-    exposes it.
-    """
+    """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy."""
     monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
     threshold, warning = tla._evaluate_low_compute_gate(3.99, 95.99, tmp_path / "analysis.md")
     assert threshold == 10.0
@@ -4672,9 +4429,7 @@ def test_extract_compute_pct_from_analysis_md_missing_row(tmp_path):
     assert tlr.extract_exposed_comm_pct_from_analysis_md(md) is None
 
 
-# ---------------------------------------------------------------------------
 # _normalize_profiler_op_name / graph-captured keyword recovery
-# ---------------------------------------------------------------------------
 
 
 def test_normalize_profiler_op_name_strips_graph_wrappers():
@@ -4702,8 +4457,8 @@ def test_normalize_profiler_op_name_strips_graph_wrappers():
 
 
 def test_candidate_keywords_recovers_graph_captured_symbols():
-    # Before normalization these kept the "hipGraphLaunch->void " prefix and
-    # greped to nothing; now they yield the real kernel identifier.
+    # Before normalization these kept the "hipGraphLaunch->void " prefix and greped to nothing; now they yield the
+    # real kernel identifier.
     kws = tla._candidate_keywords("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
     assert "paged_attention_ll4mi_QKV_mfma16_kernel" in kws
 
@@ -4715,11 +4470,8 @@ def test_candidate_keywords_recovers_graph_captured_symbols():
     assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
 
 
-# --- idle gate must honor cuda/HIP-graph under-recording (regression) ---
-# A graph-mode capture under-records replays (profiler activity-buffer overflow),
-# so idle% is inflated. The bypass route already skips its idle gate in that
-# case; the TraceLens route must do the same instead of suppressing every hot
-# kernel on a workload that is actually compute-bound.
+# --- idle gate must honor cuda/HIP-graph under-recording (regression) --- A graph-mode capture under-records replays
+# (profiler activity-buffer overflow), so idle% is inflated.
 
 
 def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
@@ -4782,23 +4534,9 @@ def _write_trace(
     omit_device_steps=(),
     extra_events=None,
 ):
-    """Build a minimal torch-profiler trace with GPU step annotations.
-
-    ``step_durs`` are microsecond durations laid end to end; each becomes one
-    ``step[<phase> ...]`` gpu_user_annotation, its host-side twin, and a kernel
-    inside it, so the trimmer has both something to measure and something to
-    drop. ``phases`` supplies a per-step phase token (default ``DECODE`` for
-    every step).
-
-    ``unique_names=False`` omits the per-step ``g_sk`` field, reproducing the
-    framework builds whose step annotations repeat verbatim; the two timelines
-    then cannot be paired by name. ``omit_host_steps`` and ``omit_device_steps``
-    drop one side's annotation for the given step indices, which is how real
-    captures arrive: most measured rank traces carry every host ``step[...]``
-    against only a handful of device ones.
-    """
-    # torch stamps metadata with the profiler-open ts, i.e. always before any
-    # cut point -- reproduce that, it is what made a naive ts filter drop it.
+    """Build a minimal torch-profiler trace with GPU step annotations."""
+    # torch stamps metadata with the profiler-open ts, i.e. always before any cut point -- reproduce that, it is what
+    # made a naive ts filter drop it.
     events = [
         {"ph": "M", "name": "process_name", "ts": 999_999.0, "pid": 1, "args": {"name": "python"}},
         {"ph": "M", "name": "thread_name", "ts": 999_999.0, "pid": 1, "tid": 7, "args": {"name": "t"}},
@@ -4807,10 +4545,8 @@ def _write_trace(
     for i, dur in enumerate(step_durs):
         phase = (phases or ["DECODE"] * len(step_durs))[i]
         name = f"step[{phase} bs=64 g_sk={i}]" if unique_names else f"step[{phase} bs=64]"
-        # The host runs a step ahead: step N's launches are issued while step
-        # N-1 still owns the GPU, so the lead is bounded by the *previous*
-        # step's duration. Reproduce that offset -- it is what makes a
-        # single-timestamp cut unable to separate the two.
+        # The host runs a step ahead: step N's launches are issued while step N-1 still owns the GPU, so the lead is
+        # bounded by the *previous* step's duration.
         host_ts = ts - min(host_lead_us, step_durs[i - 1]) if i else ts - 1.0
         if i not in omit_host_steps:
             events.append(
@@ -4867,8 +4603,8 @@ def test_pretrim_drops_leading_barrier_step(tmp_path):
     spans = tla._step_annotation_spans(out["traceEvents"])
     assert len(spans) == 127
     assert max(dur for _, dur, _ in spans) < 40_000.0  # the barrier step is gone
-    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its
-    # process/thread names and TraceLens can't attribute anything.
+    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its process/thread names and TraceLens
+    # can't attribute anything.
     assert sum(1 for ev in out["traceEvents"] if ev.get("ph") == "M") == 2
     assert out["baseTimeNanoseconds"] == 12345
 
@@ -4962,13 +4698,7 @@ def test_pretrim_threshold_is_the_module_default(tmp_path):
 
 
 def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
-    """The kept step's host ops survive even though they start inside the
-    dropped step's device span.
-
-    Host launches run a step ahead of the device, so a single-timestamp cut on
-    the device boundary would strip them -- and with them the shape-carrying
-    frames TraceLens attributes MoE kernels through.
-    """
+    """The kept step's host ops survive even though they start inside the"""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -4978,8 +4708,7 @@ def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
 
     trimmed, report = tla.pretrim_startup_transient(src, dst)
     assert trimmed is True
-    # Two cuts, host earlier -- and by the full lead, not a value clamped down
-    # to the kept step's own duration.
+    # Two cuts, host earlier -- and by the full lead, not a value clamped down to the kept step's own duration.
     assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
 
     ev = tla.open_json(dst)["traceEvents"]
@@ -4993,11 +4722,7 @@ def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
 
 
 def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
-    """Kernels belonging to the dropped step do not leak past the host cut.
-
-    The dropped step's device span extends beyond the kept step's host start, so
-    a host-boundary cut alone would leave its trailing kernels behind as orphans.
-    """
+    """Kernels belonging to the dropped step do not leak past the host cut."""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -5014,8 +4739,7 @@ def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
 
 
 def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
-    """Step count downstream is set by --num-steps, and the trim keeps well
-    clear of it: the splitter still gets its full window, only shifted."""
+    """Step count downstream is set by --num-steps, and the trim keeps well"""
     src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
     dst = tmp_path / "r.pretrimmed.trace.json.gz"
 
@@ -5026,14 +4750,7 @@ def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
 
 
 def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
-    """Repeated step names must still cut both timelines at the right place.
-
-    Framework builds that omit the cumulative-sequence-length fields emit the
-    same ``step[DECODE bs=64]`` for every step. Pairing the timelines by name
-    resolves the surviving step to the *first* occurrence, which puts the host
-    cut at the head of the capture and leaves the dropped step's entire host
-    side in the trimmed trace.
-    """
+    """Repeated step names must still cut both timelines at the right place."""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -5047,23 +4764,19 @@ def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
     assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
 
     ev = tla.open_json(dst)["traceEvents"]
-    # One host annotation per surviving device step, and no more: the dropped
-    # step's host side went with its device side.
+    # One host annotation per surviving device step, and no more: the dropped step's host side went with its device
+    # side.
     assert len(tla._step_annotation_spans(ev)) == 40
     assert sum(1 for e in ev if e.get("cat") == "user_annotation") == 40
-    # launch_0 is the dropped step's host op; it must not survive on the
-    # strength of a name it shares with every other step.
+    # launch_0 is the dropped step's host op; it must not survive on the strength of a name it shares with every other
+    # step.
     launches = {e["name"] for e in ev if e.get("cat") == "cpu_op"}
     assert "launch_0" not in launches
     assert "launch_1" in launches
 
 
 def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path):
-    """Unequal step counts make positional pairing meaningless, either way round.
-
-    Falling back to a single cut is the outcome the split-cut design exists to
-    avoid, so the trim is refused and the counts recorded instead.
-    """
+    """Unequal step counts make positional pairing meaningless, either way round."""
     src = _write_trace(
         tmp_path / "fewer_host.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 20,
@@ -5080,15 +4793,7 @@ def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path)
 
 
 def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
-    """More host steps than device steps is the shape real captures arrive in.
-
-    Measured rank traces carry every host ``step[...]`` against a fraction of
-    the device ones, and the gaps are not at the tail. Indexing the host list by
-    the device position then resolves to some earlier step, putting the host cut
-    before the transient and leaving its host side in the window -- and a guard
-    that only rejects *too few* host entries lets it through, because there are
-    more of them, not fewer.
-    """
+    """More host steps than device steps is the shape real captures arrive in."""
     src = _write_trace(
         tmp_path / "fewer_device.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 20,
@@ -5105,13 +4810,7 @@ def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
 
 
 def test_pretrim_keeps_leading_prefill_steps(tmp_path):
-    """Prefill steps are not transients just because decode dominates the trace.
-
-    A mixed capture's EXTEND steps run one to two orders of magnitude longer
-    than its DECODE steps. Measured against a whole-trace median they all read
-    as outliers, and the leading ones -- the window
-    ``--steady-state-mode=prefilldecode`` exists to analyse -- get trimmed away.
-    """
+    """Prefill steps are not transients just because decode dominates the trace."""
     durs = [1_200_000.0, 880_000.0, 1_530_000.0] + [32_944.0] * 30
     phases = ["EXTEND"] * 3 + ["DECODE"] * 30
     src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
@@ -5129,11 +4828,7 @@ def test_pretrim_keeps_leading_prefill_steps(tmp_path):
 
 
 def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
-    """The guard still fires when the transient lands on a prefill step.
-
-    Per-phase baselines must not amount to exempting prefill: a barrier that
-    opens on an EXTEND step is as fatal to the window as one on a DECODE step.
-    """
+    """The guard still fires when the transient lands on a prefill step."""
     durs = [15_781_320.0, 1_200_000.0, 1_150_000.0, 1_180_000.0] + [32_944.0] * 30
     phases = ["EXTEND"] * 4 + ["DECODE"] * 30
     src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
@@ -5144,19 +4839,15 @@ def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
     assert trimmed is True
     assert report["dropped_steps"] == 1
     assert report["dropped_phase"] == "EXTEND"
-    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms,
-    # which would have made it 479x and swept the healthy prefill steps with it.
+    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms, which would have made it 479x and swept
+    # the healthy prefill steps with it.
     assert report["outlier_ratio"] == pytest.approx(15_781_320.0 / 1_200_000.0, rel=1e-3)
     assert report["phase_medians_ms"]["EXTEND"] == pytest.approx(1_200.0)
     assert report["remaining_steps"] == 33
 
 
 def test_pretrim_leaves_a_phase_without_a_baseline_alone(tmp_path):
-    """A leading step whose phase is too rare to have a median is not dropped.
-
-    With no population of its own to compare against there is no evidence the
-    step is abnormal, so it stays and the window keeps it.
-    """
+    """A leading step whose phase is too rare to have a median is not dropped."""
     durs = [9_000_000.0] + [32_944.0] * 30
     phases = ["EXTEND"] + ["DECODE"] * 30
     src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
@@ -5184,12 +4875,7 @@ def test_pretrim_reports_the_worst_ratio_across_dropped_steps(tmp_path):
 
 
 def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
-    """A failed write must not be reported with the ``trimmed`` reason.
-
-    The caller keys its log line and the pretrim artifact off ``reason``; a
-    report that still says ``trimmed`` after the write failed makes a full-disk
-    run look like a successful trim that simply was not applied.
-    """
+    """A failed write must not be reported with the ``trimmed`` reason."""
     src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 40)
     dst = tmp_path / "out" / "r.pretrimmed.trace.json.gz"
 
@@ -5203,20 +4889,14 @@ def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
     assert trimmed is False
     assert report["reason"] == "write_failed"
     assert "No space left on device" in report["error"]
-    # The step accounting is kept for diagnosis, but no partial file is left
-    # behind for a later step to mistake for a usable trace.
+    # The step accounting is kept for diagnosis, but no partial file is left behind for a later step to mistake for a
+    # usable trace.
     assert report["dropped_steps"] == 1
     assert not dst.exists()
 
 
 def test_pretrim_redirects_only_the_splitter_input(tmp_path):
-    """The splitter reads the trimmed copy; nothing else is repointed at it.
-
-    ``analysis_trace_path`` is what capture-folder discovery and the split
-    warnings resolve against, so reassigning it to the derived file under
-    ``trace_split/`` moves both onto a directory that holds neither the capture
-    nor its graph-capture sidecar.
-    """
+    """The splitter reads the trimmed copy; nothing else is repointed at it."""
     captured, trace = _drive_main_capturing_subprocess(
         tmp_path,
         [],
@@ -5239,12 +4919,7 @@ def test_pretrim_redirects_only_the_splitter_input(tmp_path):
 
 
 def test_capture_folder_is_not_discoverable_from_the_split_directory(tmp_path):
-    """Why the splitter's input has to stay separate from the analysed path.
-
-    Discovery searches the trace file's own directory and its parent. A trimmed
-    copy lives in ``tracelens/trace_split/``, whose neighbourhood is the run's
-    output tree -- the capture's sidecar is not in it.
-    """
+    """Why the splitter's input has to stay separate from the analysed path."""
     capture_dir = tmp_path / "torch_trace"
     (capture_dir / "graph_capture_profile").mkdir(parents=True)
     raw = capture_dir / "r.trace.json.gz"
