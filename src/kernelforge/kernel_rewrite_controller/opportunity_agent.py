@@ -236,6 +236,21 @@ Apply these non-negotiable opportunity rules:
    with the same shapes, dtypes, layouts, and semantic inputs. Performance must
    time CUDA/HIP graph replays over preallocated inputs; do not use eager timing
    or silently fall back to eager execution.
+6. Set world_size to the current serving TP width only when the operator is a
+   true collective that needs multiple ranks to compute the correct result.
+   Otherwise keep world_size at 1.
+7. When world_size > 1, operator_name must encode the parallelism (for example
+   custom_all_reduce_tp8) because the same collective at different rank counts
+   is a different optimization target. Choose backend aiter for editable
+   all_reduce / reduce_scatter / all_gather sources in aiter.
+8. Publish only communication operators with editable tracked source. Skip RCCL
+   and NCCL vendor binaries with no editable generator. kernel_candidates.json
+   rows with candidate_source nccl_summary already map mangled kernels back to
+   editable aiter device sources; those are valid publish targets.
+9. Do not author distributed launch or cross-rank measurement logic in driver.py.
+   Write the same single-process driver contract; forge-loop task preparer adds
+   torchrun launch, process-group setup, and cross-rank reductions when
+   world_size > 1.
 
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under
@@ -271,6 +286,7 @@ task.json must use this exact top-level structure:
     "dtype": "<runtime dtype>"
   }],
   "priority": 0,
+  "world_size": 1,
   "reason": "<why this measured workload may improve>",
   "evidence": [{
     "level": "<measured|corroborated|inferred>",

@@ -84,6 +84,7 @@ class KernelRewriteTask:
     shape_cases: tuple[dict[str, Any], ...] = ()
     reason: str = ""
     evidence: tuple[Any, ...] = ()
+    world_size: int = 1
     schema_version: int = TASK_SCHEMA_VERSION
 
 

@@ -99,6 +99,45 @@ def test_invocation_maps_task_to_named_kernel_forge_loop(tmp_path: Path) -> None
     assert "--nomination-input" not in command
 
 
+def test_invocation_forwards_world_size_as_nproc_per_node(tmp_path: Path) -> None:
+    task, task_dir, driver, worktree = _task_and_worktree(tmp_path)
+    task = parse_task_payload(
+        {
+            "schema_version": 1,
+            "identity": {
+                "producer": "forge-loop",
+                "kernel_name": "custom_all_reduce_tp8",
+                "framework": "sglang",
+                "framework_version": "0.5.0",
+                "backend": "aiter",
+                "gpu": "mi355x",
+            },
+            "base_commit": "a" * 40,
+            "repo_root": str(tmp_path / "repo"),
+            "kernel_path": "sglang/kernels/fused_moe.py",
+            "operator_name": "custom_all_reduce_tp8",
+            "driver_path": "driver.py",
+            "source_files": ["sglang/kernels/fused_moe.py"],
+            "target_functions": ["fused_moe"],
+            "shape_cases": [],
+            "priority": 0,
+            "reason": "",
+            "evidence": [],
+            "world_size": 8,
+        },
+        task_dir=task_dir,
+        enforce_directory_identity=False,
+    )
+    invocation = build_forge_loop_invocation(
+        task,
+        task_dir=task_dir,
+        worktree=worktree,
+        deadline_unix=time.time() + 3600,
+    )
+    command = list(invocation.command)
+    assert command[command.index("--nproc-per-node") + 1] == "8"
+
+
 def test_runner_prefers_the_result_json_written_by_the_child(tmp_path: Path) -> None:
     result_json = tmp_path / "result.json"
     payload = {"improved": True, "best_commit": "b" * 40}

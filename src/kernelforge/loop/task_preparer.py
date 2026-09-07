@@ -160,6 +160,7 @@ class PreflightResult:
     bench_ok: bool
     graph_ok: bool = True
     profile_ok: bool = True
+    ranks_ok: bool = True
     reasons: list[str] = field(default_factory=list)
     details: dict = field(default_factory=dict)
     # Raw stdout+stderr tail per failed stage ("correctness", "bench", ...).
@@ -358,7 +359,7 @@ def _cleanup_probe(out_path: str, probe_dir: str) -> None:
         shutil.rmtree(probe_dir, ignore_errors=True)
 
 
-def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
+def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None = None) -> tuple[int, str]:
     """Validate graph-probe shards and return the effective replay count."""
     unranked_replays: list[int] = []
     ranked_processes: dict[
@@ -441,6 +442,8 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
         world_sizes.add(world_size)
 
     if not ranked_processes:
+        if expected_world_size is not None and expected_world_size > 1:
+            return -1, f"graph probe observed no distributed ranks; expected world_size {expected_world_size}"
         # A normal single-process driver writes one shard. If helper processes
         # also imported sitecustomize, summing their partial counts could let
         # several eager/partial processes collectively satisfy one replay gate.
@@ -449,6 +452,8 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
         return -1, "graph probe rank shards disagree on world_size"
 
     world_size = next(iter(world_sizes))
+    if expected_world_size is not None and world_size != expected_world_size:
+        return -1, f"graph probe observed world_size {world_size}, expected {expected_world_size}"
     expected_ranks = set(range(world_size))
     actual_ranks = set(ranked_processes)
     if actual_ranks != expected_ranks:
@@ -489,6 +494,7 @@ async def _count_graph_replays(
     iters: int,
     *,
     timeout_sec: float = 300,
+    require_ranks: int = 1,
 ) -> tuple[int, str]:
     """Run the driver and return its effective CUDA graph replay count.
 
@@ -507,6 +513,8 @@ async def _count_graph_replays(
         GRAPH_PROBE_OUT=out_path,
         PYTHONPATH=os.pathsep.join([probe_dir, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]),
     )
+    if require_ranks > 1:
+        env["FORGE_NPROC_PER_NODE"] = str(require_ranks)
     cmd = [
         sys.executable,
         driver,
@@ -559,7 +567,10 @@ async def _count_graph_replays(
             detail += f": {tail}"
         return -1, detail
 
-    replays, shard_error = _read_graph_probe_shards(out_path)
+    replays, shard_error = _read_graph_probe_shards(
+        out_path,
+        expected_world_size=require_ranks if require_ranks > 1 else None,
+    )
     _cleanup_probe(out_path, probe_dir)
     if shard_error:
         detail = shard_error
@@ -601,7 +612,41 @@ async def _check_profile_contract(
     output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
     if proc.returncode != 0:
         return False, f"profile-run exited {proc.returncode}: {output[-200:]}"
-    return True, "verified"
+        return True, "verified"
+
+
+def _distributed_static_checks(driver: str, require_ranks: int) -> tuple[bool, list[str]]:
+    """Validate distributed driver source before a multi-rank preflight run."""
+    if require_ranks <= 1:
+        return True, []
+    reasons: list[str] = []
+    try:
+        text = Path(driver).read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, [f"could not read driver for distributed checks: {exc}"]
+
+    if "torch.distributed.run" not in text:
+        reasons.append("distributed driver must self-launch under torch.distributed.run when RANK is absent")
+    if "nproc-per-node" not in text:
+        reasons.append("distributed driver must construct an --nproc-per-node launch")
+    if "ReduceOp.MAX" not in text and "_reduce_max" not in text:
+        reasons.append("distributed benchmark must reduce latency across ranks with MAX")
+    oversub_markers = (
+        "world_size > visible",
+        "visible < WORLD_SIZE",
+        "visible < world_size",
+        "visible < nproc",
+        "visible GPUs for TP",
+    )
+    if not any(marker in text for marker in oversub_markers):
+        reasons.append("distributed driver must refuse to oversubscribe visible GPUs")
+    if "destroy_process_group" not in text and "destroy_distributed_environment" not in text:
+        reasons.append("distributed driver must destroy the distributed environment before exiting")
+    if "torch.distributed." not in text and "dist." not in text:
+        reasons.append("distributed driver must reference torch.distributed collectives")
+    if "manual_seed(seed + " not in text and "manual_seed(seed + ctx.rank)" not in text:
+        reasons.append("distributed driver must seed inputs differently per rank")
+    return (not reasons, reasons)
 
 
 async def _preflight_async(
@@ -611,6 +656,7 @@ async def _preflight_async(
     iters: int,
     require_graph: bool = False,
     require_profile: bool = False,
+    require_ranks: int = 1,
     deadline_unix: float = 0.0,
     expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
@@ -622,6 +668,13 @@ async def _preflight_async(
     def _stage_seconds(since: float) -> float:
         return round(time.monotonic() - since, 3)
 
+    ranks_ok = True
+    if require_ranks > 1:
+        ranks_ok, rank_reasons = _distributed_static_checks(driver, require_ranks)
+        if rank_reasons:
+            reasons.extend(rank_reasons)
+            details["distributed_static"] = {"ok": ranks_ok, "reasons": rank_reasons}
+
     if not driver or not Path(driver).is_file():
         return PreflightResult(
             ok=False,
@@ -629,7 +682,8 @@ async def _preflight_async(
             bench_ok=False,
             graph_ok=not require_graph,
             profile_ok=not require_profile,
-            reasons=[f"driver file not found: {driver}"],
+            ranks_ok=ranks_ok,
+            reasons=[f"driver file not found: {driver}", *reasons],
         )
 
     # Correctness: the driver must EMIT a parseable metric and not crash. Whether
@@ -737,6 +791,7 @@ async def _preflight_async(
                 warmup,
                 iters,
                 timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_GRAPH_TIMEOUT_S),
+                require_ranks=require_ranks,
             )
             details["graph"] = {
                 "replays": replays,
@@ -756,6 +811,9 @@ async def _preflight_async(
                 )
         else:
             reasons.append("cannot verify graph timing because bench produced no timing")
+
+    if require_ranks > 1:
+        ranks_ok = ranks_ok and bench_ok and graph_ok
 
     profile_ok = True
     if require_profile:
@@ -777,13 +835,14 @@ async def _preflight_async(
         else:
             reasons.append("cannot verify profiling contract because bench produced no timing")
 
-    ok = correctness_ok and bench_ok and graph_ok and profile_ok
+    ok = correctness_ok and bench_ok and graph_ok and profile_ok and ranks_ok
     return PreflightResult(
         ok=ok,
         correctness_ok=correctness_ok,
         bench_ok=bench_ok,
         graph_ok=graph_ok,
         profile_ok=profile_ok,
+        ranks_ok=ranks_ok,
         reasons=reasons,
         details=details,
         diagnostics=diagnostics,
@@ -799,6 +858,7 @@ def preflight_task(
     iters: int = PREFLIGHT_ITERS,
     require_graph: bool = False,
     require_profile: bool = False,
+    require_ranks: int = 1,
     deadline_unix: float = 0.0,
     expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
@@ -820,6 +880,7 @@ def preflight_task(
             iters,
             require_graph,
             require_profile,
+            require_ranks,
             deadline_unix,
             expected_case_ids,
         )
@@ -2173,6 +2234,7 @@ async def prepare_task(
                     PREFLIGHT_ITERS,
                     require_graph=True,
                     require_profile=True,
+                    require_ranks=nproc_per_node,
                     deadline_unix=preflight_deadline_unix,
                     expected_case_ids=expected_case_ids,
                 )
@@ -2270,6 +2332,7 @@ async def prepare_task(
                 PREFLIGHT_ITERS,
                 require_graph=True,
                 require_profile=True,
+                require_ranks=nproc_per_node,
                 deadline_unix=preflight_deadline_unix,
                 expected_case_ids=expected_case_ids,
             )

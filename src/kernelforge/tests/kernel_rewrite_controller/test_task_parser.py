@@ -258,3 +258,26 @@ def test_a_directory_name_that_disagrees_with_the_identity_is_refused(
     outcome = load_task(wrong, record_state=False)
     assert outcome.task is None
     assert "does not match canonical operator id" in (outcome.reason or "")
+
+
+def test_world_size_defaults_to_one(task_dir: Path) -> None:
+    result = load_task(task_dir, expected_base_commit=BASE_COMMIT)
+    assert result.ok is True
+    assert result.task is not None
+    assert result.task.world_size == 1
+
+
+def test_world_size_is_parsed_when_present(task_dir: Path, task_payload: dict) -> None:
+    _write_payload(task_dir, {**task_payload, "world_size": 8})
+    result = load_task(task_dir, expected_base_commit=BASE_COMMIT)
+    assert result.ok is True
+    assert result.task is not None
+    assert result.task.world_size == 8
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "4"])
+def test_invalid_world_size_skips_task(task_dir: Path, task_payload: dict, value) -> None:
+    _write_payload(task_dir, {**task_payload, "world_size": value})
+    result = load_task(task_dir, expected_base_commit=BASE_COMMIT)
+    assert result.ok is False
+    assert "world_size" in (result.reason or "")

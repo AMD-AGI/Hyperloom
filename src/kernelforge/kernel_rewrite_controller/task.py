@@ -52,6 +52,7 @@ _OPTIONAL_TASK_FIELDS = frozenset(
         "shape_cases",
         "reason",
         "evidence",
+        "world_size",
     }
 )
 _TASK_FIELDS = _REQUIRED_TASK_FIELDS | _OPTIONAL_TASK_FIELDS
@@ -172,6 +173,10 @@ def parse_task_payload(
     if not isinstance(reason, str):
         raise TaskContractError("reason must be a string")
 
+    world_size_raw = payload.get("world_size", 1)
+    if isinstance(world_size_raw, bool) or not isinstance(world_size_raw, int) or world_size_raw < 1:
+        raise TaskContractError("world_size must be an integer >= 1")
+
     return KernelRewriteTask(
         identity=identity,
         operator_id=operator_id,
@@ -186,6 +191,7 @@ def parse_task_payload(
         shape_cases=tuple(copy.deepcopy(shape_cases)),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
+        world_size=world_size_raw,
     )
 
 
