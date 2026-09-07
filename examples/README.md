@@ -70,19 +70,19 @@ It asks for these values with a fixed option order:
    - `Use default (https://api.anthropic.com)`
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
-2. Model:
-   - `Use default (claude-opus-5)`
-   - `Custom`
-3. Secrets:
+2. Secrets:
    - Setup writes placeholders in `.env`.
    - Edit secrets directly in `.env`; never paste API keys into chat.
    - If `.env` already exists, setup preserves unrelated keys but updates the
      Hyperloom setup keys selected in this run.
+3. Model, asked alongside the non-secret values:
+   - `Use default (claude-opus-5)`
+   - `Custom`
 4. `USER_DATA_PATH`:
    - Default: `<workspace>/session`
    - Custom path
 5. Run mode, recorded in `.env` as `HYPERLOOM_RUN_MODE`:
-   - `docker`
+   - `docker (Recommended)`
    - `baremetal`
 
 ```note
