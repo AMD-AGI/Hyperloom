@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     next_forge_attempt_dir,
 )
 from hyperloom.orchestrator.kernel.forge_handoff import write_forge_handoff
+from hyperloom.orchestrator.kernel.kernel_context import build_kernel_context
 
 
 class _State(SimpleNamespace):
@@ -31,6 +32,7 @@ def _state(**overrides) -> _State:
         "model_path": "/models/example",
         "model_class": "decoder",
         "precision": "fp8",
+        "gpu_type": "MI355X",
         "tp": 8,
         "ep": 2,
         "isl": 1024,
@@ -42,6 +44,8 @@ def _state(**overrides) -> _State:
         "framework_repo_path": "",
         "baseline_config_path": "",
         "current_best": {},
+        "last_baseline": {},
+        "reference_envs": {},
         "last_profile_trace": "",
         "last_trace_analyze": {},
         "profile_context": {
@@ -60,6 +64,11 @@ def _state(**overrides) -> _State:
     }
     values.update(overrides)
     return _State(**values)
+
+
+def _handoff(session_dir: Path, state: _State, *, env_spec: dict | None = None) -> Path:
+    context = build_kernel_context(state, session_dir, env_spec=env_spec)
+    return write_forge_handoff(context, session_dir / "handoff")
 
 
 def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_path: Path) -> None:
@@ -82,7 +91,7 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
             "trace_health_warnings": [{"code": "partial_trace", "message": "one source was unavailable"}],
         },
     )
-    handoff_dir = write_forge_handoff(
+    handoff_dir = _handoff(
         session_dir,
         state,
         env_spec={
@@ -98,7 +107,6 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
         },
     )
 
-    assert handoff_dir == session_dir / "kernel-agent" / "forge" / "cycle-3" / "handoff"
     workload = (handoff_dir / "workload.md").read_text(encoding="utf-8")
     serving = (handoff_dir / "serving-context.md").read_text(encoding="utf-8")
     evidence = (handoff_dir / "trace-evidence.md").read_text(encoding="utf-8")
@@ -118,6 +126,18 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert not (handoff_dir / raw_trace.name).exists()
 
 
+def test_the_handoff_names_the_gpu_the_task_contract_requires(tmp_path: Path) -> None:
+    """``task.json`` requires a normalized ``identity.gpu`` the agent cannot guess.
+
+    forge-loop derives ``--gpu-type`` and ``--gpu-target`` from it, so a handoff
+    that withheld the accelerator left the analysis agent inferring which chip
+    it was tuning for.
+    """
+    workload = (_handoff(tmp_path / "session", _state()) / "workload.md").read_text(encoding="utf-8")
+
+    assert "GPU:** `mi355x`" in workload
+
+
 def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) -> None:
     missing_candidates = tmp_path / "missing" / "kernel_candidates.json"
     state = _state(
@@ -126,7 +146,7 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
         },
     )
 
-    handoff_dir = write_forge_handoff(tmp_path / "session", state)
+    handoff_dir = _handoff(tmp_path / "session", state)
 
     assert (handoff_dir / "workload.md").is_file()
     assert (handoff_dir / "serving-context.md").is_file()
@@ -156,7 +176,7 @@ def test_handoff_exposes_configured_git_source_roots_without_trace(
     )
     state = _state(framework_repo_path=str(framework_repo))
 
-    handoff_dir = write_forge_handoff(tmp_path / "session", state)
+    handoff_dir = _handoff(tmp_path / "session", state)
 
     serving = (handoff_dir / "serving-context.md").read_text(encoding="utf-8")
     assert serving.count(str(framework_repo.resolve())) == 1
@@ -198,10 +218,11 @@ def test_a_foreign_directory_does_not_disturb_attempt_numbering(tmp_path: Path) 
 def test_the_handoff_can_be_written_beside_the_attempt_that_consumes_it(tmp_path: Path) -> None:
     session = tmp_path / "session"
     attempt = next_forge_attempt_dir(session, 3)
+    context = build_kernel_context(_state(), session)
 
-    written = write_forge_handoff(session, _state(), handoff_dir=attempt / "handoff")
+    written = write_forge_handoff(context, attempt / "handoff")
 
     assert written == attempt / "handoff"
     assert (written / "workload.md").is_file()
-    # The per-cycle default location is untouched, so nothing else has to move.
+    # The per-cycle location is untouched, so nothing else has to move.
     assert not (forge_cycle_dir(session, 3) / "handoff").exists()

@@ -4023,18 +4023,25 @@ class KernelPhase(PhaseHandler):
         handoff_dir = attempt_dir / "handoff"
         try:
             from ..kernel.forge_handoff import write_forge_handoff
+            from ..kernel.kernel_context import build_kernel_context, write_kernel_context
 
             try:
                 env_spec = self.build_env_spec()
             except Exception:  # noqa: BLE001
                 log.exception("KERNEL entry: could not build Forge serving environment")
                 env_spec = {}
-            handoff_dir = write_forge_handoff(
-                self.session_dir,
+            # Rebuilt here rather than reused from the GEMM dispatch: a GEMM or
+            # collective KEEP has already rewritten current_best by this point,
+            # and the handoff has to describe the stack the Controller will
+            # actually measure against.
+            context = await asyncio.to_thread(
+                build_kernel_context,
                 self.shared_state,
+                self.session_dir,
                 env_spec=env_spec,
-                handoff_dir=handoff_dir,
             )
+            handoff_dir = write_forge_handoff(context, handoff_dir)
+            write_kernel_context(context, handoff_dir)
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         except Exception:  # noqa: BLE001
             log.exception("KERNEL entry: Forge handoff generation failed")

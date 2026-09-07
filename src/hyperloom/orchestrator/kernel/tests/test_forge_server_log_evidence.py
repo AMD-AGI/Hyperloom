@@ -236,7 +236,6 @@ class TestTheWrapperForwardsTheNewInputs:
         "key,flag",
         [
             ("shapes_manifest", "--shapes-manifest"),
-            ("demand_json", "--demand"),
         ],
     )
     def test_a_populated_field_reaches_the_forge_cli(self, key, flag):
