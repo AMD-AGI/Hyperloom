@@ -123,76 +123,6 @@ def _signal_group(pgid: int, sig: int) -> None:
         )
 
 
-def _descendant_pgids(root_pid: int, root_pgid: int) -> list[int]:
-    """Process groups spawned under ``root_pid`` that are not ``root_pgid``.
-
-    Magpie's wrappers ``setsid`` the serving process, which is exactly what moves
-    it out of the one group :func:`kill_my_spawned_server` signals. The wrapper
-    then exits, the server reparents to init, and its per-rank workers keep their
-    GPUs. Measured on MI355X: a torn-down ATOM server left eight workers alive
-    holding 2,188,381 MiB.
-
-    Descent is the attribution: anything below our own wrapper was spawned by the
-    run we are tearing down, whatever it happens to be called. That is why this
-    does not match on cmdline -- a framework we have not heard of is still ours,
-    and this ATOM build's per-rank workers carry no identifying argv at all.
-
-    Callers MUST read this BEFORE signalling: ``setsid`` breaks the process group
-    but the escaped leader stays the wrapper's child until the wrapper dies, so
-    the link that attributes it to us exists only until then.
-
-    Args:
-        root_pid: Pid of the wrapper we launched.
-        root_pgid: The process group the caller is about to signal.
-
-    Returns:
-        Distinct pgids below ``root_pid``, excluding ``root_pgid`` and our own.
-        Empty on non-POSIX or when ``/proc`` cannot be read.
-    """
-    if os.name != "posix":
-        return []
-    children: dict[int, list[int]] = {}
-    pgid_of: dict[int, int] = {}
-    try:
-        entries = [e.name for e in Path("/proc").iterdir() if e.name.isdigit()]
-    except OSError:
-        return []
-    for name in entries:
-        pid = int(name)
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            after_comm = stat.rsplit(")", 1)[1].split()
-            ppid, pgid = int(after_comm[1]), int(after_comm[2])
-        except (IndexError, OSError, ValueError):
-            continue
-        children.setdefault(ppid, []).append(pid)
-        pgid_of[pid] = pgid
-
-    try:
-        own_pgid = os.getpgid(0)
-    except OSError:
-        own_pgid = -1
-
-    seen: set[int] = set()
-    frontier = [root_pid]
-    # Bounded walk: a benchmark tree is wrapper -> server -> ranks, and a cycle in
-    # /proc would otherwise be unbounded.
-    for _ in range(8):
-        nxt = [c for pid in frontier for c in children.get(pid, ()) if c not in seen]
-        if not nxt:
-            break
-        seen.update(nxt)
-        frontier = nxt
-
-    found: list[int] = []
-    for pid in seen:
-        pgid = pgid_of.get(pid, 0)
-        if pgid in (0, root_pgid, own_pgid) or pgid in found:
-            continue
-        found.append(pgid)
-    return found
-
-
 def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
@@ -256,31 +186,16 @@ def kill_my_spawned_server(
         )
         return
 
-    # Read the escaped groups BEFORE signalling: the link that attributes them to
-    # this run is the wrapper still being their parent, and it is about to die.
-    escaped = _descendant_pgids(proc.pid, pgid)
-    if escaped:
-        log.info(
-            "_subprocess_kill: wrapper pgid=%d also spawned setsid'd group(s) %s; reaping them alongside it",
-            pgid,
-            escaped,
-        )
-
     _signal_group(pgid, signal.SIGTERM)
-    for escaped_pgid in escaped:
-        _signal_group(escaped_pgid, signal.SIGTERM)
 
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
-        if not _process_group_alive(pgid) and not any(_process_group_alive(g) for g in escaped):
+        if not _process_group_alive(pgid):
             break
         time.sleep(0.05)
 
     if _process_group_alive(pgid):
         _signal_group(pgid, signal.SIGKILL)
-    for escaped_pgid in escaped:
-        if _process_group_alive(escaped_pgid):
-            _signal_group(escaped_pgid, signal.SIGKILL)
 
     try:
         proc.wait(timeout=_REAP_COLLECT_SECONDS)

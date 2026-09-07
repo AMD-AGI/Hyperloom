@@ -196,41 +196,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **A torn-down ATOM server no longer keeps its GPUs.** Every teardown path
-  refused to reap it, for two independent reasons. Measured on MI355X: a
-  torn-down GLM-5.2 ATOM server left all eight per-rank workers alive,
-  reparented to init and still holding 2,188,381 MiB; signalling the right
-  process group freed all of it.<br/>
-  **The gates that match by name did not know ATOM.** `--framework atom` is
-  first-class here — `atom_mi300x.sh` and `atom_mi355x.sh` are in
-  `MAGPIE_BUILTIN_SCRIPTS`, so ATOM is admitted to the server_lifecycle reuse
-  protocol — but its cmdline, `python3 -m atom.entrypoints.openai_server`,
-  appeared in neither `_server_lifecycle._SERVER_CMDLINE_MARKERS` nor
-  `recover._OWNER_PATTERNS`. Both classified a server this session had recorded
-  *itself* as "not one of ours" and declined to signal it. The kill mechanism
-  behind them was already correct — each signals the recorded process group,
-  which is what a `setsid`-ed server needs — so the framework name was the only
-  thing standing between a leaked tree and a clean teardown.<br/>
-  **The path that matches nothing signalled the wrong group.**
-  `kill_my_spawned_server` signals the wrapper's group, and the wrapper `setsid`s
-  the server straight out of it. That is the teardown used wherever
-  server_lifecycle does not apply, which includes every profile round, since
-  reuse is ineligible once `torch_profiler` is on. Escaped groups are now
-  enumerated *before* anything is signalled, because the link that attributes
-  them to this run — the wrapper still being their parent — disappears the moment
-  the wrapper dies. Attribution there is by descent from our own wrapper rather
-  than by cmdline: a framework this repository has not heard of is still ours,
-  and the per-rank workers of the ATOM build measured here carry no identifying
-  argv at all (`multiprocessing.spawn` children, indistinguishable by name from
-  any other Python process). Nothing outside the tree we launched is ever
-  signalled.<br/>
-  Two further consequences made this hard to see from the logs. The name-matching
-  gates report the refusal as pid reuse, which is one possible cause but not this
-  one; and `recover` removes the pidfile on the way past, discarding the only
-  handle on a tree that is still holding every GPU. Sessions that finished
-  successfully were leaking too — the same refusal appears 2 and 11 times in two
-  runs that reached their target — so whether a run completed depended on how
-  much VRAM headroom the model happened to leave, not on whether teardown worked.
+- **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
+  The serving-process checks now accept `atom.entrypoints`. Recovery records
+  the members of a recognized ATOM process group before sending TERM, then
+  checks each recorded PID, group and start time before sending KILL. This
+  allows anonymous workers to be reaped after their leader exits without
+  treating a reused PID or a newly discovered process as an owned worker.
+  Recovery retains the pidfile while the group is still alive and reports the
+  worker PIDs actually signalled. Normal warmup/measure reuse and the existing
+  vLLM/SGLang recovery paths are unchanged. This does not recover ownership of
+  anonymous workers whose leader had already exited before recovery began;
+  the generic subprocess teardown and third-party benchmark scripts are unchanged.
 
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
