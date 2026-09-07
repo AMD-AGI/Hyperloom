@@ -253,12 +253,7 @@ async def test_e2e_failure_reverts_only_current_patch_and_continues(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_a_revert_leaves_the_operators_untracked_files_alone(tmp_path: Path) -> None:
-    """A failed patch must not take the operator's own files with it.
-
-    Admission asks ``git status --untracked-files=no``, so an untracked file is
-    admitted rather than refused -- which means a tree-wide ``git clean`` on the
-    revert path would delete work this integration never looked at.
-    """
+    """A failed patch must not take the operator's own files with it."""
     repo, base = _repo(tmp_path)
     (repo / "notes.md").write_text("operator notes\n", encoding="utf-8")
     (repo / "bench_local").mkdir()
@@ -295,11 +290,7 @@ async def test_a_revert_leaves_the_operators_untracked_files_alone(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_a_revert_unstages_a_patch_whose_commit_never_landed(tmp_path: Path) -> None:
-    """Reverting the working tree is not enough once a commit attempt staged it.
-
-    A staged leftover reads as a dirty tree, which would make every later patch
-    in the same run skip on an admission check it has nothing to do with.
-    """
+    """Reverting the working tree is not enough once a commit attempt staged it."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -419,9 +410,8 @@ async def test_a_note_alongside_a_real_commit_does_not_revert_the_keep(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    # _git_commit_kept documents its note as carrying "any detail", so a caller
-    # that reads any note as failure would revert a KEEP that did commit and had
-    # already passed the serving gate.
+    # _git_commit_kept documents its note as carrying "any detail", so a caller that reads any note as failure would
+    # revert a KEEP that did commit and had already passed the serving gate.
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -461,9 +451,7 @@ async def test_a_commit_that_never_lands_reverts_without_poisoning_the_next_patc
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    # The benign no-op shape: success, a note, and no commit. Admitting it would
-    # record a keep_commit that does not carry the change and leave the worktree
-    # dirty, which makes every later publication fail the dirty-worktree check.
+    # The benign no-op shape: success, a note, and no commit.
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -515,10 +503,8 @@ async def test_a_commit_that_never_lands_reverts_without_poisoning_the_next_patc
 
 @pytest.mark.asyncio
 async def test_patches_from_separate_repositories_each_keep_their_own_baseline(tmp_path: Path) -> None:
-    # A framework session hands the controller more than one editable repository
-    # (sglang and aiter here), and their HEADs are unrelated. Each publication
-    # must be graded against its own repository's baseline; requiring one shared
-    # commit would discard every patch from the second repository.
+    # A framework session hands the controller more than one editable repository (sglang and aiter here), and their
+    # HEADs are unrelated.
     aiter, aiter_base = _named_repo(tmp_path, "aiter", "moe.py")
     sglang, sglang_base = _named_repo(tmp_path, "sglang", "norm.py")
     patches = tmp_path / "cycle" / "result" / "patches"
@@ -549,8 +535,8 @@ async def test_patches_from_separate_repositories_each_keep_their_own_baseline(t
     summary = await integrate_controller_patches(
         patches_root=patches,
         session_dir=session_dir,
-        # The configured root is their common parent so both repositories are
-        # admissible; the point under test is the baseline, not the allowlist.
+        # The configured root is their common parent so both repositories are admissible; the point under test is the
+        # baseline, not the allowlist.
         shared_state=_state(session_dir, tmp_path),
         validator=_validate,
     )
@@ -832,12 +818,7 @@ async def test_a_keep_carries_the_server_settings_its_validation_measured(tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_commit_that_lands_is_reported_even_if_the_ledger_write_fails(tmp_path: Path) -> None:
-    """The Git commit and the SharedState write are not one transaction.
-
-    Losing the ledger write must not be reported as a lost patch: the commit is
-    in the repository either way, and calling it anything but ``kept`` would send
-    the next patch at a HEAD the result says does not exist.
-    """
+    """The Git commit and the SharedState write are not one transaction."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -891,12 +872,7 @@ def _patch_adding_a_file(repo: Path, modified: str, created: str) -> str:
 
 @pytest.mark.asyncio
 async def test_a_revert_the_diff_cannot_undo_restores_what_head_knows(tmp_path: Path) -> None:
-    """A validation that edits the source leaves a patch reverse-apply refuses.
-
-    That is the state a partially applied patch is in too. The fallback restores
-    every path HEAD still has a version of and leaves the ones the patch created
-    alone -- by then nothing can prove such a file was not already the operator's.
-    """
+    """A validation that edits the source leaves a patch reverse-apply refuses."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -935,15 +911,7 @@ async def test_a_revert_the_diff_cannot_undo_restores_what_head_knows(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_dirt_on_a_file_the_patch_never_touches_does_not_block_it(tmp_path: Path) -> None:
-    """Hyperloom dirties the framework tree itself; a repo-wide check never passes.
-
-    ``ensure_sglang_patched_for_tracelens`` and its ck-blockscale sibling patch
-    the serving source in place and leave it uncommitted for the whole session,
-    and every other lane leaves its own KEEP uncommitted too. A repository-wide
-    admission check therefore refuses every patch that reaches it -- which is how
-    a 4.5-hour campaign's only micro-validated patch was thrown away on a file it
-    never opened.
-    """
+    """Hyperloom dirties the framework tree itself; a repo-wide check never passes."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -954,8 +922,8 @@ async def test_dirt_on_a_file_the_patch_never_touches_does_not_block_it(tmp_path
         kernel_path="first.py",
         patch=_patch(repo, "first.py", "VALUE = 2\n"),
     )
-    # Stand-in for the in-place instrumentation: a tracked file the patch does
-    # not name, modified and left uncommitted.
+    # Stand-in for the in-place instrumentation: a tracked file the patch does not name, modified and left
+    # uncommitted.
     (repo / "second.py").write_text("INSTRUMENTED = True\n", encoding="utf-8")
 
     async def _validate(_publication):
@@ -980,11 +948,7 @@ async def test_dirt_on_a_file_the_patch_never_touches_does_not_block_it(tmp_path
 
 @pytest.mark.asyncio
 async def test_dirt_on_a_file_the_patch_does_touch_still_blocks_it(tmp_path: Path) -> None:
-    """Scoping the check narrows it; it does not remove it.
-
-    An uncommitted edit on a path the patch modifies cannot be told apart from
-    the patch's own change afterwards, so the patch is still refused.
-    """
+    """Scoping the check narrows it; it does not remove it."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -1095,12 +1059,7 @@ def _patch_only_adding_a_file(repo: Path, created: str) -> str:
 
 @pytest.mark.asyncio
 async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -> None:
-    """When the patch only adds files, HEAD holds no version to restore them to.
-
-    A reverse apply refuses a file whose content has moved on, and a file HEAD
-    never knew cannot be checked out from it. The revert then genuinely cannot
-    finish, and the run has to say so rather than report a clean rejection.
-    """
+    """When the patch only adds files, HEAD holds no version to restore them to."""
     repo, base = _repo(tmp_path)
     patches = tmp_path / "cycle" / "result" / "patches"
     _publish(
@@ -1113,8 +1072,8 @@ async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -
     )
 
     async def _validate(_publication):
-        # Stand-in for anything that rewrites the tree during validation: the
-        # added file no longer matches the diff, so it cannot be reverse applied.
+        # Stand-in for anything that rewrites the tree during validation: the added file no longer matches the diff,
+        # so it cannot be reverse applied.
         (repo / "helper.py").write_text("HELPER = False\n", encoding="utf-8")
         return {"decision": "REJECT", "new_tput": 90.0, "gain_pct": -10.0}
 

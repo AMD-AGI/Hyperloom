@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Materialise an upstream PR candidate into local patch files.
-
-This is the half of upstream-PR work that is genuinely its own: turning a
-candidate row into a diff on disk. Everything after that -- apply, structural
-vetting, bench, KEEP/REVERT, revert, KB record -- is what every other patch
-source already does, and lives in :mod:`integrate_patch`.
-
-Three sources, in priority order: explicit ``params.patches``, a net diff taken
-from a worktree checked out at the PR head, and finally the raw ``diff_url``.
-"""
+"""Materialise an upstream PR candidate into local patch files."""
 
 from __future__ import annotations
 
@@ -35,16 +26,7 @@ DEFAULT_DIFF_MAX_BYTES: int = 32 * 1024 * 1024
 
 
 def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
-    """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``,
-    sha None on failure.
-
-    Args:
-        framework_root: The git checkout to read HEAD from.
-
-    Returns:
-        A ``(sha, stderr)`` tuple; ``sha`` is ``None`` on failure with the
-        error text in ``stderr``.
-    """
+    """``git rev-parse HEAD`` in ``framework_root``; ``(sha, stderr)``, sha None on failure."""
     cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
     if cp is None:
         return None, "git rev-parse spawn failed"
@@ -54,17 +36,7 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
 
 
 def _pr_number_of(candidate: dict[str, Any]) -> int:
-    """Read a candidate's PR number, or 0 when it carries no usable one.
-
-    The row reaches us from the KB and from LLM-authored proposals alike, so
-    the field arrives as an int, a decimal string, ``"#1234"``, or prose.
-
-    Args:
-        candidate: The PR metadata row.
-
-    Returns:
-        The positive PR number, or 0.
-    """
+    """Read a candidate's PR number, or 0 when it carries no usable one."""
     raw = str(candidate.get("pr_number") or "").strip().lstrip("#")
     if not raw.isdigit():
         return 0
@@ -72,16 +44,7 @@ def _pr_number_of(candidate: dict[str, Any]) -> int:
 
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
-    """Filesystem-safe candidate id (variant names + paths). Prefer
-    ``repo/pr_number``.
-
-    Args:
-        candidate: The PR metadata row.
-
-    Returns:
-        A filesystem-safe slug derived from the candidate's repo / pr_number
-        / ref.
-    """
+    """Filesystem-safe candidate id (variant names + paths). Prefer"""
     repo = str(candidate.get("repo") or "").replace("/", "-")
     pr = _pr_number_of(candidate)
     if repo and pr:
@@ -98,20 +61,7 @@ def _fetch_diff_to_path(
     *,
     timeout_sec: float,
 ) -> tuple[bool, str]:
-    """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``.
-    Uses curl for consistent HTTPS_PROXY behaviour in restricted-network
-    sessions. The scheme is restricted to http/https; the host is logged but
-    not restricted.
-
-    Args:
-        diff_url: The unified-diff URL to download.
-        dest: Destination ``.patch`` path to write.
-        timeout_sec: Per-request curl timeout in seconds.
-
-    Returns:
-        A ``(ok, stderr)`` tuple; ``ok`` is False on failure with the error
-        text in ``stderr``.
-    """
+    """Curl ``diff_url`` into ``dest`` (.patch path); returns ``(ok, stderr)``."""
     try:
         require_http_url(diff_url, context="diff_url")
     except ValueError as exc:
@@ -152,15 +102,7 @@ def _fetch_diff_to_path(
 
 
 def _normalize_repo_id(url_or_slug: str) -> str:
-    """Reduce a repo URL / slug to a canonical lowercase ``owner/name`` token.
-    Tolerates https, ssh, and bare ``Owner/Name`` forms.
-
-    Args:
-        url_or_slug: A repo URL or slug in any supported form.
-
-    Returns:
-        The canonical lowercase ``owner/name`` token, or ``""`` when empty.
-    """
+    """Reduce a repo URL / slug to a canonical lowercase ``owner/name`` token."""
     s = (url_or_slug or "").strip().lower()
     if not s:
         return ""
@@ -181,21 +123,7 @@ def _candidate_is_same_repo(
     candidate: dict[str, Any],
     framework_root: Path,
 ) -> bool:
-    """True unless we can positively prove the candidate lives in a different
-    repo than the framework_root's origin (where checkout-head's fetch would
-    resolve the wrong ref).
-
-    Fails OPEN when inconclusive (no candidate repo, unreadable / non-GitHub
-    origin); only fires when both sides yield differing ``owner/name`` tokens.
-
-    Args:
-        candidate: The PR metadata row (carries the candidate repo).
-        framework_root: The live framework checkout whose origin is compared.
-
-    Returns:
-        True unless the candidate is positively proven to live in a different
-        repo than ``framework_root``'s origin.
-    """
+    """True unless we can positively prove the candidate lives in a different"""
     cand_repo = _normalize_repo_id(str(candidate.get("repo") or candidate.get("discovered_repo_url") or ""))
     if not cand_repo or "/" not in cand_repo:
         return True
@@ -219,25 +147,7 @@ def _materialize_pr_diff_from_head(
     *,
     timeout_sec: float,
 ) -> tuple[bool, str]:
-    """checkout-head (diff source) mode.
-
-    Fetches the PR head into ``framework_root`` and writes the PR's net diff
-    against its merge-base to ``dest``. Both ends of the range are shas, so
-    the live KEPT working tree is read but never moved. Returns ``(ok, err)``.
-
-    Head ref order: ``candidate.head_sha`` → ``candidate.ref`` →
-    ``refs/pull/<pr_number>/head``.
-
-    Args:
-        framework_root: The live framework checkout to fetch the PR head into.
-        candidate: The PR metadata row (head_sha / ref / pr_number).
-        dest: Destination ``.patch`` path the net diff is written to.
-        timeout_sec: Per-git-operation timeout in seconds.
-
-    Returns:
-        A ``(ok, err)`` tuple; ``ok`` is False on failure with the error text
-        in ``err``.
-    """
+    """checkout-head (diff source) mode."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     root = str(framework_root)
 
@@ -272,8 +182,8 @@ def _materialize_pr_diff_from_head(
     if not head_sha:
         return False, ("checkout-head: no head_sha / ref / pr_number on candidate; cannot resolve PR head")
 
-    # Diff against the merge-base so applying introduces only the PR's own
-    # commits, not the full divergence from the live HEAD.
+    # Diff against the merge-base so applying introduces only the PR's own commits, not the full divergence from the
+    # live HEAD.
     ok_hb, base_out, _e = _run_git(["-C", root, "rev-parse", "HEAD"], timeout=30.0)
     live_head = base_out.strip() if ok_hb else ""
     merge_base = ""
@@ -319,31 +229,7 @@ def materialize_candidate_patches(
     slug: str,
     diff_fetch_timeout_sec: float,
 ) -> PrMaterialization:
-    """Resolve an upstream-PR candidate into local patch files.
-
-    Sources in priority order: explicit ``params.patches``, a net diff from a
-    worktree checked out at the PR head, then the served ``diff_url``. The
-    checkout-head route is disabled for a cross-repo candidate, whose head ref
-    does not exist on the live origin.
-
-    Every failure path returns a terminal result rather than an empty patch
-    list: benching a tree no patch reached measures the baseline and reports it
-    as the candidate's verdict.
-
-    Args:
-        candidate: The candidate row (``diff_url`` / ``head_sha`` / ``ref`` /
-            ``pr_number`` / ``apply_mode``).
-        params: Task params, read for ``patches`` / ``apply_mode`` /
-            ``prefer_checkout`` overrides.
-        framework_root: The live framework checkout the diff will apply to.
-        output_root: Per-task workspace the fetched diff is written into.
-        slug: Candidate slug used to name the written patch file.
-        diff_fetch_timeout_sec: Timeout for a served-diff fetch; the
-            worktree route is given four times this.
-
-    Returns:
-        A :class:`PrMaterialization`.
-    """
+    """Resolve an upstream-PR candidate into local patch files."""
     explicit_patches = params.get("patches") or None
     if isinstance(explicit_patches, list) and explicit_patches:
         found: list[Path] = []
@@ -375,8 +261,8 @@ def materialize_candidate_patches(
     )
     explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
     use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
-    # Same-repo guard: checkout-head fetches from the live origin, so a
-    # cross-repo candidate would fetch the wrong ref.
+    # Same-repo guard: checkout-head fetches from the live origin, so a cross-repo candidate would fetch the wrong
+    # ref.
     if use_checkout_head and not _candidate_is_same_repo(candidate, framework_root):
         log.info(
             "upstream_pr: candidate repo %r differs from live framework_root origin; using diff_url",

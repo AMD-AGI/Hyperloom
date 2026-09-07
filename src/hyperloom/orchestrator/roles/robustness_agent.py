@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness``
-runtime into the Coordinator as a real Robustness Backend.
-
-Each tick is one ``runtime.cli tick`` invocation whose ``emit.json`` carries
-an ``intent_envelope``. Test seam: ``runtime_caller_factory`` bypasses the
-subprocess.
-"""
+"""RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness``"""
 
 from __future__ import annotations
 
@@ -37,16 +31,7 @@ ROBUSTNESS_AGENT_WORKDIR_KEEP_COUNT = 50
 
 
 def _default_runtime_caller(call: RuntimeCall) -> None:
-    """Real implementation — runs ``python -m hyperloom.agents.robustness.runtime.cli tick``.
-
-    Args:
-        call: The invocation descriptor with phase, request / output paths,
-            working directory, and subprocess env.
-
-    Raises:
-        BackendError: If the phase is not ``tick``, the subprocess times out,
-            cannot start, or exits non-zero.
-    """
+    """Real implementation — runs ``python -m hyperloom.agents.robustness.runtime.cli tick``."""
     if call.phase != "tick":
         raise BackendError(f"RobustnessAgentBackend: unsupported runtime phase {call.phase!r} (expected 'tick')")
     invoke_runtime_cli(
@@ -60,26 +45,7 @@ def _default_runtime_caller(call: RuntimeCall) -> None:
 # ---------------------------------------------------------------------------
 @dataclass
 class RobustnessAgentBackend:
-    """Real Robustness backend that drives the robustness-agent runtime.
-
-    Parameters
-    ----------
-    robustness_agent_root:
-        Directory containing ``runtime/cli.py``
-        (``src/hyperloom/agents/robustness/``). The CLI is invoked as the
-        package-qualified ``python -m hyperloom.agents.robustness.runtime.cli``
-        with ``cwd=robustness_agent_root``.
-    session_dir:
-        Coordinator session directory; scopes per-turn workdirs and is
-        forwarded into ``request.options.session_dir``.
-    options:
-        Optional ``request.options`` overrides forwarded into every tick
-        request. ``session_dir`` is auto-injected.
-    runtime_caller_factory:
-        Test seam returning a :data:`RuntimeCaller` that bypasses the subprocess.
-    name:
-        Backend instance name surfaced in the Coordinator startup banner.
-    """
+    """Real Robustness backend that drives the robustness-agent runtime."""
 
     robustness_agent_root: Path
     session_dir: Path
@@ -92,17 +58,7 @@ class RobustnessAgentBackend:
     calls: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Normalise paths, verify the CLI module, and select the runtime caller.
-
-        Coerces ``robustness_agent_root`` and ``session_dir`` to :class:`Path`,
-        confirms ``runtime/cli.py`` exists, wires up either the test
-        ``runtime_caller_factory`` or the real subprocess caller, and
-        snapshots the forwarded ``options``.
-
-        Raises:
-            BackendError: If the expected ``runtime/cli.py`` module is not found
-                under ``robustness_agent_root``.
-        """
+        """Normalise paths, verify the CLI module, and select the runtime caller."""
         self.robustness_agent_root = Path(self.robustness_agent_root)
         self.session_dir = Path(self.session_dir)
         cli_module = self.robustness_agent_root / "runtime" / "cli.py"
@@ -136,29 +92,7 @@ class RobustnessAgentBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """One Robustness turn — drive a single reactor tick over subprocess.
-
-        Writes a ``coordinator_inbox`` request for the rendered ``prompt``,
-        invokes one ``runtime.cli tick`` (off the event loop), reads back the
-        emitted ``intent_envelope``, validates it into intents, and records
-        per-turn telemetry.
-
-        Args:
-            prompt (str): The Coordinator-rendered prompt for this tick.
-            system_prompt (str | None): Unused; robustness ticks are
-                deterministic and ignore it.
-            tools (list[str] | None): Unused; the runtime owns its own tooling.
-            max_turns (int): Unused; one reactor tick is run per call.
-
-        Returns:
-            BackendTurnResult: The validated intents plus session/tick metadata
-            and any parse warnings from the runtime.
-
-        Raises:
-            BackendError: If ``emit.json`` cannot be read or is missing a dict
-                ``intent_envelope``.
-            NoIntentEmitted: If the emitted envelope fails intent validation.
-        """
+        """One Robustness turn — drive a single reactor tick over subprocess."""
         del system_prompt, tools, max_turns
 
         turn_idx = self._turn_idx
@@ -266,13 +200,7 @@ class RobustnessAgentBackend:
 
     @staticmethod
     def _merge_llm_usage(metadata: dict[str, Any], usage: Any) -> None:
-        """Map a runtime ``llm_usage`` block onto canonical metadata counters.
-
-        The robustness runtime reports ``{input_tokens, output_tokens, calls,
-        latency_ms, model}``. We surface ``input_tokens`` / ``output_tokens``
-        (the keys the reactor trace looks for) plus ``model`` so the ledger row
-        carries a model name. No-op when ``usage`` is missing or shapeless.
-        """
+        """Map a runtime ``llm_usage`` block onto canonical metadata counters."""
         if not isinstance(usage, dict):
             return
         it = usage.get("input_tokens")
@@ -285,15 +213,7 @@ class RobustnessAgentBackend:
             metadata["model"] = usage.get("model")
 
     def _build_runtime_env(self) -> dict[str, str]:
-        """Build the subprocess environment for ``runtime.cli`` invocations.
-
-        The module resolves via the installed ``hyperloom`` namespace, so no
-        ``PYTHONPATH`` prepending is needed.
-
-        Returns:
-            A copy of the current environment with the robustness
-            session-dir hint applied.
-        """
+        """Build the subprocess environment for ``runtime.cli`` invocations."""
         env = dict(os.environ)
         env.setdefault("ROBUSTNESS_AGENT_SESSION_DIR", str(self.session_dir))
         return env

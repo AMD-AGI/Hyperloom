@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical id helpers for the local recipe-snapshot KB store.
-
-Re-exports the 7-tuple builder + auto-detect helper from
-:mod:`hyperloom.inference_optimizer.recipe_snapshot_constants` so the
-``recipe_kb`` package presents a self-contained surface.
-
-Adds two local-store-specific helpers:
-
-* :func:`cid_to_path_components` — decompose a canonical id back into
-  its seven identity slugs (``model / hardware / framework_name /
-  model_type / architectures / framework_version / precision``). The
-  local store maps each slug to a directory level, so the round-trip
-  ``recipe_canonical_id`` → ``cid_to_path_components`` →
-  ``Path(*components)`` must be lossless.
-* :func:`canonical_id_for_path` — given a path under the store root,
-  derive the canonical id of the recipe that lives there.
-"""
+"""Canonical id helpers for the local recipe-snapshot KB store."""
 
 from __future__ import annotations
 
@@ -41,8 +25,8 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
 SLUG_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 
 
-# Documented prefix for recipe-snapshot v2 ids; bumping it is a compatibility
-# break coordinated with the central kb-service.
+# Documented prefix for recipe-snapshot v2 ids; bumping it is a compatibility break coordinated with the central
+# kb-service.
 CANONICAL_ID_PREFIX: str = "inference"
 
 
@@ -52,22 +36,10 @@ CANONICAL_ID_DIMENSIONS: int = 7
 
 
 class InvalidCanonicalIdError(ValueError):
-    """Raised when a string cannot be parsed as a 7-tuple canonical id.
-
-    Carries the offending string and the parse-failure reason so callers can
-    log a structured warning rather than a bare exception when filesystem
-    garbage drifts into the tree.
-    """
+    """Raised when a string cannot be parsed as a 7-tuple canonical id."""
 
     def __init__(self, raw: str, reason: str) -> None:
-        """Build the error from the offending id and a reason.
-
-        Args:
-            raw (str): The string that failed to parse as a canonical
-                id.
-            reason (str): Human-readable parse-failure reason; folded
-                into the message and stored on ``self.reason``.
-        """
+        """Build the error from the offending id and a reason."""
         super().__init__(f"invalid canonical_id {raw!r}: {reason}")
         self.raw = raw
         self.reason = reason
@@ -76,28 +48,7 @@ class InvalidCanonicalIdError(ValueError):
 def cid_to_path_components(
     canonical_id: str,
 ) -> tuple[str, str, str, str, str, str, str]:
-    """Decompose a canonical id into its seven identity slugs.
-
-    Exactly eight segments are required and each dimension must be a safe
-    single path component, so a malformed id cannot route writes outside its
-    own directory and silently shadow a real recipe.
-
-    Returns the tuple in the order
-    ``(model, hardware, framework_name, model_type, architectures,
-    framework_version, precision)``, matching the order the segments
-    are unpacked from the canonical id.
-
-    Args:
-        canonical_id (str): The canonical id to decompose.
-
-    Returns:
-        tuple[str, str, str, str, str, str, str]: The seven identity
-            slugs.
-
-    Raises:
-        InvalidCanonicalIdError: If the id is empty, has a bad prefix, or
-            contains a segment that is empty or unsafe as a path component.
-    """
+    """Decompose a canonical id into its seven identity slugs."""
     raw = (canonical_id or "").strip()
     if not raw:
         raise InvalidCanonicalIdError(raw, "empty string")
@@ -139,12 +90,7 @@ def canonical_id_from_components(
     framework_version: str,
     precision: str,
 ) -> str:
-    """Inverse of :func:`cid_to_path_components` — pass-through to
-    :func:`recipe_canonical_id` for symmetry / discoverability.
-
-    Returns:
-        str: The canonical id built from the seven slugs.
-    """
+    """Inverse of :func:`cid_to_path_components` — pass-through to"""
     return recipe_canonical_id(
         model=model,
         hardware=hardware,
@@ -157,22 +103,7 @@ def canonical_id_from_components(
 
 
 def canonical_id_for_path(*, root: Path, recipe_dir: Path) -> str:
-    """Build the canonical id for the recipe directory at ``recipe_dir``.
-
-    ``recipe_dir`` MUST be exactly seven levels below ``root`` — one level
-    per dimension. The directory names ARE the canonical_id slugs.
-
-    Args:
-        root (Path): Store root the recipe directory lives under.
-        recipe_dir (Path): Directory of the recipe under ``root``.
-
-    Returns:
-        str: The canonical id of the recipe at ``recipe_dir``.
-
-    Raises:
-        InvalidCanonicalIdError: If ``recipe_dir`` is not under
-            ``root`` or has an unexpected depth.
-    """
+    """Build the canonical id for the recipe directory at ``recipe_dir``."""
     try:
         rel = recipe_dir.relative_to(root)
     except ValueError as exc:

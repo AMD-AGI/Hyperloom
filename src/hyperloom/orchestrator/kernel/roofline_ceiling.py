@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Analytic performance ceilings for the roofline snapshot.
-
-Four capabilities live here:
-
-1. The top-down memory-bound decode formula::
-
-       peak_output_tok_per_sec
-         = (HBM_BW_per_gpu × num_gpus)
-           / (weight_bytes / batch + kv_bytes_per_token × kv_seq_len)
-
-   This formula does not model prefill; ``batch = max(concurrency, 1)``.
-2. The compute-bound ceiling (``compute_compute_bound_ceiling_tok_per_sec``)
-   and the ``min(T_mem, T_cmp)`` selector (``select_peak_and_bound``).
-3. The bottom-up per-op ``PerfModel`` breakdown, which does produce a
-   ``prefill_tok_per_s`` figure.
-4. The xDiT diffusion images/sec ceiling.
-
-All outputs are upper bounds.
-"""
+"""Analytic performance ceilings for the roofline snapshot."""
 
 from __future__ import annotations
 
@@ -105,14 +87,7 @@ _DTYPE_BYTES: dict[str, float] = {
 
 
 def _resolve_dtype_bytes(tag: str | None) -> float:
-    """HF/precision tag → bytes per element; bf16 (2.0) on miss.
-
-    Args:
-        tag (str | None): HF ``torch_dtype`` / precision tag.
-
-    Returns:
-        float: Bytes per element, defaulting to ``2.0`` on an unknown tag.
-    """
+    """HF/precision tag → bytes per element; bf16 (2.0) on miss."""
     if not tag:
         return 2.0
     return _DTYPE_BYTES.get(str(tag).strip().lower(), 2.0)
@@ -138,23 +113,7 @@ _QUANT_WEIGHT_BYTES: dict[str, float] = {
 
 
 def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
-    """On-disk weight bytes-per-element declared by an HF ``quantization_config``.
-
-    ``quant_method`` names the *precision* in the flat HF form (``fp8``,
-    ``awq``) but names the *toolkit* in wrapper formats — Quark writes
-    ``quant_method: "quark"`` and puts the real precision on
-    ``global_quant_config.weight.dtype`` (``"fp4"`` for MXFP4). Reading only
-    ``quant_method`` therefore misses the tag and silently falls back to the
-    checkpoint ``dtype`` (bf16), overcounting weight IO 4x — which also trips
-    the ``total_expert_bytes >= weight_bytes`` sanity guard in
-    :func:`_compute_expert_decomposition` and degrades a MoE model to dense.
-
-    Args:
-        quant_cfg: The parsed ``quantization_config`` block, or any non-dict.
-
-    Returns:
-        Bytes per weight element, or ``0.0`` when nothing decisive is found.
-    """
+    """On-disk weight bytes-per-element declared by an HF ``quantization_config``."""
     if not isinstance(quant_cfg, dict):
         return 0.0
     method = str(quant_cfg.get("quant_method", "")).strip().lower()
@@ -180,36 +139,21 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
             return 0.0
         tag = str(spec.get("dtype") or spec.get("type") or "").strip().lower()
         # Both tables, exactly as the flat ``quant_method`` path above does.
-        # ``_QUANT_WEIGHT_BYTES`` is the only one carrying fp8_e4m3, fp8_e5m2,
-        # nvfp4, int8, w8a8_int8, int4, awq and gptq, and a Quark checkpoint
-        # writes precisely those on the nested spec -- often with no
-        # ``num_bits`` beside them. Consulting one table here read
-        # ``global_quant_config.weight.dtype = "fp8_e4m3"`` as "nothing
-        # decisive", fell back to the checkpoint dtype, and reported bf16: the
-        # 2x weight-IO overcount this function was written to remove, which then
-        # trips the ``total_expert_bytes >= weight_bytes`` guard and degrades a
-        # MoE model to dense.
         if tag in _DTYPE_BYTES:
             return _DTYPE_BYTES[tag]
         if tag in _QUANT_WEIGHT_BYTES:
             return _QUANT_WEIGHT_BYTES[tag]
         return _bits_to_bytes(spec.get("num_bits") or spec.get("bits"))
 
-    # Wrapper toolkits nest the precision on a weight spec: Quark under
-    # global_quant_config, compressed-tensors under config_groups.*.weights.
-    # These two scopes describe the checkpoint as a whole, so either is decisive.
+    # Wrapper toolkits nest the precision on a weight spec: Quark under global_quant_config, compressed-tensors under
+    # config_groups.*.weights.
     for scope in (quant_cfg.get("global_quant_config"), quant_cfg):
         whole = _spec_bytes(scope)
         if whole > 0:
             return whole
 
-    # The per-group containers are different: one entry per layer pattern, and
-    # they need not agree -- a Quark MoE checkpoint routinely stores the routed
-    # experts at fp4 and the attention projections at fp8. Reading whichever
-    # entry the dict happened to yield first declared that precision for the
-    # entire model. Take the value the most groups agree on; ties resolve to the
-    # wider one, because undercounting weight bytes inflates the roofline and
-    # reports a real regression as "already at ceiling".
+    # The per-group containers are different: one entry per layer pattern, and they need not agree -- a Quark MoE
+    # checkpoint routinely stores the routed experts at fp4 and the attention projections at fp8.
     tallies: dict[float, int] = {}
     for container in (quant_cfg.get("layer_quant_config"), quant_cfg.get("config_groups")):
         if not isinstance(container, dict):
@@ -224,19 +168,7 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
 
 
 def _parse_server_arg(args: str, flag: str) -> str:
-    """Return the value following ``--flag`` (space or ``=`` form), else ``""``.
-
-    Tolerant of both ``--quantization fp8`` and ``--quantization=fp8``.
-    When the flag appears multiple times, the last value wins so an
-    optimized overlay can override the baseline args.
-
-    Args:
-        args: The server-args string to scan.
-        flag: The flag whose value to extract (e.g. ``--quantization``).
-
-    Returns:
-        The last value following the flag, or ``""`` when absent.
-    """
+    """Return the value following ``--flag`` (space or ``=`` form), else ``\"\"``."""
     if not args:
         return ""
     toks = str(args).replace("=", " ").split()
@@ -259,11 +191,7 @@ _RUNTIME_SERVER_ARG_ENV_KEYS = (
 
 @dataclass(frozen=True)
 class RuntimeWorkload:
-    """Runtime workload config used by the roofline ceiling.
-
-    Baseline materialized yaml is the base source of truth; optimized
-    current_best contributes only overlay server args.
-    """
+    """Runtime workload config used by the roofline ceiling."""
 
     model_path: str
     gpu_type: str
@@ -277,14 +205,7 @@ class RuntimeWorkload:
 
 
 def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
-    """Read ``benchmark`` from the materialized baseline yaml.
-
-    Args:
-        state: Shared run state carrying ``last_baseline`` provenance.
-
-    Returns:
-        The ``benchmark`` mapping, or ``{}`` when unreadable.
-    """
+    """Read ``benchmark`` from the materialized baseline yaml."""
     last_bl = getattr(state, "last_baseline", None) or {}
     if not isinstance(last_bl, dict):
         return {}
@@ -304,29 +225,13 @@ def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
 
 
 def _benchmark_envs(benchmark: dict[str, Any]) -> dict[str, Any]:
-    """Return the ``envs`` mapping from a benchmark record.
-
-    Args:
-        benchmark: Benchmark record.
-
-    Returns:
-        The ``envs`` dict, or ``{}`` when absent or not a dict.
-    """
+    """Return the ``envs`` mapping from a benchmark record."""
     envs = benchmark.get("envs") or {}
     return envs if isinstance(envs, dict) else {}
 
 
 def _env_int(envs: dict[str, Any], key: str) -> int:
-    """Read a positive integer from an env mapping.
-
-    Args:
-        envs: Environment mapping.
-        key: Key to read.
-
-    Returns:
-        The parsed positive integer, or ``0`` when missing, non-positive, or
-        unparseable.
-    """
+    """Read a positive integer from an env mapping."""
     raw = envs.get(key)
     if raw is None:
         return 0
@@ -338,14 +243,7 @@ def _env_int(envs: dict[str, Any], key: str) -> int:
 
 
 def _server_args_from_envs(envs: dict[str, Any]) -> str:
-    """Assemble server CLI args from recognized env keys.
-
-    Args:
-        envs: Environment mapping.
-
-    Returns:
-        A space-joined string of the non-empty server-arg env values.
-    """
+    """Assemble server CLI args from recognized env keys."""
     parts = [
         str(envs[k]).strip() for k in _RUNTIME_SERVER_ARG_ENV_KEYS if isinstance(envs.get(k), str) and envs[k].strip()
     ]
@@ -353,21 +251,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
 
 
 def _read_baseline_yaml_server_args(state: Any) -> str:
-    """Read the runtime server args from the materialized baseline yaml.
-
-    The baseline ``current_best`` snapshot carries no ``extra_server_args``
-    (the flags live only in ``benchmark.envs.EXTRA_*_ARGS`` of the on-disk
-    yaml), so a baseline-only run with ``--quantization fp8`` in the yaml
-    would otherwise be invisible to dtype resolution. If the materialized YAML
-    is unreadable, fall back to ``last_baseline`` payload/env args so prelude
-    profiling does not silently drop operator server flags.
-
-    Args:
-        state: Shared run state carrying ``last_baseline`` provenance.
-
-    Returns:
-        The assembled baseline server args, or ``""`` when unreadable.
-    """
+    """Read the runtime server args from the materialized baseline yaml."""
     yaml_args = _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
     if yaml_args:
         return yaml_args
@@ -375,14 +259,7 @@ def _read_baseline_yaml_server_args(state: Any) -> str:
 
 
 def _server_args_env_override(entry: Any) -> str:
-    """Return framework server args pinned via ``extra_envs``.
-
-    Args:
-        entry: A state entry that may carry an ``extra_envs`` mapping.
-
-    Returns:
-        The server args assembled from ``extra_envs``, or ``""``.
-    """
+    """Return framework server args pinned via ``extra_envs``."""
     if not isinstance(entry, dict):
         return ""
     envs = entry.get("extra_envs") or {}
@@ -392,14 +269,7 @@ def _server_args_env_override(entry: Any) -> str:
 
 
 def _server_args_payload(entry: Any) -> str:
-    """Return framework-neutral overlay server args from an entry.
-
-    Args:
-        entry: A state entry that may carry overlay server-arg keys.
-
-    Returns:
-        The first non-empty overlay server-args string, or ``""``.
-    """
+    """Return framework-neutral overlay server args from an entry."""
     if not isinstance(entry, dict):
         return ""
     for key in ("candidate_extra_server_args", "extra_server_args", "extra_args"):
@@ -410,31 +280,12 @@ def _server_args_payload(entry: Any) -> str:
 
 
 def _server_args_from(entry: Any) -> str:
-    """Extract the final server-args string from one state entry.
-
-    Args:
-        entry: A state entry to read server args from.
-
-    Returns:
-        The env-override args if present, else the overlay payload args.
-    """
+    """Extract the final server-args string from one state entry."""
     return _server_args_env_override(entry) or _server_args_payload(entry)
 
 
 def _achieved_arm_source(state: Any) -> str:
-    """Which arm the roofline ``achieved`` throughput comes from.
-
-    Mirrors the snapshot writer (``current_best.tput > 0`` ⇒ optimized, else
-    baseline) so the ceiling's dtype is resolved from the same run its measured
-    throughput came from.
-
-    Args:
-        state: Shared run state carrying ``current_best``.
-
-    Returns:
-        ``"current_best"`` when the optimized arm has positive throughput,
-        otherwise ``"baseline"``.
-    """
+    """Which arm the roofline ``achieved`` throughput comes from."""
     cb = getattr(state, "current_best", None)
     if isinstance(cb, dict):
         t = cb.get("tput")
@@ -444,23 +295,7 @@ def _achieved_arm_source(state: Any) -> str:
 
 
 def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
-    """Server args for the arm the ceiling is actually compared against.
-
-    Selects a SINGLE source aligned with ``achieved`` (see
-    ``_achieved_arm_source``). Baseline materialized yaml is the base
-    config; current_best contributes only overlay server args when the
-    measured throughput comes from the optimized arm. ``arm`` pins the
-    source explicitly ("baseline" never overlays current_best), so a
-    baseline snapshot's ceiling precision stays anchored to baseline.
-
-    Args:
-        state: Shared run state to read baseline / current_best args from.
-        arm: Pins the source arm; ``None`` infers it via
-            ``_achieved_arm_source``.
-
-    Returns:
-        The server-args string for the selected arm.
-    """
+    """Server args for the arm the ceiling is actually compared against."""
     base_args = _read_baseline_yaml_server_args(state) or _server_args_from(getattr(state, "last_baseline", None))
     resolved_arm = arm or _achieved_arm_source(state)
     if resolved_arm == "current_best":
@@ -474,15 +309,7 @@ def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
 
 
 def _runtime_gpu_type(state: Any, benchmark: dict[str, Any]) -> str:
-    """Resolve real hardware for roofline; runner_type is only script routing.
-
-    Args:
-        state: Shared run state carrying ``gpu_type``.
-        benchmark: Benchmark record (fallback ``runner_type``).
-
-    Returns:
-        The resolved GPU type string, or ``""`` when unknown.
-    """
+    """Resolve real hardware for roofline; runner_type is only script routing."""
     return str(
         getattr(state, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", "") or benchmark.get("runner_type") or ""
     )
@@ -493,33 +320,12 @@ def resolve_runtime_workload(
     *,
     arm: str | None = None,
 ) -> RuntimeWorkload:
-    """Resolve runtime workload fields from baseline yaml plus overlay args.
-
-    Geometry (model/gpu/tp/conc/isl/osl) always comes from the baseline
-    yaml. ``arm`` only pins which arm's server args feed precision
-    resolution; ``"baseline"`` keeps the ceiling's dtype anchored to
-    baseline even after current_best is promoted.
-
-    Args:
-        state: Shared run state to resolve workload fields from.
-        arm: Pins which arm's server args feed precision resolution.
-
-    Returns:
-        The resolved ``RuntimeWorkload``.
-    """
+    """Resolve runtime workload fields from baseline yaml plus overlay args."""
     benchmark = _read_baseline_yaml_benchmark(state)
     envs = _benchmark_envs(benchmark)
 
     def _state_int(name: str) -> int:
-        """Read a positive integer attribute from ``state``.
-
-        Args:
-            name: Attribute name to read.
-
-        Returns:
-            The positive integer value, or ``0`` when missing, non-positive, or
-            unparseable.
-        """
+        """Read a positive integer attribute from ``state``."""
         try:
             parsed = int(getattr(state, name, 0) or 0)
             return parsed if parsed > 0 else 0
@@ -541,18 +347,7 @@ def resolve_runtime_workload(
 
 @dataclass(frozen=True)
 class RuntimeDtype:
-    """Resolved runtime precision provenance for the roofline ceiling.
-
-    ``weight_dtype_bytes`` drives the per-token weight IO term; it reflects
-    the dtype weights are *actually read in* at runtime (e.g. fp8 when the
-    server ran ``--quantization fp8``), not the on-disk ``torch_dtype``.
-    ``activation_dtype_bytes`` is the activation/KV dtype and stays >= 2B.
-
-    ``compute_precision_tag`` is the precision key for the compute-peak
-    TFLOPS lookup (``fp8`` / ``bf16`` / ...). It differs from
-    ``weight_dtype_tag`` for pre-quantized checkpoints whose provenance
-    label is ``quantization_config`` but whose GEMM peak is fp8.
-    """
+    """Resolved runtime precision provenance for the roofline ceiling."""
 
     weight_dtype_bytes: float
     activation_dtype_bytes: float
@@ -568,35 +363,7 @@ def resolve_runtime_dtype(
     *,
     arm: str | None = None,
 ) -> RuntimeDtype:
-    """Resolve the runtime weight/activation dtype from the actual run.
-
-    Priority (first decisive signal wins):
-      1. ``--quantization`` in the recorded server args (the run truly
-         quantized the weights, e.g. dense fp8 over a float32 checkpoint).
-      2. Model ``quantization_config`` already reflected in ``meta``
-         (on-disk weights are pre-quantized; ``weight_dtype_bytes`` < 2).
-      3. ``--dtype`` server arg (sets weight+activation when not quantized).
-      4. Config ``torch_dtype`` already in ``meta``, floored at bf16.
-
-    Workload ``precision`` is deliberately NOT used to drive the weight dtype:
-    a workload tagged ``precision=fp8`` whose run did NOT pass
-    ``--quantization`` actually serves bf16/fp16 weights (the server only
-    downcasts float32→fp16), so trusting the tag would over-shrink the
-    weight IO term and under-report baseline within%.
-
-    Weight dtype is floored at bf16 (2B) in the fallback: servers downcast
-    float32 checkpoints to fp16, never keep 4B at runtime, and never go
-    sub-bf16 without an explicit quantization signal. Activation dtype
-    follows ``--dtype`` when present, else bf16, also floored at 2B.
-
-    Args:
-        state: Shared run state to read the runtime server args from.
-        meta: Model metadata (its on-disk weight dtype is a fallback signal).
-        arm: Pins which arm's server args feed precision resolution.
-
-    Returns:
-        The resolved ``RuntimeDtype`` provenance.
-    """
+    """Resolve the runtime weight/activation dtype from the actual run."""
     runtime = resolve_runtime_workload(state, arm=arm)
     args = runtime.server_args
     quant = _parse_server_arg(args, "--quantization").lower()
@@ -649,14 +416,7 @@ def resolve_runtime_dtype(
 
 
 def _compute_tag_for_bytes(weight_bytes: float) -> str:
-    """Map weight bytes-per-element to a HW_SPECS compute precision key.
-
-    Args:
-        weight_bytes: Weight bytes-per-element.
-
-    Returns:
-        The matching precision key (``fp4`` / ``fp8`` / ``bf16`` / ``fp32``).
-    """
+    """Map weight bytes-per-element to a HW_SPECS compute precision key."""
     if weight_bytes <= 0.5:
         return "fp4"
     if weight_bytes <= 1.0:
@@ -667,22 +427,7 @@ def _compute_tag_for_bytes(weight_bytes: float) -> str:
 
 
 def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
-    """Rescale ``meta`` weight bytes to the runtime weight dtype.
-
-    The on-disk ``weight_bytes`` reflects the checkpoint dtype (e.g.
-    float32). When the run reads weights at a different dtype (fp8), the
-    per-token weight IO must scale by ``runtime_bpe / checkpoint_bpe``.
-    No-op (scale == 1.0) when the checkpoint already matches runtime
-    (pre-quantized MoE fp8), so it is safe to call unconditionally.
-
-    Args:
-        meta: Model metadata whose weight byte fields are rescaled.
-        rt: Resolved runtime dtype carrying the runtime weight bytes.
-
-    Returns:
-        A new ``ModelMeta`` rescaled to the runtime weight dtype (or ``meta``
-        unchanged for non-dataclass test doubles).
-    """
+    """Rescale ``meta`` weight bytes to the runtime weight dtype."""
     import dataclasses as _dc
 
     # Safe degrade for non-dataclass / fake meta (test doubles).
@@ -720,12 +465,7 @@ def _resolve_peak_tflops(gpu_type: str | None, precision_tag: str | None) -> flo
 
 @dataclass(frozen=True)
 class ModelMeta:
-    """HF subset needed for the decode roofline ceiling.
-
-    ``active_weight_bytes`` is per-token MoE weight IO (0 ⇒ fall back to
-    ``weight_bytes``). ``hidden_size`` / ``intermediate_size`` / ``vocab_size`` /
-    ``num_attention_heads`` drive the PerfModel per-op breakdown (default 0).
-    """
+    """HF subset needed for the decode roofline ceiling."""
 
     weight_bytes: int
     num_layers: int
@@ -737,44 +477,24 @@ class ModelMeta:
     num_experts: int = 0
     experts_per_tok: int = 0
     expert_weight_bytes: int = 0
-    # Per-element bytes for the expert (routed FFN) weights. Some MoE checkpoints
-    # store experts at a *different* precision than the rest of the model (e.g.
-    # DeepSeek-V4 ``expert_dtype: fp4`` while ``quant_method: fp8``). 0 ⇒ same as
-    # ``weight_dtype_bytes`` (dense or uniform-precision MoE).
+    # Per-element bytes for the expert (routed FFN) weights.
     expert_weight_dtype_bytes: float = 0.0
     # Extra HF config fields for per-op PerfModel breakdown (0 = unavailable).
     hidden_size: int = 0
     intermediate_size: int = 0
     # Per-expert FFN dim for MoE models (0 = dense/unknown; falls back to intermediate_size).
     moe_intermediate_size: int = 0
-    # Routed-expert input dim. Latent-MoE decoders (Kimi-K3
-    # ``routed_expert_hidden_size``) run the experts in a narrower space than
-    # the residual stream. 0 ⇒ same as ``hidden_size``.
+    # Routed-expert input dim.
     moe_hidden_size: int = 0
     vocab_size: int = 0
     num_attention_heads: int = 0
-    # How the decoder stack splits between routed-expert FFN layers and plain
-    # dense FFN layers. Real MoE checkpoints are not MoE all the way down:
-    # DeepSeek/GLM run the first ``first_k_dense_replace`` layers as dense FFN,
-    # and Qwen can mark individual layers dense via ``mlp_only_layers``.
-    # Multiplying the MoE op by every layer overstates the largest term in the
-    # breakdown, and dropping the dense FFN entirely loses a real one.
-    # Both default to 0, meaning "not derived": the PerfModel then falls back to
-    # the previous all-or-nothing behaviour, so a hand-built ``ModelMeta`` keeps
-    # working. ``load_model_meta`` fills them from the HF config.
+    # How the decoder stack splits between routed-expert FFN layers and plain dense FFN layers.
     moe_layers: int = 0
     dense_ffn_layers: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
-    """Read ``metadata.total_size`` (bytes) from the safetensors index (byte-exact).
-
-    Args:
-        model_path: Local HF model directory.
-
-    Returns:
-        The total weight size in bytes, or ``None`` when unavailable.
-    """
+    """Read ``metadata.total_size`` (bytes) from the safetensors index (byte-exact)."""
     idx = model_path / "model.safetensors.index.json"
     if idx.is_file():
         try:
@@ -789,15 +509,7 @@ def _read_total_size(model_path: Path) -> int | None:
 
 
 def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
-    """Fallback weight size from local weight shards matching ``pattern``.
-
-    Args:
-        model_path: Local HF model directory.
-        pattern: Glob pattern for weight shards (e.g. ``*.safetensors``).
-
-    Returns:
-        The summed shard size in bytes, or ``None`` when zero/unreadable.
-    """
+    """Fallback weight size from local weight shards matching ``pattern``."""
     try:
         total = sum(p.stat().st_size for p in model_path.glob(pattern) if p.is_file())
     except OSError:
@@ -806,15 +518,7 @@ def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
 
 
 def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
-    """Read and parse ``config.json`` from a local HF model directory.
-
-    Args:
-        model_path (Path): Local HF model directory.
-
-    Returns:
-        dict[str, Any] | None: The parsed config, or ``None`` when the file is
-            absent or unreadable.
-    """
+    """Read and parse ``config.json`` from a local HF model directory."""
     cfg = model_path / "config.json"
     if not cfg.is_file():
         return None
@@ -824,28 +528,15 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape /
-    # MoE config under text_config/llm_config/language_config; flatten it (nested
-    # wins) so num_experts / hidden_size / moe_intermediate_size / kv-heads reach
-    # the ceiling readers instead of degrading to a dense full-weight roofline
-    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls
-    # back to the legacy top-down formula).
+    # Multimodal wrappers (e.g. Kimi-K2 kimi_k25) nest the real decoder shape / MoE config under
+    # text_config/llm_config/language_config; flatten it (nested wins) so num_experts / hidden_size /
+    # moe_intermediate_size / kv-heads reach the ceiling readers instead of degrading to a dense full-weight roofline
+    # (num_experts=0 -> active_weight_bytes = full weight_bytes; PerfModel falls back to the legacy top-down formula).
     return _merge_config_scopes(data)
 
 
 def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
-    """Routed experts activated per token, across the naming variants in use.
-
-    ``num_experts_per_tok`` is the common HF spelling; Gemma-4 writes
-    ``top_k_experts`` and Kimi-K3 writes ``num_experts_per_token``. Missing the
-    alias reads 0, which safe-degrades the whole MoE decomposition to dense.
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-
-    Returns:
-        The per-token routed-expert count, or ``0`` when no alias is present.
-    """
+    """Routed experts activated per token, across the naming variants in use."""
     for key in ("num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk"):
         value = cfg.get(key)
         if value:
@@ -854,31 +545,12 @@ def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
 
 
 def _derive_moe_hidden_size(cfg: dict[str, Any]) -> int:
-    """The routed experts' input dimension, which need not be ``hidden_size``.
-
-    Latent-MoE decoders (Kimi-K3) project into a narrower space before the
-    experts and declare it as ``routed_expert_hidden_size``; sizing the experts
-    at the model ``hidden_size`` overcounts their weights (2x for Kimi-K3),
-    which trips the ``total_expert_bytes >= weight_bytes`` safe-degrade.
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-
-    Returns:
-        The expert input dimension, falling back to ``hidden_size``.
-    """
+    """The routed experts' input dimension, which need not be ``hidden_size``."""
     return int(cfg.get("routed_expert_hidden_size") or cfg.get("moe_hidden_size") or cfg.get("hidden_size") or 0)
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
-    """GQA-aware: ``num_key_value_heads`` if present, else ``num_attention_heads``.
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-
-    Returns:
-        The number of KV heads, or ``0`` when neither field is present.
-    """
+    """GQA-aware: ``num_key_value_heads`` if present, else ``num_attention_heads``."""
     kv = cfg.get("num_key_value_heads")
     if kv is None:
         kv = cfg.get("num_attention_heads")
@@ -886,14 +558,7 @@ def _derive_kv_heads(cfg: dict[str, Any]) -> int:
 
 
 def _derive_head_dim(cfg: dict[str, Any]) -> int:
-    """``head_dim`` directly, or ``hidden_size / num_attention_heads``.
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-
-    Returns:
-        The per-head dimension, or ``0`` when it cannot be derived.
-    """
+    """``head_dim`` directly, or ``hidden_size / num_attention_heads``."""
     head_dim = cfg.get("head_dim")
     if head_dim:
         return int(head_dim)
@@ -905,30 +570,7 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
 
 
 def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: int) -> tuple[int, int]:
-    """Split the decoder stack into ``(moe_layers, dense_ffn_layers)``.
-
-    A MoE checkpoint is rarely MoE in every layer. The three mechanisms in the
-    wild:
-
-    * ``first_k_dense_replace`` (DeepSeek, GLM, Kimi) -- the first K layers run
-      a plain dense FFN. GLM-5.3-Flash sets 1, DeepSeek-V3 sets 3.
-    * ``moe_layer_freq`` -- either a per-layer 0/1 list, or an int stride
-      applied after the dense prefix. ``decoder_sparse_step`` is Qwen's name
-      for the same stride.
-    * ``mlp_only_layers`` (Qwen) -- explicit indices that stay dense.
-
-    Anything unrecognised degrades to "every layer after the dense prefix is
-    MoE", which is the common case and matches the previous behaviour when the
-    prefix is 0.
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-        num_layers: ``num_hidden_layers``.
-        num_experts: Routed expert count; ``<= 0`` means the model is dense.
-
-    Returns:
-        ``(moe_layers, dense_ffn_layers)``, summing to ``num_layers``.
-    """
+    """Split the decoder stack into ``(moe_layers, dense_ffn_layers)``."""
     if num_layers <= 0:
         return 0, 0
     if num_experts <= 0:
@@ -942,15 +584,8 @@ def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: 
     first_dense = int(cfg.get("first_k_dense_replace") or 0)
     first_dense = max(0, min(first_dense, num_layers))
 
-    # The stride is phased differently by the two upstream implementations, and
-    # both phase it on the ABSOLUTE layer index -- not on the offset from the
-    # dense prefix. DeepSeek/GLM:
-    #     layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
-    # Qwen3-MoE:
-    #     layer_idx not in mlp_only_layers and (layer_idx + 1) % decoder_sparse_step == 0
-    # Re-basing to ``(i - first_dense) % stride`` agreed with neither: for
-    # DeepSeek-V3 (first_k_dense_replace=3) any stride > 1 selected a layer set
-    # shifted by 3, and for Qwen it was off by one in the other direction.
+    # The stride is phased differently by the two upstream implementations, and both phase it on the ABSOLUTE layer
+    # index -- not on the offset from the dense prefix.
     stride, phase = 1, "deepseek"
     for raw, kind in ((freq, "deepseek"), (cfg.get("decoder_sparse_step"), "qwen")):
         if isinstance(raw, bool):
@@ -972,26 +607,7 @@ def _compute_expert_decomposition(
     dtype_bytes: float,
     expert_dtype_bytes: float = 0.0,
 ) -> tuple[int, int, int, int]:
-    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases, the per-token aliases in :func:`_derive_experts_per_tok`, and the latent-MoE expert width in :func:`_derive_moe_hidden_size`.
-
-    ``expert_dtype_bytes`` sizes the routed-expert weights when they are stored
-    at a different precision than the rest of the model (e.g. DeepSeek-V4
-    ``expert_dtype: fp4`` under ``quant_method: fp8``); ``0`` falls back to
-    ``dtype_bytes``. Using the global dtype here over-counts expert bytes for
-    such checkpoints, tripping the ``total_expert_bytes >= weight_bytes``
-    safe-degrade and silently dropping the entire MoE from the ceiling.
-
-    Args:
-        cfg: Parsed HF ``config.json``.
-        weight_bytes: Total weight bytes (the safe-degrade fallback).
-        dtype_bytes: Weight bytes-per-element (non-expert / fallback).
-        expert_dtype_bytes: Bytes-per-element for the routed-expert weights;
-            ``0`` falls back to ``dtype_bytes``.
-
-    Returns:
-        A tuple of ``(active_weight_bytes, total_expert_bytes, num_experts,
-        experts_per_tok)``, degrading to ``(weight_bytes, 0, 0, 0)``.
-    """
+    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases, the per-token aliases in :func:`_derive_experts_per_tok`, and the latent-MoE expert width in :func:`_derive_moe_hidden_size`."""
     num_experts = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
     experts_per_tok = _derive_experts_per_tok(cfg)
     if num_experts <= 0 or experts_per_tok <= 0:
@@ -1002,21 +618,15 @@ def _compute_expert_decomposition(
     expert_bpe = expert_dtype_bytes if expert_dtype_bytes > 0 else dtype_bytes
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or expert_bpe <= 0:
         return int(weight_bytes), 0, 0, 0
-    # Only the MoE layers hold expert weights. Charging every layer for them
-    # inflates ``total_expert_bytes``, which both overstates the per-token
-    # active bytes and pushes borderline checkpoints over the
-    # ``>= weight_bytes`` safe-degrade that drops the MoE from the ceiling
-    # altogether.
+    # Only the MoE layers hold expert weights.
     moe_layers, _dense_ffn_layers = _derive_moe_layer_counts(cfg, num_layers, num_experts)
     if moe_layers <= 0:
         return int(weight_bytes), 0, 0, 0
     expert_bytes_per_layer = num_experts * 3 * hidden_size * moe_inter * expert_bpe
     total_expert_bytes = int(moe_layers * expert_bytes_per_layer)
     if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
-        # Degrading a MoE model to dense drops the largest op from the
-        # breakdown entirely, so say so: the usual cause is an over-large
-        # ``expert_bpe`` (a quantized checkpoint misread as bf16), not a
-        # genuinely dense model.
+        # Degrading a MoE model to dense drops the largest op from the breakdown entirely, so say so: the usual cause
+        # is an over-large ``expert_bpe`` (a quantized checkpoint misread as bf16), not a genuinely dense model.
         log.warning(
             "MoE decomposition degraded to dense: computed expert bytes %.4g >= checkpoint bytes %.4g "
             "(num_experts=%d, moe_intermediate_size=%d, expert_bytes_per_element=%.4g)",
@@ -1042,25 +652,13 @@ def load_model_meta(
     *,
     precision_hint: str = "",
 ) -> ModelMeta | None:
-    """Read ``weight_bytes`` + KV-cache shape from a local HF model dir (``None`` when unreadable). Weight-dtype priority: quantization_config.quant_method > torch_dtype > dtype > precision_hint.
-
-    Args:
-        model_path: Local HF model directory.
-        precision_hint: Fallback precision tag when config lacks a dtype.
-
-    Returns:
-        The populated ``ModelMeta``, or ``None`` when the dir/config/weights
-        are unreadable.
-    """
+    """Read ``weight_bytes`` + KV-cache shape from a local HF model dir (``None`` when unreadable). Weight-dtype priority: quantization_config.quant_method > torch_dtype > dtype > precision_hint."""
     if not model_path:
         return None
     p = Path(model_path).expanduser()
     if not p.is_dir():
-        # ``model_path`` may be an HF repo id (the CLI ``--model`` is persisted
-        # verbatim); resolve it to the engine's local HF cache dir via the shared
-        # resolver so the decode ceiling isn't null for repo-id launches. Lazy
-        # import avoids an import-time orchestrator -> inference_optimizer cycle;
-        # ``None`` preserves the prior "unreadable -> None" behavior.
+        # ``model_path`` may be an HF repo id (the CLI ``--model`` is persisted verbatim); resolve it to the engine's
+        # local HF cache dir via the shared resolver so the decode ceiling isn't null for repo-id launches.
         from hyperloom.inference_optimizer.model_config_utils import (
             resolve_local_model_dir,
         )
@@ -1079,18 +677,15 @@ def load_model_meta(
     quant_cfg = cfg.get("quantization_config")
     if isinstance(quant_cfg, dict):
         quant_tag = str(quant_cfg.get("quant_method", "")).strip().lower()
-    # A declared quantization wins outright: ``quant_method`` alone is not
-    # enough (Quark says ``"quark"``, precision lives on the nested weight
-    # spec), and falling through to the checkpoint ``dtype`` would report
-    # bf16 for a 4-bit checkpoint.
+    # A declared quantization wins outright: ``quant_method`` alone is not enough (Quark says ``"quark"``, precision
+    # lives on the nested weight spec), and falling through to the checkpoint ``dtype`` would report bf16 for a 4-bit
+    # checkpoint.
     quant_bytes = _resolve_quant_config_weight_bytes(quant_cfg)
     if quant_bytes > 0:
         dtype_bytes = quant_bytes
     else:
         dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
-    # Routed experts may be stored at a distinct precision (DeepSeek-V4
-    # ``expert_dtype: fp4`` under fp8 attention). Fall back to the global dtype
-    # when the field is absent (uniform-precision MoE / dense).
+    # Routed experts may be stored at a distinct precision (DeepSeek-V4 ``expert_dtype: fp4`` under fp8 attention).
     expert_dtype_raw = str(cfg.get("expert_dtype") or "").strip()
     expert_dtype_bytes = _resolve_dtype_bytes(expert_dtype_raw) if expert_dtype_raw else dtype_bytes
     active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok = _compute_expert_decomposition(
@@ -1135,17 +730,7 @@ def compute_kv_bytes_per_token(
     head_dim: int,
     kv_dtype_bytes: float,
 ) -> int:
-    """KV cache footprint per generated token, summed over all layers (the ``2`` covers K + V).
-
-    Args:
-        num_layers: Number of transformer layers.
-        num_kv_heads: Number of KV heads.
-        head_dim: Per-head dimension.
-        kv_dtype_bytes: Bytes per KV element.
-
-    Returns:
-        The KV-cache bytes per generated token.
-    """
+    """KV cache footprint per generated token, summed over all layers (the ``2`` covers K + V)."""
     return int(2 * num_layers * num_kv_heads * head_dim * kv_dtype_bytes)
 
 
@@ -1166,28 +751,7 @@ def compute_theoretical_peak_output_tok_per_sec(
     experts_per_tok: int = 0,
     expert_weight_bytes: int = 0,
 ) -> float:
-    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE.
-
-    Args:
-        gpu_type: GPU type key for the HBM bandwidth lookup.
-        num_gpus: Number of GPUs (tensor-parallel degree).
-        weight_bytes: Total weight bytes.
-        num_layers: Number of transformer layers.
-        num_kv_heads: Number of KV heads.
-        head_dim: Per-head dimension.
-        kv_dtype_bytes: Bytes per KV element.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        concurrency: Decode batch size (floored at 1).
-        active_weight_bytes: Per-token active weight bytes for MoE (0 = dense).
-        num_experts: Total experts (0 = dense).
-        experts_per_tok: Experts activated per token.
-        expert_weight_bytes: Total expert weight bytes.
-
-    Returns:
-        The memory-bound decode throughput ceiling, or ``0.0`` on unknown
-        GPU type or a degenerate divisor.
-    """
+    """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``active_weight_bytes`` shrinks per-token IO for MoE."""
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -1201,8 +765,8 @@ def compute_theoretical_peak_output_tok_per_sec(
     )
     # Average KV-cache length during decode (isl + half of osl).
     kv_seq_len = max(int(isl) + int(osl) // 2, 1)
-    # Per-decode-step weight IO; MoE uses the coupon activated-expert fraction
-    # ``1-(1-k/n)^B``; dense reads full ``weight_bytes`` each step.
+    # Per-decode-step weight IO; MoE uses the coupon activated-expert fraction ``1-(1-k/n)^B``; dense reads full
+    # ``weight_bytes`` each step.
     if num_experts > 0 and experts_per_tok > 0 and expert_weight_bytes > 0:
         non_expert_bytes = max(int(weight_bytes) - int(expert_weight_bytes), 0)
         activated_fraction = 1.0 - (1.0 - experts_per_tok / num_experts) ** batch
@@ -1226,28 +790,7 @@ def compute_compute_bound_ceiling_tok_per_sec(
     weight_bytes: int,
     weight_dtype_bytes: float,
 ) -> float:
-    """Decode-only compute-bound ceiling for ``output_throughput``.
-
-        T_cmp = (F_peak * G * dtype_bytes) / (2 * active_weight_bytes_B1)
-
-    Divisor uses ``active_weight_bytes`` at B=1 (NOT batch-saturated). Returns 0.0 on missing input (degrade to T_mem).
-
-    ``F_peak`` is the max-achievable (sustained) TFLOPS (same convention as
-    :func:`compute_roofline_from_perfmodel`); the vendor dense peak is only a
-    coverage-gap fallback when the achievable table lacks the (gpu, precision).
-
-    Args:
-        gpu_type: GPU type key for the peak TFLOPS lookup.
-        num_gpus: Number of GPUs (tensor-parallel degree).
-        precision_tag: Precision key for the peak TFLOPS lookup.
-        active_weight_bytes: Per-token active weight bytes at B=1.
-        weight_bytes: Total weight bytes (fallback when active is missing).
-        weight_dtype_bytes: Weight bytes-per-element.
-
-    Returns:
-        The compute-bound decode throughput ceiling, or ``0.0`` on missing
-        input.
-    """
+    """Decode-only compute-bound ceiling for ``output_throughput``."""
     peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or weight_dtype_bytes <= 0:
         return 0.0
@@ -1276,20 +819,7 @@ _EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
 
 
 def select_peak_and_bound(t_mem: float, t_cmp: float) -> tuple[float, str]:
-    """Pick the dominant (lower) ceiling and its label from the memory- and
-    compute-bound projections.
-
-    Both non-positive ⇒ ``(0.0, "unknown")``; only one positive ⇒ that one;
-    else the smaller wins (a tie goes to memory).
-
-    Args:
-        t_mem: Memory-bound throughput ceiling (tok/s); ``<=0`` means unknown.
-        t_cmp: Compute-bound throughput ceiling (tok/s); ``<=0`` means unknown.
-
-    Returns:
-        ``(peak_tok_per_sec, bound_kind)`` with ``bound_kind`` ∈
-        {``"memory"``, ``"compute"``, ``"unknown"``}.
-    """
+    """Pick the dominant (lower) ceiling and its label from the memory- and"""
     if t_mem <= 0 and t_cmp <= 0:
         return 0.0, "unknown"
     if t_cmp <= 0:
@@ -1302,47 +832,18 @@ def select_peak_and_bound(t_mem: float, t_cmp: float) -> tuple[float, str]:
 
 
 def _activation_kv_dtype_bytes(meta: ModelMeta) -> float:
-    """Return the per-element byte size for activation/KV tensors.
-
-    Args:
-        meta: Model metadata.
-
-    Returns:
-        The dtype byte width used for activation and KV-cache sizing.
-    """
+    """Return the per-element byte size for activation/KV tensors."""
     return max(float(meta.weight_dtype_bytes or 2.0), 2.0)
 
 
 def _read_diffusion_num_steps(state: Any) -> int:
-    """Read the denoising step count from the baseline yaml.
-
-    Reads ``XDIT_NUM_STEPS`` (xDiT) with a ``CUSTOM_NUM_STEPS`` fallback so an
-    operator-supplied diffusion workload can feed the roofline too.
-
-    Args:
-        state: Shared run state carrying the materialized baseline yaml.
-
-    Returns:
-        The positive step count, or ``0`` when unavailable.
-    """
+    """Read the denoising step count from the baseline yaml."""
     envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
     return _env_int(envs, "XDIT_NUM_STEPS") or _env_int(envs, "CUSTOM_NUM_STEPS")
 
 
 def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
-    """Read the image/frame resolution from the baseline yaml.
-
-    Reads ``XDIT_HEIGHT``/``XDIT_WIDTH`` (xDiT) with ``CUSTOM_HEIGHT``/
-    ``CUSTOM_WIDTH`` fallback. Needed for models (e.g. FLUX,
-    SD3) whose transformer config carries no ``sample_size`` -- the DiT sequence
-    length is set by the runtime resolution.
-
-    Args:
-        state: Shared run state carrying the materialized baseline yaml.
-
-    Returns:
-        ``(height, width)`` in pixels; ``(0, 0)`` when unavailable.
-    """
+    """Read the image/frame resolution from the baseline yaml."""
     try:
         envs = _benchmark_envs(_read_baseline_yaml_benchmark(state))
         height = _env_int(envs, "XDIT_HEIGHT") or _env_int(envs, "CUSTOM_HEIGHT")
@@ -1353,19 +854,7 @@ def _read_diffusion_resolution(state: Any) -> tuple[int, int]:
 
 
 def _read_vae_geometry(model_path: str) -> tuple[int, int]:
-    """Read ``(vae_scale_factor, latent_channels)`` from ``<model>/vae/config.json``.
-
-    The VAE spatial downscale is ``2 ** (len(block_out_channels) - 1)`` (one
-    stride-2 stage per extra block); ``latent_channels`` is the VAE latent depth.
-    Both feed the DiT sequence-length derivation for sample_size-less configs.
-
-    Args:
-        model_path: Local diffusers model directory.
-
-    Returns:
-        ``(vae_scale_factor, latent_channels)``; ``vae_scale_factor`` defaults to
-        8 (the standard SD/FLUX VAE) and ``latent_channels`` to 0 when unreadable.
-    """
+    """Read ``(vae_scale_factor, latent_channels)`` from ``<model>/vae/config.json``."""
     try:
         cfg = json.loads((Path(model_path) / "vae" / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -1379,25 +868,7 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
 
 
 def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int) -> float:
-    """Memory-roofline ceiling for diffusion image throughput (images/sec).
-
-    Each denoising step must read the full model weights at least once, so the
-    per-step time is lower-bounded by ``weight_bytes / (HBM_BW * num_gpus)`` and
-    one image takes ``num_steps`` such steps. This is a strict upper bound on
-    images/sec in the memory-bound regime. The compute-bound ceiling (which
-    typically dominates for diffusion) needs per-op FLOPs modeling and is added
-    separately once it can be validated against a real xDiT trace.
-
-    Args:
-        gpu_type: GPU type key for the HBM bandwidth lookup.
-        num_gpus: Tensor/sequence-parallel degree (floored at 1).
-        weight_bytes: Total model weight bytes (read once per step).
-        num_steps: Number of denoising steps per image.
-
-    Returns:
-        The memory-bound images/sec ceiling, or ``0.0`` on unknown GPU type or
-        degenerate input.
-    """
+    """Memory-roofline ceiling for diffusion image throughput (images/sec)."""
     spec = HW_SPECS.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
@@ -1410,56 +881,15 @@ def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_by
 
 
 def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0) -> tuple[int, int, int, int] | None:
-    """DiT transformer shape from ``<model>/transformer/config.json`` for the
-    compute-bound diffusion ceiling.
-
-    Estimates DiT-ONLY params, NOT the total ``weight_bytes`` (which also holds
-    the text encoder + VAE that do NOT run per denoising step). Per standard
-    transformer block the count is ``12 * H**2`` (4H^2 attention + 8H^2 MLP);
-    FLUX-style dual-stream blocks (``num_layers``) run separate image+text
-    projections and are counted ``2x``, single-stream blocks (``num_single_layers``)
-    ``1x`` -- so ``params = 12 * H**2 * (2 * num_layers + num_single_layers)``.
-
-    Latent token count (the DiT sequence length):
-      - ``sample_size`` present (Sana/PixArt/DiT):
-        ``(sample_size / patch_h) * (sample_size / patch_w)``, where a
-        2-element ``patch_size`` is ``(h, w)`` and need not be square.
-      - else (FLUX/SD3): from the runtime resolution -- one token per
-        ``vae_scale_factor * transformer_pack`` pixels a side, where the pack is
-        inferred from ``in_channels / vae_latent_channels`` (FLUX folds a 2x2
-        patch into channels), all read from the VAE + transformer configs.
-
-    Args:
-        model_path: Local diffusers model directory.
-        height: Image height in pixels (used only when ``sample_size`` is absent).
-        width: Image width in pixels (used only when ``sample_size`` is absent).
-
-    Returns:
-        ``(dit_params, latent_tokens, num_layers, hidden_size)`` where
-        ``num_layers`` is the TOTAL block count (dual + single stream, for the
-        attention term).
-
-        ``latent_tokens == 0`` is an in-band sentinel for "the weights resolved
-        but the sequence length did not", which today means a 3-element (video)
-        ``patch_size`` this function has no frame axis for. Callers must keep
-        using the other three fields in that case -- returning ``None`` instead
-        would cost the DiT-only weight count, and
-        ``_compute_diffusion_breakdown_from_state`` answers a missing one by
-        falling its per-step memory bound back to the whole checkpoint, text
-        encoder and VAE included. Only the compute half is unavailable.
-
-        ``None`` when the config is unreadable, is missing ``num_layers`` or the
-        hidden size, carries a non-numeric value where a number is required, or
-        offers no way to size the latent grid (caller degrades to memory-only).
-    """
+    """DiT transformer shape from ``<model>/transformer/config.json`` for the"""
     try:
         cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return None
     if not isinstance(cfg, dict):
         return None
-    # Every field below is attacker-shaped JSON, so a non-numeric value must
-    # degrade to "unreadable" rather than escape as TypeError past the caller.
+    # Every field below is attacker-shaped JSON, so a non-numeric value must degrade to "unreadable" rather than
+    # escape as TypeError past the caller.
     try:
         num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
         num_single_layers = int(cfg.get("num_single_layers") or 0)
@@ -1469,8 +899,8 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
             head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
             hidden = heads * head_dim
         _ps = cfg.get("patch_size")
-        # A 3-element patch is (temporal, h, w): a video denoiser, whose token
-        # count needs the frame axis nothing in this module models.
+        # A 3-element patch is (temporal, h, w): a video denoiser, whose token count needs the frame axis nothing in
+        # this module models.
         video_patch = isinstance(_ps, (list, tuple)) and len(_ps) >= 3
         if isinstance(_ps, (list, tuple)):
             # A 2-element patch is (h, w) and need not be square, so keep both.
@@ -1485,8 +915,7 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
         return None
 
     if video_patch:
-        # Only the compute side abstains. The weights are still resolvable, so the
-        # caller keeps a DiT-only memory bound instead of the whole checkpoint's.
+        # Only the compute side abstains.
         latent_tokens = 0
     elif sample > 0:
         latent_tokens = (sample // patch_h) * (sample // patch_w)
@@ -1506,22 +935,7 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
 def _diffusion_latent_tokens_from_resolution(
     model_path: str, transformer_cfg: dict[str, Any], height: int, width: int
 ) -> int:
-    """Latent-grid token count for a sample_size-less DiT from the runtime resolution.
-
-    ``tokens = (H / downscale) * (W / downscale)`` where ``downscale =
-    vae_scale_factor * transformer_pack``. The transformer pack is inferred from
-    ``in_channels / vae_latent_channels`` (FLUX packs a 2x2 patch into channels),
-    defaulting to 2 (the FLUX/SD3 convention) when it cannot be derived.
-
-    Args:
-        model_path: Local diffusers model directory (for the VAE geometry).
-        transformer_cfg: Parsed transformer ``config.json``.
-        height: Image height in pixels.
-        width: Image width in pixels.
-
-    Returns:
-        The latent token count, or ``0`` when the resolution is unavailable.
-    """
+    """Latent-grid token count for a sample_size-less DiT from the runtime resolution."""
     if height <= 0 or width <= 0:
         return 0
     vae_scale, latent_channels = _read_vae_geometry(model_path)
@@ -1549,29 +963,7 @@ def compute_diffusion_compute_img_per_sec(
     hidden_size: int,
     num_steps: int,
 ) -> float:
-    """Compute-roofline ceiling for diffusion image throughput (images/sec).
-
-    Per denoising step the DiT does ``2 * dit_params * T`` linear FLOPs (the
-    2N-per-token rule over ``T`` latent tokens) plus ``4 * L * T**2 * H``
-    attention-score FLOPs (QK^T + A·V, weightless); one image is ``num_steps``
-    such steps. ``F_peak`` is the max-achievable (sustained) TFLOPS — the SAME
-    convention as the memory ceiling and the LLM ceiling (vendor peak only as a
-    coverage-gap fallback). VAE decode (one-time) is intentionally excluded: a
-    small, documented under-count that keeps this a valid upper bound.
-
-    Args:
-        gpu_type: GPU type key for the peak TFLOPS lookup.
-        num_gpus: Tensor/sequence-parallel degree (floored at 1).
-        precision_tag: Precision key for the peak TFLOPS lookup.
-        dit_params: DiT-only parameter count (see :func:`_read_diffusion_dit_meta`).
-        latent_tokens: Latent tokens processed per denoising step.
-        num_layers: DiT transformer layers (for the attention-score term).
-        hidden_size: DiT model dim (for the attention-score term).
-        num_steps: Denoising steps per image.
-
-    Returns:
-        The compute-bound images/sec ceiling, or ``0.0`` on degenerate input.
-    """
+    """Compute-roofline ceiling for diffusion image throughput (images/sec)."""
     peak_tflops = _resolve_achievable_tflops(gpu_type, precision_tag) or _resolve_peak_tflops(gpu_type, precision_tag)
     if peak_tflops <= 0 or dit_params <= 0 or latent_tokens <= 0 or num_steps <= 0:
         return 0.0
@@ -1585,33 +977,14 @@ def compute_diffusion_compute_img_per_sec(
 
 
 def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload) -> RooflineBreakdown:
-    """Diffusion (xDiT) roofline breakdown in images/sec.
-
-    Ceiling = ``min(memory, compute)`` (the binding side), like the LLM path.
-    Memory: per-step full-weight read. Compute: a config-analytical DiT FLOP
-    model (see :func:`compute_diffusion_compute_img_per_sec`) — route-independent,
-    so it tightens the (previously memory-only, too-loose) ceiling for every xDiT
-    run. Degrades to memory-only when the DiT transformer config is unreadable.
-    Values ride the ``*_tok_per_sec`` fields; the img/s unit is tagged at the
-    snapshot layer (``throughput_unit``).
-
-    Args:
-        state: Shared run state (for the denoising step count).
-        runtime: Resolved runtime workload (model_path / gpu_type / tp).
-
-    Returns:
-        The diffusion ``RooflineBreakdown``, or ``_EMPTY_BREAKDOWN`` when the
-        model weights or step count are unavailable.
-    """
+    """Diffusion (xDiT) roofline breakdown in images/sec."""
     num_steps = _read_diffusion_num_steps(state)
     if num_steps <= 0:
         return _EMPTY_BREAKDOWN
     # DiT geometry drives both the compute FLOP model and per-step memory IO.
-    # Read the runtime resolution so sample_size-less configs can size their grid.
     height, width = _read_diffusion_resolution(state)
-    # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so
-    # the DiT/VAE config reads work (load_model_meta re-resolves internally, so
-    # passing the resolved dir is harmless).
+    # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so the DiT/VAE config reads work
+    # (load_model_meta re-resolves internally, so passing the resolved dir is harmless).
     from hyperloom.inference_optimizer.model_config_utils import (
         resolve_local_model_dir,
     )
@@ -1620,15 +993,14 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     model_dir = str(_resolved) if _resolved is not None else runtime.model_path
     dit = _read_diffusion_dit_meta(model_dir, height=height, width=width)
 
-    # Need at least one weight source: DiT geometry OR the full-checkpoint size;
-    # bail only when both are missing.
+    # Need at least one weight source: DiT geometry OR the full-checkpoint size; bail only when both are missing.
     meta = load_model_meta(model_dir, precision_hint=runtime.precision)
     meta_bytes = int(meta.weight_bytes) if (meta is not None and meta.weight_bytes > 0) else 0
     if dit is None and meta_bytes <= 0:
         return _EMPTY_BREAKDOWN
 
-    # Per step only the DiT runs, so per-step memory IO is the DiT-only weight
-    # bytes; fall back to the full checkpoint when DiT geometry is unavailable.
+    # Per step only the DiT runs, so per-step memory IO is the DiT-only weight bytes; fall back to the full checkpoint
+    # when DiT geometry is unavailable.
     cmp_img_s = 0.0
     mem_bytes = meta_bytes
     if dit is not None:
@@ -1636,8 +1008,8 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
         dit_weight_bytes = int(dit_params * _resolve_dtype_bytes(runtime.precision or "bf16"))
         if dit_weight_bytes > 0:
             mem_bytes = dit_weight_bytes
-        # ``latent_tokens == 0`` means the geometry read resolved the weights but
-        # not the sequence length, so the memory bound above still holds.
+        # ``latent_tokens == 0`` means the geometry read resolved the weights but not the sequence length, so the
+        # memory bound above still holds.
         if latent_tokens > 0:
             cmp_img_s = compute_diffusion_compute_img_per_sec(
                 gpu_type=runtime.gpu_type,
@@ -1666,21 +1038,7 @@ def compute_roofline_breakdown_from_state(
     *,
     arm: str | None = None,
 ) -> RooflineBreakdown:
-    """Primary decode ceiling + T_mem/T_cmp side projections.
-
-    Prefers the bottom-up PerfModel (``compute_roofline_from_perfmodel``) when
-    the model config is complete, else the legacy top-down aggregate. Never
-    raises; returns ``_EMPTY_BREAKDOWN`` on missing fields. ``arm`` pins
-    precision to a specific arm.
-
-    Args:
-        state: Shared run state to resolve the workload and dtype from.
-        arm: Pins precision to a specific arm; ``None`` infers it.
-
-    Returns:
-        The decode ``RooflineBreakdown`` (``_EMPTY_BREAKDOWN`` on missing
-        fields).
-    """
+    """Primary decode ceiling + T_mem/T_cmp side projections."""
     runtime = resolve_runtime_workload(state, arm=arm)
     # Diffusion (xDiT) uses a distinct images/sec ceiling.
     if (runtime.framework or "").strip().lower() == "xdit":
@@ -1752,31 +1110,12 @@ def compute_roofline_breakdown_from_state(
 
 
 def compute_peak_from_state(state: Any, *, arm: str | None = None) -> float:
-    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm.
-
-    Args:
-        state: Shared run state to compute the ceiling from.
-        arm: Pins precision to a specific arm; ``None`` infers it.
-
-    Returns:
-        The peak decode throughput (``peak_tok_per_sec``).
-    """
+    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm."""
     return compute_roofline_breakdown_from_state(state, arm=arm).peak_tok_per_sec
 
 
 def read_baseline_server_args(state: Any) -> str:
-    """Public accessor for the baseline arm's runtime server args.
-
-    Stable entry point for callers (e.g. Coordinator profile injection) that
-    must read baseline's own flags without depending on the private
-    ``_read_baseline_yaml_server_args`` helper.
-
-    Args:
-        state: Shared run state carrying ``last_baseline`` provenance.
-
-    Returns:
-        The baseline arm's runtime server args, or ``""`` when unreadable.
-    """
+    """Public accessor for the baseline arm's runtime server args."""
     return _read_baseline_yaml_server_args(state)
 
 
@@ -1847,19 +1186,7 @@ def _resolve_achievable_tflops(gpu_type: str | None, precision_tag: str | None) 
 
 
 def resolve_compute_peak_provenance(gpu_type: str | None, precision_tag: str | None) -> dict[str, Any]:
-    """Provenance for the compute-peak TFLOPS used by every compute ceiling.
-
-    The unified convention is max-achievable (sustained) TFLOPS; the vendor
-    dense peak is only a coverage-gap fallback. Surfacing convention + value +
-    source keeps within%/gap interpretable.
-
-    Args:
-        gpu_type: GPU type key for the peak lookup.
-        precision_tag: Precision key for the peak lookup.
-
-    Returns:
-        ``{compute_peak_convention, compute_peak_tflops, compute_peak_source}``.
-    """
+    """Provenance for the compute-peak TFLOPS used by every compute ceiling."""
     ach = _resolve_achievable_tflops(gpu_type, precision_tag)
     if ach > 0:
         return {
@@ -1879,23 +1206,7 @@ import dataclasses as _dc
 
 
 def _fused_moe_flops(M: int, K: int, N: int, topk: int) -> float:
-    """FLOPs for one gated SwiGLU MoE forward (gate+up+down projections).
-
-    Mirrors TraceLens.PerfModel.extensions.moe_perf_model_extensions
-    .FusedMoE.flops_func with gated=True (all LLM MoE uses SwiGLU):
-      gate+up : 2 * M * K * N * topk * 2
-      down    : 2 * M * K * N * topk
-      aggregation: M * K * (2 * topk - 1)
-
-    Args:
-        M: Number of tokens (batch * seq).
-        K: Hidden size.
-        N: Per-expert FFN intermediate size.
-        topk: Experts activated per token.
-
-    Returns:
-        Total FLOPs for the gated SwiGLU MoE forward.
-    """
+    """FLOPs for one gated SwiGLU MoE forward (gate+up+down projections)."""
     return 2.0 * M * K * N * topk * 2 + 2.0 * M * K * N * topk + M * K * (2 * topk - 1)
 
 
@@ -1908,31 +1219,7 @@ def _fused_moe_bytes(
     weight_bpe: float,
     act_bpe: float | None = None,
 ) -> float:
-    """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector
-    active-expert count, inlined from TraceLens FusedMoE.bytes_func.
-
-    Mirrors the TraceLens separation of input/weight/output dtypes:
-      input  : M * K * act_bpe
-      fc1 (gate+up weights): E_active * N * K * weight_bpe * 2
-      fc2 (down weights)   : E_active * N * K * weight_bpe
-      output : M * K * act_bpe
-
-    act_bpe defaults to weight_bpe when not provided. For FP8/FP4-weight
-    models pass act_bpe=2.0 (bf16 activations) to match TraceLens semantics
-    where input_bpe != weight_bpe.
-
-    Args:
-        M: Number of tokens (batch * seq).
-        K: Hidden size.
-        N: Per-expert FFN intermediate size.
-        num_experts: Total experts.
-        topk: Experts activated per token.
-        weight_bpe: Weight bytes-per-element.
-        act_bpe: Activation bytes-per-element; defaults to ``weight_bpe``.
-
-    Returns:
-        Total HBM bytes for the gated SwiGLU MoE forward.
-    """
+    """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector"""
     if act_bpe is None:
         act_bpe = weight_bpe
     e_active = num_experts * (1.0 - ((num_experts - topk) / num_experts) ** M)
@@ -1959,17 +1246,7 @@ class OpBreakdown:
 
 @_dc.dataclass(frozen=True)
 class PerfModelBreakdown:
-    """Bottom-up per-op roofline breakdown via TraceLens PerfModel.
-
-    ``decode_tok_per_s`` and ``prefill_tok_per_s`` are derived from the
-    sum of per-op times over one forward pass at the given batch size.
-    ``decode_mem_tok_per_s`` / ``decode_cmp_tok_per_s`` expose the same
-    bottom-up formulas under memory-only and compute-only assumptions.
-
-    ``ops`` lists every GEMM / SDPA, one row per logical operator
-    (already summed over the layer repetitions encoded in ``rep``).
-    ``bound_kind`` reflects the decode-forward dominant bound.
-    """
+    """Bottom-up per-op roofline breakdown via TraceLens PerfModel."""
 
     decode_tok_per_s: float
     prefill_tok_per_s: float
@@ -1982,20 +1259,7 @@ class PerfModelBreakdown:
 
 
 def _gemm_flops(M: int, N: int, K: int) -> float:
-    """FLOPs for a bias-free matrix multiply (2*M*N*K).
-
-    Mirrors TraceLens.PerfModel.perf_model.GEMM.flops_func (no bias path
-    needed here since LLM linear layers are weight-only without bias in
-    the roofline model).
-
-    Args:
-        M: Rows of the output (tokens).
-        N: Output features.
-        K: Inner/contraction dimension.
-
-    Returns:
-        Total FLOPs for the matrix multiply.
-    """
+    """FLOPs for a bias-free matrix multiply (2*M*N*K)."""
     return 2.0 * M * N * K
 
 
@@ -2006,23 +1270,7 @@ def _gemm_bytes(
     weight_bpe: float,
     act_bpe: float | None = None,
 ) -> float:
-    """HBM bytes for a bias-free matmul: read(act MK + weight KN) + write(act MN).
-
-    Mirrors TraceLens.PerfModel.perf_model.GEMM.bytes_func with bpe_mat1=act_bpe
-    (input activation), bpe_mat2=weight_bpe (weight), bpe_output=act_bpe (output).
-    act_bpe defaults to weight_bpe; for FP8/FP4-weight models pass act_bpe=2.0
-    (bf16 activations) to correctly separate activation from weight bytes.
-
-    Args:
-        M: Rows of the output (tokens).
-        N: Output features.
-        K: Inner/contraction dimension.
-        weight_bpe: Weight bytes-per-element.
-        act_bpe: Activation bytes-per-element; defaults to ``weight_bpe``.
-
-    Returns:
-        Total HBM bytes for the matrix multiply.
-    """
+    """HBM bytes for a bias-free matmul: read(act MK + weight KN) + write(act MN)."""
     a = act_bpe if act_bpe is not None else weight_bpe
     return M * K * a + K * N * weight_bpe + M * N * a
 
@@ -2037,27 +1285,7 @@ def _sdpa_flops(
     d_h_v: int,
     causal: bool,
 ) -> float:
-    """FLOPs for scaled dot-product attention.
-
-    Mirrors TraceLens.PerfModel.perf_model.SDPA.flops_func:
-      QK^T  : B * H_Q * 2 * N_Q * N_KV * d_h_qk
-      PV    : B * H_Q * 2 * N_Q * d_h_v * N_KV
-    Softmax FLOPs omitted (dominated by matmuls).
-    Causal masking halves the work when N_Q == N_KV (prefill only).
-
-    Args:
-        B: Batch size.
-        N_Q: Query sequence length.
-        H_Q: Number of query heads.
-        N_KV: Key/value sequence length.
-        H_KV: Number of KV heads.
-        d_h_qk: Per-head dimension for Q/K.
-        d_h_v: Per-head dimension for V.
-        causal: Whether causal masking applies.
-
-    Returns:
-        Total FLOPs for scaled dot-product attention.
-    """
+    """FLOPs for scaled dot-product attention."""
     flops_qk = B * H_Q * (2.0 * N_Q * N_KV * d_h_qk)
     flops_pv = B * H_Q * (2.0 * N_Q * d_h_v * N_KV)
     total = flops_qk + flops_pv
@@ -2077,26 +1305,7 @@ def _sdpa_bytes(
     causal: bool,
     bpe: float,
 ) -> float:
-    """HBM bytes for SDPA: read Q, K, V + write output.
-
-    Mirrors TraceLens.PerfModel.perf_model.SDPA.bytes_func.
-    causal is accepted for API symmetry but does not change the I/O volume
-    (KV is always fully read even under causal masking at the HBM level).
-
-    Args:
-        B: Batch size.
-        N_Q: Query sequence length.
-        H_Q: Number of query heads.
-        N_KV: Key/value sequence length.
-        H_KV: Number of KV heads.
-        d_h_qk: Per-head dimension for Q/K.
-        d_h_v: Per-head dimension for V.
-        causal: Accepted for API symmetry; does not change I/O volume.
-        bpe: Bytes per element for the tensors.
-
-    Returns:
-        Total HBM bytes for scaled dot-product attention.
-    """
+    """HBM bytes for SDPA: read Q, K, V + write output."""
     elems = (
         B * N_Q * H_Q * d_h_qk  # Q read
         + B * N_KV * H_KV * d_h_qk  # K read
@@ -2116,29 +1325,7 @@ def compute_roofline_from_perfmodel(
     num_gpus: int = 1,
     precision_tag: str = "bf16",
 ) -> "PerfModelBreakdown | None":
-    """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas.
-
-    Returns ``None`` when:
-      * Model metadata is incomplete (hidden_size / num_attention_heads == 0)
-      * GPU is not in ``HW_SPECS_ACHIEVABLE``
-
-    The returned ceilings use max-achievable TFLOPS (from
-    ``HW_SPECS_ACHIEVABLE``) rather than vendor-quoted peaks. The GEMM / SDPA
-    formulas are inlined here (no TraceLens import) and mirror TraceLens PerfModel.
-
-    Args:
-        meta: Model metadata; complete config required (else ``None``).
-        gpu_type: GPU type key for the achievable-spec lookup.
-        concurrency: Decode batch size.
-        isl: Input sequence length.
-        osl: Output sequence length.
-        num_gpus: Number of GPUs (tensor-parallel degree).
-        precision_tag: Precision key for the achievable TFLOPS lookup.
-
-    Returns:
-        The per-op ``PerfModelBreakdown``, or ``None`` when model metadata is
-        incomplete or the GPU is unsupported.
-    """
+    """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     if meta is None:
         return None
     if not meta.hidden_size or not meta.num_attention_heads:
@@ -2155,8 +1342,8 @@ def compute_roofline_from_perfmodel(
         return None
     f_peak = f_peak_tflops * 1e12
     bpe = float(meta.weight_dtype_bytes or 2.0)
-    # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4
-    # experts under fp8 attention); size the MoE reads with it. 0 ⇒ same as bpe.
+    # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4 experts under fp8 attention); size the
+    # MoE reads with it. 0 ⇒ same as bpe.
     expert_bpe = float(meta.expert_weight_dtype_bytes or bpe)
     # Activations (input/output) are at least bf16 even for quantized-weight models.
     act_bpe = max(bpe, 2.0)
@@ -2176,7 +1363,6 @@ def compute_roofline_from_perfmodel(
     kv_out = n_kv_heads * hd
 
     # Linear projections per layer: (name, K_in, N_out, repeat_per_forward).
-    # MoE FFN is handled separately in _forward.
     linears: list[tuple[str, int, int, int]] = [
         ("q_proj", hidden, q_out, n_layers),
         ("k_proj", hidden, kv_out, n_layers),
@@ -2184,10 +1370,8 @@ def compute_roofline_from_perfmodel(
         ("o_proj", q_out, hidden, n_layers),
     ]
     is_moe = meta.num_experts > 0 and meta.moe_intermediate_size > 0
-    # A MoE checkpoint still runs a dense FFN in its ``first_k_dense_replace``
-    # prefix, so the two are not mutually exclusive: gate/up/down repeat over
-    # the dense layers and the MoE op over the MoE layers. Attention and SDPA
-    # stay at n_layers -- every layer has those.
+    # A MoE checkpoint still runs a dense FFN in its ``first_k_dense_replace`` prefix, so the two are not mutually
+    # exclusive: gate/up/down repeat over the dense layers and the MoE op over the MoE layers.
     if is_moe:
         n_moe_layers = meta.moe_layers or n_layers
         n_dense_ffn_layers = meta.dense_ffn_layers
@@ -2204,33 +1388,13 @@ def compute_roofline_from_perfmodel(
         linears.append(("lm_head", hidden, vocab, 1))
 
     def _roofline_time(fl: float, by: float) -> tuple[float, str, float, float]:
-        """Roofline time for one op given its FLOPs and byte traffic.
-
-        Args:
-            fl: Floating-point operations for the op.
-            by: Bytes moved for the op.
-
-        Returns:
-            A tuple ``(time, bound_kind, t_mem, t_cmp)`` where ``time`` is the
-            roofline max of compute and memory time and ``bound_kind`` is
-            ``"compute"`` or ``"memory"``.
-        """
+        """Roofline time for one op given its FLOPs and byte traffic."""
         t_cmp = fl / f_peak if f_peak > 0 else 1e30
         t_mem = by / bw_bps if bw_bps > 0 else 1e30
         return max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory", t_mem, t_cmp
 
     def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, float, float, list[OpBreakdown]]:
-        """Roofline-model one forward pass for the given shapes.
-
-        Args:
-            batch: Batch size (concurrency).
-            s_q: Query sequence length.
-            s_kv: Key/value sequence length.
-
-        Returns:
-            A tuple ``(total_time, total_mem_time, total_cmp_time, ops)`` where
-            ``ops`` is the per-op breakdown list.
-        """
+        """Roofline-model one forward pass for the given shapes."""
         total_t = 0.0
         total_mem_t = 0.0
         total_cmp_t = 0.0

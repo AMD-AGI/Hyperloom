@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cross-repo patch grounding, artifact stacking, and accumulated-config replay.
-
-Regression fixtures come from sessions 101858 (two advanced rounds whose envs a
-later KEEP erased) and 101901 (an artifact-only repair whose replay script came
-out empty).
-"""
+"""Cross-repo patch grounding, artifact stacking, and accumulated-config replay."""
 
 from __future__ import annotations
 
@@ -72,13 +67,7 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
 
 
 def test_basename_does_not_create_false_ambiguity(tmp_path):
-    """A deep sglang path must not match an aiter tree that holds only the same basename.
-
-    python/sglang/srt/layers/utils.py stripped at high -p levels reduces to utils.py.
-    That bare filename must not be accepted as a match, because any tree that happens
-    to hold a top-level utils.py would then be considered a candidate, triggering
-    false ambiguous_root and dropping the entire patch set.
-    """
+    """A deep sglang path must not match an aiter tree that holds only the same basename."""
     sglang = tmp_path / "sglang"
     sglang.mkdir()
     _git("init", "-q", str(sglang))
@@ -323,13 +312,7 @@ def test_no_candidate_roots_is_distinct_from_a_miss(tmp_path):
 
 
 def test_create_only_reason_does_not_depend_on_the_candidates(tmp_path):
-    """A create-only set has no pre-image, so candidates cannot speak to it.
-
-    Letting the candidate list rename this reason made the outcome depend on
-    which framework trees happen to exist on the host: a clean CI box, where the
-    allowlist names roots that are all absent, disagreed with a dev box where one
-    of them was real.
-    """
+    """A create-only set has no pre-image, so candidates cannot speak to it."""
     real = _checkout(tmp_path / "root", "present.py")
     absent = tmp_path / "absent"
 
@@ -442,11 +425,7 @@ def test_generated_artifact_script_installs_and_launches(tmp_path):
 
 
 def test_kept_round_keeps_the_envs_earlier_advances_accepted(tmp_path):
-    """101858: two advances accepted three envs; the KEEP bench must carry them.
-
-    The KEEP leg is benched with ``base_extra_envs``, so its effective_config
-    is the whole stack and writing it back over ``accepted_config`` is lossless.
-    """
+    """101858: two advances accepted three envs; the KEEP bench must carry them."""
     enablement = EnablementRound()
     enablement.accepted_config = {
         "extra_envs": {
@@ -458,8 +437,8 @@ def test_kept_round_keeps_the_envs_earlier_advances_accepted(tmp_path):
     }
     base_extra_envs = dict(enablement.accepted_config["extra_envs"])
 
-    # The KEEP round proposes no env of its own; the variant still launches with
-    # the accumulated three, so effective_config comes back holding all of them.
+    # The KEEP round proposes no env of its own; the variant still launches with the accumulated three, so
+    # effective_config comes back holding all of them.
     enablement.accepted_config = {"extra_envs": base_extra_envs, "extra_server_args": ""}
 
     write_setting_script(tmp_path, enablement, "sglang", model="/models/DeepSeek-V4-Pro", tp=8)

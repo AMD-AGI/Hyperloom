@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist dispatch profile — the four orthogonal dials that parameterise a
-single ``specialist`` worker.
-
-A single ``specialist`` worker is parameterised by:
-
-* ``scope``  — ``domain`` (single catalogue domain), ``domains`` (cross-domain
-  combination), or ``freeform`` (no domain lock; natural-language task).
-* ``mode``   — ``research`` (read-only; produce findings) or ``patch``
-  (worktree; produce a real unified diff).
-* ``bench``  — whether the worker may run in-loop micro-benchmarks
-  (only meaningful for ``mode == patch``).
-* ``lane``   — ``cpu`` (research / freeform default) or ``gpu`` (patch + bench).
-
-Defaults resolve a ``delegate{action='specialist', params={domain, gap, ...}}``
-call to single-domain patch-authoring behaviour.
-"""
+"""Specialist dispatch profile — the four orthogonal dials that parameterise a"""
 
 from __future__ import annotations
 
@@ -44,9 +29,8 @@ LANE_GPU = "gpu"
 LANE_VALUES: frozenset[str] = frozenset({LANE_CPU, LANE_GPU})
 
 
-# Defaults: an anchored dispatch resolves to single-domain, patch-authoring,
-# GPU-leased behaviour; a truly bare dispatch is inferred ``freeform`` and
-# resolves to the cheap read-only research/CPU lane.
+# Defaults: an anchored dispatch resolves to single-domain, patch-authoring, GPU-leased behaviour; a truly bare
+# dispatch is inferred ``freeform`` and resolves to the cheap read-only research/CPU lane.
 DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
@@ -64,40 +48,17 @@ class SpecialistProfile:
 
     @property
     def is_freeform(self) -> bool:
-        """Whether this profile uses the free-form (unscoped) scope.
-
-        Returns:
-            ``True`` if the scope is free-form.
-        """
+        """Whether this profile uses the free-form (unscoped) scope."""
         return self.scope == SCOPE_FREEFORM
 
     @property
     def reserves_benchmark_lane(self) -> bool:
-        """True iff this dispatch should contend for the ``benchmark_lane``.
-
-        Bench-capable patch specialists (``mode=patch & bench=True``) run their
-        own serving + benchmark loop on their leased cards, so they reserve the
-        shared ``benchmark_lane`` to avoid oversubscribing benchmark resources.
-
-        Returns:
-            ``True`` when the profile is patch-mode with ``bench=True``.
-        """
+        """True iff this dispatch should contend for the ``benchmark_lane``."""
         return self.mode == MODE_PATCH and self.bench
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
-    """Coerce a loosely-typed value to a boolean.
-
-    Accepts native bools, numbers, and common truthy/falsey strings
-    (``"true"``/``"yes"``/``"on"`` and their negatives).
-
-    Args:
-        value: Value to interpret.
-        default: Fallback returned when ``value`` is ``None`` or unrecognized.
-
-    Returns:
-        The interpreted boolean, or ``default`` when undecidable.
-    """
+    """Coerce a loosely-typed value to a boolean."""
     if value is None:
         return default
     if isinstance(value, bool):
@@ -113,20 +74,7 @@ def _coerce_bool(value: Any, default: bool) -> bool:
 
 
 def _infer_scope(p: dict[str, Any]) -> str:
-    """Infer the dispatch scope when none is explicitly given.
-
-    A dispatch that carries a domain/tag anchor is a real (cross-)domain
-    specialist; one with no anchor at all is treated as ``freeform`` so a bare
-    dispatch defaults to the cheap read-only lane instead of the expensive
-    patch/GPU lane.
-
-    Args:
-        p: The dispatch params to inspect for domain/tag anchors.
-
-    Returns:
-        ``SCOPE_DOMAINS`` for two-or-more tags, ``SCOPE_DOMAIN`` for one, or
-        ``SCOPE_FREEFORM`` when no anchor is present.
-    """
+    """Infer the dispatch scope when none is explicitly given."""
     # Local import avoids a module-load cycle.
     from .domains import normalize_dispatch_tags
 
@@ -139,33 +87,7 @@ def _infer_scope(p: dict[str, Any]) -> str:
 
 
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
-    """True when a GPU specialist should lease the *whole machine* (time-shared
-    with serving via ``gpu_research_lane``) rather than the serving-disjoint
-    ``gpu_specialist_pool``.
-
-    Two dispatch shapes take the whole-machine, time-shared lane:
-
-    * **framework-authoring** specialists (``framework_agent_authoring``) lease
-      the whole node from ``framework_gpu_pool``.
-    * **bench-capable** specialists (``mode=patch`` & ``bench=true``,
-      i.e. :attr:`SpecialistProfile.reserves_benchmark_lane`) start a real
-      TP-sharded server on the full serving-TP cards and run a benchmark loop,
-      so they are temporally mutually-exclusive with production serving via
-      ``gpu_research_lane`` + ``benchmark_lane``. The serving-disjoint pool is
-      empty whenever serving occupies the whole node (``TP == #GPUs``), so
-      without this route bench specialists are undispatchable.
-
-    Non-bench GPU probes (``bench=false``) keep the serving-disjoint pool: they
-    run on cards physically disjoint from serving.
-
-    Args:
-        params: The specialist dispatch params (carrying
-            ``framework_agent_authoring`` / ``mode`` / ``bench`` / ``scope`` /
-            ``lane``), or ``None``.
-
-    Returns:
-        ``True`` when the dispatch should draw from the whole-machine pool.
-    """
+    """True when a GPU specialist should lease the *whole machine* (time-shared"""
     p = params or {}
     if bool(p.get("framework_agent_authoring")):
         return True
@@ -173,32 +95,7 @@ def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
 
 
 def holds_serving_slot(params: dict[str, Any] | None) -> bool:
-    """True when a GPU specialist must hold the whole-machine ``serving_slot``
-    Ray resource (mutually exclusive with production serving).
-
-    Only **bench-capable** patch specialists (``mode=patch`` & ``bench=true``,
-    i.e. :attr:`SpecialistProfile.reserves_benchmark_lane`) start their own
-    serving + benchmark loop and therefore must serialize against production
-    serving on the ``serving_slot`` mutex for that window.
-
-    **Authoring-only** specialists — including framework authoring, which by
-    default does NOT self-bench (its real benchmark runs through
-    ``integrate_patch`` / ``framework_agent._bench_candidate`` under a run_grid
-    serving lease, phase-3 §3.1) — hold ``num_gpus`` only. They therefore do
-    NOT block the whole-machine serving mutex for their entire (largely
-    CPU-bound authoring) lifetime and can share the GPU queue with other
-    specialists (phase-3 §4 / invariant §6.3).
-
-    Note this is deliberately narrower than :func:`uses_whole_machine_gpu_lane`,
-    which still returns ``True`` for framework authoring (it selects the
-    whole-machine *pool*); only the ``serving_slot`` Ray resource is decoupled.
-
-    Args:
-        params: The specialist dispatch params, or ``None``.
-
-    Returns:
-        ``True`` only for bench-capable patch specialists.
-    """
+    """True when a GPU specialist must hold the whole-machine ``serving_slot``"""
     return resolve_specialist_profile(params or {}).reserves_benchmark_lane
 
 
@@ -206,12 +103,7 @@ def resolve_specialist_profile(
     params: dict[str, Any] | None,
     domain: "SpecialistDomain | None" = None,
 ) -> SpecialistProfile:
-    """Resolve scope/mode/bench/lane from dispatch params, falling back to safe defaults.
-
-    When ``mode`` is not given explicitly in params, the domain's ``default_mode``
-    is used before the global default.  Absent ``scope`` is inferred from the
-    domain/tag anchor; bare dispatches resolve to ``freeform → research → cpu``.
-    """
+    """Resolve scope/mode/bench/lane from dispatch params, falling back to safe defaults."""
     p = params or {}
 
     scope = str(p.get("scope") or "").strip().lower()

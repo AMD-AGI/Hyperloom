@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Mock Robustness backend — heartbeat-only, non-intervening.
-
-Used in main-path tests. Emits a heartbeat every tick, optionally one
-``alert`` after N ticks (``alert_after_ticks``) to exercise the alert pipe.
-"""
+"""Mock Robustness backend — heartbeat-only, non-intervening."""
 
 from __future__ import annotations
 
@@ -42,22 +38,7 @@ class MockRobustnessBackend:
         tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
-        """Emit a heartbeat each tick, plus a scheduled alert when configured.
-
-        Always emits a heartbeat message. If ``alert_after_ticks`` is set and
-        this is the matching tick, also emits a single ``alert`` carrying
-        ``alert_payload`` to exercise the Coordinator's alert pipe.
-
-        Args:
-            prompt (str): The composed turn prompt (recorded but not parsed).
-            system_prompt (str | None): Unused; accepted for protocol parity.
-            tools (list[str] | None): Unused; accepted for protocol parity.
-            max_turns (int): Unused; accepted for protocol parity.
-
-        Returns:
-            BackendTurnResult: The heartbeat intent and any scheduled alert for
-            this turn.
-        """
+        """Emit a heartbeat each tick, plus a scheduled alert when configured."""
         self._tick_count += 1
         self.calls.append({"prompt": prompt, "tick": self._tick_count})
         intents: list[Intent] = [

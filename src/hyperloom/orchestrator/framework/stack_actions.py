@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Typed data model for attempt-scoped runtime acquisition.
-
-An :class:`EnablementStackAction` describes an isolated runtime the enablement
-loop may acquire to provide a missing framework capability (a wheel, an editable
-checkout at a ref, or a local tree). A :class:`ProvisionResult` carries the
-outcome of provisioning one action into an attempt venv, and the resolved
-:class:`FrameworkRuntime` the bench subprocess must use.
-
-All three types provide an explicit ``to_state`` / ``from_state`` boundary so
-they cross the typed <-> dict (shared-state / task-params) seam deliberately,
-never via ``dataclasses.asdict``. Pure-Python: no network, subprocess, or
-filesystem access here (that lives in ``adapters.py``).
-"""
+"""Typed data model for attempt-scoped runtime acquisition."""
 
 from __future__ import annotations
 
@@ -21,43 +9,13 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
-# Acquisition-method vocabulary accepted by ``from_state``; compiled builds are
-# deferred to the targeted-build path. Current adapters provision only wheel or
-# editable_ref — other accepted values are rejected at provision time.
+# Acquisition-method vocabulary accepted by ``from_state``; compiled builds are deferred to the targeted-build path.
 _ACQUISITION_METHODS: frozenset[str] = frozenset({"wheel", "editable_ref", "local_tree", "package_source", "none"})
 
 
 @dataclass(frozen=True)
 class FrameworkRuntime:
-    """The explicit runtime the bench subprocess must resolve to.
-
-    The base fields describe an attempt venv; the additive fields
-    (``pythonpath_prefixes`` .. ``attempt_root``) describe a compiled-artifact
-    prefix. All additive fields default to empty so a venv-only runtime is unchanged.
-
-    Attributes:
-        bin_path: Attempt-local bin dir prepended to the YAML PATH (holds the
-            server console script, e.g. ``.../venv/bin``).
-        python_path: Attempt-local interpreter (``.../venv/bin/python``).
-        venv_root: Attempt venv root (``$SESSION_DIR/enablement/stacks/...``).
-        pythonpath_prefix: Optional single dir prepended to PYTHONPATH (an
-            editable checkout's package dir); empty when a wheel install.
-        server_args: Extra server args to route into ``EXTRA_{FW}_ARGS``.
-        envs: Extra benchmark envs to merge (never mutates os.environ).
-        pythonpath_prefixes: Multi-entry PYTHONPATH prefix for compiled
-            artifacts; prepended before inherited PYTHONPATH.
-        ld_library_path_prefix: Native ``.so`` loader path prefix; prepended
-            into LD_LIBRARY_PATH while preserving existing ROCm entries.
-        runtime_env: Per-attempt env (e.g. ``INFERENCE_OPTIMIZER_AITER_JIT_DIR``,
-            ``AITER_REBUILD``); merged into benchmark envs.
-        entrypoint_bin_dir: Optional PATH prefix for a built console script.
-        runtime_python_exe: Explicit interpreter that must launch the server
-            (e.g. the venv python a from-source build compiled against).
-            Emitted as ``HYPERLOOM_FRAMEWORK_PYTHON`` with priority over
-            ``python_path``; honored by bypass via ``python -m`` launch.
-        source_root: Isolated worktree / installed source root (provenance).
-        attempt_root: Attempt directory anchoring the build (provenance).
-    """
+    """The explicit runtime the bench subprocess must resolve to."""
 
     bin_path: str = ""
     python_path: str = ""
@@ -74,15 +32,7 @@ class FrameworkRuntime:
     attempt_root: str = ""
 
     def to_runtime_override(self) -> dict[str, Any]:
-        """Project onto the dict consumed by ``apply_runtime_override``.
-
-        Maps this runtime onto the keys ``apply_runtime_override`` recognizes so
-        the attempt runtime lands in the materialized YAML ``benchmark.envs``.
-        The base keys stay ``str``; the additive keys carry ``list``/``dict``.
-
-        Returns:
-            dict[str, Any]: The runtime-override payload (empty values omitted).
-        """
+        """Project onto the dict consumed by ``apply_runtime_override``."""
         out: dict[str, Any] = {}
         if self.bin_path:
             out["path_prefix"] = self.bin_path
@@ -156,28 +106,7 @@ class FrameworkRuntime:
 
 @dataclass(frozen=True)
 class EnablementStackAction:
-    """A candidate attempt-runtime acquisition the enablement loop may run.
-
-    Attributes:
-        kind: One of ``runtime_candidate`` / ``pr_backport`` / ``vendor_files``.
-        framework: Target framework (``vllm`` / ``sglang`` / ...).
-        gap_id: Canonical gap id (``gap.enablement.<failure_kind>``).
-        capability: The missing capability being repaired (e.g. ``deepseek_v4``).
-        reason: Human-readable justification / evidence summary.
-        acquisition_method: How the runtime is acquired (see
-            :data:`_ACQUISITION_METHODS`).
-        repo_url: Origin-allowlisted git URL (empty unless editable/source).
-        ref: Pinned ref (hash recorded); empty unless editable/source.
-        index_url: Host-allowlisted pip index (empty unless wheel).
-        packages: Pinned package specs to install.
-        expected_symbols: Symbols the adapter probe must find post-provision.
-        expected_files: Files the adapter probe must find post-provision.
-        server_args: Extra server args routed to ``EXTRA_{FW}_ARGS``.
-        envs: Extra benchmark envs to merge.
-        attempt_venv_root: Attempt venv root; filled by the executor stage.
-        pr_number: Merged PR number for a ``pr_backport`` localization.
-        localized_paths: Repo-relative paths for a ``vendor_files`` localization.
-    """
+    """A candidate attempt-runtime acquisition the enablement loop may run."""
 
     kind: str
     framework: str
@@ -260,15 +189,7 @@ class EnablementStackAction:
 
 @dataclass(frozen=True)
 class ProvisionResult:
-    """Outcome of provisioning one :class:`EnablementStackAction`.
-
-    Attributes:
-        ok: Whether provision + probe succeeded.
-        runtime: The resolved runtime the bench must use (empty on failure).
-        installed_versions: Package -> version map recorded post-install.
-        log_path: Path to the provision log (for observability).
-        error: Failure reason when ``ok`` is False.
-    """
+    """Outcome of provisioning one :class:`EnablementStackAction`."""
 
     ok: bool
     runtime: FrameworkRuntime = field(default_factory=FrameworkRuntime)

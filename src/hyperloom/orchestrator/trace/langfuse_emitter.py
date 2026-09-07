@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Live Langfuse push for the trace subsystem (opt-in, best-effort).
-
-The second of two parallel trace sinks (the local ``reports/trace/*.jsonl``
-ledger is always written). This module mirrors each LLM call into Langfuse as a
-Generation while the run is live, plus a session-end ``flush_session`` that
-backfills the out-of-process ``ext/*.jsonl`` child token shards, the recipe-KB
-/ specialist-intel audit spans, the Kernel-Forge and GEMM-tuning step spans,
-and the KEEP/REVERT decision Scores.
-
-Three gates decide whether anything is sent (all must pass, else no-op):
-
-1. master switch ``HYPERLOOM_LANGFUSE_ENABLE`` is on (default off);
-2. the three ``LANGFUSE_*`` connection vars are all set;
-3. the ``langfuse`` SDK is importable.
-
-Every send is best-effort and any exception is logged-and-swallowed. A Generation
-needs model + usage + prompt/response together, but those arrive as two separate
-calls (tokens, text) a few ms apart; the emitter buffers by
-:func:`..langfuse_mapping.pair_key` and emits once both halves are in (or at
-``flush_session`` for whichever half never paired).
-"""
+"""Live Langfuse push for the trace subsystem (opt-in, best-effort)."""
 
 from __future__ import annotations
 
@@ -65,8 +45,8 @@ def _status_signature(status: dict[str, Any]) -> tuple:
     for raw_key, raw_value in status.items():
         key = str(raw_key)
         if key in _STATUS_CLOCK_DERIVED_KEYS:
-            # Derived from the two elapsed clocks; it will be refreshed whenever
-            # either clock crosses a bucket or another semantic field changes.
+            # Derived from the two elapsed clocks; it will be refreshed whenever either clock crosses a bucket or
+            # another semantic field changes.
             continue
         value = raw_value
         if key in _STATUS_CLOCK_KEYS:
@@ -79,14 +59,7 @@ def _status_signature(status: dict[str, Any]) -> tuple:
 
 
 def _manifest_path(session_dir: Path) -> Path:
-    """Return the path to a session's ``manifest.json``.
-
-    Args:
-        session_dir: Session directory.
-
-    Returns:
-        The manifest file path.
-    """
+    """Return the path to a session's ``manifest.json``."""
     return session_dir / "manifest.json"
 
 
@@ -106,15 +79,7 @@ _FLUSH_STEP_NAMES: tuple[str, ...] = (
 
 
 def _persisted_ext_cursors(session_dir: Path) -> dict[str, int]:
-    """Return how far each ext/ shard was drained by a previous process.
-
-    Args:
-        session_dir: Session directory whose receipt is read.
-
-    Returns:
-        A ``{shard filename: rows already sent}`` map; empty when there is no
-        (valid) receipt yet.
-    """
+    """Return how far each ext/ shard was drained by a previous process."""
     persisted = (read_receipt(session_dir) or {}).get("ext_rows_sent")
     if not isinstance(persisted, dict):
         return {}
@@ -128,23 +93,12 @@ def _persisted_ext_cursors(session_dir: Path) -> dict[str, int]:
 
 
 def _receipt_path(session_dir: Path) -> Path:
-    """Return the path to a session's Langfuse receipt file.
-
-    Args:
-        session_dir: Session directory.
-
-    Returns:
-        The ``langfuse_receipt.json`` path under the trace directory.
-    """
+    """Return the path to a session's Langfuse receipt file."""
     return trace_dir(session_dir) / "langfuse_receipt.json"
 
 
 def _sdk_available() -> bool:
-    """Whether the optional ``langfuse`` SDK can be imported (no side effects).
-
-    Returns:
-        True when the ``langfuse`` SDK can be located, False otherwise.
-    """
+    """Whether the optional ``langfuse`` SDK can be imported (no side effects)."""
     import importlib.util
 
     try:
@@ -154,18 +108,7 @@ def _sdk_available() -> bool:
 
 
 def _to_ns(dt: Any) -> int | None:
-    """Datetime -> integer nanoseconds since epoch (langfuse v4 ``end_time``).
-
-    v4's OTEL-based SDK wants integer ns for ``end_time``; v2/v3 accepted a
-    ``datetime``. Returns None for a None input; best-effort.
-
-    Args:
-        dt: the datetime to convert (any other type yields ``None``).
-
-    Returns:
-        Integer nanoseconds since the epoch, or ``None`` for a ``None`` /
-        non-datetime / unparseable input.
-    """
+    """Datetime -> integer nanoseconds since epoch (langfuse v4 ``end_time``)."""
     if dt is None:
         return None
     try:
@@ -178,9 +121,7 @@ def _to_ns(dt: Any) -> int | None:
     return None
 
 
-# Optional kwargs dropped, in order, when the installed SDK rejects them. Each
-# rung is a superset of the previous one, so the richest call that the SDK
-# actually accepts wins instead of the whole observation being lost.
+# Optional kwargs dropped, in order, when the installed SDK rejects them.
 _OBS_KWARG_LADDER: tuple[tuple[str, ...], ...] = (
     (),
     ("start_time",),
@@ -189,25 +130,7 @@ _OBS_KWARG_LADDER: tuple[tuple[str, ...], ...] = (
 
 
 def _start_obs(parent: Any, **kwargs: Any) -> Any:
-    """Create a child/root observation, tolerant of v2/v3 vs v4 signatures.
-
-    Tries the caller's kwargs first and, on a ``TypeError``, retries with
-    progressively fewer optional kwargs (:data:`_OBS_KWARG_LADDER`): ``v4``
-    removed ``start_time``, and older SDKs predate ``level`` /
-    ``status_message``. Degrading one rung at a time keeps backdated timestamps
-    and error levels wherever they are supported. Rungs that would repeat an
-    already-attempted signature are skipped.
-
-    Args:
-        parent: the parent observation (or client) to create the child on.
-        **kwargs: the keyword arguments forwarded to ``start_observation``.
-
-    Returns:
-        The newly started observation.
-
-    Raises:
-        TypeError: If even the most reduced signature is rejected.
-    """
+    """Create a child/root observation, tolerant of v2/v3 vs v4 signatures."""
     seen: set[frozenset[str]] = set()
     attempts: list[dict[str, Any]] = []
     for drop in _OBS_KWARG_LADDER:
@@ -222,26 +145,13 @@ def _start_obs(parent: Any, **kwargs: Any) -> Any:
             return parent.start_observation(**attempt)
         except TypeError:
             continue
-    # The final rung is not guarded, so a still-rejected signature surfaces its
-    # own TypeError instead of one synthesized from a saved exception.
+    # The final rung is not guarded, so a still-rejected signature surfaces its own TypeError instead of one
+    # synthesized from a saved exception.
     return parent.start_observation(**attempts[-1])
 
 
 def _end_time_wants_int(obs: Any) -> bool:
-    """Whether this SDK's ``end(end_time=...)`` wants integer ns (v4) vs a
-    datetime (v2/v3), decided by inspecting the parameter annotation.
-
-    The type must be right on the first call: v4's ``end(datetime)`` raises only
-    after already ending the span, so a try-then-retry pattern double-ends it.
-    Falls back to datetime (False) when the annotation can't be read.
-
-    Args:
-        obs: the observation whose ``end`` signature is inspected.
-
-    Returns:
-        True when the SDK's ``end(end_time=...)`` wants integer ns (v4), False
-        when it wants a datetime (v2/v3) or the annotation can't be read.
-    """
+    """Whether this SDK's ``end(end_time=...)`` wants integer ns (v4) vs a"""
     try:
         import inspect
 
@@ -254,16 +164,7 @@ def _end_time_wants_int(obs: Any) -> bool:
 
 
 def _end_obs(obs: Any, end_dt: Any) -> None:
-    """End an observation, tolerant of v2/v3 (datetime) vs v4 (int ns).
-
-    Picks the right ``end_time`` type up front (see :func:`_end_time_wants_int`)
-    so the span is never ended twice. Falls back to a bare ``end()`` if the
-    typed call is rejected, so a signature change can't strand an open span.
-
-    Args:
-        obs: the observation to end (``None`` is a no-op).
-        end_dt: the end time as a datetime; ``None`` ends with no explicit time.
-    """
+    """End an observation, tolerant of v2/v3 (datetime) vs v4 (int ns)."""
     if obs is None:
         return
     if end_dt is None:
@@ -283,19 +184,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
 
 
 def _otel_attr_value(v: Any) -> Any:
-    """Coerce a metadata value into an OTEL-acceptable attribute, or None to
-    skip it.
-
-    OTEL span attributes accept only str/bool/int/float. Skip ``None``, pass
-    scalars through, and JSON-stringify everything else so it still lands as text.
-
-    Args:
-        v: the metadata value to coerce.
-
-    Returns:
-        The value unchanged when it is a str/bool/int/float, a JSON string for
-        any other non-``None`` value, or ``None`` to skip ``None`` inputs.
-    """
+    """Coerce a metadata value into an OTEL-acceptable attribute, or None to"""
     if v is None:
         return None
     if isinstance(v, (str, bool, int, float)):
@@ -315,18 +204,7 @@ def _set_trace_attrs(
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Stamp trace-level name/session_id/metadata, tolerant of v2/v3 vs v4.
-
-    Uses ``span.update_trace(...)`` (v2/v3); when absent (v4) falls back to
-    writing the v4 OTEL trace attributes directly on the underlying span.
-    Best-effort: a missing API just means the label isn't set, never a raise.
-
-    Args:
-        span: the span/observation whose trace-level attributes are stamped.
-        name: optional trace name.
-        session_id: optional session id to group the trace.
-        metadata: optional trace-level metadata mapping.
-    """
+    """Stamp trace-level name/session_id/metadata, tolerant of v2/v3 vs v4."""
     try:
         span.update_trace(name=name, session_id=session_id, metadata=metadata)
         return
@@ -357,61 +235,30 @@ def _set_trace_attrs(
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file into a list of dict records.
-
-    Args:
-        path: Path to the ``.jsonl`` file.
-
-    Returns:
-        The dict records; missing files, unreadable files, and malformed or
-        non-object lines are skipped to an empty/partial list.
-    """
+    """Load a JSONL file into a list of dict records."""
     from hyperloom.common.jsonio import read_jsonl
 
     return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    """Load a JSON object file.
-
-    Args:
-        path: Path to the JSON file.
-
-    Returns:
-        The parsed object, or ``{}`` when the file is missing, unreadable, or
-        not a JSON object.
-    """
+    """Load a JSON object file."""
     from hyperloom.common.jsonio import read_json
 
     return read_json(path, default={}, require_dict=True)
 
 
 class LangfuseEmitter:
-    """Per-session live emitter. No-op unless all three gates pass.
-
-    One instance is created lazily per ``session_dir`` via
-    :func:`get_emitter`. Thread-safe: the trace appenders may be called from
-    the Coordinator loop and from worker threads, so the pairing buffer is
-    guarded by a lock.
-    """
+    """Per-session live emitter. No-op unless all three gates pass."""
 
     def __init__(self, session_dir: Path) -> None:
-        """Initialize the per-session emitter.
-
-        Resolves the manifest and correlation labels unconditionally so the
-        receipt always reports the right trace and correlation ids.
-
-        Args:
-            session_dir: Session directory whose traces are emitted.
-        """
+        """Initialize the per-session emitter."""
         self.session_dir = Path(session_dir)
         self._lock = threading.Lock()
         # pair_key -> partial generation parts ({"llm": row} / {"conv": row}).
         self._pending: dict[tuple, dict[str, dict[str, Any]]] = {}
         self._client: Any = None
-        # Manifest + correlation resolved unconditionally so the receipt always
-        # reports the right ids. Push / backfill / claw upload correlate on
-        # claw_session_id (fallback internal session id).
+        # Manifest + correlation resolved unconditionally so the receipt always reports the right ids.
         self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
         self._session_label: str | None = lfmap.langfuse_session_id(
             self._manifest,
@@ -447,36 +294,21 @@ class LangfuseEmitter:
             "gemm_tuning_read": 0,  # gemm_tuning.jsonl rows swept
             "errors": 0,  # swallowed send failures
         }
-        # Reconcile steps that already succeeded in *this* process, so a retry
-        # after a partial flush neither re-emits them nor loses the ones still
-        # owed. Deliberately not restored from the receipt: ``pending_halves``
-        # drains an in-process buffer, and a resumed session writes new ext
-        # shards, so a step another process finished is not the same work.
+        # Reconcile steps that already succeeded in *this* process, so a retry after a partial flush neither re-emits
+        # them nor loses the ones still owed.
         self._flush_steps_done: set[str] = set()
         self._flushed = False
-        # How many rows of each ext/ shard have been sent, restored from the
-        # receipt. This *is* durable across processes: the rows are on disk, so
-        # re-sending them would duplicate the Generation, while a shard that
-        # grew (or appeared) after the last flush still gets picked up.
+        # How many rows of each ext/ shard have been sent, restored from the receipt.
         self._ext_rows_sent: dict[str, int] = _persisted_ext_cursors(self.session_dir)
-        # Live-status mirror throttle: last pushed signature + monotonic ts, so a
-        # snapshot is sent only on-change or after a slow refresh interval.
+        # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
+        # after a slow refresh interval.
         self._last_status_sig: tuple | None = None
         self._last_status_ts: float = 0.0
         self._enabled = self._init_client()
 
     # -- gating / client setup ------------------------------------------
     def _init_client(self) -> bool:
-        """Resolve the three gates and build the SDK client; False -> no-op.
-
-        Records ``_disabled_reason`` (``disabled`` / ``no_credentials`` /
-        ``sdk_missing`` / ``init_failed``) so the receipt can explain *why*
-        nothing was pushed. Correlation is already resolved in ``__init__``.
-
-        Returns:
-            bool: True when all three gates pass and the SDK client was built;
-                False (a no-op emitter) otherwise.
-        """
+        """Resolve the three gates and build the SDK client; False -> no-op."""
         if not langfuse_live_enabled():
             self._disabled_reason = "disabled"
             return False
@@ -500,8 +332,8 @@ class LangfuseEmitter:
             )
             return False
         try:
-            # Tighten the SDK auto-flush cadence before the singleton is built so
-            # a session killed early still lands its latest observations.
+            # Tighten the SDK auto-flush cadence before the singleton is built so a session killed early still lands
+            # its latest observations.
             apply_flush_defaults()
             creds = langfuse_credentials()
             self._client = get_client()
@@ -519,31 +351,16 @@ class LangfuseEmitter:
 
     @property
     def enabled(self) -> bool:
-        """Whether live push to Langfuse is enabled for this session.
-
-        Returns:
-            bool: True when live push is enabled for this session.
-        """
+        """Whether live push to Langfuse is enabled for this session."""
         return self._enabled
 
     # -- span hierarchy (trace -> phase -> agent -> generation) ---------
     def _trace_name(self) -> str:
-        """Return the human-readable trace name.
-
-        Returns:
-            The model name, else the session label, else ``"hyperloom"``.
-        """
+        """Return the human-readable trace name."""
         return str(self._manifest.get("model_name") or self._session_label or "hyperloom")
 
     def _ensure_root(self, start: Any) -> Any:
-        """Lazily open the root span and stamp trace-level attrs once.
-
-        Args:
-            start: the start time for the root span.
-
-        Returns:
-            The cached or newly opened root span.
-        """
+        """Lazily open the root span and stamp trace-level attrs once."""
         if self._root_span is None:
             self._root_span = _start_obs(
                 self._client,
@@ -564,15 +381,7 @@ class LangfuseEmitter:
         return self._root_span
 
     def _ensure_phase_span(self, phase: str, start: Any) -> Any:
-        """Get-or-create the span for a phase under the trace root.
-
-        Args:
-            phase: Phase name.
-            start: Span start time.
-
-        Returns:
-            The cached or newly opened phase span.
-        """
+        """Get-or-create the span for a phase under the trace root."""
         span = self._phase_spans.get(phase)
         if span is None:
             root = self._ensure_root(start)
@@ -588,17 +397,7 @@ class LangfuseEmitter:
         return span
 
     def _ensure_agent_span(self, phase: str, agent: str, start: Any) -> Any:
-        """Get-or-create the per-(phase, agent) span. This is the 'which agent
-        did what' layer; Generations and decision Scores attach here.
-
-        Args:
-            phase: Phase name.
-            agent: Agent name.
-            start: Span start time.
-
-        Returns:
-            The cached or newly opened (phase, agent) span.
-        """
+        """Get-or-create the per-(phase, agent) span. This is the 'which agent"""
         key = (phase, agent)
         span = self._agent_spans.get(key)
         if span is None:
@@ -616,11 +415,7 @@ class LangfuseEmitter:
 
     # -- live ingest ----------------------------------------------------
     def record_llm_call(self, row: dict[str, Any]) -> None:
-        """Buffer a token row; emit the Generation if its text half is in.
-
-        Args:
-            row: the token (``llm``) row to buffer.
-        """
+        """Buffer a token row; emit the Generation if its text half is in."""
         if not self._enabled:
             return
         try:
@@ -629,11 +424,7 @@ class LangfuseEmitter:
             log.debug("langfuse: record_llm_call failed", exc_info=True)
 
     def record_conversation(self, row: dict[str, Any]) -> None:
-        """Buffer a conversation row; emit the Generation if its tokens are in.
-
-        Args:
-            row: the conversation (``conv``) row to buffer.
-        """
+        """Buffer a conversation row; emit the Generation if its tokens are in."""
         if not self._enabled:
             return
         try:
@@ -642,17 +433,7 @@ class LangfuseEmitter:
             log.debug("langfuse: record_conversation failed", exc_info=True)
 
     def _buffer(self, row: dict[str, Any], *, half: str) -> None:
-        """Buffer one half of a generation and emit once both halves arrive.
-
-        A failed call is emitted immediately instead of being buffered: it has
-        no response, so its conversation half never arrives and waiting would
-        hold the failure until session end — or worse, let ``pair_key`` (which
-        does not consider status) marry it to a neighbouring successful call.
-
-        Args:
-            row: The token (``llm``) or conversation (``conv``) row.
-            half: Which half this row represents (``"llm"`` or ``"conv"``).
-        """
+        """Buffer one half of a generation and emit once both halves arrive."""
         if half == "llm" and lfmap.generation_level(row) == lfmap.LEVEL_ERROR:
             if not self._emit_generation(token_row=row, conv_row=None):
                 self._requeue_parts(lfmap.pair_key(row), {"llm": row})
@@ -668,8 +449,8 @@ class LangfuseEmitter:
             token_row=emit_parts.get("llm"),
             conv_row=emit_parts.get("conv"),
         ):
-            # The send failed and was swallowed; keep the halves so session-end
-            # reconcile can retry them rather than losing the call.
+            # The send failed and was swallowed; keep the halves so session-end reconcile can retry them rather than
+            # losing the call.
             self._requeue_parts(key, emit_parts)
 
     def record_kb_span(
@@ -682,21 +463,7 @@ class LangfuseEmitter:
         metadata: dict[str, Any] | None = None,
         ts: str | None = None,
     ) -> None:
-        """Emit one non-LLM KB trace as a span nested under its agent span.
-
-        Used for the KB integration trace so KB-usage evidence lands on the same
-        trace as the LLM generations. The full trace dict goes in ``output``; a
-        scalar summary goes in ``metadata`` for filtering. Best-effort and a no-op
-        unless live push is enabled.
-
-        Args:
-            name (str): Span name (e.g. ``"kb_priors:iter_3"``).
-            agent (str): Owning agent (``"critic"`` / ``"recipe_kb"``).
-            output (Any): The trace payload attached as the span output.
-            phase (str): Phase bucket; defaults to ``(unphased)``.
-            metadata (dict[str, Any] | None): Scalar summary for filtering.
-            ts (str | None): ISO timestamp for span start, if known.
-        """
+        """Emit one non-LLM KB trace as a span nested under its agent span."""
         if not self._enabled:
             return
         try:
@@ -723,24 +490,11 @@ class LangfuseEmitter:
         token_row: dict[str, Any] | None,
         conv_row: dict[str, Any] | None,
     ) -> bool:
-        """Emit one Generation, nested under its phase -> agent span.
-
-        Args:
-            token_row: the token-half row, or ``None`` when only text is in.
-            conv_row: the conversation-half row, or ``None`` when only tokens
-                are in.
-
-        Returns:
-            ``True`` when the Generation was handed to the SDK. ``False`` on a
-            swallowed send failure, so the caller can keep the rows for a retry
-            instead of dropping the call from the trace.
-        """
+        """Emit one Generation, nested under its phase -> agent span."""
         base = token_row or conv_row or {}
         phase = lfmap.phase_of(base)
         agent = lfmap.agent_of(base)
-        # ``ts`` approximates the call END. With a measured ``latency_ms`` the
-        # start is backdated to ``ts - latency`` so the leaf shows a real
-        # duration; otherwise start == end == ts.
+        # ``ts`` approximates the call END.
         end = lfmap.parse_ts(base.get("ts"))
         start = lfmap.generation_start(end, (token_row or {}).get("latency_ms"))
         has_text = conv_row is not None
@@ -778,15 +532,7 @@ class LangfuseEmitter:
 
     # -- session-end reconcile ------------------------------------------
     def flush_session(self) -> None:
-        """Emit leftover halves + audit spans + decision Scores, then flush.
-
-        Run once at session end. Safe to call when disabled (no-op) and
-        idempotent: every reconcile step runs at most once, so a second call
-        re-attempts only the steps that failed and never duplicates audit spans
-        / Scores in Langfuse. ``_flushed`` (which suppresses further reconcile
-        work) is only set once every step has succeeded — marking a partial
-        reconcile as flushed would strand whatever it never got to.
-        """
+        """Emit leftover halves + audit spans + decision Scores, then flush."""
         if not self._enabled:
             # Still drop a receipt so the breakdown can report why nothing was pushed.
             self._write_receipt()
@@ -795,9 +541,8 @@ class LangfuseEmitter:
             log.debug("langfuse: flush_session already ran; skipping re-emit")
             self._write_receipt()
             return
-        # ``client_flush`` is last and is a step like any other: everything
-        # before it only hands observations to the SDK's buffer, so a failed
-        # final flush means nothing reached Langfuse and has to be retried.
+        # ``client_flush`` is last and is a step like any other: everything before it only hands observations to the
+        # SDK's buffer, so a failed final flush means nothing reached Langfuse and has to be retried.
         steps: dict[str, Any] = {
             "pending_halves": self._flush_pending_halves,
             "ext_shards": self._flush_ext_shards,
@@ -823,21 +568,11 @@ class LangfuseEmitter:
         self._write_receipt()
 
     def _flush_client(self) -> None:
-        """Hand the SDK's buffered observations to the network.
-
-        Raises rather than swallowing, so :meth:`flush_session` records the step
-        as unfinished and a later call retries it.
-        """
+        """Hand the SDK's buffered observations to the network."""
         self._client.flush()
 
     def record_session_start(self) -> None:
-        """Emit a one-shot ``session_start`` marker the moment a session begins.
-
-        Attached directly to the session's ``trace_id`` so a run aborted in
-        pre-flight still leaves a Langfuse trace tying the session dir to its
-        ``code_revision`` and dependency commits. Idempotent (cross-process via
-        the persisted receipt) and best-effort.
-        """
+        """Emit a one-shot ``session_start`` marker the moment a session begins."""
         if not self._enabled:
             return
         if self._counts.get("session_start_recorded"):
@@ -896,17 +631,7 @@ class LangfuseEmitter:
             self._write_receipt()
 
     def record_session_breakdown(self, breakdown: dict[str, Any]) -> None:
-        """Attach the complete ``session_breakdown.json`` document to the trace.
-
-        Emitted as one ``session_breakdown`` observation attached to this
-        session's ``trace_id`` so it lands on the same trace even when called
-        after :meth:`flush_session` closed the live spans. Idempotent and
-        best-effort: any send failure is swallowed.
-
-        Args:
-            breakdown: the complete ``session_breakdown.json`` document to
-                attach; a non-dict or empty value is a no-op.
-        """
+        """Attach the complete ``session_breakdown.json`` document to the trace."""
         if not self._enabled or not isinstance(breakdown, dict) or not breakdown:
             return
         if self._counts.get("breakdown_recorded"):
@@ -959,24 +684,7 @@ class LangfuseEmitter:
         *,
         min_refresh_sec: float = 300.0,
     ) -> None:
-        """Mirror a live ``state.json`` status snapshot onto the session's trace.
-
-        Two effects, both keyed to this session's ``trace_id``: trace-level
-        **metadata** is upserted from ``status`` (always the current snapshot),
-        and a lightweight ``session_status`` **observation** is appended so the
-        status timeline is queryable.
-
-        Throttled to avoid flooding the trace: a snapshot is sent only when its
-        signature changed or after ``min_refresh_sec`` elapsed. Runtime clocks
-        are minute-bucketed in that signature, so per-save second changes do not
-        defeat the throttle. Never flushes the client; best-effort and a no-op
-        unless live push is enabled.
-
-        Args:
-            status (dict[str, Any]): Flat scalar status summary (str/bool/int/
-                float values); non-scalars are coerced by ``_otel_attr_value``.
-            min_refresh_sec (float): Minimum seconds between unchanged pushes.
-        """
+        """Mirror a live ``state.json`` status snapshot onto the session's trace."""
         if not self._enabled:
             return
         if not isinstance(status, dict) or not status:
@@ -1027,26 +735,14 @@ class LangfuseEmitter:
 
     @staticmethod
     def _safe_end(span: Any) -> None:
-        """End a span, swallowing any errors.
-
-        Args:
-            span: The span object to end.
-        """
+        """End a span, swallowing any errors."""
         try:
             span.end()
         except Exception:  # noqa: BLE001
             log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
-        """Emit any buffered call that only ever got one half (token XOR text).
-
-        A row is only dropped once its Generation was sent: a swallowed SDK
-        failure puts the halves back so a later flush can retry them, and this
-        step reports itself unfinished instead of losing the call.
-
-        Raises:
-            RuntimeError: When at least one buffered call could not be sent.
-        """
+        """Emit any buffered call that only ever got one half (token XOR text)."""
         with self._lock:
             leftovers = list(self._pending.items())
             self._pending.clear()
@@ -1063,38 +759,14 @@ class LangfuseEmitter:
             raise RuntimeError(f"{requeued} buffered generation(s) could not be sent")
 
     def _requeue_parts(self, key: tuple, parts: dict[str, dict[str, Any]]) -> None:
-        """Put unsent generation halves back on the pending map.
-
-        Only fills halves the map does not already hold, so a live row that
-        arrived while the flush was running is never overwritten by the older
-        copy being returned.
-
-        Args:
-            key: The ``pair_key`` the halves were buffered under.
-            parts: The halves that failed to send.
-        """
+        """Put unsent generation halves back on the pending map."""
         with self._lock:
             current = self._pending.setdefault(key, {})
             for half, row in parts.items():
                 current.setdefault(half, row)
 
     def _flush_ext_shards(self) -> None:
-        """Backfill out-of-process children's token rows from ext/*.jsonl.
-
-        Children (geak / forge / robustness / specialist subprocess) never
-        connect to Langfuse; their tokens land in ``ext/<component>-<pid>.jsonl``.
-        Emitted as text-less Generations so the trace still accounts their spend.
-
-        Progress is a per-shard row cursor persisted in the receipt, so a
-        retry — in this process or a later one — resumes at the row that failed
-        instead of re-emitting the rows that landed, while a shard that grew
-        since the last flush is still picked up. The cursor only advances over
-        contiguous sends, so a failure stops that shard rather than stranding
-        the failed row behind later ones.
-
-        Raises:
-            RuntimeError: When at least one shard row could not be sent.
-        """
+        """Backfill out-of-process children's token rows from ext/*.jsonl."""
         ext_dir = trace_ext_dir(self.session_dir)
         if not ext_dir.is_dir():
             return
@@ -1113,19 +785,7 @@ class LangfuseEmitter:
             raise RuntimeError(f"{unsent} ext-shard row(s) could not be sent")
 
     def _flush_recipe_kb_audit(self) -> None:
-        """Backfill recipe-KB reads and writes from the audit log.
-
-        The recipe KB dispatcher appends one row per read and per write to
-        ``runtime/recipe_snapshot/.audit.jsonl``. Reads become
-        ``kb:recipe_snapshot:<method>`` spans; writes become
-        ``kb:recipe_write:<generator>`` spans carrying what this session sank
-        into the KB (which fields grew, by how much, and at which version).
-        Both nest under the ``recipe_kb`` agent. Read out-of-band at session
-        end; idempotent via the ``flush_session`` guard.
-
-        Rows predating the write-audit event carry no ``op`` and are treated as
-        reads, so historical sessions replay exactly as before.
-        """
+        """Backfill recipe-KB reads and writes from the audit log."""
         rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
         for row in rows:
             self._counts["recipe_audit_read"] += 1
@@ -1143,14 +803,7 @@ class LangfuseEmitter:
             )
 
     def _flush_specialist_intel(self) -> None:
-        """Backfill specialist intel/tool calls as per-call ``intel:<tool>`` spans.
-
-        The specialist runner appends one row per recovered tool call to
-        ``reports/trace/specialist_intel.jsonl``. Each row becomes an
-        ``intel:<tool>`` span under the ``specialist`` agent so the trace shows
-        what a specialist actually read. Read out-of-band at session end;
-        idempotent via the ``flush_session`` guard.
-        """
+        """Backfill specialist intel/tool calls as per-call ``intel:<tool>`` spans."""
         rows = _load_jsonl(specialist_intel_path(self.session_dir))
         for row in rows:
             self._counts["specialist_intel_read"] += 1
@@ -1170,14 +823,7 @@ class LangfuseEmitter:
             )
 
     def _flush_forge_steps(self) -> None:
-        """Backfill the Kernel-Forge loop's key steps as ``forge:*`` spans.
-
-        ``kernel_request_handlers`` records each forge attempt's per-iteration
-        steps and a run summary to ``reports/trace/forge_steps.jsonl``. Each row
-        becomes a ``forge:iter:<n>`` (or ``forge:summary``) span under the
-        ``forge`` agent. Read out-of-band at session end; idempotent via the
-        ``flush_session`` guard.
-        """
+        """Backfill the Kernel-Forge loop's key steps as ``forge:*`` spans."""
         for row in _load_jsonl(forge_steps_path(self.session_dir)):
             self._counts["forge_steps_read"] += 1
             kind = str(row.get("kind") or "iteration")
@@ -1213,14 +859,7 @@ class LangfuseEmitter:
             )
 
     def _flush_gemm_tuning(self) -> None:
-        """Backfill each deterministic GEMM-tuning run as a ``gemm_tuning:*`` span.
-
-        ``run_gemm_tuning_handler`` appends one row per run to
-        ``reports/trace/gemm_tuning.jsonl``. Each row becomes a
-        ``gemm_tuning:<engine>`` span under the ``gemm_tuning`` agent so a trace
-        attributes the tuner as its own source. Read out-of-band at session end;
-        idempotent via the ``flush_session`` guard.
-        """
+        """Backfill each deterministic GEMM-tuning run as a ``gemm_tuning:*`` span."""
         for row in _load_jsonl(gemm_tuning_steps_path(self.session_dir)):
             self._counts["gemm_tuning_read"] += 1
             engine = str(row.get("engine") or row.get("backend") or "unknown")
@@ -1243,12 +882,7 @@ class LangfuseEmitter:
             )
 
     def _flush_decision_scores(self) -> None:
-        """Convert each decision_trace row into Langfuse Score(s).
-
-        Each score targets the agent span that owns the decision (phase,
-        component from the decision metadata). Falls back to a trace-level score
-        when no matching span exists.
-        """
+        """Convert each decision_trace row into Langfuse Score(s)."""
         for drow in _load_jsonl(decision_trace_path(self.session_dir)):
             scores = lfmap.decision_to_scores(drow)
             if not scores:
@@ -1256,8 +890,7 @@ class LangfuseEmitter:
             meta0 = scores[0].get("metadata") or {}
             phase = str(meta0.get("phase") or lfmap.UNPHASED)
             agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
-            # Per-decision span carrying ``operation_kind`` so the trace can be
-            # filtered by step. Scores attach here when it opens, else to the agent span.
+            # Per-decision span carrying ``operation_kind`` so the trace can be filtered by step.
             step_span = self._open_decision_span(drow, phase, agent)
             for score in scores:
                 self._create_score(
@@ -1275,21 +908,7 @@ class LangfuseEmitter:
         phase: str,
         agent: str,
     ) -> Any:
-        """Open an ``optimization_step:<operation_kind>`` span for one decision.
-
-        Parented to the owning agent span (then phase span, then root). Carries
-        operation_kind + proposer + effect in metadata for step filtering.
-        Best-effort; returns ``None`` when no parent is open or the SDK rejects it.
-
-        Args:
-            drow: the decision_trace row carrying the ``decision`` payload.
-            phase: the phase that owns the decision (used to locate the parent).
-            agent: the agent that owns the decision (used to locate the parent).
-
-        Returns:
-            The opened ``optimization_step`` span, or ``None`` when no parent is
-            open or the SDK rejects the call.
-        """
+        """Open an ``optimization_step:<operation_kind>`` span for one decision."""
         parent = self._agent_spans.get((phase, agent)) or self._phase_spans.get(phase) or self._root_span
         if parent is None:
             return None
@@ -1344,14 +963,7 @@ class LangfuseEmitter:
         agent: str,
         span: Any = None,
     ) -> None:
-        """Attach a Langfuse Score to a step span / agent span / the trace.
-
-        Args:
-            score: Score payload (``name``, ``value``, ``data_type``, ...).
-            phase: Phase that owns the decision, used to locate the span.
-            agent: Agent/component that owns the decision.
-            span: Optional pre-opened step span; preferred over the agent span.
-        """
+        """Attach a Langfuse Score to a step span / agent span / the trace."""
         if span is None:
             span = self._agent_spans.get((phase, agent))
         try:
@@ -1383,18 +995,7 @@ class LangfuseEmitter:
 
     # -- receipt (session_breakdown ``langfuse`` section) ---------------
     def receipt(self) -> dict[str, Any]:
-        """A redacted record of whether/where/how much was pushed.
-
-        Shape mirrors the ``langfuse`` section of ``session_breakdown.json``.
-        Credentials are never included verbatim (only the host URL and
-        key-presence booleans). ``counts_final`` is True once
-        :meth:`flush_session` has run, else it reports in-process running totals.
-
-        Returns:
-            dict[str, Any]: a redacted receipt dict (enabled flag, disabled
-                reason, config, trace/session ids, correlation key, and push
-                counts) mirroring the ``langfuse`` breakdown section.
-        """
+        """A redacted record of whether/where/how much was pushed."""
         creds = langfuse_credentials()
         config = {
             "enable_flag": langfuse_live_enabled(),
@@ -1414,34 +1015,14 @@ class LangfuseEmitter:
             ),
             "counts": dict(self._counts),
             "counts_final": self._flushed,
-            # Which reconcile steps have completed, so a receipt written after a
-            # partial flush says what is still owed instead of reading as final.
-            # Scope: this process. ``ext_rows_sent`` is the cross-process part —
-            # the rows already pushed out of each on-disk shard.
+            # Which reconcile steps have completed, so a receipt written after a partial flush says what is still owed
+            # instead of reading as final.
             "flush_steps_done": sorted(self._flush_steps_done),
             "ext_rows_sent": dict(self._ext_rows_sent),
         }
 
     def _claim_one_shot(self, marker: str) -> bool:
-        """Take the cross-process claim for a once-per-session push.
-
-        The receipt is a whole-file rewrite, so two processes can both read it
-        before either writes and both emit the same one-shot observation. An
-        exclusive create resolves that in the filesystem instead: exactly one
-        caller creates the marker, every other sees ``EEXIST`` and stands down.
-
-        A claim holder that dies before emitting loses that one observation —
-        the accepted cost, since the alternative is a duplicate on every
-        concurrent shutdown. When the claim itself cannot be written (read-only
-        mount) the caller proceeds on the receipt check alone rather than
-        dropping the push.
-
-        Args:
-            marker: Short name of the one-shot push being claimed.
-
-        Returns:
-            ``True`` when this process owns the push.
-        """
+        """Take the cross-process claim for a once-per-session push."""
         path = trace_dir(self.session_dir) / f".{marker}.claim"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1461,18 +1042,7 @@ class LangfuseEmitter:
         return True
 
     def _write_receipt(self) -> None:
-        """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``.
-
-        The file doubles as the cross-process idempotency record for
-        ``session_start`` / breakdown pushes, so a torn receipt would either
-        replay a push or suppress one forever. It is written atomically (temp
-        file + rename, both the file and the parent directory fsynced) and
-        stamped with a ``payload_sha256`` that :func:`read_receipt` verifies, so
-        a truncated or corrupted file is ignored rather than trusted.
-
-        Best-effort: a failed write must never break shutdown. The breakdown
-        collector prefers this file over a live read of the singleton.
-        """
+        """Persist :meth:`receipt` to ``reports/trace/langfuse_receipt.json``."""
         try:
             atomic_write_json(
                 _receipt_path(self.session_dir),
@@ -1493,14 +1063,7 @@ _REGISTRY_LOCK = threading.Lock()
 
 
 def get_emitter(session_dir: Path) -> LangfuseEmitter:
-    """Return the per-session emitter, building it once (cached by session).
-
-    Args:
-        session_dir: Session directory the emitter is keyed by.
-
-    Returns:
-        LangfuseEmitter: the cached or newly built emitter for the session.
-    """
+    """Return the per-session emitter, building it once (cached by session)."""
     key = str(Path(session_dir).resolve())
     with _REGISTRY_LOCK:
         emitter = _REGISTRY.get(key)
@@ -1511,23 +1074,12 @@ def get_emitter(session_dir: Path) -> LangfuseEmitter:
 
 
 def record_session_start(session_dir: Path) -> None:
-    """Module-level convenience: emit the startup marker for ``session_dir``.
-
-    Call once right after ``manifest.json`` is written so the session's Langfuse
-    trace exists from the start. No-op when disabled; best-effort.
-
-    Args:
-        session_dir: Session directory whose startup marker is emitted.
-    """
+    """Module-level convenience: emit the startup marker for ``session_dir``."""
     get_emitter(session_dir).record_session_start()
 
 
 def flush_session(session_dir: Path) -> None:
-    """Module-level convenience: flush the emitter for ``session_dir``.
-
-    Args:
-        session_dir: Session directory whose emitter is flushed.
-    """
+    """Module-level convenience: flush the emitter for ``session_dir``."""
     get_emitter(session_dir).flush_session()
 
 
@@ -1535,16 +1087,7 @@ def record_session_breakdown(
     session_dir: Path,
     breakdown: dict[str, Any] | None = None,
 ) -> None:
-    """Attach the final ``session_breakdown.json`` to the session's trace.
-
-    Call after the breakdown is written and the langfuse section patched. Reads
-    the file from disk when ``breakdown`` is not supplied. No-op when disabled;
-    best-effort.
-
-    Args:
-        session_dir: Session directory whose trace the breakdown attaches to.
-        breakdown: the breakdown document; read from disk when ``None``.
-    """
+    """Attach the final ``session_breakdown.json`` to the session's trace."""
     if breakdown is None:
         from hyperloom.common.jsonio import read_json
         from hyperloom.inference_optimizer.breakdown import BREAKDOWN_FILENAME
@@ -1559,16 +1102,7 @@ def record_status(
     *,
     min_refresh_sec: float = 300.0,
 ) -> None:
-    """Module-level convenience: mirror a status snapshot for ``session_dir``.
-
-    Reuses the per-session emitter singleton so its throttle state persists. No-op
-    when disabled; best-effort.
-
-    Args:
-        session_dir: Session directory whose trace the status attaches to.
-        status: Flat scalar status summary to mirror.
-        min_refresh_sec: Minimum seconds between unchanged pushes.
-    """
+    """Module-level convenience: mirror a status snapshot for ``session_dir``."""
     get_emitter(session_dir).record_status(status, min_refresh_sec=min_refresh_sec)
 
 
@@ -1577,14 +1111,7 @@ _RECEIPT_HASH_KEY = "payload_sha256"
 
 
 def _receipt_body_hash(payload: dict[str, Any]) -> str:
-    """Return the SHA-256 of a receipt payload, excluding the hash field itself.
-
-    Args:
-        payload: A receipt dict, with or without its hash stamped.
-
-    Returns:
-        The hex digest of the canonical JSON body.
-    """
+    """Return the SHA-256 of a receipt payload, excluding the hash field itself."""
     import hashlib
     import json
 
@@ -1593,37 +1120,13 @@ def _receipt_body_hash(payload: dict[str, Any]) -> str:
 
 
 def _stamp_receipt_hash(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return ``payload`` with its body hash stamped in.
-
-    Args:
-        payload: The receipt dict to stamp.
-
-    Returns:
-        The same dict, carrying :data:`_RECEIPT_HASH_KEY`.
-    """
+    """Return ``payload`` with its body hash stamped in."""
     payload[_RECEIPT_HASH_KEY] = _receipt_body_hash(payload)
     return payload
 
 
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
-    """Read the persisted ``langfuse_receipt.json`` for ``session_dir``.
-
-    Returns the post-flush receipt dict (preferred by the breakdown collector
-    since its counts are final) or ``None`` if no receipt was written.
-
-    A receipt whose stamped ``payload_sha256`` does not match its body is
-    treated as absent: the callers use it to decide whether a one-shot push
-    already happened, and acting on a corrupted receipt either replays that
-    push or suppresses it forever. A receipt with no hash at all is accepted —
-    those were written before the field existed.
-
-    Args:
-        session_dir: Session directory whose persisted receipt is read.
-
-    Returns:
-        dict[str, Any] | None: the post-flush receipt dict, or ``None`` when no
-            receipt was written, it is unreadable, or its hash does not match.
-    """
+    """Read the persisted ``langfuse_receipt.json`` for ``session_dir``."""
     from hyperloom.common.jsonio import read_json
 
     payload = read_json(_receipt_path(session_dir), default=None, require_dict=True)

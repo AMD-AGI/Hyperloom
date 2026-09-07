@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the throughput convergence judge.
-
-The numbers below are the real ones. ``_RCA_ROUNDS`` is the three-round series
-that started this (58% spread, monotonically rising). ``_T6_ROUNDS`` is the
-five-pass controlled repeat that showed the spread is cold start, not noise:
-117.6% across all five, 3.9% once the first is dropped.
-"""
+"""Tests for the throughput convergence judge."""
 
 from __future__ import annotations
 
@@ -29,16 +23,13 @@ class TestTheSeriesThatStartedThis:
         assert verdict.value is None
 
     def test_rca_series_is_rejected_on_spread(self):
-        # Dropping the warm-up round leaves 19373.98 -> 22424.80: a 15.8% gap,
-        # five times the tolerance. Taking the last round here is what turned a
-        # warm-up climb into a reported "gain".
+        # Dropping the warm-up round leaves 19373.98 -> 22424.80: a 15.8% gap, five times the tolerance.
         verdict = assess_convergence(_RCA_ROUNDS)
         assert verdict.reason == "spread_exceeds_tolerance"
         assert verdict.spread_pct > 15.0
 
     def test_two_rounds_are_not_called_a_trend(self):
-        # A rising pair is not evidence of warm-up: half of all steady pairs
-        # rise. The trend verdict needs three points.
+        # A rising pair is not evidence of warm-up: half of all steady pairs rise.
         assert assess_convergence(_RCA_ROUNDS).monotonic is False
 
     def test_warmup_round_is_discarded_not_averaged(self):
@@ -55,16 +46,14 @@ class TestT6ControlledRepeat:
         assert verdict.spread_pct > 100.0
 
     def test_dropping_the_cold_round_still_fails_on_the_shared_box(self):
-        # Rounds 2-5 include the round-5 dip caused by another workload landing
-        # on the shared machine, so this is correctly NOT converged -- the fix
-        # for that is paired measurement, not a looser threshold.
+        # Rounds 2-5 include the round-5 dip caused by another workload landing on the shared machine, so this is
+        # correctly NOT converged -- the fix for that is paired measurement, not a looser threshold.
         verdict = assess_convergence(_T6_ROUNDS)
         assert verdict.converged is False
         assert verdict.reason == "spread_exceeds_tolerance"
 
     def test_rounds_two_to_four_are_converged(self):
-        # The steady window: 3.9% spread, inside the 3%-order tolerance once the
-        # dip is excluded.
+        # The steady window: 3.9% spread, inside the 3%-order tolerance once the dip is excluded.
         verdict = assess_convergence(_T6_ROUNDS[1:4], warmup_rounds=0, tolerance_pct=5.0)
         assert verdict.converged is True
         assert verdict.spread_pct < 4.0
@@ -93,16 +82,16 @@ class TestVerdicts:
         assert 0.0 not in verdict.used and -1.0 not in verdict.used
 
     def test_tight_but_still_climbing_series_is_rejected(self):
-        # Where the trend rule earns its keep: the spread is inside tolerance,
-        # so only the monotonic check catches that this is still warming up.
+        # Where the trend rule earns its keep: the spread is inside tolerance, so only the monotonic check catches
+        # that this is still warming up.
         verdict = assess_convergence([50.0, 100.0, 101.0, 102.0])
         assert verdict.converged is False
         assert verdict.reason == "monotonic_increasing"
         assert verdict.spread_pct < 3.0
 
     def test_decreasing_series_is_allowed_when_tight(self):
-        # Only *increasing* series indicate an unfinished warm-up; a tight
-        # decreasing one is just noise around steady state.
+        # Only *increasing* series indicate an unfinished warm-up; a tight decreasing one is just noise around steady
+        # state.
         verdict = assess_convergence([50.0, 100.5, 100.2, 100.0])
         assert verdict.converged is True
 

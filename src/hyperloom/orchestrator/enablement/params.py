@@ -25,12 +25,7 @@ def _maybe_build_runtime_candidate(
     model: str,
     gpu_type: str,
 ) -> dict[str, Any] | None:
-    """Build a serialized runtime-candidate stack action, or None.
-
-    Returns None when the gap does not require code acquisition, the run is
-    multi-node (single-node-only guard), or the framework adapter cannot produce
-    an evidence-backed candidate. Fully exception-guarded.
-    """
+    """Build a serialized runtime-candidate stack action, or None."""
     if not getattr(capability_gap, "requires_code_acquisition", False):
         return None
     try:
@@ -51,10 +46,7 @@ def _maybe_build_runtime_candidate(
 
 
 def _enablement_carrier_params(state: Any) -> dict[str, Any]:
-    """eval-origin trigger context threaded to specialist/integrate/build tasks.
-
-    Empty for boot-origin enablement so the boot path is unchanged.
-    """
+    """eval-origin trigger context threaded to specialist/integrate/build tasks."""
     origin = str(state.enablement.origin or "")
     if not origin:
         return {}
@@ -76,12 +68,7 @@ def _maybe_build_localization_candidate(
     repo_url: str,
     candidate_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
-    """Build a serialized localization stack action, or None.
-
-    Returns None when the gap does not require code acquisition, the run is
-    multi-node, there is no merged-PR candidate ref, or the framework adapter
-    cannot localize. The compiled-closure gate runs later in the executor.
-    """
+    """Build a serialized localization stack action, or None."""
     if not getattr(capability_gap, "requires_code_acquisition", False):
         return None
     ref = next((r for r in (candidate_refs or ()) if str(r).strip()), "")
@@ -110,32 +97,7 @@ class EnablementParams(CoordinatorCollaborator):
     """Builds the enablement authoring specialist's parameters."""
 
     def _build_enablement_specialist_params(self, launch_log: str, *, attempt: int = 0) -> dict[str, Any] | None:
-        """Build enablement-specialist params from a captured launch failure.
-
-        Classifies the failure (advisory ``kind`` only — see Q1 hardening),
-        plans bridging discovery, and runs a **best-effort** candidate-PR
-        enumeration (network; fully exception-guarded, degrades to repos-only).
-        The mandate itself is rendered downstream by
-        ``_section_enablement_playbook`` from the structured ``enablement_*``
-        params emitted here, so the prompt text is built once, at the point of
-        use. Returns ``None`` **only** when the launch log is blank (nothing to
-        act on); a non-blank log always yields params, even when it classifies
-        as ``UNKNOWN`` — the LLM specialist repairs from the raw log so a
-        brand-new gap type never wedges the run.
-
-        On a retry (``attempt > 0``) the ranked candidate list is *rotated* so a
-        different bridging PR leads, and the notes flag that prior attempts
-        reverted — steering the sub-agent toward a different bridge.
-
-        Args:
-            launch_log: Captured launch / traceback text.
-            attempt: Zero-based dispatch index; drives candidate rotation and a
-                retry hint in the mandate.
-
-        Returns:
-            dict | None: Specialist task params (tagged ``enablement`` +
-            ``framework_agent_authoring``) or ``None``.
-        """
+        """Build enablement-specialist params from a captured launch failure."""
         text = (launch_log or "").strip()
         if not text:
             return None
@@ -148,9 +110,8 @@ class EnablementParams(CoordinatorCollaborator):
         model = (getattr(state, "model_name", "") or "").strip()
         repo_url = repo_url_for_framework(framework)
 
-        # Dispatch a specialist for ANY non-blank launch log, even one that
-        # classifies as ``UNKNOWN``: ``kind`` is advisory (routes bridge-repo
-        # hints and labels the mandate), not a gate.
+        # Dispatch a specialist for ANY non-blank launch log, even one that classifies as ``UNKNOWN``: ``kind`` is
+        # advisory (routes bridge-repo hints and labels the mandate), not a gate.
         signature = classify_failure(text)
         req = EnablementRequest(
             framework=framework,
@@ -169,26 +130,21 @@ class EnablementParams(CoordinatorCollaborator):
         # Persist so _maybe_escalate_to_targeted_build can pick the top candidate.
         state.enablement.candidate_refs = list(candidate_refs)
         source_context = self._read_enablement_source_context(signature)
-        # For a weight-init failure, fold the checkpoint's ground-truth per-layer
-        # weight inventory into the mandate so the loop self-corrects each retry.
+        # For a weight-init failure, fold the checkpoint's ground-truth per-layer weight inventory into the mandate so
+        # the loop self-corrects each retry.
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        # Progressing patches from prior rounds, re-applied as a base before this
-        # round's patch (serial-gap stacking); author a fix composing on top.
+        # Progressing patches from prior rounds, re-applied as a base before this round's patch (serial-gap stacking);
+        # author a fix composing on top.
         base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
-        # Whole-file artifacts kept by prior rounds, re-installed before the
-        # boot the same way patches are re-applied.
+        # Whole-file artifacts kept by prior rounds, re-installed before the boot the same way patches are re-applied.
         base_artifacts = list(state.enablement.kept_artifacts or [])
-        # Only prior rounds' *actually-applied* setup commands (recorded by the
-        # specialist and replayed by integrate_patch) stack as a base. No install
-        # command is ever auto-seeded here: an unpinned upgrade of the shared
-        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
-        # transformers-major skew) and environment/build acquisition is owned by
-        # the isolated targeted-build path + the specialist's own setup_commands.
+        # Only prior rounds' *actually-applied* setup commands (recorded by the specialist and replayed by
+        # integrate_patch) stack as a base.
         base_setup = [str(c) for c in (state.enablement.setup_commands or [])]
-        # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
-        # notes carries only per-dispatch dynamic context that §1b cannot provide.
+        # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook. notes carries
+        # only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
         spanned_roots = bool(state.enablement.patches_span_multiple_roots)
@@ -244,16 +200,14 @@ class EnablementParams(CoordinatorCollaborator):
 
         capability_gap = CapabilityGap.from_signature(signature)
 
-        # When the gap requires code acquisition (not a resource constraint) and
-        # an adapter can build an evidence-backed candidate, attach a
-        # ``runtime_candidate`` so integrate_patch provisions an attempt-scoped
-        # runtime before booting. Skipped in multi-node mode.
+        # When the gap requires code acquisition (not a resource constraint) and an adapter can build an
+        # evidence-backed candidate, attach a ``runtime_candidate`` so integrate_patch provisions an attempt-scoped
+        # runtime before booting.
         runtime_candidate = _maybe_build_runtime_candidate(
             capability_gap, framework=framework, model=model, gpu_type=req.gpu_type
         )
-        # When a merged-PR candidate exists, attach a ``localization_candidate``
-        # so integrate_patch localizes the closure into the source tree
-        # (compiled closures defer to the targeted build at apply).
+        # When a merged-PR candidate exists, attach a ``localization_candidate`` so integrate_patch localizes the
+        # closure into the source tree (compiled closures defer to the targeted build at apply).
         localization_candidate = _maybe_build_localization_candidate(
             capability_gap,
             framework=framework,
@@ -282,9 +236,8 @@ class EnablementParams(CoordinatorCollaborator):
             # CapabilityGap projection: marks resource_constraint as not actionable.
             "enablement_capability_gap": capability_gap.to_dict(),
             "enablement_candidate_refs": list(candidate_refs),
-            # Source lines near the offending site, plus (on a weight-init
-            # failure) the checkpoint's per-layer weight inventory. Rendered
-            # into the mandate by _section_enablement_playbook.
+            # Source lines near the offending site, plus (on a weight-init failure) the checkpoint's per-layer weight
+            # inventory.
             "enablement_source_context": source_context,
             # Progressing patches from prior rounds, stacked as a base.
             "enablement_base_patches": base_patches,
@@ -292,9 +245,7 @@ class EnablementParams(CoordinatorCollaborator):
             "enablement_base_artifacts": base_artifacts,
             # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
-            # Config accumulated by prior advanced rounds. The bench variant
-            # layers this round's proposal on top, so a KEEP is graded on the
-            # whole stack and its effective_config records the whole stack.
+            # Config accumulated by prior advanced rounds.
             "base_extra_envs": acc_envs,
             "base_extra_args": acc_args,
             "launch_probe": req.launch_probe,
@@ -307,8 +258,8 @@ class EnablementParams(CoordinatorCollaborator):
         }
         if runtime_candidate is not None:
             params_out["runtime_candidate"] = runtime_candidate
-        # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on
-        # the same runtime the last round promoted.
+        # Re-activate a prior KEEP'd attempt runtime so serial stacking runs on the same runtime the last round
+        # promoted.
         kept_action = state.enablement.kept_stack_action
         if isinstance(kept_action, dict) and kept_action and "runtime_candidate" not in params_out:
             params_out["runtime_candidate"] = kept_action
@@ -334,24 +285,7 @@ class EnablementParams(CoordinatorCollaborator):
         return params_out
 
     def _read_enablement_source_context(self, signature: Any, *, window: int = 12) -> str:
-        """Best-effort read a small source window near the offending site.
-
-        Resolves ``signature.offending_file`` against the framework/ROCm source
-        allowlist, then returns ``window`` lines centred on the first occurrence
-        of ``offending_symbol`` (or the file head when the symbol is absent).
-        Fully exception-guarded: any failure returns ``""`` so the mandate
-        degrades to the no-context form (G is grounding, never a hard dependency).
-
-        Delegates to :func:`~..actions.executors._apply_feedback.source_context_for_file`
-        which is the shared file-resolve + window primitive.
-
-        Args:
-            signature: The classified :class:`FailureSignature`.
-            window: Total number of lines to return around the hit.
-
-        Returns:
-            str: A ``file:line`` header + snippet, or ``""``.
-        """
+        """Best-effort read a small source window near the offending site."""
         offending_file = str(getattr(signature, "offending_file", "") or "").strip()
         if not offending_file:
             return ""
@@ -368,21 +302,7 @@ class EnablementParams(CoordinatorCollaborator):
         )
 
     def _derive_checkpoint_weight_facts(self, launch_log: str) -> str:
-        """Auto-derive ground-truth checkpoint-weight facts for a weight-init failure.
-
-        On a weight-loading error (strict init / state_dict mismatch), parses the
-        offending ``model...`` parameter names from the launch log and
-        cross-references the model's ``*.index.json`` ``weight_map`` to report,
-        per offending family, which layer indices carry that weight in the
-        checkpoint and which do not. Returns a compact FACTS block appended to the
-        enablement mandate. Fully exception-guarded: any failure returns ``""``.
-
-        Args:
-            launch_log: The captured launch / traceback text.
-
-        Returns:
-            str: A ``CHECKPOINT WEIGHT FACTS`` block, or ``""``.
-        """
+        """Auto-derive ground-truth checkpoint-weight facts for a weight-init failure."""
         text = launch_log or ""
         low = text.lower()
         try:
@@ -391,8 +311,8 @@ class EnablementParams(CoordinatorCollaborator):
             import re as _re
             from pathlib import Path as _Path
 
-            # Offending parameter names in the traceback; parsed first so the
-            # trigger is robust to a head-truncated launch log.
+            # Offending parameter names in the traceback; parsed first so the trigger is robust to a head-truncated
+            # launch log.
             offending = set(_re.findall(r"['\"]((?:model|language_model|transformer)\.[\w.]+)['\"]", text))
             weighty = {o for o in offending if o.endswith((".weight", ".bias", "_scale"))}
             phrase_hit = (
@@ -401,16 +321,15 @@ class EnablementParams(CoordinatorCollaborator):
                 or "unexpected key" in low
                 or "error(s) in loading state_dict" in low
             )
-            # Fire when the log names weight-shaped offending params even if the
-            # explanatory phrase was truncated off.
+            # Fire when the log names weight-shaped offending params even if the explanatory phrase was truncated off.
             if not (phrase_hit or weighty):
                 return ""
             if not offending:
                 return ""
             model_path = str(getattr(self.shared_state, "model_path", "") or "").strip()
             if model_path:
-                # ``model_path`` may be an HF repo id; resolve to the local
-                # weights dir so the sharded-index read works for repo-id launches.
+                # ``model_path`` may be an HF repo id; resolve to the local weights dir so the sharded-index read
+                # works for repo-id launches.
                 from hyperloom.inference_optimizer.model_config_utils import (
                     resolve_local_model_dir,
                 )
@@ -491,25 +410,7 @@ class EnablementParams(CoordinatorCollaborator):
             return ""
 
     def _discover_enablement_candidate_refs(self, req: Any, plan: Any) -> tuple[str, ...]:
-        """Best-effort enumerate + rank bridging PRs for an enablement failure.
-
-        Enumerates candidate PRs across every repo in ``plan.repos`` (framework
-        + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
-        ranks each :class:`framework_agent.models.Candidate` with
-        ``score_enablement_title`` (per-Candidate so the ref/html_url is
-        preserved) and returns the top ``req.max_search_candidates`` refs
-        (``html_url`` preferred).
-
-        Network + git; **fully exception-guarded**: any failure degrades to an
-        empty tuple so the mandate falls back to repos-only.
-
-        Args:
-            req: The :class:`framework_agent.enablement.EnablementRequest`.
-            plan: The :class:`framework_agent.enablement_ops.EnablementSearchPlan`.
-
-        Returns:
-            tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
-        """
+        """Best-effort enumerate + rank bridging PRs for an enablement failure."""
         from hyperloom.agents.framework.enablement_ops import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates

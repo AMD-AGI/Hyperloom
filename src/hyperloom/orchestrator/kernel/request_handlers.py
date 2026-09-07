@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator-side programmatic handlers for kernel REQUEST kinds.
-
-Handler signature::
-
-    async def handler(payload: dict, *, session_dir: Path) -> dict:
-
-Dispatch table is exposed via :data:`KERNEL_REQUEST_HANDLERS` for test monkey-patching.
-"""
+"""Coordinator-side programmatic handlers for kernel REQUEST kinds."""
 
 from __future__ import annotations
 
@@ -84,35 +77,21 @@ from .nomination_result import parse_outcome as parse_outcome
 
 log = logging.getLogger(__name__)
 
-# Recognized trace-analysis routes. Only an omitted value defaults to ``agent``;
-# an explicit unknown value fails before dispatch so it cannot start an LLM.
+# Recognized trace-analysis routes.
 _VALID_ANALYSIS_ROUTES = frozenset({"bypass", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
-# A patch whose correctness was only established against a reference kernel;
-# serving accuracy is what settles it.
+# A patch whose correctness was only established against a reference kernel; serving accuracy is what settles it.
 _FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
 _INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
-# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync
-# so the feasibility check reasons about the budget the eval will really ask for.
+# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync so the feasibility check reasons
+# about the budget the eval will really ask for.
 _EVAL_DEFAULT_MAX_TOKENS = 4096
 
 
 def _vram_guarded_server_args(extra_args: str) -> str:
-    """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
-
-    When ``HL_INTEGRATE_VRAM_GUARD`` is on and the caller has not already pinned
-    ``--gpu-memory-utilization``, append a conservative cap
-    (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a re-baseline server cannot
-    OOM. A strict no-op when the flag is off or a util is already specified.
-
-    Args:
-        extra_args: The resolved ``extra_server_args`` string for the server.
-
-    Returns:
-        str: ``extra_args`` unchanged, or with a util cap appended.
-    """
+    """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline."""
     if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
         return extra_args
     # ``--gpu-memory-utilization`` is vLLM-only; apply the cap only for vLLM.
@@ -131,24 +110,7 @@ def _vram_guarded_server_args(extra_args: str) -> str:
 
 
 def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> bool | None:
-    """Best-effort confirm the patched source was actually imported/compiled.
-
-    Greps the re-baseline server log for evidence the patched module's basename
-    was imported/loaded/compiled, so a measured E2E delta is attributed to code
-    the workload really ran. Returns a tri-state:
-
-    * ``True``  — the module basename appears in import/load/compile context.
-    * ``False`` — the server log is readable and the basename never appears
-      anywhere (positive evidence the patched file was not exercised).
-    * ``None``  — unknown (no source_file, no readable log) — never penalized.
-
-    Args:
-        source_file: Resolved path of the patched kernel source.
-        workspace: Re-baseline workspace dir (holds ``server.log``).
-
-    Returns:
-        bool | None: Tri-state confirmation as described above.
-    """
+    """Best-effort confirm the patched source was actually imported/compiled."""
     if not source_file or not workspace:
         return None
     ws = Path(workspace)
@@ -181,27 +143,7 @@ def _confirm_sources_imported(
     source_files: list[str],
     workspace: str | Path | None,
 ) -> tuple[bool | None, dict[str, bool | None]]:
-    """Confirm every file a patch wrote was exercised by the served process.
-
-    A patch can span several files -- a new module, the dispatcher that routes
-    to it, the original source it replaces -- so each is graded on its own with
-    :func:`_confirm_source_imported` and the verdicts are combined:
-
-    * ``True``  — every file shows import evidence.
-    * ``False`` — no file appears in the log at all, which is the unambiguous
-      "the served process never ran any of this" case.
-    * ``None``  — anything mixed. A module can be imported lazily or folded
-      into another, so partial evidence is recorded for audit rather than held
-      against the patch.
-
-    Args:
-        source_files: Paths the patch wrote; duplicates and blanks are ignored.
-        workspace: Re-baseline workspace dir (holds ``server.log``).
-
-    Returns:
-        tuple[bool | None, dict[str, bool | None]]: The aggregate tri-state and
-            the per-file verdicts kept for audit.
-    """
+    """Confirm every file a patch wrote was exercised by the served process."""
     ordered = list(dict.fromkeys(path for path in source_files if str(path or "").strip()))
     if not ordered:
         return None, {}
@@ -223,15 +165,7 @@ _KERNEL_AGENT_ROOT_ENV = "HYPERLOOM_KERNEL_AGENT_ROOT"
 
 
 def _kernel_agent_root_from_env() -> Path | None:
-    """Read the kernel-agent install root from the environment at call time.
-
-    Resolved lazily on every call so a late ``os.environ`` injection by the CLI
-    preflight still wins.
-
-    Returns:
-        Path | None: The kernel-agent root as a :class:`~pathlib.Path`, or
-            ``None`` when ``HYPERLOOM_KERNEL_AGENT_ROOT`` is unset or empty.
-    """
+    """Read the kernel-agent install root from the environment at call time."""
     raw = os.environ.get(_KERNEL_AGENT_ROOT_ENV)
     if not raw:
         return None
@@ -258,16 +192,7 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 
 
 def _reusable_source_roots() -> tuple[str, ...]:
-    """Framework install roots for the runtime-generated kernel classifier.
-
-    Emits a lower-case variant per root because that classifier matches against
-    a lower-cased source path. Path containment uses
-    :func:`~hyperloom.orchestrator.framework.paths.resolved_within` instead.
-
-    Returns:
-        The de-duplicated framework install roots (each with a lower-case
-        variant), including FlyDSL checkout roots.
-    """
+    """Framework install roots for the runtime-generated kernel classifier."""
     from ..framework.paths import resolve_patch_target_roots
 
     roots = resolve_patch_target_roots()
@@ -282,22 +207,15 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
 
 _APPLY_TOOL_MODULE: Any | None = None
-# forge is the only per-kernel backend. The default phase-level backend is the
-# whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
-# KERNEL_OPT_BACKEND_ORDER=forge.
+# forge is the only per-kernel backend.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
-# forge-loop holds back a finalize reserve of half this window, so the figure
-# here buys only half as much search as it reads. At 60 a campaign completed one
-# iteration -- planning alone took 16 of its 30 usable minutes -- and terminated
-# on budget_exhausted with nothing kept, which reads as "the kernel cannot be
-# optimized" rather than "the kernel was tried once". 90 leaves ~45 usable
-# minutes, enough for a second iteration to act on what the first measured.
+# forge-loop holds back a finalize reserve of half this window, so the figure here buys only half as much search as it
+# reads.
 _DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
-# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
-# for large models with many GEMM shapes. Independent of the session --max-hours
-# budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
+# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized for large models with many GEMM
+# shapes.
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 _FORGE_FUSION_WRAPPER_TIMEOUT_GRACE_SEC = 30
 
@@ -327,13 +245,7 @@ _SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
 def _kernel_agent_root_error() -> str | None:
-    """Validate that the kernel-agent install root is configured and present.
-
-    Returns:
-        str | None: A human-readable error message when the root env var is
-            unset or points at a missing directory, or ``None`` when the root
-            exists and is usable.
-    """
+    """Validate that the kernel-agent install root is configured and present."""
     root = _kernel_agent_root_from_env()
     if root is None:
         return (
@@ -347,29 +259,14 @@ def _kernel_agent_root_error() -> str | None:
 
 
 def _resolve_tracelens_root() -> Path:
-    """Resolve the TraceLens checkout, independent of inherited env.
-
-    Falls back to the install-script-derived pod-local path so trace analysis
-    works even when the coordinator process did not source kernel-agent.env.sh.
-
-    Returns:
-        Path: The resolved TraceLens root (may not exist yet; callers validate).
-    """
+    """Resolve the TraceLens checkout, independent of inherited env."""
     from hyperloom.inference_optimizer.session import paths
 
     return paths.tracelens_root()
 
 
 def _tracelens_root_error(root: Path) -> str | None:
-    """Validate that the resolved TraceLens root is a usable git checkout.
-
-    A directory that exists but lacks ``.git`` is not usable and must be reported
-    so a non-default override fails fast and a default path is self-healed.
-
-    Returns:
-        str | None: A human-readable error when the checkout is missing or
-            incomplete, or ``None`` when it is a usable git checkout.
-    """
+    """Validate that the resolved TraceLens root is a usable git checkout."""
     if not root.is_dir():
         return (
             f"TraceLens root not found: {root}; run "
@@ -386,17 +283,11 @@ def _tracelens_root_error(root: Path) -> str | None:
 
 
 def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
-    """Rebuild the pod-local TraceLens checkout if it vanished mid-run.
-
-    Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override must fail fast when missing. Best-effort: any
-    failure is swallowed so the caller's validation produces the error.
-    """
+    """Rebuild the pod-local TraceLens checkout if it vanished mid-run."""
     from hyperloom.inference_optimizer.session import paths
 
-    # The installer-managed checkout is <deps_cache_root>/TraceLens or the
-    # per-revision <deps_cache_root>/TraceLens@<sha>; both are healable. An
-    # explicit override elsewhere must fail fast (never auto-clone).
+    # The installer-managed checkout is <deps_cache_root>/TraceLens or the per-revision
+    # <deps_cache_root>/TraceLens@<sha>; both are healable.
     try:
         cache_root = paths.deps_cache_root().resolve()
         root_resolved = Path(root).resolve()
@@ -424,19 +315,7 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
 
 
 def _kernel_agent_tool_path(tool_name: str) -> Path:
-    """Resolve the absolute path to a kernel-agent shell tool.
-
-    Args:
-        tool_name (str): File name of the tool under ``<root>/tools/`` (for
-            example ``tracelens_analysis.py``).
-
-    Returns:
-        Path: The resolved path to the requested tool.
-
-    Raises:
-        RuntimeError: If the kernel-agent root is unset/missing, or the named
-            tool does not exist under ``<root>/tools/``.
-    """
+    """Resolve the absolute path to a kernel-agent shell tool."""
     err = _kernel_agent_root_error()
     if err:
         raise RuntimeError(err)
@@ -449,19 +328,7 @@ def _kernel_agent_tool_path(tool_name: str) -> Path:
 
 
 def _coerce_runtime_value(value: Any) -> Any:
-    """Best-effort coercion of a string runtime value to ``int`` or ``float``.
-
-    Integer-looking strings become ``int``; strings containing ``.`` that
-    parse as a float become ``float``. Anything else (including unparseable
-    strings and non-string inputs) is returned unchanged.
-
-    Args:
-        value (Any): The raw value to coerce.
-
-    Returns:
-        Any: The coerced numeric value, or the original value when no safe
-            numeric coercion applies.
-    """
+    """Best-effort coercion of a string runtime value to ``int`` or ``float``."""
     if isinstance(value, str):
         stripped = value.strip()
         if stripped.isdigit():
@@ -474,18 +341,7 @@ def _coerce_runtime_value(value: Any) -> Any:
 
 
 def _candidate_env_allowed(key: str) -> bool:
-    """Decide whether an env var may be forwarded as candidate metadata.
-
-    Rejects anything that looks sensitive (keys, tokens, secrets, passwords,
-    credentials); otherwise allows the key if it is in the explicit allowlist
-    or starts with a known safe prefix (e.g. ``SGLANG_``, ``VLLM_``).
-
-    Args:
-        key (str): Environment variable name to test.
-
-    Returns:
-        bool: ``True`` if the env var is safe to surface, ``False`` otherwise.
-    """
+    """Decide whether an env var may be forwarded as candidate metadata."""
     upper = key.upper()
     if any(part in upper for part in _SENSITIVE_ENV_PARTS):
         return False
@@ -493,15 +349,7 @@ def _candidate_env_allowed(key: str) -> bool:
 
 
 def _split_server_args(raw: str) -> list[str]:
-    """Tokenize a raw server-args string into an argv list.
-
-    Args:
-        raw (str): Raw shell-style server argument string.
-
-    Returns:
-        list[str]: The parsed argv tokens, or an empty list when ``raw`` is
-            falsy or cannot be parsed (a warning is logged on parse failure).
-    """
+    """Tokenize a raw server-args string into an argv list."""
     try:
         return shlex.split(raw) if raw else []
     except ValueError:
@@ -510,21 +358,7 @@ def _split_server_args(raw: str) -> list[str]:
 
 
 def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
-    """Extract runtime workload context from a materialized Magpie YAML config.
-
-    Reads the config's ``benchmark`` block and derives the per-framework
-    server-args env name, the allowed candidate env vars, and a normalized
-    ``runtime_args`` view (framework, model, precision, server args, and the
-    coerced workload knobs such as ``tp`` / ``conc`` / ``isl`` / ``osl``).
-
-    Args:
-        config_path (str): Path to the materialized workload YAML config.
-
-    Returns:
-        dict[str, Any]: A dict with ``env_vars`` and ``runtime_args`` keys, or
-            an empty dict when the path is missing/unreadable. Empty/``None``
-            ``runtime_args`` entries are dropped.
-    """
+    """Extract runtime workload context from a materialized Magpie YAML config."""
     if not config_path:
         return {}
     path = Path(config_path)
@@ -578,22 +412,7 @@ def _enrich_candidate_runtime_metadata(
     candidates: Any,
     metadata: dict[str, Any],
 ) -> None:
-    """Backfill runtime env/args metadata onto each candidate kernel in place.
-
-    For every dict candidate, sets default ``env_vars`` and ``runtime_args``
-    entries from ``metadata`` without overwriting values the candidate already
-    carries (uses ``setdefault`` semantics).
-
-    Args:
-        candidates (Any): Expected to be a list of candidate dicts; ignored if
-            not a list.
-        metadata (dict[str, Any]): Metadata with ``env_vars`` / ``runtime_args``
-            sub-dicts as produced by
-            :func:`_load_materialized_workload_metadata`.
-
-    Returns:
-        None: The ``candidates`` list is mutated in place.
-    """
+    """Backfill runtime env/args metadata onto each candidate kernel in place."""
     if not isinstance(candidates, list) or not metadata:
         return
     env_vars = metadata.get("env_vars") if isinstance(metadata.get("env_vars"), dict) else {}
@@ -612,17 +431,7 @@ def _enrich_candidate_runtime_metadata(
 
 
 def _enrich_candidate_trace_report(candidates: Any, report_path: str) -> None:
-    """Stamp the TraceLens report path onto each candidate kernel in place.
-
-    Args:
-        candidates (Any): Expected to be a list of candidate dicts; ignored if
-            not a list.
-        report_path (str): Path to the TraceLens ``analysis.md`` report; ignored
-            if empty.
-
-    Returns:
-        None: Each dict candidate gains a default ``trace_report_path`` entry.
-    """
+    """Stamp the TraceLens report path onto each candidate kernel in place."""
     if not isinstance(candidates, list) or not report_path:
         return
     for item in candidates:
@@ -636,22 +445,7 @@ def _enrich_candidates_artifact(
     *,
     trace_report_path: str = "",
 ) -> None:
-    """Rewrite the on-disk candidates artifact with enriched metadata.
-
-    Loads the ``candidates_path`` JSON, enriches its ``hot_kernels`` and
-    ``hot_kernels_top15`` lists with runtime metadata and (optionally) the
-    TraceLens report path, then writes the artifact back out (pretty-printed,
-    key-sorted). No-op when the path is missing or unreadable.
-
-    Args:
-        candidates_path (str): Path to the candidates JSON artifact to update.
-        metadata (dict[str, Any]): Runtime metadata to merge into each kernel.
-        trace_report_path (str): Optional TraceLens report path to record at
-            both the top level and on each kernel entry.
-
-    Returns:
-        None: The artifact file is rewritten in place when changes apply.
-    """
+    """Rewrite the on-disk candidates artifact with enriched metadata."""
     if not candidates_path:
         return
     path = Path(candidates_path)
@@ -681,18 +475,7 @@ def _enrich_candidates_artifact(
 
 
 def _load_apply_tool() -> Any:
-    """Lazily import and cache the kernel-agent ``apply_kernel_patch.py`` module.
-
-    Loaded by file path via :mod:`importlib.util` and memoized in the module
-    global ``_APPLY_TOOL_MODULE`` so subsequent calls reuse the same module.
-
-    Returns:
-        Any: The imported ``apply_kernel_patch`` module object.
-
-    Raises:
-        RuntimeError: If the kernel-agent root/tool path cannot be resolved.
-        ImportError: If the module cannot be loaded from its resolved path.
-    """
+    """Lazily import and cache the kernel-agent ``apply_kernel_patch.py`` module."""
     global _APPLY_TOOL_MODULE
     if _APPLY_TOOL_MODULE is not None:
         return _APPLY_TOOL_MODULE
@@ -707,17 +490,7 @@ def _load_apply_tool() -> Any:
 
 
 def _artifact_paths_from_payload(payload: dict) -> list[str]:
-    """Normalize compiled-artifact paths from a payload into a list of strings.
-
-    Accepts either ``artifact_paths`` or ``compiled_artifact_paths``; a single
-    string is wrapped into a one-element list and falsy entries are dropped.
-
-    Args:
-        payload (dict): Request payload that may carry artifact path(s).
-
-    Returns:
-        list[str]: The collected artifact paths (possibly empty).
-    """
+    """Normalize compiled-artifact paths from a payload into a list of strings."""
     raw = payload.get("artifact_paths") or payload.get("compiled_artifact_paths") or []
     if isinstance(raw, str):
         return [raw]
@@ -732,24 +505,7 @@ def _final_content_snapshot(
     snapshot_dir: str | None,
     repo_root: str | None,
 ) -> str | None:
-    """Return a snapshot dir holding the patch's FINAL bytes, materializing if needed.
-
-    ``snapshot_dir`` means two different things on the two sides of the
-    nomination wire. The fusion exporter records its *pre-authoring pristine*
-    snapshot -- the baseline it diffed AGAINST -- on ``RecipePatch.snapshot_dir``,
-    and that value rides the envelope into the pending record. ``apply_kernel_patch``
-    reads the same field as the *post-patch final* contents it copies FROM. A
-    pristine dir can never satisfy that: it is missing, by construction, every
-    module the fusion authored, so the apply pre-flight refuses the whole patch
-    with "snapshot missing content for <...>_fused_<recipe>.py" and a real KEEP
-    is lost. (The collective lane never hit this only because its record carries
-    no ``snapshot_dir`` at all, so it always took the materialize path.)
-
-    Rather than trust the field, check it: a usable snapshot has the final bytes
-    for every path the patch writes. When it does not, materialize one from the
-    patch itself. Materialization failure returns the original value so apply
-    reports the real error instead of this helper's.
-    """
+    """Return a snapshot dir holding the patch's FINAL bytes, materializing if needed."""
     if not (patch_path.endswith(".patch") and repo_root):
         return snapshot_dir
     try:
@@ -780,23 +536,7 @@ def _maybe_apply_kernel_patch(
     session_dir: Path,
     kernel_id: str | None,
 ) -> HandlerResult:
-    """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
-
-    Resolves a backup root under the session's patches dir when none is given,
-    then delegates to the tool with rebuild / dry-run / target options pulled
-    from the payload.
-
-    Args:
-        payload (dict): Request payload carrying ``patch_path`` plus
-            ``target_file`` / ``source_file`` and optional apply/rebuild flags.
-        session_dir (Path): Session directory used to derive the backup root.
-        kernel_id (str | None): Kernel identifier for backup namespacing;
-            falls back to ``payload['kernel_id']`` or ``"anon"``.
-
-    Returns:
-        HandlerResult: A ``status="skipped"`` result when required inputs are
-            missing, otherwise the tool's apply result dict.
-    """
+    """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool."""
     patch_path = str(payload.get("patch_path") or "").strip()
     target_file = str(payload.get("target_file") or payload.get("source_file") or "").strip()
     if not patch_path or not target_file:
@@ -807,8 +547,8 @@ def _maybe_apply_kernel_patch(
     from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
-    # Same fold as the integrate workspace: a fusion sibling keys this dir by its
-    # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
+    # Same fold as the integrate workspace: a fusion sibling keys this dir by its ``llm:<recipe>`` operator name,
+    # which ``mkdir`` rejects on some filesystems.
     backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
     tool = _load_apply_tool()
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
@@ -859,12 +599,7 @@ def materialize_unified_patch_snapshot(
     repo_root: str | Path,
     snapshot_dir: str | Path | None = None,
 ) -> str:
-    """Materialize final file contents for apply_kernel_patch snapshot mode.
-
-    Applies a ``forge-fusion`` unified diff to a minimal throwaway mirror of the
-    touched files and returns that mirror path (snapshot mode treats the diff as
-    a manifest with final bytes under ``snapshot_dir``).
-    """
+    """Materialize final file contents for apply_kernel_patch snapshot mode."""
     patch = Path(patch_path).resolve()
     root = Path(repo_root).resolve()
     if not patch.is_file():
@@ -878,12 +613,8 @@ def materialize_unified_patch_snapshot(
     if not descriptors:
         raise ValueError(f"patch has no file operations: {patch}")
 
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
+    # Paths the patch CREATES: these must be produced by ``git apply``, never pre-seeded with a base, or apply fails
+    # "already exists".
     _new_file_paths = {
         str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
     }
@@ -907,36 +638,21 @@ def materialize_unified_patch_snapshot(
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
         elif rel.as_posix() not in _new_file_paths:
-            # ``git show HEAD:`` failed and this is a MODIFY (not a create):
-            # non-git repo_root (e.g. vLLM/sglang under site-packages/
-            # dist-packages) or an untracked-but-present file. Fall back to the
-            # on-disk source. forge-fusion (PR #75) emits the patch for these
-            # non-git frameworks; without this fallback the snapshot lacks the
-            # base file and ``git apply`` fails "<path>: No such file or
-            # directory". New files are intentionally left for ``git apply`` to
-            # create.
+            # ``git show HEAD:`` failed and this is a MODIFY (not a create): non-git repo_root (e.g. vLLM/sglang under
+            # site-packages/ dist-packages) or an untracked-but-present file.
             src = root / rel
             if not src.is_file():
-                # Neither git HEAD nor the on-disk layout has the base. Surface
-                # a precise error here instead of the opaque ``git apply`` "No
-                # such file or directory" that would otherwise follow.
+                # Neither git HEAD nor the on-disk layout has the base.
                 raise FileNotFoundError(
                     f"patch base missing for {rel.as_posix()}: not in git HEAD and not on disk under {root}"
                 )
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(src.read_bytes())
 
-    # ``git apply <path>`` rejects an otherwise valid final hunk when the patch
-    # artifact lacks a trailing newline (observed in legacy KB records). Feed a
-    # normalized in-memory copy so materialization is tolerant without mutating
-    # the content-addressed downloaded artifact.
+    # ``git apply <path>`` rejects an otherwise valid final hunk when the patch artifact lacks a trailing newline
+    # (observed in legacy KB records).
     normalized_patch_text = patch_text if patch_text.endswith(("\n", "\r")) else f"{patch_text}\n"
-    # Pin the work tree to ``snap``. Without this, ``git apply`` resolves paths
-    # against whatever repository encloses ``snap`` -- and when the session dir
-    # lives INSIDE a checkout (a session under the Hyperloom repo itself), every
-    # hunk is reported "Skipped patch ..." while git still exits 0. The snapshot
-    # then comes back empty and the failure surfaces later as the far more
-    # confusing "snapshot missing final content".
+    # Pin the work tree to ``snap``.
     apply_env = {
         **os.environ,
         "GIT_DIR": str(snap / ".git_materialize"),
@@ -963,18 +679,7 @@ def materialize_unified_patch_snapshot(
 
 
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
-    """Revert a kernel patch using its apply manifest.
-
-    A manifest is enough; the apply's ``status`` is not required, so a partial
-    apply reverts the files it managed to touch. Gating on ``status == "ok"``
-    used to leave exactly those applied.
-
-    Args:
-        apply_result: Apply metadata carrying ``manifest_path``.
-
-    Returns:
-        The revert result, or an explicit failure result.
-    """
+    """Revert a kernel patch using its apply manifest."""
     if not apply_result.get("manifest_path"):
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
@@ -1011,19 +716,7 @@ def _maybe_finalize_kernel_patch(
 
 
 def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
-    """Look up a kernel's source file from the last trace-analyze result.
-
-    Searches ``state.last_trace_analyze`` (preferring ``hot_kernels_top15``,
-    falling back to ``hot_kernels``) for the entry matching ``kernel_id``.
-
-    Args:
-        state (Any): SharedState snapshot exposing ``last_trace_analyze``.
-        kernel_id (str): Kernel identifier to match.
-
-    Returns:
-        str: The matching candidate's ``source_file``, or an empty string when
-            no match is found.
-    """
+    """Look up a kernel's source file from the last trace-analyze result."""
     kernels = (
         (state.last_trace_analyze or {}).get("hot_kernels_top15")
         or (state.last_trace_analyze or {}).get("hot_kernels")
@@ -1038,11 +731,7 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
 
 
 class AmbiguousIntegrationTarget(Exception):
-    """A bare ``kernel_id`` named several pending integration records.
-
-    ``kernel_id`` is not unique across a nomination round, so it cannot select
-    the record a KEEP/REVERT verdict is bound to.
-    """
+    """A bare ``kernel_id`` named several pending integration records."""
 
 
 def _fill_integrate_defaults_from_state(
@@ -1050,24 +739,7 @@ def _fill_integrate_defaults_from_state(
     *,
     session_dir: Path,
 ) -> dict:
-    """Pull ``base_tput`` / ``config_path`` / ``extra_server_args`` defaults from SharedState.
-
-    Runs before the ``base_tput > 0`` hard-check in ``integrate_handler`` for
-    bare ``{"kernel_id": ...}`` payloads. Always returns a shallow copy; never
-    raises on a missing snapshot.
-
-    Args:
-        payload: The integrate request payload.
-        session_dir: Session directory to load SharedState from.
-
-    Returns:
-        A shallow copy of ``payload`` with defaults filled from state.
-
-    Raises:
-        AmbiguousIntegrationTarget: The payload carries no ``integration_id``
-            that resolves and its ``kernel_id`` matches more than one pending
-            record.
-    """
+    """Pull ``base_tput`` / ``config_path`` / ``extra_server_args`` defaults from SharedState."""
     from ..state.shared_state import SharedState, resolve_grading_anchor_tput
 
     resolved = dict(payload)
@@ -1089,8 +761,8 @@ def _fill_integrate_defaults_from_state(
             and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
         ]
         if len(candidates) > 1:
-            # Siblings of one nomination round share a kernel_id, so picking any
-            # of them would bind the verdict to a record nobody named.
+            # Siblings of one nomination round share a kernel_id, so picking any of them would bind the verdict to a
+            # record nobody named.
             raise AmbiguousIntegrationTarget(
                 f"integrate refused: kernel_id={requested_kernel_id!r} matches "
                 f"{len(candidates)} pending integration records; an explicit "
@@ -1123,11 +795,7 @@ def _fill_integrate_defaults_from_state(
             "integration_validation_status",
             str(pending_record.get("integration_validation_status") or ""),
         )
-        # Fusion siblings carry three facts the generic drain cannot infer. The
-        # env flags gate the fused path (unset => the patch measures as the eager
-        # path and REVERTs a real win); the keep bar is fusion-specific; the
-        # action label routes the promoted stack row. Fold them in HERE, before
-        # the extra_envs merge below, so the fused path is active during e2e.
+        # Fusion siblings carry three facts the generic drain cannot infer.
         if str(pending_record.get("source") or "") == "forge_fusion":
             resolved.setdefault("source", "forge_fusion")
             resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
@@ -1146,8 +814,8 @@ def _fill_integrate_defaults_from_state(
     current_best = getattr(state, "current_best", None) or {}
 
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
-        # ``extra_server_args`` below is filled from current_best, so the
-        # candidate must be graded against that recipe too.
+        # ``extra_server_args`` below is filled from current_best, so the candidate must be graded against that recipe
+        # too.
         bt = resolve_grading_anchor_tput(state)
         if bt > 0:
             resolved["base_tput"] = bt
@@ -1167,9 +835,7 @@ def _fill_integrate_defaults_from_state(
         requested_envs = resolved.get("extra_envs")
         requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
         if current_envs or requested_envs:
-            # The candidate stacks onto current_best. Candidate-specific
-            # overrides win, but omitting an env must not silently drop the
-            # accepted recipe during E2E validation.
+            # The candidate stacks onto current_best.
             resolved["extra_envs"] = {
                 **current_envs,
                 **requested_envs,
@@ -1182,12 +848,10 @@ def _fill_integrate_defaults_from_state(
             task_group_key = str(attempt.get("task_group_key") or "")
             if task_group_key:
                 resolved["task_group_key"] = task_group_key
-        # Defense-in-depth mirror of _queue_kernel_keep()'s refusal to queue
-        # a vendor-playbook KEEP for auto-integration (PR #1191 review
-        # finding #1): this also catches an LLM-initiated integrate request
-        # that names the kernel_id directly, bypassing the pending-queue
-        # lookup above via _resolve_kernel_patch_identity()'s
-        # last_kernel_opt.best_artifact_path backfill.
+        # Defense-in-depth mirror of _queue_kernel_keep()'s refusal to queue a vendor-playbook KEEP for
+        # auto-integration (PR #1191 review finding #1): this also catches an LLM-initiated integrate request that
+        # names the kernel_id directly, bypassing the pending-queue lookup above via
+        # _resolve_kernel_patch_identity()'s last_kernel_opt.best_artifact_path backfill.
         if attempt.get("vendor_playbook_deploy_blocked"):
             resolved["_vendor_playbook_deploy_blocked"] = True
         elif (
@@ -1201,21 +865,7 @@ def _fill_integrate_defaults_from_state(
 
 
 def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
-    """Backfill integrate inputs from a recorded multi-file artifact bundle.
-
-    A bundle is bound to the sibling that produced it by ``integration_id``. When
-    the caller already resolved this integrate from a specific pending record
-    (i.e. ``resolved`` carries an ``integration_id``), a bundle stamped with a
-    *different* id belongs to another sibling of the same nomination round and
-    must not be merged in: doing so would land one sibling's multi-file write
-    set under a second sibling's integrate. Under the one-patch era every
-    kernel_id had exactly one bundle so this never arose; the fallbacks keyed on
-    ``kernel_id`` (``last_kernel_opt`` / per-kernel ledger) now route several
-    bundles through the same kernel_id, so the guard is load-bearing.
-
-    A bundle with no ``integration_id`` of its own predates the contract and is
-    accepted as before -- there is no id to disagree with.
-    """
+    """Backfill integrate inputs from a recorded multi-file artifact bundle."""
     if not isinstance(bundle, dict) or bundle.get("type") != "patch_snapshot":
         return
     if not bundle_belongs_to(bundle, resolved.get("integration_id")):
@@ -1241,12 +891,7 @@ def _fill_integrate_provenance(
     framework_applyback: Any,
     integration_validation_status: Any,
 ) -> None:
-    """Backfill artifact provenance for an integrate resolved from a ledger entry.
-
-    These two fields arm the strict accuracy gate. A KEEP the ``source_file`` dedup
-    drops from the pending queue resolves through a fallback instead, and without
-    them a reference-only apply-back reads as an ordinary kernel patch.
-    """
+    """Backfill artifact provenance for an integrate resolved from a ledger entry."""
     if not resolved.get("artifact_kind") and isinstance(framework_applyback, dict):
         kind = str(framework_applyback.get("artifact_kind") or "")
         if kind:
@@ -1258,17 +903,7 @@ def _fill_integrate_provenance(
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
-    """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``).
-
-    Args:
-        payload: The integrate request payload.
-        session_dir: Session directory to load SharedState from.
-
-    Returns:
-        A tuple of ``(resolved_payload, error_result)`` where ``error_result``
-        is a failure ``HandlerResult`` when required inputs are missing, else
-        ``None``.
-    """
+    """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``)."""
     from ..state.shared_state import SharedState
 
     resolved = dict(payload)
@@ -1296,8 +931,8 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             "identity_route",
             str(pending_record.get("identity_route") or ""),
         )
-        # Provenance travels with the artifact so the serving verdict can tell a
-        # reference-only apply-back from one already proven in place.
+        # Provenance travels with the artifact so the serving verdict can tell a reference-only apply-back from one
+        # already proven in place.
         resolved.setdefault(
             "artifact_kind",
             str(pending_record.get("artifact_kind") or ""),
@@ -1322,8 +957,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             resolved["source_file"] = str(pending_record["source_file"])
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
-        # Snapshot deploy: prefer the original patch + snapshot dir so the whole
-        # multi-file patch lands atomically.
+        # Snapshot deploy: prefer the original patch + snapshot dir so the whole multi-file patch lands atomically.
         _fill_integrate_snapshot_from_bundle(resolved, last_kernel.get("best_artifact_bundle"))
         if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
             resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
@@ -1347,8 +981,8 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
             integration_validation_status=last_kernel.get("integration_validation_status"),
         )
 
-    # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
-    # ledger for KEEPs other than the strongest pending one.
+    # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel ledger for KEEPs other than the
+    # strongest pending one.
     if kernel_id:
         attempt = _entry_by_kernel_id(state, kernel_id) or {}
         _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
@@ -1400,14 +1034,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 
 
 def _tool_label(cmd: list[str]) -> str:
-    """Name the tool a command runs, for the progress note.
-
-    Args:
-        cmd (list[str]): The command and arguments.
-
-    Returns:
-        str: The first ``.py`` argument's stem, else the executable's name.
-    """
+    """Name the tool a command runs, for the progress note."""
     for arg in cmd:
         text = str(arg)
         if text.endswith(".py"):
@@ -1420,15 +1047,7 @@ async def _run_subprocess(
     *,
     timeout_sec: int,
 ) -> tuple[int, str, str]:
-    """Run a bounded subprocess without blocking the reactor.
-
-    Args:
-        cmd: The command and arguments to run.
-        timeout_sec: Per-run timeout in seconds.
-
-    Returns:
-        A tuple of ``(returncode, stdout, stderr)``.
-    """
+    """Run a bounded subprocess without blocking the reactor."""
     if (
         isinstance(timeout_sec, bool)
         or not isinstance(timeout_sec, (int, float))
@@ -1438,23 +1057,7 @@ async def _run_subprocess(
         raise ValueError("timeout_sec must be finite and positive")
 
     def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
-        """Run the command synchronously in a worker thread.
-
-        Copies the environment, injects the Ray GCS address in multi-node mode,
-        and prepends the venv ``bin`` to ``PATH``. Launches the child in its own
-        POSIX session and, on timeout, reaps the whole process group so a hung
-        grandchild dies with the wrapper. Mirrors ``subprocess.run``: captures
-        stdout/stderr and re-raises ``TimeoutExpired``.
-
-        Args:
-            on_output: Liveness callback invoked per line the child emits.
-
-        Returns:
-            tuple[int, str, str]: ``(returncode, stdout, stderr)``.
-
-        Raises:
-            subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
-        """
+        """Run the command synchronously in a worker thread."""
         env = os.environ.copy()
         from ..actions.executors._multi_node_env import (
             is_multi_node,
@@ -1464,9 +1067,8 @@ async def _run_subprocess(
         from ..actions.executors._subprocess_kill import run_with_session_kill
 
         if is_multi_node():
-            # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
-            # infera_ssh_env_from_state() returns {} for RayJob/single-node, so
-            # the RAY_ADDRESS path below is unchanged for those.
+            # Infera backend: route GEAK GPU work to a pod over SSH (no Ray). infera_ssh_env_from_state() returns {}
+            # for RayJob/single-node, so the RAY_ADDRESS path below is unchanged for those.
             ssh_env = infera_ssh_env_from_state()
             if ssh_env:
                 env.update(ssh_env)
@@ -1474,9 +1076,8 @@ async def _run_subprocess(
             if addr:
                 env.setdefault("RAY_ADDRESS", addr)
         env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # The heartbeat around this call is only as honest as the child's
-        # flushing: block-buffered on a pipe, it looks dead between flushes.
-        # ``setdefault`` so an operator who set this deliberately still wins.
+        # The heartbeat around this call is only as honest as the child's flushing: block-buffered on a pipe, it looks
+        # dead between flushes.
         env.setdefault("PYTHONUNBUFFERED", "1")
         # run_with_session_kill reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
@@ -1493,15 +1094,7 @@ async def _run_subprocess(
 
 
 def _normalize_precision(value: Any) -> str:
-    """Normalize a precision label to a trimmed lower-case string.
-
-    Args:
-        value (Any): Raw precision value (e.g. ``"FP8"``, ``None``).
-
-    Returns:
-        str: The lower-cased, whitespace-stripped precision, or an empty
-            string for falsy input.
-    """
+    """Normalize a precision label to a trimmed lower-case string."""
     return str(value or "").strip().lower()
 
 
@@ -1511,41 +1104,13 @@ def _lane_budget(
     *,
     gemm_target_costs_sec: tuple[int, ...] = (),
 ):
-    """Derive one lane's share of the phase's remaining time.
-
-    Wraps :func:`lane_budget.allocate`, which divides the remaining time between
-    the lanes and returns, per lane, both a second budget and how many targets that
-    budget can fund. Every lane draws its share from this single probe of session
-    state, so the shares stay parts of one whole.
-
-    Args:
-        state: SharedState exposing ``remaining_minutes()``.
-        lane: Which lane's allocation to return.
-        gemm_target_costs_sec: Per-tuner estimates in the router's priority order;
-            only the gemm lane's target ceiling consumes them.
-
-    Returns:
-        That lane's ``LaneAllocation``. An unbounded session yields a zero budget
-        and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
-        reads as "no allocation to make".
-    """
+    """Derive one lane's share of the phase's remaining time."""
     remaining = _lane_remaining_minutes(state)
     return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
 
 
 def _lane_remaining_minutes(state: Any) -> float | None:
-    """Minutes a lane may plan against: the tighter of session and phase.
-
-    The session clock alone overfunds a phase that has already spent most of its
-    own slice, and work planned past the phase exit is cut off partway through.
-
-    Args:
-        state: SharedState exposing ``remaining_minutes()`` and the phase clock.
-
-    Returns:
-        The binding remaining minutes, or ``None`` when the session is unbounded
-        and there is no finite budget to divide.
-    """
+    """Minutes a lane may plan against: the tighter of session and phase."""
     from ..phases.machine_state import phase_budget_remaining_seconds
 
     remaining_fn = getattr(state, "remaining_minutes", None)
@@ -1559,22 +1124,7 @@ def _lane_remaining_minutes(state: Any) -> float | None:
 
 
 def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
-    """Resolve the GEMM-tuning subprocess timeout in seconds.
-
-    Reads ``payload['timeout_sec']`` then the
-    ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- both operator inputs, so both
-    outrank a derived budget -- then the lane's share of the phase, then the module
-    default; the result is floored at 60 seconds.
-
-    Args:
-        payload (dict): Request payload that may carry ``timeout_sec``.
-        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a zero-second timeout.
-
-    Returns:
-        int: The resolved timeout in seconds (>= 60).
-    """
+    """Resolve the GEMM-tuning subprocess timeout in seconds."""
     raw = payload.get("timeout_sec") or os.environ.get(
         "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
         "",
@@ -1598,27 +1148,7 @@ def _gemm_router_targets(
     has_shapes_json: bool,
     has_tunableop_input: bool,
 ) -> tuple[tuple[str, int], ...]:
-    """Ask the forge router which tuners it would run and what each costs.
-
-    The router is the only place a per-tuner runtime estimate exists, and it
-    returns them already in the execution order the gemm lane ceiling assumes.
-
-    Args:
-        model_path (str): Local model directory the router profiles.
-        framework (str): Routed forge framework (``sglang``/``vllm``/``vllm-aiter``).
-        precision (str): Resolved precision label.
-        quant_type (str): Resolved quantisation type.
-        gpu_type (str): Target GPU identifier.
-        kernel_signature_log (str): Server log used to detect 1-stage ASM.
-        has_untuned_csv (bool): Whether an untuned CSV shape source was resolved.
-        has_shapes_json (bool): Whether any JSON shape source was resolved.
-        has_tunableop_input (bool): Whether TunableOp rows were resolved.
-
-    Returns:
-        tuple[tuple[str, int], ...]: ``(tuner name, seconds)`` per runnable tuner in
-            priority order, or an empty tuple when the router cannot be consulted,
-            which leaves the lane ceiling on its own per-target default.
-    """
+    """Ask the forge router which tuners it would run and what each costs."""
     try:
         from kernelforge.gemm_tune.model_analyzer import analyze_model  # noqa: PLC0415
         from kernelforge.gemm_tune.router import select_tuners  # noqa: PLC0415
@@ -1641,17 +1171,7 @@ def _gemm_router_targets(
 
 
 def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
-    """Resolve the forge-fusion subprocess timeout in seconds.
-
-    Args:
-        payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
-        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a one-second timeout.
-
-    Returns:
-        int: The resolved timeout in seconds (>= 1).
-    """
+    """Resolve the forge-fusion subprocess timeout in seconds."""
     raw = (
         payload.get("timeout")
         or payload.get("timeout_sec")
@@ -1708,20 +1228,7 @@ def _fusion_session_serve_args(
 
 
 def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
-    """Resolve the workspace directory for a GEMM-tuning run.
-
-    Honors an explicit ``payload['workspace_path']``; otherwise builds a path
-    under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id`` /
-    ``request_id`` (or a timestamped fallback).
-
-    Args:
-        payload (dict): Request payload that may carry ``workspace_path``,
-            ``task_id`` or ``request_id``.
-        session_dir (Path): Session directory used to build the default path.
-
-    Returns:
-        Path: The resolved (not yet created) workspace directory.
-    """
+    """Resolve the workspace directory for a GEMM-tuning run."""
     raw = payload.get("workspace_path")
     if raw:
         return Path(raw)
@@ -1742,21 +1249,7 @@ def _write_gemm_tuning_benchmark_script(
     isl: int,
     osl: int,
 ) -> Path:
-    """Create an isolated benchmark wrapper for GEAK GEMM tuning (distinct port + no global ``pgrep sglang`` cleanup, so it can't kill the main optimizer's server).
-
-    Args:
-        workspace: Directory to write the benchmark script into.
-        model_path: Path to the model under test.
-        framework: Serving framework (e.g. ``sglang``).
-        gpu_type: GPU type used to select the benchmark runner.
-        tp: Tensor-parallel degree.
-        conc: Concurrency.
-        isl: Input sequence length.
-        osl: Output sequence length.
-
-    Returns:
-        The path to the written, executable benchmark script.
-    """
+    """Create an isolated benchmark wrapper for GEAK GEMM tuning (distinct port + no global ``pgrep sglang`` cleanup, so it can't kill the main optimizer's server)."""
     inferencex_path = os.environ.get("INFERENCEX_PATH") or "/hyperloom/InferenceX"
     runner = f"{inferencex_path}/benchmarks/{framework}_{gpu_type}.sh"
     path = workspace / "geak_gemm_benchmark.sh"
@@ -1809,12 +1302,7 @@ def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
 
 
 def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
-    """Read forge's on-disk ``result.json`` from the tuning workspace.
-
-    forge always writes the full report (including ``tuners_skipped``) to
-    ``<output_dir>/result.json``, even when the stdout sentinel omits some
-    fields. Returns ``{}`` when missing or unparseable.
-    """
+    """Read forge's on-disk ``result.json`` from the tuning workspace."""
     try:
         path = workspace / "result.json"
         if path.is_file():
@@ -1851,18 +1339,7 @@ def _forge_gemm_tune_probe_cmd() -> list[str]:
 
 
 def _forge_gemm_tune_available() -> bool:
-    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
-
-    The tuner is a subpackage of the ``kernelforge`` that ships in this
-    distribution, invoked as ``sys.executable -m kernelforge.cli gemm-tune run``.
-    Vendoring forge in-tree removes the cross-checkout failures this probe was
-    built for, but not the reason it is a subprocess: ``find_spec`` proves the
-    module is importable and says nothing about whether ``gemm-tune`` is
-    registered on the CLI, which is the thing ``_build_cmd`` actually needs. So
-    ask the subcommand itself -- in a subprocess, so a heavy CLI import cannot
-    land in the orchestrator's own process. ``--help`` exits 0 only if
-    ``kernelforge.cli`` imported and ``gemm-tune`` is registered on it.
-    """
+    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in."""
     try:
         proc = subprocess.run(
             _forge_gemm_tune_probe_cmd(),
@@ -1908,16 +1385,7 @@ def _resolve_aiter_root_for_forge() -> str:
 
 
 def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
-    """Resolve the actual runtime precision and quant_type for forge tuning.
-
-    Priority:
-    1. Explicit payload override
-    2. --quantization from current_best server args (actual runtime)
-    3. state.precision (session-level, may be stale)
-    4. Default: bf16
-
-    Returns (precision, quant_type) tuple.
-    """
+    """Resolve the actual runtime precision and quant_type for forge tuning."""
     from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
     framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
@@ -1949,8 +1417,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     if quantization_arg == "fp8":
         precision = "fp8"
-        # Hand forge the fp8 GEMM path the model runs: explicit per-token env wins,
-        # else the checkpoint's static format, else "auto".
+        # Hand forge the fp8 GEMM path the model runs: explicit per-token env wins, else the checkpoint's static
+        # format, else "auto".
         if per_token_signal:
             quant_type = "per_token"
         else:
@@ -2004,16 +1472,7 @@ _LOG_SCAN_OVERLAP = 64
 
 
 def _scan_serving_log_m(path) -> dict[int, int]:
-    """Count the M values of the dense aiter dispatch lines in a serving log.
-
-    Chunks overlap by ``_LOG_SCAN_OVERLAP`` so a match spanning a boundary is
-    still seen, but the carry starts after the last match already counted:
-    re-feeding a fixed tail would count any match landing in it twice, which
-    skews the frequency ranking that picks ``--tokens``.
-
-    Any read error yields no counts -- an unreadable candidate is not a usable
-    shape source either way.
-    """
+    """Count the M values of the dense aiter dispatch lines in a serving log."""
     counts: dict[int, int] = {}
     carry = b""
     try:
@@ -2036,20 +1495,7 @@ def _scan_serving_log_m(path) -> dict[int, int]:
 
 
 def _log_has_aiter_evidence(path) -> bool:
-    """True when the log carries at least one aiter dispatch line, dense or MoE.
-
-    Kept separate from :func:`_scan_serving_log_m` rather than folded into it as
-    a ``first_only`` flag. Two reasons, both of which cost a real behaviour bug
-    when the two were one function:
-
-    * The M counter skips ``M:0``, so a log whose first dispatch line carried
-      one read as "no evidence at all".
-    * Evidence is not dense-only. ``[fused_moe]`` lines make a log fully usable
-      for the MoE routing decisions that consume the same path.
-
-    Stops at the first marker: a log with evidence usually proves it in the
-    first few KB, and only a silent log is read to the end.
-    """
+    """True when the log carries at least one aiter dispatch line, dense or MoE."""
     markers = (_AITER_DISPATCH_MARKER.encode(), *_AITER_MOE_DISPATCH_MARKERS)
     carry = b""
     try:
@@ -2067,28 +1513,12 @@ def _log_has_aiter_evidence(path) -> bool:
 
 
 def _tokens_from_serving_log(path, limit: int = 16, reserve_largest: int = 4) -> str:
-    """Derive forge's ``--tokens`` from the M values the server actually saw.
-
-    Returns up to ``limit`` distinct M values, smallest first, as a
-    comma-separated string -- empty when the log carries no dispatch lines.
-
-    Selection is frequency-ranked, because tuning the M values the model spends
-    its time at beats tuning the largest one it ever reached. But frequency
-    alone is not enough: a serving warmup sweeps every M about equally often,
-    so on real logs the counts come out uniform and the ranking degenerates
-    into its tie-break. Measured on two fleet sessions, every distinct M
-    carried an identical count (17 values x4, and 44 values x40), so a plain
-    frequency cut kept the smallest M and dropped exactly the large prefill
-    shapes -- 16384/24576/32768 and 57344/65536 -- that the runtime then
-    missed. Reserve slots for the largest observed M so the prefill end
-    survives the cut; GEMM time scales with M, so those are also where the
-    end-to-end time actually is.
-    """
+    """Derive forge's ``--tokens`` from the M values the server actually saw."""
     counts = _scan_serving_log_m(path)
     if not counts:
         return ""
-    # Never let the reservation crowd out the frequency ranking: at most a
-    # quarter of the budget goes to "largest", and always at least one slot.
+    # Never let the reservation crowd out the frequency ranking: at most a quarter of the budget goes to "largest",
+    # and always at least one slot.
     reserve = min(max(reserve_largest, 0), max(1, limit // 4))
     picked: list[int] = sorted(counts, reverse=True)[:reserve]
     for value, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
@@ -2100,15 +1530,9 @@ def _tokens_from_serving_log(path, limit: int = 16, reserve_largest: int = 4) ->
 
 
 def _resolve_trace_shape_manifest(state, session_dir: Path) -> str:
-    """Find the newest TraceShapeManifest this session produced.
-
-    ``bypass_trace_analysis`` writes ``trace_shape_manifest.json`` next to its
-    other bypass artifacts; forge calls it the preferred dense-shape source but
-    nothing forwarded it, so the file was written and never read. Newest wins:
-    a later trace reflects the currently resolved server args.
-    """
-    # Deduplicate: state.session_dir is usually the same path we were handed,
-    # and an empty session then paid for two full-tree walks to find nothing.
+    """Find the newest TraceShapeManifest this session produced."""
+    # Deduplicate: state.session_dir is usually the same path we were handed, and an empty session then paid for two
+    # full-tree walks to find nothing.
     seen_roots: set[str] = set()
     roots: list[Path] = []
     for raw in (session_dir, Path(str(getattr(state, "session_dir", "") or session_dir))):
@@ -2134,24 +1558,7 @@ def _resolve_trace_shape_manifest(state, session_dir: Path) -> str:
 
 
 def _resolve_forge_server_log(state, session_dir: Path) -> str:
-    """Find the server log matching the current runtime configuration.
-
-    Priority: current_best workspace (matches the resolved server args)
-    → baseline workspace → most recent server.log under runs/.
-
-    Every candidate must carry aiter dispatch evidence. Picking on existence
-    alone made the first *present* log win, so a ``current_best`` workspace
-    whose log never routed a GEMM through aiter ended the search and the
-    ``runs/`` fallback became unreachable -- the tuner was then handed a log
-    that had no shapes in it at all.
-
-    The server log is written by the benchmark server at startup and lives in
-    the warmup_round benchmark directory (where the server process was first
-    launched). When ``current_best.workspace`` points to the measure_round
-    benchmark directory (one level sibling), the log is not there — so we also
-    check sibling ``warmup_round/`` dirs and walk up to the parent run
-    directory.
-    """
+    """Find the server log matching the current runtime configuration."""
 
     def _find_server_log_near(workspace_str: str) -> str | None:
         if not workspace_str:
@@ -2161,8 +1568,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
         direct = ws / "server.log"
         if direct.is_file() and _log_has_aiter_evidence(direct):
             return str(direct)
-        # Sibling warmup_round — benchmark dirs sit under
-        # {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
+        # Sibling warmup_round — benchmark dirs sit under {run_hash}/{warmup_round|measure_round}/{benchmark_dir}/
         parent = ws.parent  # e.g. measure_round/
         if parent.name in ("warmup_round", "measure_round"):
             run_hash_dir = parent.parent
@@ -2196,12 +1602,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
         if found:
             return found
 
-    # Fallback: the whole runs/ tree, newest first. Restricting this to a fixed
-    # (baseline, explore, gemm_tuning, roofline) tuple skipped runs/integrate/,
-    # which is where the GEMM validation runs put their logs -- those sessions
-    # got "" plus a warning telling them to enable a flag that was already on.
-    # Newest-first with an early return also means only the logs newer than the
-    # winner are scanned, instead of every log in the tree.
+    # Fallback: the whole runs/ tree, newest first.
     runs_dir = session_dir / "runs"
     candidates_by_age: list[tuple[float, Path]] = []
     if runs_dir.is_dir():
@@ -2215,11 +1616,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
             if _log_has_aiter_evidence(candidate_log):
                 return str(candidate_log)
 
-    # Separate the two ways this fails. No server.log at all is an upstream
-    # gap; logs that exist but never dispatched through aiter means the serving
-    # run had AITER_LOG_TUNED_CONFIG off. Both return "", but only the second is
-    # actionable, and one silent "" hid it. Reuse the listing above rather than
-    # walking the tree a second time.
+    # Separate the two ways this fails.
     if candidates_by_age:
         log.warning(
             "GEMM: %d server.log file(s) under %s but none contain aiter dispatch "
@@ -2235,11 +1632,7 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
 
 
 def _is_forge_compatible_shapes_json(path: Path) -> bool:
-    """Validate that a shapes JSON file matches forge's expected format.
-
-    Forge expects: [{"M": int, "N": int, "K": int}, ...]
-    or {"shapes": [{"M": int, "N": int, "K": int}, ...]}
-    """
+    """Validate that a shapes JSON file matches forge's expected format."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -2268,23 +1661,7 @@ def _resolve_forge_shapes(
     require_fresh_profile: bool = False,
     precision: str = "",
 ) -> str:
-    """Find TraceLens shapes JSON if available and in forge-compatible format.
-
-    Forge dense tuners expect: [{"M": int, "N": int, "K": int}, ...]
-    Only passes files that match this schema; incompatible formats are
-    silently skipped so forge falls back to config.json shape derivation.
-
-    ``precision`` scopes the traced shapes to the dtype the tuner will actually
-    tune (a trace carries every GEMM dtype the model runs, e.g. FP8 projections
-    alongside BF16 router heads). Empty means "no dtype scoping".
-
-    When scoping is requested the candidate extraction runs first, because it is
-    the only source whose dtype can be checked: a pre-rendered shapes artifact is
-    a bare ``[{M,N,K}]`` list carrying no dtype or provenance, so an artifact
-    recorded for another dtype would otherwise be handed to the tuner ahead of
-    correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
-    and for when the trace yields nothing for this precision.
-    """
+    """Find TraceLens shapes JSON if available and in forge-compatible format."""
     if require_fresh_profile and not _profile_shapes_are_fresh(state):
         log.info(
             "Forge GEMM shapes: latest TraceLens profile does not match the "
@@ -2316,8 +1693,7 @@ def _resolve_forge_shapes(
             shapes_file = cand_file.parent / "shapes.json"
             candidates.append(str(shapes_file))
 
-    # Extract the GEMM shapes observed by the latest TraceLens analysis. Older
-    # traces can describe a backend that is no longer active.
+    # Extract the GEMM shapes observed by the latest TraceLens analysis.
     def _extracted() -> str:
         return _extract_gemm_shapes_from_candidates(
             str(last_trace.get("candidates_path") or ""),
@@ -2343,17 +1719,7 @@ _BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
 
 
 def _canonical_dtype(raw: str) -> str:
-    """Fold a precision name or traced dtype token onto one canonical family.
-
-    Both sides of the comparison spell the same dtype many ways: a tuning
-    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
-    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``, and
-    ``_TRACE_DTYPE_SUFFIX`` in this repo emits ``f16`` for float16. Matching the
-    raw strings drops shapes that do belong to the tuned precision, so both are
-    folded onto a family first.
-
-    Returns "" for anything unrecognised, which callers treat as "do not scope".
-    """
+    """Fold a precision name or traced dtype token onto one canonical family."""
     token = str(raw or "").strip().lower().removeprefix("torch.")
     if not token:
         return ""
@@ -2369,17 +1735,7 @@ def _canonical_dtype(raw: str) -> str:
 
 
 def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: Path, *, precision: str = "") -> str:
-    """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes.
-
-    Derives the GEMM dimensions actually observed during serving and writes a
-    forge-compatible shapes JSON beside the candidates file, returning its path.
-
-    ``precision`` scopes the result to one traced dtype. A trace records every
-    GEMM the model runs, so an FP8 tuner would otherwise also receive the BF16
-    router/head shapes; those rows are never looked up at serve time and they
-    displace real FP8 shapes in the call-count ordering below. Empty keeps every
-    dtype (historical behaviour).
-    """
+    """Extract M,N,K from kernel_candidates.json hot_kernels input_shapes."""
     import json as _json
     import re as _re
 
@@ -2398,13 +1754,10 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     if not isinstance(hot_kernels, list):
         return ""
 
-    # Tolerate whitespace after the comma ("(1024, 5120)") and any leading token
-    # before the tuple; TraceLens formats vary. .search() rather than .match() so
-    # a leading dtype/name does not defeat it.
+    # Tolerate whitespace after the comma ("(1024, 5120)") and any leading token before the tuple; TraceLens formats
+    # vary. .search() rather than .match() so a leading dtype/name does not defeat it.
     dim_pattern = _re.compile(r"\((\d+)\s*,\s*(\d+)\)")
     # TraceLens renders the dtype right after the dims: "(64,3072) fp8".
-    # Dots are allowed so a fully-qualified spelling ("torch.float8_e4m3fn") is
-    # captured whole rather than truncated at "torch".
     dtype_pattern = _re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
     wanted_dtype = _canonical_dtype(precision)
 
@@ -2425,19 +1778,15 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
             return None
         M, K = int(m0.group(1)), int(m0.group(2))
         b0, b1 = int(m1.group(1)), int(m1.group(2))
-        # B is stored either (N,K) or (K,N); pick the orientation whose
-        # contracted dim matches K, else keep the legacy first-dim reading.
+        # B is stored either (N,K) or (K,N); pick the orientation whose contracted dim matches K, else keep the legacy
+        # first-dim reading.
         N = b0 if b1 == K else (b1 if b0 == K else b0)
-        # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
-        # tunable GEMM tile; it would otherwise sort first on call count and
-        # burn a tuning slot.
+        # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a tunable GEMM tile; it would otherwise
+        # sort first on call count and burn a tuning slot.
         return (M, N, K) if min(M, K) > 0 and N > 1 else None
 
-    # ``weight`` is the observed call count: decode GEMMs are invoked far more
-    # often than prefill ones, so ordering by it puts the throughput-dominant
-    # shapes first and they still get tuned when the tuner runs out of budget.
-    # The same (M,N,K) can be reported by several kernels; keep the largest
-    # count, otherwise a rare first sighting would outrank the hot one.
+    # ``weight`` is the observed call count: decode GEMMs are invoked far more often than prefill ones, so ordering by
+    # it puts the throughput-dominant shapes first and they still get tuned when the tuner runs out of budget.
     weights: dict[tuple[int, int, int], int] = {}
     order: dict[tuple[int, int, int], int] = {}
 
@@ -2457,8 +1806,7 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
             continue
         entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
 
-        # Legacy format: one entry carries every tensor, "<br>"-joined. The tag
-        # is spelled several ways across TraceLens versions (<br>, <br/>, <BR/>).
+        # Legacy format: one entry carries every tensor, "<br>"-joined.
         matched_joined = False
         for entry in entries:
             parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
@@ -2494,8 +1842,8 @@ def _extract_gemm_shapes_from_candidates(candidates_path_str: str, session_dir: 
     return str(out_path)
 
 
-# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV the
-# specialist phase records; fp8 "auto" resolves to blockscale (forge default).
+# Map the resolved (precision, quant_type) to the aiter untuned-GEMM CSV the specialist phase records; fp8 "auto"
+# resolves to blockscale (forge default).
 _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
     "auto": "a8w8_blockscale_untuned_gemm.csv",
     "blockscale": "a8w8_blockscale_untuned_gemm.csv",
@@ -2521,12 +1869,7 @@ _FORGE_UNTUNED_CSV_BY_QUANT: dict[str, str] = {
 
 
 def _csv_has_data_rows(path: Path) -> bool:
-    """Return True when ``path`` is a CSV carrying at least one data row.
-
-    The aiter recorder leaves header-only or empty files for quant types the
-    server never exercised; those must not be passed to forge as a real shape
-    source.
-    """
+    """Return True when ``path`` is a CSV carrying at least one data row."""
     try:
         with path.open(encoding="utf-8", errors="replace") as f:
             header = f.readline()
@@ -2541,13 +1884,7 @@ def _csv_has_data_rows(path: Path) -> bool:
 
 
 def _csv_k_values(path: Path) -> set[int]:
-    """Return the distinct integer ``K`` (contraction-dim) values in a CSV.
-
-    The aiter recorder writes a header containing ``M,N,K`` (optionally with
-    extra columns such as ``q_dtype_w``). ``K`` is the GEMM contraction dim,
-    which for a transformer layer equals its input dim (``hidden_size`` for
-    QKV/gate-up/o projections, ``intermediate_size`` for the down projection).
-    """
+    """Return the distinct integer ``K`` (contraction-dim) values in a CSV."""
     ks: set[int] = set()
     try:
         with path.open(encoding="utf-8", errors="replace") as f:
@@ -2573,8 +1910,8 @@ def _read_model_config(model_path: str) -> dict | None:
     """Load a HF ``config.json`` as a dict; ``None`` when unavailable/unreadable."""
     if not model_path:
         return None
-    # ``model_path`` may be an HF repo id; resolve to the local weights dir
-    # (shared resolver) so the config read works for repo-id launches.
+    # ``model_path`` may be an HF repo id; resolve to the local weights dir (shared resolver) so the config read works
+    # for repo-id launches.
     from hyperloom.inference_optimizer.model_config_utils import (
         resolve_local_model_dir,
     )
@@ -2605,24 +1942,7 @@ def _model_hidden_size(model_path: str) -> int | None:
 
 
 def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str = "") -> str:
-    """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
-
-    forge accepts an explicit ``quant_type``; rather than letting it fall back to
-    its internal blockscale default, hand it the path the model actually runs:
-
-    - ``blockscale_bpreshuffle`` when the checkpoint uses block-quantized
-      weights AND the target GPU is gfx950 (MI355X) AND framework is sglang --
-      sglang/aiter automatically upgrades blockscale to the bpreshuffle kernel
-      on CDNA4. vLLM does NOT use this path (it reads
-      AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
-    - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942,
-      on vllm, or when GPU type is unknown.
-    - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
-      ``--quantization fp8`` (the a8w8 per-token path).
-    - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
-      ``kernel_signature_log`` itself (preserves the legacy behaviour and keeps
-      the no-readable-config case unchanged).
-    """
+    """Pick the fp8 dense tuner quant_type from the checkpoint's static format."""
     data = _read_model_config(model_path)
     if data is None:
         return "auto"
@@ -2678,16 +1998,7 @@ def _is_gfx950_rocminfo() -> bool:
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
-    """Return True when an untuned CSV plausibly belongs to ``model_path``.
-
-    A real per-model dense untuned CSV always contains GEMMs whose ``K`` equals
-    the model ``hidden_size``. When ``hidden_size`` is known and absent from the
-    CSV's ``K`` column, the CSV was recorded for a different model and is
-    rejected so forge derives shapes from the model config instead.
-
-    Returns True when validation is not possible (``hidden_size`` unreadable or
-    the CSV exposes no ``K`` column) to avoid false rejections.
-    """
+    """Return True when an untuned CSV plausibly belongs to ``model_path``."""
     hidden = _model_hidden_size(model_path)
     if hidden is None:
         return True
@@ -2698,18 +2009,7 @@ def _csv_matches_model(csv_path: Path, model_path: str) -> bool:
 
 
 def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: str, model_path: str = "") -> str:
-    """Find an aiter untuned-GEMM CSV in a specialist worktree.
-
-    Specialist runs may materialize or modify these files under
-    ``runs/specialist/<hash>/worktree/aiter/configs/*_untuned_gemm.csv``; this
-    resolver picks the newest non-empty CSV matching the resolved quant type.
-    Because an unchanged checkout can also contain static upstream rows, this is
-    a fallback behind explicit benchmark input and the latest runtime profile.
-
-    When ``model_path`` is given, candidate CSVs whose GEMM shapes do not match
-    the model are rejected so forge derives per-model shapes from ``config.json``.
-    Returns the CSV path, or "" when none is available.
-    """
+    """Find an aiter untuned-GEMM CSV in a specialist worktree."""
     precision = (precision or "").strip().lower()
     quant_type = (quant_type or "").strip().lower()
 
@@ -2747,12 +2047,7 @@ def _resolve_forge_untuned_csv(session_dir: Path, precision: str, quant_type: st
 
 
 def _path_is_existing_file(value: str) -> bool:
-    """Safe ``Path.is_file()`` that never raises on an over-long pathname.
-
-    A caller may hand us inline JSON content instead of a path; ``is_file()``
-    raises ``OSError(ENAMETOOLONG)`` on such input. Treat any OSError as
-    "not a file".
-    """
+    """Safe ``Path.is_file()`` that never raises on an over-long pathname."""
     try:
         return Path(value).is_file()
     except OSError:
@@ -2760,11 +2055,7 @@ def _path_is_existing_file(value: str) -> bool:
 
 
 def _normalize_tokens(value: Any) -> str:
-    """Return a clean comma-separated token string for forge's ``--tokens``.
-
-    forge parses ``--tokens`` as ``int(t) for t in value.split(",")``, so accept
-    lists and bracketed strings and emit a bare comma-separated list.
-    """
+    """Return a clean comma-separated token string for forge's ``--tokens``."""
     if value in (None, ""):
         return ""
     if isinstance(value, (list, tuple)):
@@ -2787,16 +2078,7 @@ def _normalize_tokens(value: Any) -> str:
 
 
 def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
-    """Return a usable shapes-JSON *file path*, materializing inline content.
-
-    Callers sometimes pass GEMM shapes as inline JSON in ``shapes_json`` instead
-    of a file path; forge treats it strictly as a path. Normalize here:
-
-    - existing file path -> returned unchanged
-    - list/dict, or a string that parses as JSON -> written to
-      ``<workspace>/forge_shapes.json`` and that path returned
-    - anything else (empty / unparseable / non-existent path) -> ""
-    """
+    """Return a usable shapes-JSON *file path*, materializing inline content."""
     if value in (None, ""):
         return ""
 
@@ -2833,8 +2115,8 @@ def _normalize_forge_shapes_json(value: Any, workspace: Path) -> str:
         return ""
 
 
-# Forge tuner families whose deliverable is an aiter tuned-GEMM CSV, i.e. the
-# ones whose rows are resolved through aiter's padded (M, N, K) lookup.
+# Forge tuner families whose deliverable is an aiter tuned-GEMM CSV, i.e. the ones whose rows are resolved through
+# aiter's padded (M, N, K) lookup.
 _AITER_CSV_TUNER_FRAMEWORKS = ("sglang", "vllm-aiter")
 
 
@@ -2853,18 +2135,7 @@ def _align_forge_shapes_for_aiter(
     budget_sec: int = 0,
     mp: int = 1,
 ) -> tuple[str, dict[str, Any] | None]:
-    """Re-key profiled GEMM shapes onto the M values aiter actually looks up.
-
-    Captured shapes carry the raw runtime M, which for prefill is the
-    data-dependent scheduled-token count and so never recurs between runs. aiter
-    resolves a tuned row by trying the raw M and then two padded M variants, so a
-    CSV keyed on raw M is unreachable and the tuner's micro win never reaches the
-    server. Padding the shapes first makes each tuned row serve the whole bucket
-    that pads onto it.
-
-    Returns the shapes-JSON path to hand forge plus an alignment report, or the
-    input path and ``None`` when alignment does not apply.
-    """
+    """Re-key profiled GEMM shapes onto the M values aiter actually looks up."""
     if forge_framework not in _AITER_CSV_TUNER_FRAMEWORKS:
         return shapes_json, None
     if not env_bool("HYPERLOOM_GEMM_ALIGN_SHAPES", True):
@@ -2979,14 +2250,7 @@ _FMOE_SHAPE_FIELDS = (
 
 
 def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
-    """Return whether aiter's CK MoE codegen has a kernel family for this pair.
-
-    ``get_gemm1_kernels_list`` / ``get_gemm2_kernels_list`` pick a family from the
-    activation/weight widths and raise ``Unsupported data type combination`` for
-    anything else. Notably a BF16 activation against FP4 weights -- which the
-    serving path runs happily -- matches no family, so handing it to the tuner
-    trades a silent no-op for a hard error.
-    """
+    """Return whether aiter's CK MoE codegen has a kernel family for this pair."""
     act = q_dtype_a.replace("torch.", "")
     weight = q_dtype_w.replace("torch.", "")
     if act in _AITER_BIT16_DTYPES and weight in _AITER_BIT16_DTYPES:
@@ -3000,15 +2264,7 @@ def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
 
 
 def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
-    """Return the distinct MoE problems a server log shows aiter dispatching.
-
-    Deduplicated on everything but the token count, preserving first-seen order.
-    One model routinely yields several problems -- the same checkpoint dispatches
-    both a BF16-activation and an FP8-activation variant, and the EP path appends
-    a masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
-    model config states. Neither is derivable from the config, which is why the
-    log is the authoritative source for what to tune.
-    """
+    """Return the distinct MoE problems a server log shows aiter dispatching."""
     if not server_log:
         return []
     try:
@@ -3025,19 +2281,7 @@ def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
 
 
 def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
-    """Return whether aiter's CK MoE tuner can tune anything the server dispatched.
-
-    The tuner builds its kernel candidates from the activation/weight dtype pair
-    and rejects some combinations the serving path happily runs. Measured on
-    gpt-oss-120b at TP=1, a BF16-activation / FP4-weight MoE (the
-    ``AITER_MXFP4_BF16`` backend) benchmarks fine but fails candidate generation
-    with ``Unsupported data type combination: b16, fp4x2``, so routing it to
-    ``fmoe_ck`` would only trade silent no-op for a hard tuner error.
-
-    A single checkpoint can dispatch several dtype pairs at once, so this asks
-    whether *any* of them is tunable; per-problem filtering happens where the
-    tuning input is written.
-    """
+    """Return whether aiter's CK MoE tuner can tune anything the server dispatched."""
     if not server_log:
         return False
     keys = _aiter_fused_moe_dispatch_keys(server_log)
@@ -3065,13 +2309,7 @@ _FORGE_BARREN_MICRO_DECISIONS = (
 
 
 def _fmoe_token_list(tokens: Any) -> list[int]:
-    """Positive token counts to sweep, keyed off whatever the caller sends.
-
-    Accepts forge's comma-separated string (what :func:`_normalize_tokens`
-    produces) or a sequence. Unparseable and non-positive entries are dropped
-    rather than raising -- one bad entry is not worth the run -- and ``[1]`` is
-    the floor so there is always a token to key on.
-    """
+    """Positive token counts to sweep, keyed off whatever the caller sends."""
     if isinstance(tokens, str):
         raw: list[str] = [part.strip() for part in tokens.split(",")]
     elif isinstance(tokens, (list, tuple, set, frozenset)):
@@ -3099,18 +2337,7 @@ def _write_fmoe_untuned_csv_from_log(
     tokens: Any,
     workspace: Path,
 ) -> tuple[str, dict[str, Any]]:
-    """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
-
-    Returns ``(csv_path, report)``; ``csv_path`` is "" when nothing tunable was
-    observed. Writing the observed tuple verbatim is the whole point: the
-    quantisation pair, the per-partition ``inter_dim`` and the EP-inflated
-    expert/topk counts are all properties of what the serving framework chose,
-    and every attempt to re-derive them from the model config is a guess that has
-    already produced tables no runtime lookup could reach.
-
-    Problems whose dtype pair aiter's codegen rejects are dropped rather than
-    passed through, because one unsupported row aborts the whole tuner run.
-    """
+    """Turn the MoE problems observed in ``server_log`` into a tuning input CSV."""
     report: dict[str, Any] = {
         "observed": 0,
         "tunable": 0,
@@ -3153,9 +2380,8 @@ def _write_fmoe_untuned_csv_from_log(
         workspace.mkdir(parents=True, exist_ok=True)
         csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError as exc:
-        # A full disk or a read-only workspace must cost the MoE tuner its input,
-        # not the whole tuning run: the dense tuners take their shapes from
-        # elsewhere and can still produce something useful.
+        # A full disk or a read-only workspace must cost the MoE tuner its input, not the whole tuning run: the dense
+        # tuners take their shapes from elsewhere and can still produce something useful.
         report["write_error"] = f"{type(exc).__name__}: {exc}"
         log.warning("Forge GEMM shapes: cannot write %s: %s", csv_path, exc)
         return "", report
@@ -3170,12 +2396,7 @@ def _write_fmoe_untuned_csv_from_log(
 
 
 def _aiter_serving_evidence(server_log: str) -> set[str]:
-    """Return which aiter kernel families a server log shows in use.
-
-    Routing is driven by the log rather than by precision alone because only the
-    log says which backend the model actually got: the same checkpoint runs on
-    aiter or on the native path depending on the recipe's env.
-    """
+    """Return which aiter kernel families a server log shows in use."""
     found: set[str] = set()
     if not server_log:
         return found
@@ -3201,13 +2422,7 @@ def _forge_framework_for_vllm(
     aiter_bf16_dense: bool = False,
     aiter_fused_moe: bool = False,
 ) -> str:
-    """Route vLLM runs served by aiter to Forge's AITER tuner family.
-
-    Forge's vLLM branch only offers ``vllm_moe_triton`` and
-    ``vllm_dense_tunableop``, which target kernels an aiter-served model never
-    executes. Its sglang branch carries the tuners that do write the tables aiter
-    reads, and the router already accepts ``vllm-aiter`` as an alias for it.
-    """
+    """Route vLLM runs served by aiter to Forge's AITER tuner family."""
     if framework != "vllm" or tunableop_input:
         return framework
     if _is_vllm_block_fp8(precision, quant_type):
@@ -3238,13 +2453,12 @@ def _resolve_vllm_aiter_routing(
         return flags
     is_moe = bool(summary.get("is_moe"))
 
-    # Dense BF16 routing is for dense checkpoints; a MoE model's dense side
-    # rides along with its MoE routing instead.
+    # Dense BF16 routing is for dense checkpoints; a MoE model's dense side rides along with its MoE routing instead.
     flags["aiter_bf16_dense"] = "bf16_dense" in evidence and not is_moe
 
     if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
-        # Only route MoE when aiter's CK fused-MoE can actually serve this
-        # checkpoint at this TP -- otherwise the tuner has no reachable target.
+        # Only route MoE when aiter's CK fused-MoE can actually serve this checkpoint at this TP -- otherwise the
+        # tuner has no reachable target.
         from hyperloom.inference_optimizer.cli.model_gate import (
             model_supports_aiter_ck_fused_moe,
         )
@@ -3256,29 +2470,14 @@ def _resolve_vllm_aiter_routing(
 
 
 def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[str, bool]) -> None:
-    """Say so when one log shows both MoE backends and routing picks one.
-
-    The decision above is a substring scan: seeing an aiter fused-MoE marker
-    anywhere routes the whole run to the aiter tuner family, and
-    ``vllm_moe_triton`` then never runs. A run can dispatch both -- aiter CK over
-    part of the token range and vLLM's Triton path over the rest -- and forge's
-    own parser records exactly that as ``impl="mixed"``. Whichever way the single
-    flag falls, the range served by the other backend is left untuned.
-
-    Reported rather than acted on here: changing this routing changes which
-    tuners run for every aiter-served vLLM model, which is a bigger step than
-    the tuner-side addition that already covers the CK half. Forge adds
-    ``fmoe_ck`` from the same evidence, so the gap this warns about is the
-    Triton half.
-    """
+    """Say so when one log shows both MoE backends and routing picks one."""
     if not flags.get("aiter_fused_moe"):
         return
     try:
         from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
-        # Same reasoning as apply_verification._parse: kernelforge is in this
-        # wheel, so a miss is a broken install, and a bare return makes the
-        # missing routing warning indistinguishable from a clean run.
+        # Same reasoning as apply_verification._parse: kernelforge is in this wheel, so a miss is a broken install,
+        # and a bare return makes the missing routing warning indistinguishable from a clean run.
         log.warning(
             "kernelforge.gemm_tune is not importable, so the aiter/vLLM MoE "
             "routing check is skipped -- it ships with Hyperloom, so this means "
@@ -3363,14 +2562,13 @@ def _extract_vllm_block_fp8_profile_shapes(
     import gzip
 
     def _is_capture_sidecar(path: Path) -> bool:
-        # Shared classifier, so a layout the kernel-agent routes demote is also
-        # kept out of the shape harvest here; the exact-``capture_traces`` test
-        # this replaced missed ``graph_capture_profile/``.
+        # Shared classifier, so a layout the kernel-agent routes demote is also kept out of the shape harvest here;
+        # the exact-``capture_traces`` test this replaced missed ``graph_capture_profile/``.
         return _shared_is_capture_fragment(path, trace_input if trace_input.is_dir() else trace_input.parent)
 
     shapes: set[tuple[int, int, int]] = set()
-    # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the
-    # whole process CWD and harvest shapes from unrelated traces.
+    # ``Path("")`` normalizes to ``Path(".")``, which would otherwise walk the whole process CWD and harvest shapes
+    # from unrelated traces.
     if str(trace_input) in ("", "."):
         return "", 0
     if trace_input.is_file():
@@ -3754,8 +2952,8 @@ async def _capture_vllm_tunableop_shapes(
                 "timeout_sec": timeout_sec,
                 "disable_run_eval": True,
                 "baseline_double_run": False,
-                # Shape capture is a sub-step of the KERNEL phase's own event,
-                # not a dispatched measurement, so it leaves no baseline event.
+                # Shape capture is a sub-step of the KERNEL phase's own event, not a dispatched measurement, so it
+                # leaves no baseline event.
                 SBD_INNER_STEP_PARAM: True,
             }
         )
@@ -3870,25 +3068,13 @@ async def _run_forge_gemm_tuning(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Deterministic GEMM tuning via the ``kernelforge gemm-tune`` CLI.
-
-    Supports bf16/fp8/fp4 + sglang/vllm. Only micro-benchmarks;
-    returns recommended_env for Hyperloom E2E validation.
-
-    ``model_path`` accepts either a local directory or a Hugging Face repo ID.
-    Forge receives a validated local directory, while result provenance and
-    durable artifact names retain the original logical model identifier.
-    Missing inputs return ``model_path_missing``; inputs that cannot resolve to
-    a local directory return ``model_path_unavailable`` as a ``skipped`` result,
-    because forge never ran and so has no verdict to report.
-    """
+    """Deterministic GEMM tuning via the ``kernelforge gemm-tune`` CLI."""
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
 
-    # Importing kernelforge.cli is deliberately isolated in a subprocess, but
-    # that subprocess may still take until the bounded timeout to fail. Keep the
-    # synchronous probe off the orchestrator reactor.
+    # Importing kernelforge.cli is deliberately isolated in a subprocess, but that subprocess may still take until the
+    # bounded timeout to fail.
     if not await asyncio.to_thread(_forge_gemm_tune_available):
         return {
             "status": "failed",
@@ -3918,15 +3104,12 @@ async def _run_forge_gemm_tuning(
         resolve_local_model_dir,
     )
 
-    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
-    # serve; probing only the hub cache here would reject a repo id that the
-    # running server resolved fine.
+    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to serve; probing only the hub cache
+    # here would reject a repo id that the running server resolved fine.
     resolved_model_dir = resolve_local_model_dir(resolve_serving_model_path(raw_model_path) or raw_model_path)
     if resolved_model_dir is None:
-        # Forge needs the config on disk to derive shapes, so it cannot run --
-        # but not running one tuning backend is a skip, not a session failure.
-        # Reporting it as failed spends a REVERT verdict on an experiment that
-        # never started, which is the misattribution this change set removes.
+        # Forge needs the config on disk to derive shapes, so it cannot run -- but not running one tuning backend is a
+        # skip, not a session failure.
         return {
             "status": "skipped",
             "error_class": "model_path_unavailable",
@@ -3951,17 +3134,10 @@ async def _run_forge_gemm_tuning(
     # Resolve server log for 1-stage ASM detection.
     kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
     if not kernel_sig_log:
-        # Off the event loop: this walks runs/ and byte-scans server logs that
-        # measure ~17MB apiece on the fleet. Inline, it stalled every other
-        # coroutine on this orchestrator -- heartbeats included -- for the
-        # duration.
+        # Off the event loop: this walks runs/ and byte-scans server logs that measure ~17MB apiece on the fleet.
         kernel_sig_log = await asyncio.to_thread(_resolve_forge_server_log, state, session_dir)
 
-    # Explicit operator/benchmark input wins. Automatic SGLang priority is:
-    # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
-    # Forge's config-derived fallback. A specialist checkout is not sufficient
-    # evidence that its static CSV came from the active benchmark. vLLM instead
-    # requires native TunableOp rows or a workload-matched block-FP8 profile.
+    # Explicit operator/benchmark input wins.
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
     untuned_csv = str(payload.get("untuned_csv") or "").strip()
     if untuned_csv and not _path_is_existing_file(untuned_csv):
@@ -3982,28 +3158,13 @@ async def _run_forge_gemm_tuning(
                 resolved_model_path,
             )
 
-    # forge's own fallback derives --tokens from ``conc``, which is a guess
-    # about M. The serving log records the M values the model actually ran, so
-    # prefer those whenever a log with dispatch evidence was resolved.
-    #
-    # This has to happen BEFORE the MoE untuned CSV is built, not just before
-    # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derive
-    # afterwards and the dense lane got the full observed sweep while the MoE
-    # lane got a table with a single M=1 row -- which then missed on every
-    # prefill and large-batch lookup and was reverted as no_shape_key_matched.
-    # That is precisely the failure this change set exists to remove, so leaving
-    # it in place on the MoE side would have fixed one lane and not the other.
+    # forge's own fallback derives --tokens from ``conc``, which is a guess about M.
     if not tokens and kernel_sig_log:
         tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
         if tokens:
             log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, kernel_sig_log)
 
-    # MoE shapes come from the runtime, never from inference. The dispatch tuple
-    # in the server log states the quantisation pair, the per-partition inter_dim
-    # and the EP-inflated expert/topk counts; none of the three is recoverable
-    # from the model config, and guessing them is what produced tuned tables no
-    # runtime lookup could reach.
+    # MoE shapes come from the runtime, never from inference.
     moe_untuned_csv = str(payload.get("moe_untuned_csv") or "").strip()
     if moe_untuned_csv and not _path_is_existing_file(moe_untuned_csv):
         moe_untuned_csv = ""
@@ -4033,16 +3194,9 @@ async def _run_forge_gemm_tuning(
         dry_run=bool(payload.get("dry_run")),
     )
     if block_fp8_profile_capture:
-        # Decode steps replay inside a CUDA Graph and therefore emit no Kineto
-        # *op* events, so every profile-derived block-FP8 shape set structurally
-        # carries prefill M only -- measured on a real capture, the decode-only
-        # trace split yields zero block-FP8 events while the prefill splits yield
-        # M=2095. Tuning that alone optimizes an operating point the workload
-        # barely uses. TraceLens candidates are built from the device kernel
-        # timeline, which does see through the graph and carries the decode M
-        # that dominates throughput, so prefer them. ``require_fresh_profile``
-        # keeps the vLLM rule that shapes must be workload-matched, and
-        # ``precision`` keeps BF16 heads out of an FP8 tuner's input.
+        # Decode steps replay inside a CUDA Graph and therefore emit no Kineto *op* events, so every profile-derived
+        # block-FP8 shape set structurally carries prefill M only -- measured on a real capture, the decode-only trace
+        # split yields zero block-FP8 events while the prefill splits yield M=2095.
         traced_shapes = _resolve_forge_shapes(
             state,
             session_dir,
@@ -4064,9 +3218,8 @@ async def _run_forge_gemm_tuning(
             untuned_csv = ""
             block_fp8_profile_capture = False
     tunableop_capture = (
-        # Keyed on the routed framework: a run handed to the AITER tuner family
-        # has no use for a TunableOp recording pass, and paying for one costs a
-        # full extra server boot.
+        # Keyed on the routed framework: a run handed to the AITER tuner family has no use for a TunableOp recording
+        # pass, and paying for one costs a full extra server boot.
         _vllm_dense_shape_capture_required(
             framework=forge_framework,
             model_path=resolved_model_path,
@@ -4098,25 +3251,17 @@ async def _run_forge_gemm_tuning(
         captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
         if captured_shapes:
             shapes_json = captured_shapes
-            # Forge dense tuners prefer untuned_csv over shapes_json. A fresh
-            # profile capture is workload-matched and must supersede any stale
-            # specialist CSV resolved before the capture pass.
+            # Forge dense tuners prefer untuned_csv over shapes_json.
             untuned_csv = ""
 
-    # forge prefers the manifest over shapes_json as a dense-shape source, and
-    # an explicit demand.json over re-deriving demand from the serving log.
-    # Both are optional: forge drops a path that is not there, with a warning.
+    # forge prefers the manifest over shapes_json as a dense-shape source, and an explicit demand.json over
+    # re-deriving demand from the serving log.
     shapes_manifest = str(payload.get("shapes_manifest") or "").strip()
     if not shapes_manifest:
-        # Scavenge one from the session only when nothing more specific was
-        # produced for THIS run. forge ranks the manifest at priority 0 on the
-        # premise that it was explicitly supplied; a manifest found by walking
-        # the session tree carries no such promise -- it can come from an
-        # earlier run at a different precision or with different server args,
-        # and there is no consistency check to catch that. Letting it win would
-        # discard a block-FP8 profile capture or a TunableOp shape capture that
-        # deliberately cleared ``untuned_csv`` so the fresh result would be
-        # used, and would bypass ``_align_forge_shapes_for_aiter`` as well.
+        # Scavenge one from the session only when nothing more specific was produced for THIS run. forge ranks the
+        # manifest at priority 0 on the premise that it was explicitly supplied; a manifest found by walking the
+        # session tree carries no such promise -- it can come from an earlier run at a different precision or with
+        # different server args, and there is no consistency check to catch that.
         if untuned_csv or shapes_json:
             log.debug(
                 "GEMM: not scavenging a trace shape manifest; this run already has "
@@ -4124,8 +3269,8 @@ async def _run_forge_gemm_tuning(
                 "untuned_csv" if untuned_csv else "shapes_json",
             )
         else:
-            # Off the event loop for the same reason: a ``**/`` walk of a
-            # session tree that holds thousands of run artifacts.
+            # Off the event loop for the same reason: a ``**/`` walk of a session tree that holds thousands of run
+            # artifacts.
             shapes_manifest = await asyncio.to_thread(_resolve_trace_shape_manifest, state, session_dir)
     if shapes_manifest and not _path_is_existing_file(shapes_manifest):
         shapes_manifest = ""
@@ -4133,8 +3278,7 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    # The lane's share, priced on the router's own per-tuner estimates. A share
-    # funding none of them degrades to the module default, not to a doomed run.
+    # The lane's share, priced on the router's own per-tuner estimates.
     gemm_targets = await asyncio.to_thread(
         _gemm_router_targets,
         model_path=resolved_model_path,
@@ -4160,8 +3304,8 @@ async def _run_forge_gemm_tuning(
         requested_tuners = int(payload.get("max_tuners") or 0)
     except (TypeError, ValueError):
         requested_tuners = 0
-    # An explicit payload value stays an operator/test escape hatch; a named
-    # ``tuner`` already narrows the set to one, so no ceiling is needed then.
+    # An explicit payload value stays an operator/test escape hatch; a named ``tuner`` already narrows the set to one,
+    # so no ceiling is needed then.
     if str(payload.get("tuner") or "").strip():
         gemm_tuner_ceiling = 0
     else:
@@ -4187,10 +3331,8 @@ async def _run_forge_gemm_tuning(
         "conc": conc,
         "mp": mp,
         "output_dir": str(workspace),
-        # Passing the same value to both made the producer's own
-        # min(per_tuner, remaining) an identity, so the first tuner could
-        # consume the entire session and every later one was skipped for lack of
-        # time. The per-target cap must stay strictly below the global one.
+        # Passing the same value to both made the producer's own min(per_tuner, remaining) an identity, so the first
+        # tuner could consume the entire session and every later one was skipped for lack of time.
         "timeout": gemm_per_tuner_timeout_sec(timeout),
         # Bounds the whole session across all tuners.
         "global_timeout": timeout,
@@ -4204,8 +3346,7 @@ async def _run_forge_gemm_tuning(
         "tunableop_input": tunableop_input,
         "kernel_signature_log": kernel_sig_log,
         "tuner": str(payload.get("tuner") or ""),
-        # How many routed tuners the lane's share pays for. Omitted when none
-        # could be derived, which leaves the producer's own routing intact.
+        # How many routed tuners the lane's share pays for.
         **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
         # Exhaustive search when budget allows (>= 24h) and mp >= 4.
         "thorough": bool(session_max_min >= 1440 and mp >= 4),
@@ -4245,9 +3386,8 @@ async def _run_forge_gemm_tuning(
     result.setdefault("tuning_framework", forge_framework)
     result.setdefault("model_path", raw_model_path)
     if moe_key_report:
-        # Kept even when nothing was tunable: "no MoE problem was observed" and
-        # "the observed pair is one aiter cannot tune" lead to different actions,
-        # and neither is visible from the tuner's own status.
+        # Kept even when nothing was tunable: "no MoE problem was observed" and "the observed pair is one aiter cannot
+        # tune" lead to different actions, and neither is visible from the tuner's own status.
         result.setdefault("moe_key_source", moe_key_report)
     if shape_alignment is not None:
         result.setdefault("shape_alignment", shape_alignment)
@@ -4265,8 +3405,8 @@ async def _run_forge_gemm_tuning(
             },
         )
 
-    # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
-    # result.json and derive a top-level skip_reason.
+    # Surface why forge skipped: merge per-tuner skip reasons from the on-disk result.json and derive a top-level
+    # skip_reason.
     if not result.get("tuners_skipped"):
         disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
         if disk_skipped:
@@ -4276,13 +3416,9 @@ async def _run_forge_gemm_tuning(
         if reason:
             result["skip_reason"] = reason
 
-    # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision, but this array was previously dropped
-    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
+    # Surface crashed tuners. forge lists every failure in ``failed_tuners`` regardless of the overall decision, but
+    # this array was previously dropped here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
     # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
-    # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
-    # keep it on the envelope for the trace row / breakdown, and log it so the
-    # failure is never silent even when the session is kept.
     if not result.get("failed_tuners"):
         disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
         if disk_failed:
@@ -4299,10 +3435,8 @@ async def _run_forge_gemm_tuning(
                 _f.get("error") or "",
             )
 
-    # The breakdown and the stack read the envelope, not the jsonl audit row, so
-    # a tuner's own error class has to surface here too. Lifted before the bridge
-    # so a specific class outranks the generic wording. ``tuners_run`` is forge's
-    # JSON and may be any shape; this is bookkeeping and must not raise.
+    # The breakdown and the stack read the envelope, not the jsonl audit row, so a tuner's own error class has to
+    # surface here too.
     _tuner_rows = result.get("tuners_run")
     if not isinstance(_tuner_rows, list):
         _tuner_rows = []
@@ -4317,17 +3451,14 @@ async def _run_forge_gemm_tuning(
                 result["error"] = str(_t["error"])
                 break
 
-    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
-    # recommended_env becomes decision="KEEP" + extra_envs.
+    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with recommended_env becomes
+    # decision="KEEP" + extra_envs.
     micro = str(result.get("micro_decision") or "").strip().lower()
     if micro == "candidate" and result.get("recommended_env"):
         result.setdefault("decision", "KEEP")
-        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
-        # source-layer snapshot): copy it into the serving aiter config dir,
-        # repoint the env there, and snapshot it so the KEEP survives with the
-        # recipe instead of referencing the ephemeral tuner-workspace path.
-        # Keep the logical ID here: a resolved HF snapshot basename is a commit
-        # hash, which would make durable artifact names unstable across revisions.
+        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's source-layer snapshot): copy it into
+        # the serving aiter config dir, repoint the env there, and snapshot it so the KEEP survives with the recipe
+        # instead of referencing the ephemeral tuner-workspace path.
         _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
             dict(result["recommended_env"]),
             model_path=raw_model_path,
@@ -4361,32 +3492,7 @@ async def _run_forge_gemm_tuning(
 
 
 def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, session_dir: Path) -> tuple[dict, str]:
-    """Make forge GEMM tuned CSVs durable + recipe-portable.
-
-    The forge KEEP references tuned CSVs by their ephemeral tuner-workspace paths,
-    so a recipe replayed after the workspace is gone (or on another box) loses the
-    tuning and aiter falls back to its default config. Mirror integrate_patch's
-    durability: copy each CSV into the serving aiter config tree, repoint the env
-    there, and snapshot the realized files via :func:`snapshot_source_layer` so
-    they travel with the recipe.
-
-    The copy lands one level below ``configs/model_configs/`` on purpose. aiter
-    merges every ``model_configs/*{table}*.csv`` it can glob whenever the env var
-    is unset, and that glob is not recursive. Writing directly into that
-    directory would hand the table to every later server start -- including after
-    E2E rejected the candidate, and including servers for other models, since the
-    scan does not discriminate by model. Replay does not need the scan: it
-    restores the env var explicitly (see ``prelude._warm_kernel_extra_envs``) and
-    defers a GEMM column that has no env at all.
-
-    The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same
-    durable, run-cleanup-surviving location integrate_patch uses) -- NOT under the
-    ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
-    defeat the cross-environment recipe-portability this exists for.
-
-    Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
-    Returns ``(extra_envs, source_snapshot_dir)``.
-    """
+    """Make forge GEMM tuned CSVs durable + recipe-portable."""
     # Below model_configs/, out of reach of aiter's non-recursive auto-merge glob.
     _FORGE_DURABLE_SUBDIR = "hyperloom"
     _forge_durable_env_stems = {
@@ -4412,9 +3518,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     if not pending:
         return extra_envs, ""
 
-    # Step 1 -- commit durable copies + env repoints. This is what makes the
-    # KEEP survive: each CSV lands in aiter's config dir and the env points
-    # there instead of the ephemeral tuner workspace.
+    # Step 1 -- commit durable copies + env repoints.
     try:
         import importlib.util
 
@@ -4434,8 +3538,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
         log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
         return extra_envs, ""
 
-    # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
-    # snapshot failure must NOT discard the copy + repoint committed above.
+    # Step 2 -- recipe-portability snapshot.
     snap_dir = ""
     try:
         from ..source_snapshot import snapshot_source_layer
@@ -4462,11 +3565,7 @@ async def _run_geak_gemm_tuning(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Legacy GEAK GEMM tuning wrapper.
-
-    Hyperloom does not decide precision/framework applicability here; it passes
-    the workload metadata through and lets GEAK decide.
-    """
+    """Legacy GEAK GEMM tuning wrapper."""
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -4583,19 +3682,7 @@ async def run_gemm_tuning_handler(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEMM tuning via GEAK, or forge only when explicitly enabled.
-
-    Backend selection:
-    1. Exact ``KERNEL_OPT_BACKEND_ORDER=forge`` -> forge.
-    2. Everything else -> GEAK.
-
-    Args:
-        payload: The GEMM-tuning request payload.
-        session_dir: Session directory for workspace and state.
-
-    Returns:
-        A ``HandlerResult`` describing the tuning outcome.
-    """
+    """Run GEMM tuning via GEAK, or forge only when explicitly enabled."""
     backend = _resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
     try:
@@ -4633,13 +3720,7 @@ _FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORG
 
 
 def _forge_fusion_available() -> bool:
-    """Check that KernelForge's fusion pipeline is importable.
-
-    Probes the subpackage rather than ``kernelforge``: an installation
-    predating the fusion absorption would satisfy the parent import and only
-    fail once the subprocess rejected ``forge-fuse``. PATH is not consulted
-    because the tool is invoked through ``sys.executable -m``.
-    """
+    """Check that KernelForge's fusion pipeline is importable."""
     try:
         return importlib.util.find_spec("kernelforge.fusion") is not None
     except (ModuleNotFoundError, ValueError):
@@ -4658,12 +3739,7 @@ def _parse_forge_fusion_sentinel(stdout: str) -> dict[str, Any] | None:
 
 
 def _resolve_fusion_decode_trace(state, payload: dict) -> str:
-    """Reuse the PRELUDE/roofline decode trace for fusion discovery.
-
-    forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
-    already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
-    re-profiling. Explicit ``payload['trace_path']`` wins.
-    """
+    """Reuse the PRELUDE/roofline decode trace for fusion discovery."""
 
     def _trace_file(path_str: str) -> str:
         path = Path(path_str)
@@ -4718,31 +3794,7 @@ def _resolve_forge_agent(
     *,
     env: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
-    """Resolve the Forge agent backend and model as one decision.
-
-    Shared by forge-fusion and forge-collective (rewrite uses the same model
-    ladder via :func:`llm_config.resolve_forge_llm_model`). The canonical
-    provider-shape predicates decide the default backend: OpenAI-only uses
-    Codex, while Anthropic-only and dual-configured deployments use Claude, the
-    established default for this agentic role. A valid explicit
-    ``agent_backend`` or ``llm_model`` in the request wins. With no configured
-    provider, the request fails instead of silently spawning an unauthenticated
-    Claude process.
-
-    Model id precedence (after the backend is chosen) is owned by
-    :func:`llm_config.resolve_forge_llm_model`.
-
-    Args:
-        payload: Kernel request payload.
-        env: Provider environment to inspect; defaults to ``os.environ``.
-
-    Returns:
-        The canonical ``(agent_backend, llm_model)`` pair.
-
-    Raises:
-        RuntimeError: If neither provider side is configured.
-        ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
-    """
+    """Resolve the Forge agent backend and model as one decision."""
     source = env if env is not None else os.environ
     openai_only = llm_config.is_openai_only(source)
     anthropic_only = llm_config.is_anthropic_only(source)
@@ -4781,27 +3833,7 @@ def _resolve_forge_fusion_sandbox_mode(
     agent_backend: str,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Resolve and validate the sandbox policy recorded for forge-fusion.
-
-    Codex delegates both defaults and validation to the canonical Hyperloom
-    resolver, including its operator opt-in for ``bypass``. Claude records
-    ``workspace-write`` as the stable audit default; an explicit override is
-    validated by that same resolver so both backends share one policy vocabulary
-    and unsafe bypass cannot reach the subprocess.
-
-    Args:
-        payload: Kernel request payload.
-        agent_backend: The already-resolved ``"claude"`` or ``"codex"`` backend.
-        env: Environment overlay for the canonical resolver; defaults to the
-            process environment.
-
-    Returns:
-        A validated KernelForge sandbox mode.
-
-    Raises:
-        CodexSessionUnavailableError: If the mode is unknown or bypass lacks
-            the operator mode confirmation.
-    """
+    """Resolve and validate the sandbox policy recorded for forge-fusion."""
     explicit = str(payload.get("agent_sandbox_mode") or "").strip()
     if agent_backend == "claude" and not explicit:
         return codex_session.DEFAULT_CODEX_SANDBOX_MODE
@@ -4812,14 +3844,7 @@ def _resolve_forge_fusion_sandbox_mode(
 
 
 async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Autonomous kernel fusion via the forge-fusion CLI.
-
-    Builds an input-json with one provider-compatible agent backend, model, and
-    validated sandbox policy, shells out to the ``forge_fusion.py`` wrapper, and
-    parses the result sentinel. A KEPT fusion carries a source patch + env flags
-    and ``requires_e2e_validation`` so the integrate gate confirms the
-    end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
-    """
+    """Autonomous kernel fusion via the forge-fusion CLI."""
     from ..state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)
@@ -4910,8 +3935,8 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    # The lane's share of the phase; a zero share means none could be derived, and
-    # the module default is safer for an unattended lane than a one-second session.
+    # The lane's share of the phase; a zero share means none could be derived, and the module default is safer for an
+    # unattended lane than a one-second session.
     fusion_lane = _lane_budget(state, LANE_FUSION)
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
     try:
@@ -4936,11 +3961,10 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "max_turns": max_turns,
         "gpu": gpu,
         "timeout": timeout,
-        # Multi-patch (one independent sibling per recipe) is the default; the
-        # combine escape hatch (a single merged patch) must be requested explicitly.
+        # Multi-patch (one independent sibling per recipe) is the default; the combine escape hatch (a single merged
+        # patch) must be requested explicitly.
         "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
-        # How many recipes the lane's share pays for. Omitted when none could be
-        # derived, which leaves forge-fuse on every discovered recipe.
+        # How many recipes the lane's share pays for.
         **({"max_recipes": fusion_recipe_ceiling} if fusion_recipe_ceiling > 0 else {}),
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
@@ -4994,11 +4018,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
 
 
 async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run autonomous kernel fusion via forge-fusion (serving-validated).
-
-    Registered as the ``run_fusion`` kernel request. Authors serving-safe fused
-    kernels and returns a source patch + env flags for the integrate gate.
-    """
+    """Run autonomous kernel fusion via forge-fusion (serving-validated)."""
     return await _run_forge_fusion(payload, session_dir=session_dir)
 
 
@@ -5130,17 +4150,7 @@ def select_collective_candidate(state: Any) -> dict[str, Any] | None:
 
 
 def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
-    """Read a forge-loop budget bound, falling back when KernelForge is off the path.
-
-    A local copy of the number drifts the moment upstream changes it, and the
-    lane then plans against a budget the campaign will not honour.
-
-    The fallback is logged rather than taken silently. KernelForge now ships in
-    this distribution, so a failed import means a renamed module or a broken
-    install, not an optional dependency -- and the symptom otherwise is a
-    campaign quietly planned against the wrong wall-clock budget, which no run
-    ever reports.
-    """
+    """Read a forge-loop budget bound, falling back when KernelForge is off the path."""
     try:
         return float(getattr(importlib.import_module(module), name))
     except (ImportError, AttributeError, TypeError, ValueError) as exc:
@@ -5210,8 +4220,7 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
     if timeout_sec > 0:
         wall_limits.append(timeout_sec)
     if requested_hours is None and not wall_limits:
-        # Unbounded session: no budget to divide, so the reserve and
-        # minimum-campaign contracts below cannot apply.
+        # Unbounded session: no budget to divide, so the reserve and minimum-campaign contracts below cannot apply.
         log.info(
             "collective budget: unbounded session, defaulting the wrapper to %ds",
             _COLLECTIVE_UNBOUNDED_WRAPPER_SEC,
@@ -5234,8 +4243,7 @@ def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tu
         campaign_sec = min(requested_sec, campaign_capacity) if wall_limits else requested_sec
     if campaign_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
         return None, 0
-    # Truncate to two decimals so the hours we hand forge-loop never round up
-    # past the budget they were derived from.
+    # Truncate to two decimals so the hours we hand forge-loop never round up past the budget they were derived from.
     hours = math.floor(campaign_sec / 3600 * 100) / 100.0
     required = _COLLECTIVE_PREP_GRACE_SEC + int(hours * 3600) + _COLLECTIVE_FINALIZE_GRACE_SEC
     return hours, required
@@ -5290,9 +4298,7 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
 
     source_file = candidate["source_file"].strip()
     source_function = candidate["source_function"].strip()
-    # The anchor alone hides the op's sibling sources, so a fused variant of the
-    # same collective stays uneditable. Keep the anchor first, then whatever the
-    # candidate declares as the op's source set.
+    # The anchor alone hides the op's sibling sources, so a fused variant of the same collective stays uneditable.
     raw_kernel_sources = candidate.get("kernel_sources") or []
     if isinstance(raw_kernel_sources, str):
         raw_kernel_sources = [raw_kernel_sources]
@@ -5453,13 +4459,7 @@ def _find_repo_root_for_source(source_file: str) -> str:
 
 
 async def run_collective_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run the coordinator-owned collective optimization lane.
-
-    The attempt identity is deliberately left unset: the KERNEL phase derives it
-    from the result's content so a replayed or salvaged campaign deduplicates
-    against its earlier record. Stamping a wall-clock id here would make every
-    replay look like a new campaign.
-    """
+    """Run the coordinator-owned collective optimization lane."""
     result = await _run_forge_collective(payload, session_dir=session_dir)
     if not isinstance(result, dict):
         raise TypeError("Collective handler result must be a mapping")
@@ -5467,27 +4467,16 @@ async def run_collective_handler(payload: dict, *, session_dir: Path) -> Handler
     return result
 
 
-# A tuner error is a diagnostic pointer, not the diagnosis: the full text lives
-# in the run's own result.json and tune.log. 400 characters is enough to carry
-# the argparse line or the aiter marker that says which of the two it was.
+# A tuner error is a diagnostic pointer, not the diagnosis: the full text lives in the run's own result.json and
+# tune.log. 400 characters is enough to carry the argparse line or the aiter marker that says which of the two it was.
 _TRACE_TUNER_ERROR_MAXLEN = 400
 
-# Emitted even when null. ``kept`` is null on every row observed so far, and an
-# absent key would be indistinguishable from ``false``.
+# Emitted even when null.
 _TRACE_TUNER_ALWAYS_KEYS = ("tuner", "best_micro_speedup", "kept")
 
 
 def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
-    """One per-tuner entry for the audit row, keeping why it ended as it did.
-
-    The row used to carry only ``tuner``/``best_micro_speedup``/``kept``, which
-    cannot separate a tuner that crashed from one that ran and found nothing --
-    the single question the audit trail exists to answer. Across one campaign 38
-    of 337 tuner runs ended ``failed`` or ``empty_output`` and the trace showed
-    none of them; one of those was 82 runs rejected by argparse in 11 seconds
-    and recorded as a clean ``no_improvement`` (#1211), which stayed invisible
-    for three weeks because this row had nowhere to put it.
-    """
+    """One per-tuner entry for the audit row, keeping why it ended as it did."""
     error = tuner.get("error")
     if isinstance(error, str) and len(error) > _TRACE_TUNER_ERROR_MAXLEN:
         error = error[:_TRACE_TUNER_ERROR_MAXLEN] + "..."
@@ -5500,22 +4489,13 @@ def _trace_tuner_row(tuner: dict[str, Any]) -> dict[str, Any]:
         "error_class": tuner.get("error_class"),
         "error": error,
     }
-    # A clean run stays as compact as before: everything added here is dropped
-    # when it is null, so a successful row gains only status and elapsed_s.
+    # A clean run stays as compact as before: everything added here is dropped when it is null, so a successful row
+    # gains only status and elapsed_s.
     return {k: v for k, v in row.items() if k in _TRACE_TUNER_ALWAYS_KEYS or v is not None}
 
 
 def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
-    """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run.
-
-    Distils the run result into a compact source-attribution row (engine,
-    decision, speedup, per-tuner summary) appended to
-    ``reports/trace/gemm_tuning.jsonl``. Best-effort; any failure is swallowed.
-
-    Args:
-        result: The GEMM-tuning handler result envelope.
-        session_dir: Session directory the audit row is appended under.
-    """
+    """Append one ``gemm_tuning.jsonl`` audit row for a GEMM-tuning run."""
     if not isinstance(result, dict):
         return
     from datetime import datetime, timezone
@@ -5526,9 +4506,8 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     tuners: list[dict[str, Any]] = [
         _trace_tuner_row(t) for t in (result.get("tuners_run") or []) if isinstance(t, dict)
     ]
-    # The envelope reported no error class even when a tuner had named one, so a
-    # crashed run and a barren one looked alike at the top level too. Take the
-    # first one a tuner supplied rather than leaving the field null.
+    # The envelope reported no error class even when a tuner had named one, so a crashed run and a barren one looked
+    # alike at the top level too.
     error_class = result.get("error_class") or next((t["error_class"] for t in tuners if t.get("error_class")), None)
     row = {
         "kind": "gemm_tuning",
@@ -5546,8 +4525,8 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "workspace": result.get("workspace"),
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
-        # A crash stays in the audit even when a sibling tuner won and the run was
-        # kept -- otherwise a KEEP row hid the failures behind it.
+        # A crash stays in the audit even when a sibling tuner won and the run was kept -- otherwise a KEEP row hid
+        # the failures behind it.
         "failed_tuners": result.get("failed_tuners") or None,
         "error_class": error_class,
     }
@@ -5574,8 +4553,7 @@ def _build_trace_analyze_cmd(
     target_platform: str,
     analysis_mode: str,
 ) -> "tuple[list[str], str]":
-    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
-    ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
+    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns"""
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
@@ -5608,10 +4586,7 @@ def _build_trace_analyze_cmd(
     if analysis_mode:
         cmd += ["--analysis-mode", str(analysis_mode)]
 
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
+    # Model identity informs source resolution for every framework, not only the diffusion roofline.
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
@@ -5631,7 +4606,6 @@ def _build_trace_analyze_cmd(
         if not is_bypass:
             cmd += ["--skip-split"]
         # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -5640,8 +4614,7 @@ def _build_trace_analyze_cmd(
             except (TypeError, ValueError):
                 pass
     else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
+        # Splitter workload hints.
         split_conc = payload.get("split_conc") or workload.get("conc")
         if split_conc not in (None, ""):
             cmd += ["--split-conc", str(split_conc).strip()]
@@ -5662,8 +4635,7 @@ def _build_trace_analyze_cmd(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
+    # Post-kernel-opt roofline writes a separate report so it never overwrites the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     if roofline_output_name:
         cmd += ["--roofline-output-name", roofline_output_name]
@@ -5672,10 +4644,8 @@ def _build_trace_analyze_cmd(
     return cmd, steady_state_mode
 
 
-# TraceLens picks its steady-state window by writing split chunks and selecting
-# one file; the TraceLens-free reader picks a window in memory and never writes
-# chunks. Both answer "is the window this analysis rests on trustworthy", so the
-# event normalizes them onto one shape and keeps the raw form under ``selected``.
+# TraceLens picks its steady-state window by writing split chunks and selecting one file; the TraceLens-free reader
+# picks a window in memory and never writes chunks.
 _STEADY_SOURCE_SPLIT_CHUNK = "split_chunk"
 _STEADY_SOURCE_READER_WINDOW = "in_reader_window"
 
@@ -5686,18 +4656,7 @@ def _analysis_steady_state(
     requested_mode: str,
     tool: str,
 ) -> dict[str, Any]:
-    """Normalize the steady-state window across analysis tools.
-
-    Args:
-        result: The analysis tool's result dict.
-        requested_mode: The steady-state mode asked of the tool.
-        tool: ``tracelens`` or ``bypass``.
-
-    Returns:
-        A dict naming the requested mode, how the window was picked, the raw
-        selection, whether the tool fell back to the full trace, and the
-        aggregation scope the shares are anchored to.
-    """
+    """Normalize the steady-state window across analysis tools."""
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     scope = str(result.get("aggregation_scope") or run_meta.get("aggregation_scope") or "")
     if tool == "bypass":
@@ -5727,25 +4686,7 @@ def _build_analysis_meta(
     trace_input: str,
     duration_sec: float,
 ) -> dict[str, Any]:
-    """Assemble the per-run analysis metadata the roofline timeline event carries.
-
-    The TraceLens agent and TraceLens-free reader share this envelope. ``route``
-    records the routing policy (``agent`` / ``bypass``), while ``tool`` records
-    the implementation that ran (``tracelens`` / ``bypass``). Tool-specific
-    analysis output lands under ``route_ext`` rather than widening the shared
-    envelope.
-
-    Args:
-        result: The analysis tool's result dict.
-        route: The requested analysis route (``agent`` / ``bypass``).
-        tool: The tool that actually ran (``tracelens`` / ``bypass``).
-        requested_mode: The steady-state mode asked of the tool.
-        trace_input: The trace the run analyzed.
-        duration_sec: Wall-clock seconds the subprocess took.
-
-    Returns:
-        The analysis metadata dict.
-    """
+    """Assemble the per-run analysis metadata the roofline timeline event carries."""
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     steps = run_meta.get("steps")
     return {
@@ -5768,25 +4709,7 @@ async def trace_analyze_handler(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir.
-
-    The explicit payload framework normally takes precedence over the persisted
-    session value.  A scriptable session overrides a conflicting non-scriptable
-    payload framework so a diffusion trace is not sent through the LLM
-    prefill/decode splitter.
-
-    Args:
-        payload (dict): Request payload (see ``Required payload`` /
-            ``Optional payload`` below for the recognized keys).
-        session_dir (Path): Session root used for resolving inputs and writing
-            the analysis outputs.
-
-    Required payload:
-        trace_input: path to a torch_trace dir or single .trace.json.gz file.
-
-    Returns the tool's result dict with ``status``, surfaced artifact paths, and
-    ``trace_health_warnings``; on failure, ``returncode`` / ``error`` and empty ``hot_kernels``.
-    """
+    """Run Hyperloom/kernel-agent's tracelens_analysis.py on a trace dir."""
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
@@ -5802,9 +4725,6 @@ async def trace_analyze_handler(
     from hyperloom.inference_optimizer.framework_registry import is_scriptable
 
     # Payload metadata remains authoritative for ordinary serving frameworks.
-    # The exception is a scriptable session receiving a stale non-scriptable
-    # default (commonly ``sglang``): that would make xDiT follow the LLM trace
-    # splitter, which discards its raw diffusion GPU kernels.
     framework = payload_framework or state_framework
     framework_warnings: list[dict[str, Any]] = []
     if payload_framework and is_scriptable(state_framework) and not is_scriptable(payload_framework):
@@ -5834,19 +4754,14 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # is the explicit route via payload ``analysis_route`` /
-    # ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
-    # Only an absent or blank payload value defers to the env var. A non-blank
-    # value is kept even when unrecognized, so it reaches the check below rather
-    # than silently overriding the env with the ``agent`` default.
+    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free) is the explicit route via payload
+    # ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``.
     raw_route = payload.get("analysis_route")
     route_text = "" if raw_route is None else str(raw_route).strip()
     if not route_text:
         route_text = os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "").strip()
     explicit_route = route_text.lower()
-    # An explicit unknown route is a configuration error. Falling back to
-    # ``agent`` could turn a no-LLM request into a paid model session.
+    # An explicit unknown route is a configuration error.
     if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
         valid_routes = sorted(_VALID_ANALYSIS_ROUTES)
         message = (
@@ -5864,8 +4779,7 @@ async def trace_analyze_handler(
         }
     analysis_route = explicit_route or "agent"
     is_bypass = analysis_route == "bypass"
-    # Resolve TraceLens root independently of inherited env, self-healing a
-    # vanished checkout before validation. Skipped on bypass.
+    # Resolve TraceLens root independently of inherited env, self-healing a vanished checkout before validation.
     tracelens_root: Path | None = None
     if not is_bypass:
         tracelens_root = _resolve_tracelens_root()
@@ -5880,8 +4794,8 @@ async def trace_analyze_handler(
     workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
 
-    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the
-    # raw trace and drop the --split-* hints.
+    # Scriptable frameworks (xDiT) have no decode steady-state window, so feed the raw trace and drop the --split-*
+    # hints.
     scriptable = is_scriptable(framework)
 
     # Load materialized baseline workload metadata once.
@@ -5969,12 +4883,12 @@ async def trace_analyze_handler(
                 trace_report_path=str(report_path or ""),
             )
 
-        # Route and tool are one-to-one after the no-LLM TraceLens route was
-        # removed: agent runs TraceLens, while bypass runs its standalone reader.
+        # Route and tool are one-to-one after the no-LLM TraceLens route was removed: agent runs TraceLens, while
+        # bypass runs its standalone reader.
         _disc_route = analysis_route
         _disc_tool = "bypass" if is_bypass else "tracelens"
-        # Surfaced for the caller's SBD V6 roofline event, which records the run
-        # as it happens rather than re-deriving it at export time.
+        # Surfaced for the caller's SBD V6 roofline event, which records the run as it happens rather than re-deriving
+        # it at export time.
         result["analysis_meta"] = _build_analysis_meta(
             result,
             route=_disc_route,
@@ -6020,12 +4934,7 @@ _REWRITE_EXECUTABLE_TARGETS = 1
 
 
 def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
-    """Count dropped patch entries by reason, logging each one as it is counted.
-
-    ``parse_outcome`` names why every unusable entry was refused, but a reason
-    nobody reports is indistinguishable from forge never having offered the
-    entry at all.
-    """
+    """Count dropped patch entries by reason, logging each one as it is counted."""
     counts: dict[str, int] = {}
     for entry in dropped or ():
         reason = str(getattr(entry, "reason", "") or "unknown")
@@ -6039,55 +4948,22 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
 
 
 def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
-    """Return the effective kernel backend order.
-
-    Forge is deliberately not request-selectable.  The only supported forge
-    opt-in is exactly ``KERNEL_OPT_BACKEND_ORDER=forge``; every other value,
-    missing value, legacy alias, or payload override stays on the GEAK
-    whole-phase backend.
-    """
+    """Return the effective kernel backend order."""
     if forge_explicitly_enabled():
         return ["forge"]
     return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
 
 def geak_selected(payload: dict | None = None) -> bool:
-    """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order.
-
-    ``geak`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL_AGENT phase to the GEAK e2e optimizer".
-    It therefore *owns* the phase whenever present (any other backends in the
-    order are ignored for the kernel phase), so an order of just ``geak``
-    runs only the GEAK e2e optimizer. ``forge`` is the per-kernel backend.
-
-    Args:
-        payload: Optional request payload that may carry ``backend_order``.
-
-    Returns:
-        bool: ``True`` when ``geak`` is in the resolved order.
-    """
+    """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order."""
     return "geak" in _raw_kernel_backend_order(payload)
 
 
 def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
-    """Wrap a kernel-agent tool's exit + stdout into our schema (prefer the tool's own JSON, synthesize only on parse failure).
-
-    Args:
-        rc: The tool's process return code.
-        stdout: The tool's captured standard output.
-        stderr: The tool's captured standard error.
-
-    Returns:
-        The tool's own JSON result (status filled from ``rc`` if absent), or a
-        synthesized failure result when stdout has no parseable JSON.
-    """
+    """Wrap a kernel-agent tool's exit + stdout into our schema (prefer the tool's own JSON, synthesize only on parse failure)."""
     parsed = _parse_tool_stdout(stdout)
     if parsed and set(parsed) == {"raw_stdout_tail"}:
-        # Unparseable output is not a result. Inferring ``ok`` from rc==0 here
-        # made a tool whose output we could not read indistinguishable from one
-        # that succeeded: the roofline executor read status=ok, recorded an
-        # empty analysis over the real one, and the leg reported success while
-        # twenty minutes of GPU evidence went in the bin.
+        # Unparseable output is not a result.
         return {
             "status": "failed",
             "error_class": "tool_output_unparseable",
@@ -6113,19 +4989,7 @@ def _shape_tool_result(rc: int, stdout: str, stderr: str) -> HandlerResult:
 
 
 def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
-    """Parse a tool's stdout into a dict, surviving non-JSON noise.
-
-    Tries the whole stdout as a JSON object first; if that fails, scans
-    backwards for the last line that is a standalone JSON object. As a last
-    resort returns the stdout tail under ``raw_stdout_tail``.
-
-    Args:
-        stdout (str): Captured standard output from a kernel-agent tool.
-
-    Returns:
-        dict[str, Any]: The parsed JSON object, an empty dict for empty input,
-            or ``{"raw_stdout_tail": ...}`` when no JSON object is found.
-    """
+    """Parse a tool's stdout into a dict, surviving non-JSON noise."""
     text = stdout.strip()
     if not text:
         return {}
@@ -6145,13 +5009,7 @@ def _parse_tool_stdout(stdout: str) -> dict[str, Any]:
                     return obj
             except json.JSONDecodeError:
                 continue
-    # Last: a pretty-printed object opening at the start of a line. A tool that
-    # indents its result spans many lines, so neither whole-text nor per-line
-    # parsing sees it, and it is exactly the tools with a lot to say that
-    # indent. tracelens_analysis returned a megabyte of hot-kernel analysis this
-    # way, interleaved with progress chatter and followed by an import banner;
-    # every field of it was dropped and the run still reported ``ok``.
-    # ``raw_decode`` stops at the end of the object, so trailing noise is fine.
+    # Last: a pretty-printed object opening at the start of a line.
     decoder = json.JSONDecoder()
     starts = [m.start() for m in re.finditer(r"^\{", text, re.MULTILINE)]
     for start in reversed(starts):
@@ -6220,9 +5078,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
         "retry_attempted": False,
     }
 
-    # A live compiler may legitimately own the observed lock. When liveness is
-    # unknown, a fresh skipped lock is also not safe to remove. Retry only after
-    # at least one deletion or after confirming the lock disappeared.
+    # A live compiler may legitimately own the observed lock.
     cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
     lock_removed = bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
     if not (cleanup_safe and lock_removed):
@@ -6257,12 +5113,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
 
 
 def _eval_generation_budget() -> int:
-    """Completion tokens the eval harness reserves per sample.
-
-    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS``
-    when it parses as a positive integer, else the shim's own default. ``0``
-    means the operator disabled the clamp, so no budget can be assumed.
-    """
+    """Completion tokens the eval harness reserves per sample."""
     raw = (os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
     if not raw:
         return _EVAL_DEFAULT_MAX_TOKENS
@@ -6281,33 +5132,7 @@ def _grade_integrate_accuracy(
     strict: bool = False,
     server_args: str = "",
 ) -> dict[str, Any]:
-    """Grade a kernel re-baseline's accuracy against the session baseline.
-
-    The staged re-baseline already ran the serving eval after hot throughput
-    passed, so the score is read back rather than re-measured. A measured drop
-    beyond ``ACCURACY_THRESHOLD`` blocks the KEEP. A missing verdict blocks only
-    when a positive baseline accuracy proves eval works in this environment;
-    otherwise the gate degrades to throughput-only so eval-less setups are not
-    universally blocked.
-
-    The preferred path is the accuracy attached by BaselineExecutor's staged
-    accuracy round. Workspace parsing remains as a compatibility fallback for
-    older runs where eval lived in the warmup slot.
-
-    Args:
-        bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        session_dir: Session directory used to resolve ``baseline_accuracy``.
-        workspace: The integrate task workspace holding both round slots.
-        strict: Grade an artifact whose correctness has only ever been proven
-            against a reference. This serving run is its first and only
-            end-to-end evidence, so the operator opt-out does not apply and a
-            gate that produced no verdict blocks instead of degrading.
-
-    Returns:
-        ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
-        "degraded": bool, "accuracy": float | None, "baseline_accuracy": float,
-        "task": str, "metric": str, "source_file": str}``.
-    """
+    """Grade a kernel re-baseline's accuracy against the session baseline."""
     from ..actions.executors._accuracy_gate import (
         accuracy_keep_block,
         accuracy_passed,
@@ -6354,10 +5179,8 @@ def _grade_integrate_accuracy(
     if strict and degraded:
         blocked = True
         reason = "accuracy gate produced no eval result and this artifact has no other end-to-end correctness evidence"
-    # A verdict can be missing because the eval broke, or because the serving
-    # configuration cannot answer an eval request at all. Only the first says
-    # anything about the patch. The second reproduces on every retry, so
-    # charging it to the patch discards a kernel over a configuration choice.
+    # A verdict can be missing because the eval broke, or because the serving configuration cannot answer an eval
+    # request at all.
     infeasible = False
     if accuracy_pass is None:
         fits, why = served_context_hosts_eval(
@@ -6400,36 +5223,7 @@ def _grade_integrate_accuracy(
 
 
 def _agentx_rebaseline_timeout(resolved_sec: int, *, shared_state: Any = None) -> int:
-    """Raise a re-baseline timeout to what an AgentX round needs.
-
-    Same shape, and the same root cause, as
-    :func:`_cold_start_rebaseline_timeout`: the explicit ``timeout_sec`` that
-    integrate passes suppresses the baseline executor's own AgentX branch, so a
-    value sized for the synthetic shape becomes the only budget the round gets.
-    Observed values are 7200s and 9000s; a canonical AgentX warmup is 10
-    requests per lane over real agentic traces and does not fit either.
-
-    Measured on Qwen3.8: a round whose server answered all 685
-    chat/completions with 200 was cut at exactly its 7200s param, mid-warmup,
-    after which the client could no longer connect. Nothing in the abort reason
-    names the timeout -- aiperf reports the cancelled warmup credit as
-    ``warmup_failure``, so it reads as a workload problem.
-
-    Raised here, where the param is produced, rather than in the executor that
-    consumes it: ``_resolve_timeout`` deliberately lets an explicit param
-    outrank the AgentX derivation, and that contract has a test on it. AgentX
-    is an opt-in branch, so with it disabled this returns ``resolved_sec``
-    untouched and the default path is unaffected.
-
-    Args:
-        resolved_sec: The timeout the payload/contract resolved to.
-        shared_state: Session state, so a persisted ``benchmark_mode`` still
-            triggers the raise when this integrate call runs in a subprocess
-            that did not inherit ``HYPERLOOM_AGENTX``.
-
-    Returns:
-        int: ``resolved_sec``, or the AgentX-derived cap when that is larger.
-    """
+    """Raise a re-baseline timeout to what an AgentX round needs."""
     from ..actions.executors._workload_envs import agentx_active
 
     if not agentx_active(shared_state):
@@ -6450,12 +5244,7 @@ def _agentx_rebaseline_timeout(resolved_sec: int, *, shared_state: Any = None) -
 
 
 def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
-    """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
-
-    An apply moves the cache aside, so the re-baseline recompiles from scratch;
-    the explicit ``timeout_sec`` integrate passes also suppresses the baseline
-    executor's own cold-start branch, leaving the warm budget as the only one.
-    """
+    """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty."""
     from ..actions.executors._aiter_jit import (
         BASELINE_COLD_START_TIMEOUT_SEC,
         probe_aiter_jit_cache,
@@ -6533,53 +5322,21 @@ async def integrate_handler(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
-
-    Applies an optimized kernel artifact, re-runs the active Magpie baseline,
-    and KEEPs only when measured E2E throughput clears the threshold AND the
-    re-baseline's accuracy holds (source + artifacts are backed up first so
-    non-KEEP can restore without a rebuild). Accuracy is graded only for a
-    candidate that already cleared the throughput bar -- see
-    :func:`_grade_integrate_accuracy`.
-
-    Payload: ``base_tput`` must be > 0 at decision time, but is auto-filled from
-    SharedState when a baseline has been recorded, so a bare ``{kernel_id}`` (or
-    ``{integration_id}``) payload is accepted. Optional: patch_path,
-    target_file, snapshot_dir, kernel_repo, config_path, extra_server_args,
-    extra_envs, source, task_group_key, keep_threshold_pct (1.0), timeout_sec,
-    or budget_minutes. Without an explicit timeout, the benchmark config's
-    timeout contract is used. Returns ``{status, decision, base_tput, new_tput,
-    gain_pct, kernel_id, patch_path, report_path, workspace}``.
-
-    Args:
-        payload: The integrate request payload.
-        session_dir: Session directory for workspace and state.
-
-    Returns:
-        A ``HandlerResult`` with the KEEP/REVERT decision and re-baseline
-        metrics (``status``, ``decision``, ``base_tput``, ``new_tput``,
-        ``gain_pct``, ``kernel_id``, ``patch_path``, ``report_path``,
-        ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
-        ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
-    """
+    """Apply a kernel patch + re-baseline + KEEP/REVERT decision."""
     from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..state.task_registry import Task
 
-    # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare
-    # {kernel_id} payload isn't failed with a phantom "missing base_tput".
+    # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare {kernel_id} payload isn't failed
+    # with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
     if payload.get("_vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
-        # tuning) has no deployable artifact: best_artifact_path is a copy of
-        # a KernelForge task-bundle config file, not a rewrite of the real
-        # installed operator, and apply_kernel_patch's legacy full-file
-        # replace would happily overwrite the real site-packages module with
-        # it (PR #1191 review finding #1). Refuse before touching the
-        # filesystem rather than letting a config-file copy silently
-        # corrupt a live install.
+        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config tuning) has no deployable artifact:
+        # best_artifact_path is a copy of a KernelForge task-bundle config file, not a rewrite of the real installed
+        # operator, and apply_kernel_patch's legacy full-file replace would happily overwrite the real site-packages
+        # module with it (PR #1191 review finding #1).
         return {
             "status": "failed",
             "error_class": "vendor_playbook_not_deployable",
@@ -6600,12 +5357,8 @@ async def integrate_handler(
             "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
         }
 
-    # Env-only is a property of the request, not of who sent it: a payload that
-    # carries a runtime bundle and names no artifact has nothing to apply, so it
-    # is graded on the bundle alone. Deciding by shape also keeps such a request
-    # away from _resolve_integrate_payload, which would otherwise back-fill
-    # patch_path/target_file from the last kernel optimization and silently
-    # measure an unrelated patch.
+    # Env-only is a property of the request, not of who sent it: a payload that carries a runtime bundle and names no
+    # artifact has nothing to apply, so it is graded on the bundle alone.
     _has_artifact = bool(str(payload.get("patch_path") or "").strip()) or bool(
         str(payload.get("target_file") or payload.get("source_file") or "").strip()
     )
@@ -6657,8 +5410,7 @@ async def integrate_handler(
         }
     log.info("integrate_handler: apply_result=%s", apply_result)
     if apply_result.get("status") == "failed":
-        # Apply crash: the patch was never measured. Stamp a top-level fault
-        # error_class so SharedState routes this through the fault retry budget.
+        # Apply crash: the patch was never measured.
         return {
             "status": "failed",
             "error_class": "apply_failed",
@@ -6683,29 +5435,21 @@ async def integrate_handler(
 
     keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
     extra_args = str(payload.get("extra_server_args") or "").strip()
-    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
-    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
-    # vLLM so the integrate server cannot OOM on a tighter node.
+    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0):
+    # cap re-baseline util on vLLM so the integrate server cannot OOM on a tighter node.
     extra_args = _vram_guarded_server_args(extra_args)
 
     # Wrap BaselineExecutor in a Task/RunnerContext.
     from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
 
-    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
-    # only reaches this handler now that fusion lands through the generic queue.
-    # It is a legal id but not a legal directory name everywhere -- fold it.
+    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which only reaches this handler now that
+    # fusion lands through the generic queue.
     fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     from ..state.shared_state import SharedState
 
-    # Read-only, and only to learn whether this session is AgentX. A strict load
-    # that raises here lands AFTER the kernel patch has been applied, so a
-    # truncated or concurrently-written state.json would throw away work that
-    # already succeeded -- to answer an advisory question. Fall back to the env
-    # signal instead: ``agentx_active(None)`` consults HYPERLOOM_AGENTX, which is
-    # the same answer in every case except a run resumed into a shell that lost
-    # the variable, and there the cost is the un-raised timeout we had before.
+    # Read-only, and only to learn whether this session is AgentX.
     try:
         _state_for_mode = SharedState.load_or_init(session_dir)
     except Exception as exc:  # noqa: BLE001 - advisory read, never fatal
@@ -6737,27 +5481,23 @@ async def integrate_handler(
             "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
-            # The only artifact that patches FlyDSL sources, so the only run that
-            # needs the JIT cache key widened.
+            # The only artifact that patches FlyDSL sources, so the only run that needs the JIT cache key widened.
             "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
             "accuracy_timeout_sec": rebaseline_timeout_sec,
-            # Synthetic kind="baseline": candidate A/B validation against the
-            # already-anchored reference. It runs eval for the kernel accuracy
-            # gate but never establishes a replacement quality reference.
+            # Synthetic kind="baseline": candidate A/B validation against the already-anchored reference.
             "quality_ref_exempt": True,
-            # A sub-step of the KERNEL phase's own event, not a dispatched
-            # measurement, so it leaves no baseline event.
+            # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it leaves no baseline
+            # event.
             SBD_INNER_STEP_PARAM: True,
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
     ctx = RunnerContext(task=fake_task, lease=None)
 
-    # aiter cpp_itfs kernels recompile at runtime and its cache hashes params not
-    # source, so set AITER_REBUILD=1 for the re-baseline server to force a rebuild
-    # of the patched kernel. Scoped to cpp_itfs applies and always restored.
+    # aiter cpp_itfs kernels recompile at runtime and its cache hashes params not source, so set AITER_REBUILD=1 for
+    # the re-baseline server to force a rebuild of the patched kernel.
     cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
     force_aiter_rebuild = bool(cpp_itfs_backup.get("is_cpp_itfs"))
     _prev_aiter_rebuild = os.environ.get("AITER_REBUILD")
@@ -6765,10 +5505,7 @@ async def integrate_handler(
         os.environ["AITER_REBUILD"] = "1"
 
     def _restore_aiter_rebuild_env() -> None:
-        """Restore the ``AITER_REBUILD`` env var to its prior value.
-
-        No-op unless a forced rebuild was applied for this re-baseline.
-        """
+        """Restore the ``AITER_REBUILD`` env var to its prior value."""
         if not force_aiter_rebuild:
             return
         if _prev_aiter_rebuild is None:
@@ -6776,14 +5513,13 @@ async def integrate_handler(
         else:
             os.environ["AITER_REBUILD"] = _prev_aiter_rebuild
 
-    # Multi-node: force a FULL sglang restart so it re-imports the patched
-    # modules (a resume would measure the pre-patch process). mn_round_restarted
-    # stops a double restart; force_full_restart scopes the resume override here.
+    # Multi-node: force a FULL sglang restart so it re-imports the patched modules (a resume would measure the
+    # pre-patch process). mn_round_restarted stops a double restart; force_full_restart scopes the resume override
+    # here.
     from ..actions.executors._multi_node_env import is_multi_node
 
-    # This must run even when the regular JIT cache is warm: cpp_itfs attention
-    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
-    # from a timed-out Forge driver.
+    # This must run even when the regular JIT cache is warm: cpp_itfs attention uses the separate AITER_ROOT_DIR/build
+    # tree and can carry a stale baton from a timed-out Forge driver.
     _sweep_integrate_aiter_locks(reason="integrate server startup")
 
     if is_multi_node():
@@ -6836,16 +5572,12 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
     finally:
-        # Restore AITER_REBUILD on every path so the override never leaks past
-        # this integrate.
+        # Restore AITER_REBUILD on every path so the override never leaks past this integrate.
         _restore_aiter_rebuild_env()
 
     if not is_valid_measurement(bench_result):
         revert_result = _maybe_revert_kernel_patch(apply_result)
-        # The re-baseline produced no usable measurement, so the patch was never
-        # fairly scored. Surface a top-level fault error_class (the re-baseline's
-        # own when present, else bench_exception) so this routes through the fault
-        # retry budget rather than being discarded as a genuine REVERT.
+        # The re-baseline produced no usable measurement, so the patch was never fairly scored.
         rebaseline_error_class = (
             str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
         ) or "bench_exception"
@@ -6877,15 +5609,8 @@ async def integrate_handler(
             "revert_result": revert_result,
         }
 
-    # Don't score a stale binary: for cpp_itfs targets the served kernel is
-    # runtime-compiled, so a reused params-hashed lib.so would measure the
-    # PRE-patch kernel. Assert a fresh lib.so (newer than the invalidation) landed
-    # before trusting gain_pct; otherwise flag for review.
-    #
-    # Single-node only: in multi-node the served cache lives on the serving pod,
-    # so AITER_REBUILD=1 on the pod restart is the mechanism and this local check
-    # is skipped. verify_cpp_itfs_rebuilt() returns verified=True off the
-    # cpp_itfs path, so this gate is a strict no-op there.
+    # Don't score a stale binary: for cpp_itfs targets the served kernel is runtime-compiled, so a reused
+    # params-hashed lib.so would measure the PRE-patch kernel.
     rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
     if force_aiter_rebuild and not is_multi_node():
         rebuild_check = _load_apply_tool().verify_cpp_itfs_rebuilt(cpp_itfs_backup)
@@ -6935,16 +5660,7 @@ async def integrate_handler(
         else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
     )
 
-    # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy. Graded
-    # ONLY for a candidate that already cleared the throughput bar, so a
-    # regressing patch never spends a verdict on itself, and graded from the
-    # re-baseline's own eval output, so the verdict costs no extra GPU time.
-    # Placed ahead of the optional source-import pass so a patch that loses
-    # accuracy short-circuits before it runs.
-    # An apply-back carries only reference correctness, so this run is the sole
-    # end-to-end evidence it will ever get.
-    # Anything other than a recorded pass still owes the verdict, so an absent or
-    # unrecognised status keeps the gate armed rather than disarming it.
+    # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy.
     applyback_pending = (
         str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
         and str(payload.get("integration_validation_status") or "") != "passed"
@@ -6960,10 +5676,7 @@ async def integrate_handler(
         )
         if accuracy_gate["blocked"]:
             if accuracy_gate.get("infeasible"):
-                # The gate cannot run under this configuration, so this round
-                # measured nothing about the patch. Report it as an integration
-                # fault: faults carry their own budget and never consume one of
-                # the three attempts a patch gets to prove itself.
+                # The gate cannot run under this configuration, so this round measured nothing about the patch.
                 from ..actions.executors._accuracy_gate import (
                     EVAL_KIND_CONTEXT_TOO_SMALL,
                 )
@@ -6978,21 +5691,16 @@ async def integrate_handler(
                     "accuracy_gate": accuracy_gate,
                     "revert_result": revert_result,
                 }
-            # A measured regression is hard negative evidence -> REVERT. A
-            # missing verdict is only an evidence gap -> NEEDS_REVIEW.
+            # A measured regression is hard negative evidence -> REVERT.
             decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
 
-    # import-grep source confirmation (HL_HONEST_E2E umbrella, default ON; opt
-    # out with HL_HONEST_E2E=0 or HL_CONFIRM_SOURCE_IMPORTED=0). Advisory:
-    # annotate whether the served process imported/compiled the patched source.
-    # Only the strict sub-flag enforces it, and only on positive non-import
-    # evidence (confirmed is False); an "unknown" (None) never penalizes.
+    # import-grep source confirmation (HL_HONEST_E2E umbrella, default ON; opt out with HL_HONEST_E2E=0 or
+    # HL_CONFIRM_SOURCE_IMPORTED=0).
     source_import_confirmed: bool | None = None
     source_import_evidence: dict[str, bool | None] = {}
     source_not_imported_downgrade = False
     if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        # Grade the whole write set; the single target is the fallback for a
-        # patch whose bundle declared none.
+        # Grade the whole write set; the single target is the fallback for a patch whose bundle declared none.
         _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
         if not _written:
             _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
@@ -7054,9 +5762,9 @@ async def integrate_handler(
         "identity_route": str(payload.get("identity_route") or ""),
         "integration_id": str(payload.get("integration_id") or ""),
     }
-    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
-    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
-    # read by the idempotency short-circuit and the remote-recipe fusion export.
+    # Fusion provenance rides through so the KEEP writeback lifts the stack row as ``fusion`` (not ``integrate``) and
+    # sets ``last_fusion_integrate`` -- both are read by the idempotency short-circuit and the remote-recipe fusion
+    # export.
     if str(payload.get("source") or "") == "forge_fusion":
         result["source"] = "forge_fusion"
         result["action_label"] = str(payload.get("action_label") or "fusion")
@@ -7073,9 +5781,8 @@ async def integrate_handler(
         result["source_import_evidence"] = source_import_evidence
     if source_not_imported_downgrade:
         result["decision_reason"] = "source_not_confirmed_imported"
-    # Recorded last so a blocking accuracy verdict owns ``decision_reason``: it
-    # is the reason this candidate lost its KEEP, outranking the throughput-side
-    # annotations above.
+    # Recorded last so a blocking accuracy verdict owns ``decision_reason``: it is the reason this candidate lost its
+    # KEEP, outranking the throughput-side annotations above.
     if accuracy_gate is not None:
         result["accuracy"] = accuracy_gate["accuracy"]
         result["baseline_accuracy"] = accuracy_gate["baseline_accuracy"]
@@ -7087,9 +5794,7 @@ async def integrate_handler(
             )
     if applyback_pending:
         result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        # Only a KEEP settles the outstanding verdict. A non-KEEP is left
-        # unstamped: the attempt ledger already distinguishes a rejection from a
-        # retryable fault, and this field must not blur the two.
+        # Only a KEEP settles the outstanding verdict.
         if decision == "KEEP":
             result["integration_validation_status"] = "passed"
             result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
@@ -7126,27 +5831,12 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
 
 
 def has_handler(kind: str) -> bool:
-    """Report whether a programmatic handler is registered for a request kind.
-
-    Args:
-        kind (str): The kernel request ``kind`` to check.
-
-    Returns:
-        bool: ``True`` if a handler is registered for ``kind``, else ``False``.
-    """
+    """Report whether a programmatic handler is registered for a request kind."""
     return kind in KERNEL_REQUEST_HANDLERS
 
 
 def get_handler(kind: str) -> HandlerFn | None:
-    """Look up the programmatic handler registered for a request kind.
-
-    Args:
-        kind (str): The kernel request ``kind`` to resolve.
-
-    Returns:
-        HandlerFn | None: The registered handler coroutine function, or
-            ``None`` when no handler is registered for ``kind``.
-    """
+    """Look up the programmatic handler registered for a request kind."""
     return KERNEL_REQUEST_HANDLERS.get(kind)
 
 

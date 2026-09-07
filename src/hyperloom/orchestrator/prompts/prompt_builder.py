@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Compose the Orchestration agent's system prompt from typed inputs.
-
-Wraps the ``orchestration.md`` rules fragment with generated sections
-(mission, session context, pipeline/budget, phase contract, action catalogue,
-decision framework, cycle directive, optional kernel-opt reference, rules).
-Deterministic for given inputs; the only IO is reading the rules fragment.
-
-Sections are scoped by the ``phase`` argument: a module whose behaviour the
-phase cannot reach is omitted, so the agent is never handed a payload contract
-PolicyGate would deny. A blank phase renders every module.
-"""
+"""Compose the Orchestration agent's system prompt from typed inputs."""
 
 from __future__ import annotations
 
@@ -63,31 +53,18 @@ _BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
 _PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
 
-# ``<!-- transport: tools -->`` scopes the ``### `` heading that follows it,
-# exactly as the phase tag does, and the two compose.
+# ``<!-- transport: tools -->`` scopes the ``### `` heading that follows it, exactly as the phase tag does, and the
+# two compose.
 _TRANSPORT_TAG_RE = re.compile(r"^<!--\s*transport:\s*(?P<transports>[a-z_,\s]+?)\s*-->$")
 
 
 def _renders_in(phase: str, phases: frozenset[str]) -> bool:
-    """Whether a phase-scoped module renders for ``phase``.
-
-    Args:
-        phase (str): Normalised current phase; ``""`` disables scoping.
-        phases (frozenset[str]): Phases the module belongs to.
-
-    Returns:
-        bool: ``True`` when the module should render.
-    """
+    """Whether a phase-scoped module renders for ``phase``."""
     return not phase or phase in phases
 
 
 def _section_mission() -> list[str]:
-    """Build the MISSION section lines.
-
-    Returns:
-        list[str]: Markdown lines describing the Orchestration agent's
-        cumulative-gain objective and per-tick decision question.
-    """
+    """Build the MISSION section lines."""
     return [
         "## 1. MISSION",
         "",
@@ -116,25 +93,7 @@ def _section_session_context(
     framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
-    """Build the SESSION CONTEXT section lines.
-
-    Args:
-        framework (str): The framework name shown verbatim.
-        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
-        framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase
-            is enabled.
-        objective_kind (str): The objective kind (e.g. ``time_only``,
-            ``gain_pct``).
-        objective_value (float | str | None): Optional objective target value
-            rendered alongside the kind.
-        max_minutes (int): Wall-clock budget for the run, in minutes.
-        framework_source_roots (tuple[str, ...] | None): Optional framework
-            source roots; a PolicyGate-default note is shown when empty.
-
-    Returns:
-        list[str]: Markdown lines describing static session context and phase
-        awareness.
-    """
+    """Build the SESSION CONTEXT section lines."""
     obj = f"{objective_kind}"
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
@@ -164,21 +123,7 @@ def _section_phase_semantics(
     kernel_enabled: bool,
     framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
-    """Render the per-phase LLM-proposable action contract (current phase
-    injected dynamically by the Coordinator).
-
-    Phases switched off by ``--no-framework-agent`` / ``--no-kernel`` keep
-    their row in the chain but are annotated
-    ``(DISABLED: --no-xxx — phase skipped)`` so Orchestration plans against the
-    phases the run will actually enter.
-
-    Args:
-        kernel_enabled: Whether kernel_agent-owned actions are enabled.
-        framework_agent_phase_enabled: Whether the FRAMEWORK_AGENT phase is enabled.
-
-    Returns:
-        Markdown lines for the phase-contract section.
-    """
+    """Render the per-phase LLM-proposable action contract (current phase"""
     from ..phases.machine_state import render_phase_action_bullets
 
     # phase name -> the flag that disabled it (None => always enabled).
@@ -238,17 +183,7 @@ def _filter_actions(
     registry: Mapping[str, ActionMetadata],
     enabled: Iterable[str],
 ) -> list[ActionMetadata]:
-    """Resolve enabled action names to their catalogue metadata.
-
-    Args:
-        registry (Mapping[str, ActionMetadata]): The action catalogue to look up.
-        enabled (Iterable[str]): Enabled action names, drawn from the closed
-            :data:`FULL_ENABLED_ACTIONS` set.
-
-    Returns:
-        list[ActionMetadata]: Metadata for each enabled action, in the input
-        order.
-    """
+    """Resolve enabled action names to their catalogue metadata."""
     enabled_set: list[str] = list(enabled)
     out: list[ActionMetadata] = []
     for name in enabled_set:
@@ -265,21 +200,7 @@ def _resolve_prompt_prelude(
     kernel_enabled: bool | None,
     rules_fragment_path: Path | None,
 ) -> tuple[list[ActionMetadata], bool, str, str]:
-    """Resolve the shared prelude for the orchestration / critic prompt builders.
-
-    Args:
-        action_registry (Mapping[str, ActionMetadata]): The action catalogue.
-        enabled_actions (Iterable[str]): Action names enabled for this run.
-        framework (str): The framework name; normalised to lower-case (default
-            ``sglang``).
-        kernel_enabled (bool | None): Explicit override; ``None`` derives from
-            whether any KERNEL_OWNED action is enabled.
-        rules_fragment_path (Path | None): Path to the rules fragment.
-
-    Returns:
-        tuple[list[ActionMetadata], bool, str, str]: ``(actions, kernel_enabled,
-        framework_norm, rules_md)``.
-    """
+    """Resolve the shared prelude for the orchestration / critic prompt builders."""
     actions = _filter_actions(action_registry, enabled_actions)
     if kernel_enabled is None:
         kernel_enabled = any(a.name in KERNEL_AGENT_OWNED_ACTIONS for a in actions)
@@ -289,28 +210,12 @@ def _resolve_prompt_prelude(
 
 
 def join_sections(sections: list[list[str]]) -> str:
-    """Join prompt sections into the final prompt string (shared epilogue).
-
-    Args:
-        sections (list[list[str]]): Per-section line lists.
-
-    Returns:
-        str: The sections joined (lines by ``\\n``, sections by blank line),
-        right-stripped with a trailing newline.
-    """
+    """Join prompt sections into the final prompt string (shared epilogue)."""
     return "\n\n".join("\n".join(s) for s in sections).rstrip() + "\n"
 
 
 def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
-    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names).
-
-    Args:
-        actions: The enabled actions to group by pipeline phase.
-
-    Returns:
-        A list of ``(phase, eta_min_sum, names)`` tuples ordered by
-        ``_PHASE_ORDER`` with unknown phases appended last.
-    """
+    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names)."""
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
@@ -336,17 +241,7 @@ def _section_pipeline_and_budget(
     *,
     max_minutes: int,
 ) -> list[str]:
-    """Build the PIPELINE & TIME BUDGET section lines.
-
-    Args:
-        actions (list[ActionMetadata]): The enabled actions, summarised by
-            phase ETA.
-        max_minutes (int): Wall-clock budget for the run, compared against the
-            summed phase ETAs.
-
-    Returns:
-        list[str]: Markdown lines describing per-phase ETAs and budget guidance.
-    """
+    """Build the PIPELINE & TIME BUDGET section lines."""
     lines: list[str] = [
         "## 3. PIPELINE & TIME BUDGET",
         "",
@@ -374,15 +269,7 @@ def _section_pipeline_and_budget(
 
 
 def _format_gain_pair(meta: ActionMetadata) -> str:
-    """Format an action's expected-gain range as a short string.
-
-    Args:
-        meta (ActionMetadata): The action whose ``expected_gain_pct`` range to
-            format.
-
-    Returns:
-        str: ``"0%"`` when the range is zero, otherwise ``"lo-hi%"``.
-    """
+    """Format an action's expected-gain range as a short string."""
     lo, hi = meta.expected_gain_pct
     if lo == 0.0 and hi == 0.0:
         return "0%"
@@ -397,26 +284,12 @@ def _llm_selectable_domains() -> str:
 
 
 def _format_emit_hint(meta: ActionMetadata) -> str:
-    """Build the per-action ``EMIT:`` hint showing the correct transport.
-
-    Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
-    ``integrate_patch`` render their closed ``delegate`` payload contracts;
-    ``report`` renders a fixed zero-gain propose_action; everything else
-    renders a ``propose_action`` template.
-
-    Args:
-        meta (ActionMetadata): The action to build an emit hint for.
-
-    Returns:
-        str: The emit-hint string for the catalogue entry.
-    """
+    """Build the per-action ``EMIT:`` hint showing the correct transport."""
     if meta.name in KERNEL_AGENT_OWNED_ACTIONS:
         kind_hint = KERNEL_ACTION_REQUEST_KINDS[meta.name]
         if kind_hint in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS:
-            # The lane still has a catalogue entry so the model can read what it
-            # does, but the Coordinator dispatches it at KERNEL entry from the
-            # nomination. A payload template here would invite a request the
-            # gate then denies.
+            # The lane still has a catalogue entry so the model can read what it does, but the Coordinator dispatches
+            # it at KERNEL entry from the nomination.
             return f"(no emit — Coordinator dispatches `{kind_hint}` at KERNEL entry)"
         return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
     if meta.name == "report":
@@ -443,15 +316,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
-    """Return a per-action one-liner showing how to override grid, or None.
-
-    Args:
-        name: The action name to render a grid-injection hint for.
-
-    Returns:
-        The grid-injection hint string for ``explore``, or ``None`` for any
-        other action.
-    """
+    """Return a per-action one-liner showing how to override grid, or None."""
     if name == "explore":
         return (
             "GRID INPUT (REQUIRED): emit "
@@ -481,18 +346,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
 
 
 def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
-    """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
-
-    Every enabled action keeps its description, cost/gain/risk line and payload
-    contract in every phase, so a ``skip_to_*`` decision can still compare what
-    later phases do.
-
-    Args:
-        actions (list[ActionMetadata]): The actions enabled for this run.
-
-    Returns:
-        list[str]: Markdown lines for the action catalogue.
-    """
+    """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase."""
     lines: list[str] = [
         "## 4. ACTIONS YOU MAY USE",
         "",
@@ -529,22 +383,7 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
 
 
 def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
-    """Build the DECISION FRAMEWORK section lines.
-
-    Covers the per-tick selection order, FAILURE RECOVERY, and the
-    Config-arm IDEA GENERATION block.
-
-    Args:
-        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
-            run.
-        phase (str): Normalised current pipeline phase; ``""`` renders every
-            phase-scoped block.
-        transport (str): One of :data:`TRANSPORTS`; scopes the tool references
-            inside FAILURE RECOVERY.
-
-    Returns:
-        list[str]: Markdown lines for the decision framework.
-    """
+    """Build the DECISION FRAMEWORK section lines."""
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
@@ -621,21 +460,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
 
 
 def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
-    """Build the FAILURE RECOVERY block.
-
-    Always-on trigger and F3/F4 rules are inlined; the detailed diagnostic
-    surfaces, fingerprint semantics, and worked examples live in the
-    ``failure_recovery`` reference document, which only a transport with the
-    ``read_reference`` tool can pull.
-
-    Args:
-        phase (str): Normalised current pipeline phase.
-        transport (str): One of :data:`TRANSPORTS`; a transport without tools
-            is not pointed at the reference document.
-
-    Returns:
-        list[str]: Markdown lines for the failure-recovery block.
-    """
+    """Build the FAILURE RECOVERY block."""
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
     detail = (
         "/ `last_action_failures` for the error detail."
@@ -680,12 +505,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
 
 
 def _idea_generation_lines() -> list[str]:
-    """Build the config-arm IDEA GENERATION block.
-
-    Returns:
-        list[str]: Markdown lines describing how to compose the next
-        ``explore`` grid.
-    """
+    """Build the config-arm IDEA GENERATION block."""
     return [
         "",
         "### IDEA GENERATION (apply after EVERY explore round)",
@@ -784,23 +604,7 @@ kernels — they're tied to one compile cache and not reusable."""
 
 
 def _filter_rules_fragment(rules_md: str, *, phase: str = "", transport: str = "") -> str:
-    """Drop rules-fragment ``### `` blocks that this run cannot reach.
-
-    A ``<!-- phase: A, B -->`` or ``<!-- transport: tools -->`` comment scopes
-    the ``### `` heading that follows it, up to the next ``### `` / ``## ``
-    heading; both may precede the same heading and both must then match.
-    Untagged blocks always render, so a section added without a tag stays
-    always-on. The tag comments and the fragment's leading maintainer
-    blockquote are never emitted.
-
-    Args:
-        rules_md (str): Raw rules-fragment markdown.
-        phase (str): Normalised current pipeline phase; ``""`` keeps everything.
-        transport (str): One of :data:`TRANSPORTS`; ``""`` keeps everything.
-
-    Returns:
-        str: The fragment with unreachable blocks removed.
-    """
+    """Drop rules-fragment ``### `` blocks that this run cannot reach."""
     kept: list[str] = []
     pending_phases: frozenset[str] | None = None
     pending_transports: frozenset[str] | None = None
@@ -836,19 +640,7 @@ def _filter_rules_fragment(rules_md: str, *, phase: str = "", transport: str = "
 
 
 def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> list[str]:
-    """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment.
-
-    Args:
-        rules_md (str): The raw rules-fragment markdown; a placeholder is used
-            when empty.
-        phase (str): Normalised current pipeline phase; scopes the fragment's
-            phase-tagged blocks.
-        transport (str): One of :data:`TRANSPORTS`; scopes the fragment's
-            transport-tagged blocks.
-
-    Returns:
-        list[str]: Markdown lines for the RULES & OUTPUT PROTOCOL section.
-    """
+    """Build the RULES & OUTPUT PROTOCOL section wrapping the rules fragment."""
     body = _filter_rules_fragment(rules_md, phase=phase, transport=transport) or (
         "(orchestration.md rules fragment not found — Coordinator will still enforce PolicyGate hard rules at runtime.)"
     )
@@ -856,19 +648,7 @@ def _section_rules(rules_md: str, *, phase: str = "", transport: str = "") -> li
 
 
 def _section_cycle_directive(*, macro_cycle: int = 0, cycle_directive: str = "") -> list[str]:
-    """Build the CYCLE DIRECTIVE section.
-
-    When ``cycle_directive`` is non-empty it carries an LLM-authored focus
-    mandate for this macro-cycle (see ``orchestration_memory.next_cycle_directive``).
-    Otherwise the standing breadth→depth arc is used as the default.
-
-    Args:
-        macro_cycle: Current macro-cycle counter; shown verbatim.
-        cycle_directive: Optional LLM-authored focus text for this cycle.
-
-    Returns:
-        list[str]: Markdown lines for the section.
-    """
+    """Build the CYCLE DIRECTIVE section."""
     lines = [
         "## CYCLE DIRECTIVE (advisory — this macro-cycle's focus)",
         "",
@@ -899,15 +679,7 @@ _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
 
 
 def _section_reference_index(*, references_dir: Path, phase: str = "") -> list[str]:
-    """Build ``## 8.`` from the reference docs that apply to *phase*.
-
-    Args:
-        references_dir: Directory containing the reference markdown files.
-        phase: Normalised current pipeline phase; ``""`` includes all entries.
-
-    Returns:
-        Markdown lines, or ``[]`` when the directory is absent or empty.
-    """
+    """Build ``## 8.`` from the reference docs that apply to *phase*."""
     if not references_dir.is_dir():
         return []
     entries: list[tuple[str, str]] = []
@@ -961,54 +733,10 @@ def build_orchestration_prompt(
     framework_source_roots: tuple[str, ...] | None = None,
     references_dir: Path | None = None,
 ) -> str:
-    """Compose the Orchestration system prompt (deterministic for given inputs).
-
-    Args:
-        action_registry: the ``ACTION_CATALOGUE`` mapping.
-        enabled_actions: enabled action names; final ordering is by
-            pipeline_phase.
-        framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
-        kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED
-            actions.
-            skipped; the prompt annotates it as DISABLED so Orchestration's plan
-            matches the real phase chain.
-        framework_agent_phase_enabled: when False (``--no-framework-agent``) the
-            FRAMEWORK_AGENT phase is skipped; annotated DISABLED in the prompt.
-        objective_kind: :mod:`objective` kind string, printed verbatim.
-        objective_value: :mod:`objective` target value, printed verbatim.
-        max_minutes: wall-clock budget for the run.
-        macro_cycle: current macro-cycle counter; shown in the CYCLE DIRECTIVE
-            section.
-        cycle_directive: optional LLM-authored focus text for this cycle
-            (from ``orchestration_memory.next_cycle_directive``); empty string
-            renders the standing breadth→depth default.
-        phase: current pipeline phase; omits the modules whose behaviour it
-            cannot reach. Empty renders every module. The Coordinator rebuilds
-            the prompt at each phase seam.
-        transport: one of :data:`TRANSPORTS`, taken from the backend that will
-            actually run the role. Omits the modules describing a tool surface
-            that transport does not mount.
-        rules_fragment_path: path to ``orchestration.md``; placeholder if
-            unreadable.
-        framework_source_roots: optional framework source roots passed through
-            to the session-context section.
-        references_dir: directory of on-demand reference documents; defaults
-            to ``asset_prompt_references_dir()`` when ``None``.
-
-    Returns:
-        The composed Orchestration system prompt text.
-
-    Raises:
-        ValueError: If ``transport`` is neither empty nor one of
-            :data:`TRANSPORTS`. Raised rather than tolerated because the caller
-            builds this at start-up, and an unknown transport silently strips
-            the Output protocol instead of failing.
-    """
-    # Checked here rather than tolerated downstream: a transport nobody declares
-    # matches no `<!-- transport: ... -->` block, and both Output protocol blocks
-    # are scoped by one, so an unknown value renders a prompt that never tells
-    # the model how to answer. Nothing later in the pipeline can tell that apart
-    # from a fragment that simply had nothing to say.
+    """Compose the Orchestration system prompt (deterministic for given inputs)."""
+    # Checked here rather than tolerated downstream: a transport nobody declares matches no `<!-- transport: ... -->`
+    # block, and both Output protocol blocks are scoped by one, so an unknown value renders a prompt that never tells
+    # the model how to answer.
     if transport and transport not in TRANSPORTS:
         raise ValueError(f"unknown prompt transport {transport!r}; expected one of {', '.join(sorted(TRANSPORTS))}")
     actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
@@ -1051,8 +779,8 @@ def build_orchestration_prompt(
         and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
     ):
         sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
-    # The reference index is an index of documents ``read_reference`` pulls;
-    # without that tool it is a list the model cannot act on.
+    # The reference index is an index of documents ``read_reference`` pulls; without that tool it is a list the model
+    # cannot act on.
     if transport != TRANSPORT_STRUCTURED_OUTPUT:
         ref_index = _section_reference_index(references_dir=references_dir, phase=phase_norm)
         if ref_index:
@@ -1067,22 +795,7 @@ def default_enabled_actions(
     no_kernel: bool,
     no_optimize: bool = False,
 ) -> tuple[str, ...]:
-    """Return the canonical enabled-action set used by the CLI.
-
-    Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
-    ``--no-kernel --no-framework-agent`` run drops both kernel_agent-owned
-    names and the ``explore`` grid-runner.
-
-    Args:
-        no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
-            intersection with :data:`NO_KERNEL_AGENT_ENABLED_ACTIONS`).
-        no_optimize (bool): When ``True``, drop the ``explore`` grid-runner
-            action: the phase that dispatches it is skipped.
-
-    Returns:
-        tuple[str, ...]: The filtered enabled-action set, preserving
-        :data:`FULL_ENABLED_ACTIONS` ordering.
-    """
+    """Return the canonical enabled-action set used by the CLI."""
     actions = list(FULL_ENABLED_ACTIONS)
     if no_kernel:
         actions = [a for a in actions if a in NO_KERNEL_AGENT_ENABLED_ACTIONS]

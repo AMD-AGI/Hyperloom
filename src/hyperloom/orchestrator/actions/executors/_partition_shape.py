@@ -1,36 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The compute-partition shape a session runs in, checked once at launch.
-
-The mode is fixed for the session and established outside it. This module does
-three things with that fact, and nothing else:
-
-* **Records it.** Whatever mode the card is in becomes part of the session's
-  platform fingerprint, so a number is never filed under a topology it was not
-  measured on. Two runs of the same configuration on the same card in SPX and in
-  CPX are different experiments, and without this they are indistinguishable in
-  the history.
-* **Checks it.** A session given a mode whose partitions cannot hold the
-  workload is going to fail, and it is going to take hours to find out. The
-  arithmetic that says so costs milliseconds, so it runs at launch.
-* **Publishes it.** The benchmark entrypoint already has to fan work out across
-  partitions. It gets the shape -- mode, partition count, CU per partition,
-  streams -- so it can place work and, crucially, verify what it is running on.
-
-What it deliberately does not do is change the mode. The card must already be in
-its mode before ``optimize`` starts: this runs at launch, and the entrypoint that
-places work across partitions does not start until the first benchmark, long
-after the shape has been checked and recorded. So the apply belongs to the
-operator or the provisioning platform, not to anything downstream of here and
-not to an optimization loop running agent-authored code. Nothing here needs
-privilege.
-
-The check fails closed on the one thing it can be wrong about. If the operator
-declares an expected mode and the card cannot be read, the session is refused
-rather than run: the declaration exists precisely to catch an external set that
-did not take, and an unverifiable assertion is not a satisfied one.
-"""
+"""The compute-partition shape a session runs in, checked once at launch."""
 
 from __future__ import annotations
 
@@ -65,14 +36,7 @@ DEFAULT_STREAMS_PER_PARTITION = 2
 
 @dataclass(frozen=True)
 class ShapeVerdict:
-    """The launch-time verdict on a session's partition shape.
-
-    Attributes:
-        layout: The live topology, or ``None`` when it could not be read.
-        refusal: Why the session must not start. Empty when it may.
-        warnings: Things the operator should know that do not stop the run.
-        notes: Lines describing the shape, for the launch banner.
-    """
+    """The launch-time verdict on a session's partition shape."""
 
     layout: PartitionLayout | None = None
     refusal: str = ""
@@ -86,13 +50,7 @@ class ShapeVerdict:
 
 
 def partition_gpu_id() -> int:
-    """Return the GPU whose partition state describes this session (default 0).
-
-    An unusable value is warned about rather than quietly replaced. Reading card
-    0 in silence is the exact mislabelling this module exists to prevent: the
-    session would file card 0's topology as its own while the benchmark ran on
-    the card the operator meant to name.
-    """
+    """Return the GPU whose partition state describes this session (default 0)."""
     raw = os.environ.get(PARTITION_GPU_ENV, "").strip()
     if not raw:
         return 0
@@ -115,36 +73,7 @@ def per_stream_footprint_gib(
     params: dict[str, Any] | None = None,
     shared_state: Any = None,
 ) -> tuple[float, str]:
-    """Resolve the per-stream HBM footprint to size partitions against.
-
-    In practice today there is one source: the checkpoint's weight bytes.
-
-    * **Weights.** ``weight_bytes`` read byte-exact from the checkpoint's
-      safetensors index. A *lower bound*, and deliberately used as one: each
-      stream holds its own copy of the weights, so the true footprint is never
-      smaller. That makes a "does not fit" verdict from this source a proof and
-      a "fits" verdict no evidence at all -- which is exactly the asymmetry a
-      refusal needs, since it only ever acts on the former.
-    * **Measured.** ``peak_gib_per_stream`` would be the real footprint --
-      weights, activations and workspace -- and is the only thing that could
-      rule out a mode the weights alone fit. Nothing in this repository writes
-      it: the branch below reads it from task params and from ``current_best``
-      so a harness that starts reporting it is honoured without a change here,
-      but no in-tree producer exists, so the weights bound is what every
-      refusal is actually made on. Do not read the two bullets as a fallback
-      chain that is exercised.
-
-    Args:
-        params: Task params, consulted for an explicit override.
-        shared_state: Live SharedState, consulted for a prior measurement and
-            the model identity.
-
-    Returns:
-        ``(gib, source)``, or ``(0.0, "")`` when neither source can answer.
-        ``source`` names the origin for the message that reports a refusal,
-        since "too big by the weights alone" and "too big as measured" call for
-        different responses from an operator.
-    """
+    """Resolve the per-stream HBM footprint to size partitions against."""
     measured = (params or {}).get("peak_gib_per_stream")
     if measured is None:
         best = getattr(shared_state, "current_best", None)
@@ -154,20 +83,19 @@ def per_stream_footprint_gib(
         if measured is not None and float(measured) > 0:
             return float(measured), "measured"
     except (TypeError, ValueError):
-        # A report carrying the field as something other than a number is
-        # treated as not carrying it: fall through to the weight-bytes bound
-        # rather than fail, since the contract is "refuses nothing when the
-        # footprint is unknown" and a malformed reading is unknown.
+        # A report carrying the field as something other than a number is treated as not carrying it: fall through to
+        # the weight-bytes bound rather than fail, since the contract is "refuses nothing when the footprint is
+        # unknown" and a malformed reading is unknown.
         pass
 
     model_path = str((params or {}).get("model_path") or getattr(shared_state, "model_path", "") or "").strip()
     if not model_path:
         return 0.0, ""
-    # Params first, then state: the launch path has resolved flags but no
-    # SharedState yet, and it is the path where a refusal is worth the most.
+    # Params first, then state: the launch path has resolved flags but no SharedState yet, and it is the path where a
+    # refusal is worth the most.
     precision = str((params or {}).get("precision") or getattr(shared_state, "precision", "") or "")
-    # Lazy: the kernel package pulls in the analytical stack, and this module is
-    # imported whether a partition shape is in play or not.
+    # Lazy: the kernel package pulls in the analytical stack, and this module is imported whether a partition shape is
+    # in play or not.
     from hyperloom.orchestrator.kernel.roofline_ceiling import load_model_meta
 
     try:
@@ -190,40 +118,7 @@ def validate_session_shape(
     gpu_id: int | None = None,
     fanout_expected: bool = True,
 ) -> ShapeVerdict:
-    """Check, at launch, that this session can run in the shape it was given.
-
-    Args:
-        declared_mode: The mode the operator asserts the card is in. Empty means
-            no assertion, in which case an unreadable card is merely unrecorded
-            rather than a refusal.
-        streams: Concurrent streams intended per partition. ``None`` means the
-            caller named none and takes the default; a value below one is
-            refused, not quietly replaced by it. Tested against ``None`` rather
-            than falsiness for that reason -- ``0 or DEFAULT`` is ``DEFAULT``,
-            which would honour the one value most likely to be a mistake.
-        gpu_type: Board name, used only if the CU probe fails.
-        params: Task params, for the footprint resolution.
-        shared_state: Live SharedState, for the footprint resolution.
-        gpu_id: GPU to interrogate; defaults to the configured one.
-        fanout_expected: Whether anything in this session will actually place
-            streams on partitions. ``False`` suppresses the footprint refusal,
-            because the question it answers does not arise: see below.
-
-    Returns:
-        The verdict. ``refusal`` is non-empty only for a shape that cannot work:
-        a declared mode that does not match the card, and a workload whose
-        streams provably do not fit one partition.
-
-    The footprint check is gated on ``fanout_expected`` rather than run
-    unconditionally because "N streams share one partition" is a premise, not a
-    fact about the card. Without a fan-out, nothing puts a second stream on a
-    partition, and worse, nothing pins the benchmark to a partition at all --
-    HIP enumerates whole cards before partitions, so on a node where one card of
-    eight is split, device 0 is a *whole* card. Refusing such a session on
-    ``streams x footprint`` would be arithmetic about a shape it was never going
-    to run in. The mode is still observed, recorded and published; only the
-    refusal is withheld.
-    """
+    """Check, at launch, that this session can run in the shape it was given."""
     warnings: list[str] = []
     notes: list[str] = []
     try:
@@ -231,10 +126,9 @@ def validate_session_shape(
     except (TypeError, ValueError):
         requested_streams = 0
     if requested_streams < 1:
-        # Refused rather than defaulted, and refused before the card is touched:
-        # this is a usage error about the request, not a fact about the hardware,
-        # so it needs no probe to decide and must not differ from the CLI's own
-        # verdict on the same value.
+        # Refused rather than defaulted, and refused before the card is touched: this is a usage error about the
+        # request, not a fact about the hardware, so it needs no probe to decide and must not differ from the CLI's
+        # own verdict on the same value.
         return ShapeVerdict(
             refusal=(
                 f"streams per partition must be >= 1, got {streams!r}. One stream per "
@@ -256,8 +150,7 @@ def validate_session_shape(
                     f"set it. Drop the flag to run without the assertion."
                 ),
             )
-        # Nothing declared and nothing readable is the ordinary case on a host
-        # without amd-smi. The session runs exactly as it always has.
+        # Nothing declared and nothing readable is the ordinary case on a host without amd-smi.
         return ShapeVerdict()
 
     if declared_mode and layout.mode != declared_mode:
@@ -280,14 +173,12 @@ def validate_session_shape(
         )
 
     if not layout.partitioned:
-        # An unpartitioned card is the default and needs no further checking:
-        # one partition is the whole card, which is what every other session
-        # already assumes.
+        # An unpartitioned card is the default and needs no further checking: one partition is the whole card, which
+        # is what every other session already assumes.
         return ShapeVerdict(layout=layout, warnings=tuple(warnings), notes=tuple(notes))
 
     if not fanout_expected:
-        # Record the shape, refuse nothing. This is the card someone else left
-        # split, met by a session that will not place work per partition.
+        # Record the shape, refuse nothing.
         warnings.append(
             f"GPU {gpu} is in {layout.mode}, but nothing in this session places work on "
             f"individual partitions, so the shape is recorded and no per-partition memory "
@@ -309,10 +200,8 @@ def validate_session_shape(
         return ShapeVerdict(layout=layout, warnings=tuple(warnings), notes=tuple(notes))
 
     if not layout.capacity_known:
-        # Shares its predicate with fits_in_partition rather than testing
-        # `is None` here and falsiness there, which sent a zero capacity down
-        # opposite paths. Checked here, ahead of the arithmetic, because only
-        # this side can say so out loud.
+        # Shares its predicate with fits_in_partition rather than testing `is None` here and falsiness there, which
+        # sent a zero capacity down opposite paths.
         warnings.append(
             f"GPU {gpu} reported no usable per-partition memory, so the {footprint_gib:.1f} GiB "
             f"per stream could not be checked against a {layout.mode} partition."
@@ -349,37 +238,7 @@ def validate_session_shape(
 
 
 def runtime_env(layout: PartitionLayout, streams: int, *, fanout: bool = True) -> dict[str, str]:
-    """Build the env published at launch for the shape this session runs in.
-
-    Two readers, and they want different things, which is why ``fanout`` splits
-    the block rather than suppressing it:
-
-    * **The provenance record.** ``platform_fingerprint`` reads the observed mode,
-      partition count and CU per partition back out of here, because it is
-      written on the crash path where spawning ``amd-smi`` is not acceptable.
-      Those three describe the card and are true whatever the benchmark does, so
-      they are always published -- withholding them is how a CPX number gets
-      filed as though it were SPX, which is the failure this module exists to
-      prevent.
-    * **The fan-out instruction.** Streams per partition and the total
-      concurrency are directions to a benchmark that places work on each
-      partition. Only a scriptable entrypoint does that, so publishing them to a
-      serving session would state a concurrency nothing was going to drive.
-
-    The entrypoint is given the shape rather than a device list on purpose. HIP
-    enumerates whole cards before partitions, so an index list computed here
-    would be wrong in the one case that matters and wrong invisibly; the process
-    holding the GPU context is the one positioned to check a device's CU count
-    against :data:`PARTITION_CU_ENV` and refuse what does not match.
-
-    Args:
-        layout: The observed topology.
-        streams: Streams to place on each partition.
-        fanout: Whether this session's benchmark places work per partition.
-
-    Returns:
-        Env mapping for the benchmark process.
-    """
+    """Build the env published at launch for the shape this session runs in."""
     streams = max(1, int(streams))
     env = {
         PARTITION_MODE_ENV: layout.mode,
@@ -398,24 +257,7 @@ def session_shape_summary(
     *,
     fanout_expected: bool = True,
 ) -> dict[str, Any]:
-    """Summarize the session's partition shape for the report and the manifest.
-
-    A layout is required. An unknown shape is ``{}`` at the call site, not a
-    record of zeroes here: this used to accept ``None`` and answer with a
-    four-key mapping missing ``cu_probed``, ``gib_per_partition`` and
-    ``fanout_expected``, so a consumer that met it saw a second schema for the
-    same field -- one whose absent provenance key reads as a positive claim.
-
-    Args:
-        layout: The observed topology.
-        streams: Streams placed on each partition.
-        fanout_expected: Whether this session's benchmark places work on each
-            partition. Recorded because it decides whether the throughput can be
-            an aggregate at all, which the report has to state and cannot infer.
-
-    Returns:
-        A JSON-safe mapping, always carrying every key.
-    """
+    """Summarize the session's partition shape for the report and the manifest."""
     return {
         "mode": layout.mode,
         "partitions": layout.partitions,

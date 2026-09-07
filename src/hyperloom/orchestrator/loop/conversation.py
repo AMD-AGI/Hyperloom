@@ -23,8 +23,8 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# Per-variant failure lines expanded by get_recent_outcomes, and the total cap
-# that keeps a wide top_k from flooding the turn.
+# Per-variant failure lines expanded by get_recent_outcomes, and the total cap that keeps a wide top_k from flooding
+# the turn.
 _RECENT_OUTCOMES_VARIANT_ROWS = 12
 _RECENT_OUTCOMES_LINE_CAP = 120
 
@@ -39,44 +39,16 @@ class ConversationCollaborator:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _orchestration_conversational(self) -> bool:
-        """True when the orchestration backend runs in persistent-conversation mode.
-
-        Returns:
-            ``True`` if the orchestration backend exposes a truthy
-            ``conversational`` attribute, else ``False``.
-        """
+        """True when the orchestration backend runs in persistent-conversation mode."""
         backend = self.backends.get("orchestration")
         return bool(getattr(backend, "conversational", False))
 
     def _orchestration_context_tools_mounted(self) -> bool:
-        """True when the orchestration backend really exposes the pull tools.
-
-        Returns:
-            ``True`` when the backend reports the read-only context tools live;
-            backends without them (and a failed MCP build) report ``False``.
-        """
+        """True when the orchestration backend really exposes the pull tools."""
         return bool(getattr(self.backends.get("orchestration"), "context_tools_mounted", False))
 
     def _orchestration_needs_seed(self, system_prompt: str | None = None) -> bool:
-        """True when the orchestration backend lost the history a delta assumes.
-
-        Only the backend knows when the conversation underneath it was
-        replaced — a session-scoped provider re-opens its thread on a re-scoped
-        system prompt or after a turn that never landed. Backends that keep no
-        conversation report nothing and the seeded flag alone decides.
-
-        The answer has to describe the turn that is *about* to run: a re-scoped
-        system prompt replaces the thread inside the turn, so a backend asked
-        only about the thread as it stands would report history that this turn is
-        going to discard. ``needs_seed_for`` answers for the pending prompt;
-        ``needs_seed`` is the fallback for backends that cannot.
-
-        Args:
-            system_prompt: The system prompt this turn will carry, when known.
-
-        Returns:
-            ``True`` when the backend reports a conversation with no history.
-        """
+        """True when the orchestration backend lost the history a delta assumes."""
         backend = self.backends.get("orchestration")
         ask = getattr(backend, "needs_seed_for", None)
         if callable(ask):
@@ -95,24 +67,13 @@ class ConversationCollaborator:
         self._coord._orchestration_seeded = False
 
     def _count_prompt_mode(self, mode: str) -> None:
-        """Tally one orchestration prompt push as SEED or DELTA.
-
-        Args:
-            mode: ``"seed"`` or ``"delta"``.
-        """
+        """Tally one orchestration prompt push as SEED or DELTA."""
         census = dict(self.shared_state.orchestration_prompt_modes or {})
         census[mode] = int(census.get(mode, 0)) + 1
         self.shared_state.orchestration_prompt_modes = census
 
     def _conversation_progress_signal(self) -> dict[str, Any]:
-        """Compute the no-progress circuit-breaker signal.
-
-        Returns:
-            A dict with ``ticks_without_progress``, ``threshold``,
-            ``severity`` ("ok" or "high"), and ``last_progress_tick``;
-            progress is detected from stack growth, validated gain,
-            current-best signature, or phase change.
-        """
+        """Compute the no-progress circuit-breaker signal."""
         state = self.shared_state
         cur_tick = int(getattr(state, "tick", 0) or 0)
         try:
@@ -205,16 +166,7 @@ class ConversationCollaborator:
         return candidate.read_text(encoding="utf-8")
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
-        """Synchronous projection of the orchestration inbox tail (sync SQLite path).
-
-        Args:
-            since_seq: Only events with a sequence number greater than this are
-                included; defaults to ``0`` (all events).
-
-        Returns:
-            A newline-joined rendering of all matching inbox events, or
-            a placeholder string when none are available.
-        """
+        """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
         try:
             rows = self.bus.db.fetchall_sync(
                 "SELECT * FROM events WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq ASC",
@@ -230,16 +182,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
-        """Synchronous projection of recent action outcomes.
-
-        Args:
-            top_k: Number of recent outcome events to project; clamped to the
-                range 1..50 (defaults to 8).
-
-        Returns:
-            A newline-joined, chronological (newest-last) rendering of recent
-            delegated_result/review_verdict events, or a placeholder string.
-        """
+        """Synchronous projection of recent action outcomes."""
         try:
             k = max(1, min(int(top_k or 8), 50))
         except (TypeError, ValueError):
@@ -270,12 +213,7 @@ class ConversationCollaborator:
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
-        """Synchronous projection of in-flight tasks with their held resources.
-
-        Returns:
-            One line per running task carrying elapsed time, lease expiry, held
-            lanes, leased GPUs and heartbeat age, or a placeholder string.
-        """
+        """Synchronous projection of in-flight tasks with their held resources."""
         try:
             rows = self.bus.db.fetchall_sync(
                 "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
@@ -339,19 +277,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
-        """Age of a specialist's freshest liveness file, mirroring the reaper.
-
-        The reap loop treats either ``heartbeat.json`` or ``process.log`` as
-        proof of life; this reports the same signal.
-
-        Args:
-            task: The running task to probe.
-            now_unix: Current wall-clock epoch seconds.
-
-        Returns:
-            Seconds since the most recent liveness write, or ``None`` when no
-            workspace file is readable.
-        """
+        """Age of a specialist's freshest liveness file, mirroring the reaper."""
         if (task.kind or "").strip() != "specialist":
             return None
         ws = runs_dir(self.session_dir, "specialist", task.task_id)
@@ -367,12 +293,7 @@ class ConversationCollaborator:
         return max(0.0, now_unix - newest)
 
     def _context_analysis_reader(self) -> str:
-        """Return the latest TraceLens analysis.md snapshot text.
-
-        Returns:
-            The formatted analysis.md snapshot, the text read from the recorded
-            ``analysis_md_path``, or a placeholder when none is available.
-        """
+        """Return the latest TraceLens analysis.md snapshot text."""
         try:
             blob = self.shared_state._format_analysis_md_full()
             if blob and blob.strip():
@@ -396,18 +317,7 @@ class ConversationCollaborator:
         agent_name: str,
         result: BackendTurnResult,
     ) -> None:
-        """Append one ``conversations.jsonl`` row for a reactor turn.
-
-        Persists the full (redacted) prompt + completion from the backend
-        ``metadata`` (``prompt`` / ``response``). Only rows that carry
-        conversation text are written. Best-effort: any failure degrades to a
-        logged warning rather than breaking the tick loop.
-
-        Args:
-            agent_name: The reactor role; doubles as trace component and role.
-            result: The backend turn result whose metadata carries the redacted
-                prompt/response text.
-        """
+        """Append one ``conversations.jsonl`` row for a reactor turn."""
         try:
             metadata = result.metadata or {}
             prompt = metadata.get("prompt")
@@ -417,8 +327,8 @@ class ConversationCollaborator:
             record = ConversationRecord(
                 session_id=self.session_dir.name,
                 component=agent_name,
-                # Same turn metadata the token row is built from, so both halves
-                # carry the backend's call_id when it stamped one.
+                # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
+                # stamped one.
                 call_id=metadata.get("call_id"),
                 role=agent_name,
                 tick=int(self.shared_state.tick or 0),
@@ -436,18 +346,7 @@ class ConversationCollaborator:
             )
 
     async def _compose_prompt(self, agent_name: str, *, system_prompt: str | None = None) -> str:
-        """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row).
-
-        Args:
-            agent_name: The agent role to compose the per-tick prompt for;
-                selects which advisory/telemetry sections are included.
-            system_prompt: The system prompt the turn will carry. The SEED/DELTA
-                gate needs it because a re-scoped prompt empties the backend's
-                conversation inside the turn this prompt is being built for.
-
-        Returns:
-            The assembled prompt string for this agent's reactor turn.
-        """
+        """Compose the orchestration prompt: SharedState summary + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
 
         # SESSION_DIR contract — literal path for every agent.
@@ -668,10 +567,7 @@ class ConversationCollaborator:
                 sections.append("=== Acceptance threshold (advisory) ===")
                 sections.append(accept_block)
 
-        # Conversational DELTA turn: tell the agent verbose state was not
-        # re-pushed. Where to find it depends on what the backend mounted —
-        # pointing a tool-less session at the context tools is an instruction
-        # it cannot follow, and the state is still in its conversation anyway.
+        # Conversational DELTA turn: tell the agent verbose state was not re-pushed.
         if agent_name == "orchestration" and not push_full:
             preamble = (
                 "This is a continuation of our ongoing conversation; the "
@@ -697,17 +593,6 @@ class ConversationCollaborator:
                 )
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
-        # This prompt renders only on an agent's own turn, and a turn only
-        # comes around between blocking actions — so a running specialist is
-        # exactly what the agent is waiting on and is structurally absent from
-        # any snapshot taken here. Measured over a full 11.6h session: 33
-        # renders, 0 of them overlapped a live specialist, while specialists
-        # held 41% of the wall clock. A block that always reports "none
-        # running" is worse than no block, because it manufactures a false
-        # belief. In-flight specialists reach the agent through
-        # ``specialist_progress`` observations (pushed from the reap loop,
-        # independent of turn timing) and are verified on demand with
-        # ``get_running_tasks``.
 
         # Robustness gets phase budget telemetry for medium-severity alerts.
         if agent_name == "robustness":
@@ -769,12 +654,7 @@ class ConversationCollaborator:
         return "\n".join(sections)
 
     async def _advance_rendered_cursor(self, agent_name: str) -> None:
-        """Advance an agent's read cursor to the last message its prompt rendered.
-
-        Args:
-            agent_name: The agent whose cursor to advance; a no-op when its
-                last composed prompt carried no new messages.
-        """
+        """Advance an agent's read cursor to the last message its prompt rendered."""
         entry = self._coord._rendered_cursor.get(agent_name)
         if entry is None:
             return
@@ -782,21 +662,7 @@ class ConversationCollaborator:
         await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
-        """Ensure every undecided proposal awaiting a Critic verdict is present.
-
-        A rendered proposal whose verdict has not yet arrived will not appear in
-        the next inbox because the cursor has legitimately moved past it. Source
-        the review set from the durable ``pending_proposals`` registry and merge
-        any missing proposal messages into the rendered window (deduped by
-        ``msg_id``, re-sorted by ``seq`` so "newest last" holds).
-
-        Args:
-            rendered: The messages selected for the inbox.
-
-        Returns:
-            The rendered list augmented with any undecided proposal messages
-            not already present; unchanged on any error (best-effort).
-        """
+        """Ensure every undecided proposal awaiting a Critic verdict is present."""
         try:
             pending = [p for p in self.state.pending_proposals.values() if not getattr(p, "decided", False)]
         except Exception:  # noqa: BLE001 — never break prompt composition
@@ -823,16 +689,7 @@ class ConversationCollaborator:
         return merged
 
     async def _load_system_prompt(self, agent_name: str) -> str:
-        """Load the system prompt for an agent, honoring overrides.
-
-        Args:
-            agent_name: Name of the agent/role whose prompt to load.
-
-        Returns:
-            The override prompt if configured, ``""`` for roles that are not
-            prompt-driven, the role's prompt file contents, or a placeholder
-            string when the file is missing.
-        """
+        """Load the system prompt for an agent, honoring overrides."""
         override = getattr(self, "system_prompt_overrides", {}).get(agent_name)
         if override is not None:
             return override
@@ -845,21 +702,8 @@ class ConversationCollaborator:
             return f"(no system prompt for {agent_name})"
 
     # Advisory prompt blocks (folded in from the former AdvisoryCollaborator).
-    # Consumed by :meth:`_compose_prompt` above and by the phase handlers via the
-    # coordinator's bare-name ``_DELEGATED`` resolution.
     def _plateau_advisory_block(self) -> str:
-        """Render the plateau-judgment advisory block for the current phase.
-
-        In the optimisation phase both arms are always reported: the phase
-        leaves only when both are dry, so naming one alone would say "plateau"
-        about a phase still paying on the other lever. Both dry advances to
-        KERNEL_AGENT via ``optimize_no_more_leverage`` (a non-terminal lever
-        switch); a KERNEL plateau is advisory only.
-
-        Returns:
-            The rendered plateau advisory text, or ``""`` when no plateau
-            signal is active for the current phase.
-        """
+        """Render the plateau-judgment advisory block for the current phase."""
         state = self.shared_state
         phase = (getattr(state, "phase", "") or "").strip().upper()
         overrides = getattr(state, "plateau_overrides", None) or {}
@@ -867,9 +711,8 @@ class ConversationCollaborator:
             overrides = {}
         lines: list[str] = []
         if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            # Both arms, always: the phase leaves only when both are dry, so
-            # reporting one alone would say "plateau" about a phase that is
-            # still paying on the other lever.
+            # Both arms, always: the phase leaves only when both are dry, so reporting one alone would say "plateau"
+            # about a phase that is still paying on the other lever.
             config_dry, config_ev = _phase_state.compute_plateau_explore(
                 state,
                 lookback=int(
@@ -956,13 +799,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
-        """Return ``(direction, pct)`` for the most-saturated roofline direction
-        in the latest snapshot; ``("", 0.0)`` when no snapshot is available.
-
-        Returns:
-            A ``(direction, pct)`` tuple for the dominant roofline direction, or
-            ``("", 0.0)`` when no snapshot exists.
-        """
+        """Return ``(direction, pct)`` for the most-saturated roofline direction"""
         from ..kernel.roofline_snapshot import dominant_direction
 
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
@@ -971,17 +808,7 @@ class ConversationCollaborator:
         return dominant_direction(snaps[-1])
 
     def _bottleneck_redirect_advisory_block(self) -> str:
-        """Render the R3 cyclic bottleneck-redirect advisory (optimisation phase only).
-
-        Applies when a prior cycle's plateau flagged
-        ``pending_bottleneck_switch``. Names the bottleneck we plateaued on, the
-        current dominant roofline direction, and a suggested specialist domain so
-        Orchestration redirects the new cycle's dispatch. Advisory, never gates.
-
-        Returns:
-            The rendered bottleneck-redirect advisory text, or ``""`` when not
-            applicable.
-        """
+        """Render the R3 cyclic bottleneck-redirect advisory (optimisation phase only)."""
         state = self.shared_state
         if (getattr(state, "phase", "") or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return ""
@@ -1044,15 +871,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _acceptance_threshold_advisory_block(self) -> str:
-        """Render the decaying acceptance bar and prior measured gains as evidence.
-
-        Active only in cyclic mode after at least one macro-cycle. Shows the
-        current KEEP threshold and lists prior measured results above and below
-        it for decision context; the results never gate re-submission.
-
-        Returns:
-            The rendered advisory text, or ``""`` when not applicable.
-        """
+        """Render the decaying acceptance bar and prior measured gains as evidence."""
         state = self.shared_state
         keep = _phase_state.resolve_keep_threshold(state)
         cycle = int(getattr(state, "macro_cycle", 0) or 0)
@@ -1094,12 +913,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _target_gap_advisory_block(self) -> str:
-        """Build the advisory "External target gap" prompt block (current-best vs competitor target; never gates).
-
-        Returns:
-            The rendered external-target-gap advisory text, or ``""`` when
-            disabled or no competitor target/current-best is available.
-        """
+        """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return ""
@@ -1126,12 +940,7 @@ class ConversationCollaborator:
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
-        """Resolve the dominant external gap direction ('latency'/'throughput') from the competitor target, or None when advisory is off / no target. Fail-soft.
-
-        Returns:
-            The primary gap direction string, or ``None`` when the advisory is
-            off, no target exists, or analysis fails.
-        """
+        """Resolve the dominant external gap direction ('latency'/'throughput') from the competitor target, or None when advisory is off / no target. Fail-soft."""
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return None
@@ -1167,15 +976,7 @@ class ConversationCollaborator:
         *,
         max_rounds: int = 2,
     ) -> list[dict[str, Any]]:
-        """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft).
-
-        Args:
-            max_rounds: Number of most-recent specialist rounds to scan
-                (default 2).
-
-        Returns:
-            A name-deduped list of proposal variant dicts.
-        """
+        """Collect proposal_set rows from the most recent specialist rounds (deduped by name; fail-soft)."""
         rounds = [
             r
             for r in (getattr(self.shared_state, "specialist_rounds", []) or [])
@@ -1194,12 +995,7 @@ class ConversationCollaborator:
         return out
 
     def _research_scout_seed_block(self) -> str:
-        """Render the persisted research-scout findings for an Orchestration SEED.
-
-        The scout's executable proposals are not rendered here: they go through
-        ``=== Untested proposals (current cycle) ===`` alongside every other
-        domain's, which also drops the ones already benched.
-        """
+        """Render the persisted research-scout findings for an Orchestration SEED."""
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
@@ -1232,12 +1028,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft).
-
-        Returns:
-            The rendered priors-match advisory text, or ``""`` when there are no
-            recent variants or rendering fails.
-        """
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
         try:
             from ..knowledge import research_hints as _research_hints
 

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE phase handler for section-based Recipe replay and initial analysis.
-
-Merges Explore, Framework, and Kernel AgentKB snapshots, applies their ordered
-patch timeline, and enqueues the baseline/roofline internal-analysis tasks.
-"""
+"""PRELUDE phase handler for section-based Recipe replay and initial analysis."""
 
 from __future__ import annotations
 import logging as _logging
@@ -34,11 +30,8 @@ from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
 
-# The ``parse_eval_results`` reasons that prove an eval produced output: a
-# results file it could not decode, and one carrying no metric it recognises.
-# Every other reason -- no file at all, or the parser itself raising -- leaves
-# no evidence the eval ran, and calling those "ran" makes an infrastructure
-# fault read as a model that answered nothing.
+# The ``parse_eval_results`` reasons that prove an eval produced output: a results file it could not decode, and one
+# carrying no metric it recognises.
 _EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
 
 
@@ -100,12 +93,7 @@ def _merge_named_current_recipe_configs(
 
 
 def _recorded_apply_roots(provenance: Any) -> dict[str, str]:
-    """Map each overlay ref to the checkout the record says it was applied into.
-
-    Per ref rather than per record: a session can KEEP a patch against the
-    framework tree and another against a sibling one, and each is replayable
-    against the tree it came from.
-    """
+    """Map each overlay ref to the checkout the record says it was applied into."""
     roots: dict[str, str] = {}
     for row in provenance or []:
         if not isinstance(row, Mapping):
@@ -122,13 +110,7 @@ def _recorded_apply_roots(provenance: Any) -> dict[str, str]:
 
 
 def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]:
-    """Summarise how the overlays this replay is about to apply were captured.
-
-    Recorded on the outcome so a reader can tell an overlay set that reproduces
-    its session from one that never could: a capture that could not account for
-    every path, or a KEEP whose gain partly landed outside the framework root,
-    is a known gap rather than a clean replay.
-    """
+    """Summarise how the overlays this replay is about to apply were captured."""
 
     def _count(value: Any) -> int:
         try:
@@ -152,11 +134,7 @@ class PreludePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _internal_analysis_kind(self) -> str:
-        """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile.
-
-        Returns:
-            ``"roofline"`` when roofline is enabled, else ``"profile"``.
-        """
+        """Pick the kind for the next Coordinator-internal analysis task: roofline when enable_roofline else profile."""
         return (
             "roofline"
             if bool(
@@ -166,18 +144,7 @@ class PreludePhase(PhaseHandler):
         )
 
     def _measured_analysis_cost_sec(self) -> float:
-        """Expected cost of the initial roofline/profile arm, in seconds.
-
-        The analysis arm boots its own server and runs the same benchmark under
-        a profiler, so one measured baseline round is a floor on its cost rather
-        than a guess at it; :func:`expected_action_cost_minutes` applies that
-        floor and falls back to the catalog for the first analysis of a session
-        that has no measurement yet.
-
-        Returns:
-            float: Expected cost in seconds; ``0.0`` when nothing is on record,
-            which :func:`machine_state.prelude_can_afford` reads as free.
-        """
+        """Expected cost of the initial roofline/profile arm, in seconds."""
         registry = getattr(self, "action_registry", None)
         meta = registry.get(self._internal_analysis_kind()) if registry is not None else None
         return (
@@ -189,16 +156,7 @@ class PreludePhase(PhaseHandler):
         )
 
     def _record_prelude_arm_dropped(self, arm: str, evidence: dict[str, Any]) -> None:
-        """Record a PRELUDE arm dropped for budget on the current phase record.
-
-        The phase record is what the session breakdown exports, so a dropped
-        arm reads as a decision with numbers behind it rather than as an arm
-        that silently never ran.
-
-        Args:
-            arm: The arm that was dropped.
-            evidence: The affordability numbers behind the decision.
-        """
+        """Record a PRELUDE arm dropped for budget on the current phase record."""
         if not _phase_state.append_phase_evidence_row(
             getattr(self.shared_state, "phase_history", None),
             key="budget_dropped_arms",
@@ -211,12 +169,7 @@ class PreludePhase(PhaseHandler):
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
-        """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft.
-
-        Returns:
-            A list of ``{"name", "source"}`` dicts for proven warm-start items;
-            empty when no warm recipe is present.
-        """
+        """Summarise warm-start ``what_worked`` items the scout can skip ({name, source}); fail-soft."""
         state = self.shared_state
         warm = getattr(state, "warm_start_recipe", None) or {}
         if not isinstance(warm, dict) or not warm:
@@ -240,11 +193,7 @@ class PreludePhase(PhaseHandler):
         return out
 
     def _inject_warm_recipe_history_into_ledger(self) -> int:
-        """Pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added.
-
-        Returns:
-            The number of new rejected rows injected into the explore ledger.
-        """
+        """Pre-fill ``explore_search.rejected`` with the warm recipe's ``what_failed`` rows (fingerprinted so the dedup gate denies re-tests). Idempotent via warm_history_injected; returns rows added."""
         state = self.shared_state
         if getattr(state, "warm_history_injected", False):
             return 0
@@ -315,14 +264,7 @@ class PreludePhase(PhaseHandler):
         return added
 
     def _collect_warm_kernel_plan(self, kb: Any) -> list[dict[str, Any]]:
-        """Resolve the prior-champion kernel columns into a local apply plan.
-
-        Reads the ``gemm``/``fusion``/``rewrite`` sub-columns the warm-start
-        download provided, resolves every recorded file ref to its downloaded
-        copy via ``KernelAgentKB.prior_file``, and returns one plan entry per
-        item carrying the local Patch or tuned artifact plus non-file metadata.
-        Refs that do not resolve are dropped.
-        """
+        """Resolve the prior-champion kernel columns into a local apply plan."""
         readers = (
             ("gemm", kb.read_gemm, "optimizations"),
             ("fusion", kb.read_fusion, "items"),
@@ -357,8 +299,8 @@ class PreludePhase(PhaseHandler):
                     )
                 }
                 entry: dict[str, Any] = {"column": column, "meta": meta}
-                # Preserve the exact Recipe row so CLOSE can carry the validated
-                # kernel content and its refs forward on the same inference page.
+                # Preserve the exact Recipe row so CLOSE can carry the validated kernel content and its refs forward
+                # on the same inference page.
                 entry["recipe_row"] = {
                     key: value
                     for key, value in row.items()
@@ -371,9 +313,7 @@ class PreludePhase(PhaseHandler):
                         "target_path",
                     }
                 }
-                # The checkout this item was applied into. Replay places the
-                # patch there and nowhere else, so an item that records none is
-                # not replayable and says so rather than being searched for.
+                # The checkout this item was applied into.
                 host_origin = row.get(HOST_ORIGIN_KEY)
                 if isinstance(host_origin, Mapping):
                     entry["apply_root"] = str(host_origin.get("apply_root") or "").strip()
@@ -407,12 +347,7 @@ class PreludePhase(PhaseHandler):
 
     @classmethod
     def _parse_diff_target(cls, patch_path: str | None) -> str:
-        """Return the shared parser's first safe repo-relative Patch target.
-
-        Modify/delete/create targets come from paired pre/post-image headers;
-        mode-only and metadata-only rename patches fall back to ``diff --git``.
-        No persisted target metadata participates.
-        """
+        """Return the shared parser's first safe repo-relative Patch target."""
         targets = cls._parse_diff_targets(patch_path)
         return targets[0] if targets else ""
 
@@ -422,13 +357,7 @@ class PreludePhase(PhaseHandler):
         return targets[0] if targets else ""
 
     def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
-        """Resolve every declared Patch target under the Session active root.
-
-        Existing pre-images must be files, create destinations must be absent,
-        and resolved paths must remain beneath the root. Any read, parse, root,
-        boundary, or file-state failure records ``entry['resolution_error']``
-        and emits a warning before replay is deferred.
-        """
+        """Resolve every declared Patch target under the Session active root."""
 
         def reject(reason: str, *, code: str = "") -> list[str]:
             entry["resolution_error"] = reason
@@ -444,9 +373,7 @@ class PreludePhase(PhaseHandler):
             parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
         except (OSError, ValueError) as exc:
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
-        # The recorded root is the only answer. Searching an allowlist for a
-        # tree the diff happens to fit would replay against code the gain was
-        # never measured on, and a record naming no root is simply broken.
+        # The recorded root is the only answer.
         root_value = str(entry.get("apply_root") or "").strip().rstrip("/")
         if not root_value:
             return reject(
@@ -482,18 +409,7 @@ class PreludePhase(PhaseHandler):
 
     @staticmethod
     def _warm_kernel_extra_envs(entry: dict[str, Any]) -> dict[str, str]:
-        """Rebuild a champion's env bundle against this run's downloaded files.
-
-        A champion's deliverable is not always a source file. GEMM is purely
-        parameter-shaped — the tuned table travels as a file ref and the env var
-        that carries it is recorded per accepted tuner in
-        ``e2e_results.kept[].env_var`` — and a fusion carries the env switches
-        (``extra_envs``/``env_flags``) that turn the fused path on. Applying the
-        patch without them re-measures the unoptimized path and reverts a good
-        champion, so replay merges every recorded env and re-points any
-        file-valued one at this run's local copy (the producing session's
-        absolute paths are scrubbed before publish).
-        """
+        """Rebuild a champion's env bundle against this run's downloaded files."""
         meta = entry.get("meta") or {}
         local = [str(p) for p in (entry.get("source_paths") or []) if p]
         envs: dict[str, str] = {}
@@ -524,19 +440,14 @@ class PreludePhase(PhaseHandler):
             env_var = str(tuner.get("env_var") or "").strip()
             if not env_var:
                 continue
-            # Each accepted tuner owns its own table, so match by the recorded
-            # value's filename. Pointing every tuner at the first download would
-            # feed a dense tuner the MoE table (or vice versa) whenever a record
-            # carries more than one.
+            # Each accepted tuner owns its own table, so match by the recorded value's filename.
             recorded = str(tuner.get("env_value") or envs.get(env_var) or "").strip()
             local_copy = by_name.get(Path(recorded).name) if recorded else None
             if local_copy is None and len(local) == 1:
                 local_copy = local[0]
             if local_copy:
                 envs[env_var] = local_copy
-        # Re-point any other var that still names a file we downloaded. Only
-        # path-shaped values qualify, so a flag like "1" or "candidate" whose
-        # text happens to match a filename is left alone.
+        # Re-point any other var that still names a file we downloaded.
         for name, value in list(envs.items()):
             if not value or "/" not in value:
                 continue
@@ -546,13 +457,7 @@ class PreludePhase(PhaseHandler):
         return envs
 
     def _apply_warm_kernel_patch(self, entry: dict[str, Any], target: str) -> dict[str, Any]:
-        """Land one champion's file on disk without measuring it.
-
-        The measurement is deliberately not here: a champion set is applied as a
-        batch and graded by a single re-baseline, so this only stages the file
-        (with a backup manifest that :meth:`_revert_warm_kernel_patches` uses to
-        roll the whole set back when the set does not win).
-        """
+        """Land one champion's file on disk without measuring it."""
         from ..kernel.request_handlers import (
             _maybe_apply_kernel_patch,
             materialize_unified_patch_snapshot,
@@ -705,12 +610,7 @@ class PreludePhase(PhaseHandler):
         }
 
     def _warm_kernel_gate_reason(self) -> str:
-        """Why this run must not replay kernel champions, or '' when allowed.
-
-        Mirrors the gates the recipe warm-replay honours: an operator opt-out,
-        an explicitly disabled KB, and local knowledge mode — which must never
-        consult ambient ``KB_STORE_*`` credentials.
-        """
+        """Why this run must not replay kernel champions, or '' when allowed."""
         if not getattr(self, "_warm_replay_enabled", True):
             return "warm_replay_disabled"
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
@@ -737,18 +637,7 @@ class PreludePhase(PhaseHandler):
         roots: Sequence[str] = (),
         rollback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Record why warm replay stopped, naming the roots the record asked for.
-
-        Args:
-            reason: The resolution failure to surface in SBD.
-            root_kind: ``framework`` or ``kernel``; names the reported keys.
-            roots: The recorded roots that could not be used, for a reader
-                diagnosing a record produced on another image.
-            rollback: Outcome of undoing patches already applied, when any were.
-
-        Returns:
-            The ``warm_replay_outcome`` mapping.
-        """
+        """Record why warm replay stopped, naming the roots the record asked for."""
         outcome: dict[str, Any] = {
             "status": ("skipped" if rollback is None or rollback.get("ok") else "rollback_failed"),
             "reason": reason,
@@ -763,17 +652,12 @@ class PreludePhase(PhaseHandler):
         self,
         state: Any,
     ) -> dict[str, Any] | None:
-        """Skip combined warm replay when a kernel item's recorded root is unusable.
-
-        A persisted plan may be restored on resume under a different image, so
-        every recorded root is re-checked here rather than trusted from when the
-        plan was built.
-        """
+        """Skip combined warm replay when a kernel item's recorded root is unusable."""
         for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
             if not isinstance(entry, dict):
                 continue
-            # gemm is parameter-shaped: it re-points env vars at downloaded files
-            # and never patches a checkout, so it has no root to resolve.
+            # gemm is parameter-shaped: it re-points env vars at downloaded files and never patches a checkout, so it
+            # has no root to resolve.
             if entry.get("column") == "gemm":
                 continue
             if not str(entry.get("patch_path") or "").strip():
@@ -827,13 +711,7 @@ class PreludePhase(PhaseHandler):
         return {"extra_server_args": args, "extra_envs": envs}
 
     async def _prepare_warm_kernel_kb(self, kb: Any = None) -> dict[str, Any]:
-        """Prepare the Recipe's kernel section for the combined replay benchmark.
-
-        This method never benchmarks. It stages Fusion/Rewrite files, resolves
-        GEMM/env inputs, and returns the merged launch overlay plus rollback
-        manifests. The one ``replay_warm_recipe`` task grades Recipe and Kernel
-        together.
-        """
+        """Prepare the Recipe's kernel section for the combined replay benchmark."""
         state = self.shared_state
         if getattr(state, "warm_kernel_kb_attempted", False):
             return {"status": "skipped", "reason": "already_attempted"}
@@ -841,8 +719,8 @@ class PreludePhase(PhaseHandler):
         if gated:
             return self._set_warm_kernel_outcome({"status": "skipped", "reason": gated})
         state.warm_kernel_kb_attempted = True
-        # Persist the one-shot flag now: a crash mid-replay must not re-run the
-        # whole (potentially hour-long) set on resume.
+        # Persist the one-shot flag now: a crash mid-replay must not re-run the whole (potentially hour-long) set on
+        # resume.
         try:
             state.save(self.session_dir)
         except Exception as exc:  # noqa: BLE001
@@ -929,13 +807,12 @@ class PreludePhase(PhaseHandler):
                 entry["decision"] = "DEFERRED"
                 deferred += 1
                 continue
-            # Every column carries its env bundle: a fusion needs its switches to
-            # activate the patched path, and a GEMM is nothing but its bundle.
+            # Every column carries its env bundle: a fusion needs its switches to activate the patched path, and a
+            # GEMM is nothing but its bundle.
             envs = prepared_envs.get(index, {})
             if envs:
                 entry["extra_envs"] = envs
-            # GEMM is parameter-shaped: its env bundle is the whole deliverable,
-            # so there is nothing to stage on disk.
+            # GEMM is parameter-shaped: its env bundle is the whole deliverable, so there is nothing to stage on disk.
             if entry.get("column") == "gemm":
                 if not envs:
                     entry["decision"] = "DEFERRED"
@@ -1130,8 +1007,7 @@ class PreludePhase(PhaseHandler):
                 ("kernel", kernel_config),
             ]
         )
-        # The column records its overlays in replay order, so the recorded
-        # order is the order they are applied in.
+        # The column records its overlays in replay order, so the recorded order is the order they are applied in.
         timeline = patch_kb.read_patches()
         if len(timeline) != len(set(timeline)):
             raise ValueError("current Recipe patch refs contain a duplicate")
@@ -1150,8 +1026,8 @@ class PreludePhase(PhaseHandler):
                 "required": True,
                 "timeline_index": index,
             }
-            # Each overlay carries the checkout it was applied into, so a Recipe
-            # whose KEEPs came from different trees replays against each of them.
+            # Each overlay carries the checkout it was applied into, so a Recipe whose KEEPs came from different trees
+            # replays against each of them.
             if recorded_root := apply_roots.get(ref, ""):
                 entry["framework_root"] = recorded_root
             patches.append(entry)
@@ -1172,28 +1048,15 @@ class PreludePhase(PhaseHandler):
         *,
         baseline_tput: float,
     ) -> "Task | None":
-        """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior.
-
-        Skips on --no-warm-replay/resume/low-confidence/empty best_config; otherwise
-        mints an internal task running the baseline workload contract with the KB
-        config applied. Idempotent via warm-replay-prelude.
-
-        Args:
-            baseline_tput: The baseline throughput captured at enqueue time,
-                carried forward as the replay's comparison anchor.
-
-        Returns:
-            The created (or existing) ``replay_warm_recipe`` task, or ``None``
-            when the replay is skipped.
-        """
+        """Enqueue a one-shot ``replay_warm_recipe`` task for a high-confidence T0 prior."""
         state = self.shared_state
         if not getattr(self, "_warm_replay_enabled", True):
             state.warm_replay_outcome = {
                 "status": "skipped",
                 "reason": "disabled_by_flag",
             }
-            # Flip the one-shot guard even on disabled-skip so a resume without --no-warm-replay can't
-            # retroactively trigger a replay against the operator's original intent.
+            # Flip the one-shot guard even on disabled-skip so a resume without --no-warm-replay can't retroactively
+            # trigger a replay against the operator's original intent.
             state.warm_replay_attempted = True
             return None
         if state.warm_replay_attempted:
@@ -1226,10 +1089,7 @@ class PreludePhase(PhaseHandler):
                 state.save(self.session_dir)
                 return None
             if patch_entries := list(sdk_replay.get("patches") or []):
-                # Every overlay names the checkout it was measured on. One that
-                # does not is a broken record, not a case to search a tree for:
-                # any tree found that way is one this gain was never measured
-                # against. The whole replay is skipped, never part of it.
+                # Every overlay names the checkout it was measured on.
                 recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
                 if not all(recorded):
                     state.warm_replay_attempted = True
@@ -1379,8 +1239,8 @@ class PreludePhase(PhaseHandler):
             if replay.get(field) not in (None, "", [])
         }
         recipe_suppressed = False
-        # Low-confidence config/patch content is suppressed, but the kernel
-        # section from the same Recipe can still receive a combined check.
+        # Low-confidence config/patch content is suppressed, but the kernel section from the same Recipe can still
+        # receive a combined check.
         if replay_conf < min_conf:
             if kernel_pending:
                 recipe_suppressed = True
@@ -1418,9 +1278,8 @@ class PreludePhase(PhaseHandler):
             wsc_patches = []
             required_patch_timeline = False
         if wsc_patches:
-            # Re-checked here because a persisted plan may be resumed under a
-            # different image, and because the kernel half is already applied by
-            # now: a root that has since gone means unwinding that too.
+            # Re-checked here because a persisted plan may be resumed under a different image, and because the kernel
+            # half is already applied by now: a root that has since gone means unwinding that too.
             recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in wsc_patches]
             unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
             if not all(recorded_roots) or unusable:
@@ -1461,8 +1320,8 @@ class PreludePhase(PhaseHandler):
             }
             state.warm_replay_attempted = True
             return None
-        # Historical gain anchor: donor's expected gain, else MAX gain across
-        # attrs.sessions[], else the flat gain_pct.
+        # Historical gain anchor: donor's expected gain, else MAX gain across attrs.sessions[], else the flat
+        # gain_pct.
         expected_gain = donor_expected_gain
         sessions_field = recipe_attrs.get("sessions")
         if expected_gain <= 0 and isinstance(sessions_field, list):
@@ -1623,8 +1482,7 @@ class PreludePhase(PhaseHandler):
         state.warm_replay_attempted = True
         state.warm_replay_outcome = {
             "status": "in_flight",
-            # Bounds the replay for the SBD timeline; the terminal write below
-            # stamps ``settled_at`` against this.
+            # Bounds the replay for the SBD timeline; the terminal write below stamps ``settled_at`` against this.
             "enqueued_at": now_iso(timespec="seconds"),
             "warm_recipe_tier": tier,
             "warm_recipe_conf": conf,
@@ -1656,12 +1514,7 @@ class PreludePhase(PhaseHandler):
         result: dict[str, Any],
         task: "Task | None",
     ) -> tuple[bool, dict[str, Any]]:
-        """Validate every already-patched checkout selected by warm replay.
-
-        A replay may have patched more than one tree, because each overlay is
-        placed into the checkout it was recorded against. All of them are
-        promoted or none is: the measured gain came from the whole set.
-        """
+        """Validate every already-patched checkout selected by warm replay."""
         params = (task.params if task is not None else {}) or {}
         if not params.get("required_patch_timeline") or not params.get("patches"):
             return True, {"status": "not_required"}
@@ -1713,12 +1566,7 @@ class PreludePhase(PhaseHandler):
         result: dict[str, Any],
         task: "Task | None",
     ) -> dict[str, Any]:
-        """Restore both Recipe and Kernel halves of a combined replay.
-
-        The Recipe half may span several checkouts, so every tree the replay
-        patched is restored -- leaving one behind would bank a mutation from a
-        replay that was rejected.
-        """
+        """Restore both Recipe and Kernel halves of a combined replay."""
         from ..actions.executors.baseline import _revert_patches
 
         restores: list[dict[str, Any]] = []
@@ -1830,22 +1678,7 @@ class PreludePhase(PhaseHandler):
 
     @staticmethod
     def _replay_eval_search_root(result: dict) -> Path | None:
-        """Directory holding every round of this replay task.
-
-        The cold-start guard evaluates only in the warmup round but decides on
-        the measure round, so the score lands in a sibling directory rather
-        than under the deciding round's own workspace. Searching the workspace
-        alone finds nothing on every double-run replay: across 852 recorded
-        replays the score sat in ``warmup_round`` 320 times and in
-        ``measure_round`` never.
-
-        Args:
-            result: The ``replay_warm_recipe`` result envelope.
-
-        Returns:
-            The task-level directory containing both round directories, or
-            ``None`` when the result names no usable path.
-        """
+        """Directory holding every round of this replay task."""
         from ..actions.executors.baseline import (
             _MEASURE_ROUND_DIR,
             _WARMUP_ROUND_DIR,
@@ -1869,28 +1702,7 @@ class PreludePhase(PhaseHandler):
         task: "Task | None",
         outcome: dict,
     ) -> bool:
-        """Whether a replayed config may be promoted on accuracy grounds.
-
-        Every replay is judged, not just the ones touching a knob known to be
-        risky: a KB recipe is evidence from another session and another
-        machine, so reproducing its throughput says nothing about whether it
-        still computes correctly here. The measured score is recorded either
-        way — a promotion that was checked and passed is not the same record as
-        one that was never checked.
-
-        ``eval_ran`` separates the two ways ``replay_accuracy`` can be absent.
-        A score of 0.0 means the model answered nothing; no score at all means
-        no evidence either way, and those must not collapse into one state.
-
-        Args:
-            result: The ``replay_warm_recipe`` result envelope.
-            task: The originating task, carrying the replayed args/envs.
-            outcome: The warm-replay outcome dict, stamped either way.
-
-        Returns:
-            ``True`` when promotion may proceed; ``False`` when the caller must
-            stop (the rollback and outcome have already been recorded).
-        """
+        """Whether a replayed config may be promoted on accuracy grounds."""
         from ..actions.executors._accuracy_gate import (
             DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
             accuracy_meets_floor,
@@ -1923,8 +1735,8 @@ class PreludePhase(PhaseHandler):
                     eval_ran = True
                 else:
                     eval_error = str(eval_out.get("error") or "no accuracy in eval output")
-                    # Only a results file the parser reached can say the eval
-                    # ran; a parser that never got one says nothing either way.
+                    # Only a results file the parser reached can say the eval ran; a parser that never got one says
+                    # nothing either way.
                     eval_ran = eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE)
 
         outcome["eval_ran"] = bool(eval_ran)
@@ -1933,10 +1745,8 @@ class PreludePhase(PhaseHandler):
         outcome["baseline_accuracy"] = baseline_accuracy if baseline_accuracy > 0 else None
 
         if measured is None:
-            # A measurement that failed is not evidence the config broke the
-            # model, so it must not stop the run: the replay is admitted and the
-            # reason it could not be judged is recorded instead. ``eval_ran``
-            # says whether an eval produced nothing or never ran at all.
+            # A measurement that failed is not evidence the config broke the model, so it must not stop the run: the
+            # replay is admitted and the reason it could not be judged is recorded instead.
             log.warning(
                 "warm-replay admitted without an accuracy verdict (eval_ran=%s, baseline %.4f): %s",
                 eval_ran,
@@ -1973,23 +1783,11 @@ class PreludePhase(PhaseHandler):
         *,
         task: "Task | None" = None,
     ) -> None:
-        """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result.
-
-        Measured uplift promotes the warm config onto ``optimization_stack`` and
-        ``current_best``. Failures (including a failed required patch timeline)
-        roll back both halves fail-closed, set an outcome status, and never
-        propagate.
-
-        Args:
-            result: The ``replay_warm_recipe`` task result dict (status,
-                throughput, workspace, etc.).
-            task: The originating task, used to recover the warm args/envs and
-                the baseline anchor; may be ``None`` (degraded path).
-        """
+        """Interpret a combined Recipe+Kernel ``replay_warm_recipe`` result."""
         state = self.shared_state
         outcome = dict(state.warm_replay_outcome or {})
-        # Stamped once up front so every terminal branch below carries it; each
-        # of them re-persists ``outcome`` before returning.
+        # Stamped once up front so every terminal branch below carries it; each of them re-persists ``outcome`` before
+        # returning.
         outcome["settled_at"] = now_iso(timespec="seconds")
         expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
         if not isinstance(result, dict):
@@ -2020,8 +1818,8 @@ class PreludePhase(PhaseHandler):
             tput = float(tput_raw) if tput_raw is not None else 0.0
         except (TypeError, ValueError):
             tput = 0.0
-        # ``tput`` (output_throughput) is the HOT measure round and the
-        # comparison value; the warmup round is retained for audit only.
+        # ``tput`` (output_throughput) is the HOT measure round and the comparison value; the warmup round is retained
+        # for audit only.
         cold_raw = result.get("warmup_round_tput")
         try:
             cold_round_tput = float(cold_raw) if cold_raw is not None else 0.0
@@ -2047,16 +1845,14 @@ class PreludePhase(PhaseHandler):
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
-        # Recorded before the gates below, not after the KEEP ruling: a replay
-        # rejected on quality or accuracy still produced a real measurement, and
-        # reading what it scored is how a gate rejection is told apart from a
-        # replay that never got that far.
+        # Recorded before the gates below, not after the KEEP ruling: a replay rejected on quality or accuracy still
+        # produced a real measurement, and reading what it scored is how a gate rejection is told apart from a replay
+        # that never got that far.
         measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
-        # warm_replay is an optimization candidate, so it must clear the
-        # image-quality gate against the baseline reference before promotion.
-        # ``require=False`` keeps a missing/skipped gate non-blocking.
+        # warm_replay is an optimization candidate, so it must clear the image-quality gate against the baseline
+        # reference before promotion.
         from ..actions.executors._accuracy_gate import quality_gate_passed
 
         qg = result.get("quality_gate")
@@ -2070,14 +1866,7 @@ class PreludePhase(PhaseHandler):
             state.save(self.session_dir)
             log.info("warm-replay REJECTED by quality gate: %s", qg)
             return
-        # A replayed config lands on ``current_best``, so every later
-        # measurement in the session is taken against it. Promoting one on
-        # throughput alone is how a config that makes the model emit garbage
-        # becomes the session's reference: breaking the numerics is itself a
-        # large throughput win, so the objective actively selects for it.
-        # Every replay is judged here, not only high-risk knobs: a KB recipe is
-        # evidence from another session, so reproducing its throughput says
-        # nothing about whether it still computes correctly here.
+        # A replayed config lands on ``current_best``, so every later measurement in the session is taken against it.
         if not self._warm_replay_accuracy_ok(result, task, outcome):
             return
         result["combined_gain_pct"] = round(measured_gain, 3)
@@ -2096,8 +1885,7 @@ class PreludePhase(PhaseHandler):
         min_reproduce = float(
             getattr(self, "_warm_replay_min_reproduce_pct", 0.8) or 0.8,
         )
-        # Local legacy replay keeps any positive gain. The current combined
-        # contract must clear the approved kernel replay threshold.
+        # Local legacy replay keeps any positive gain.
         reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
         outcome["keep_threshold_pct"] = keep_threshold
         if expected_gain > 0:
@@ -2139,8 +1927,7 @@ class PreludePhase(PhaseHandler):
             )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops
-                # the run when it has since vanished.
+                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
                 state.active_inferencex_path = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
@@ -2182,10 +1969,7 @@ class PreludePhase(PhaseHandler):
                 "gain_pct": round(measured_gain, 3),
                 "hot_tput": float(hot_tput),
                 "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
-                # The score this promotion was judged on, recorded alongside the
-                # throughput it was judged with. ``None`` means no score could be
-                # read, not that the model scored nothing — ``eval_ran`` on the
-                # outcome separates those.
+                # The score this promotion was judged on, recorded alongside the throughput it was judged with.
                 "accuracy": outcome.get("replay_accuracy"),
                 # source_tier records the warm-recipe tier for breakdown attribution.
                 "source_tier": outcome.get("warm_recipe_tier", ""),
@@ -2253,13 +2037,8 @@ class PreludePhase(PhaseHandler):
                 },
                 entry_extra=entry_extra,
             )
-            # Publish the reproduced verdict now that the stack entry exists but
-            # before the cumulative update (the one step below that can raise and
-            # is swallowed by the caller). The post-ruling mirror reads this
-            # in-memory outcome: persisting it here keeps the canonical adoption
-            # in step with the stack. Placed after the lift on purpose -- if the
-            # lift itself raises, the outcome stays in_flight and both the stack
-            # and the mirror agree there is nothing adopted.
+            # Publish the reproduced verdict now that the stack entry exists but before the cumulative update (the one
+            # step below that can raise and is swallowed by the caller).
             state.warm_replay_outcome = outcome
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput, result)
@@ -2318,12 +2097,7 @@ class PreludePhase(PhaseHandler):
         *,
         baseline_tput: float | None = None,
     ) -> None:
-        """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline; skipped while warm-replay is in_flight (GPU/port contention).
-
-        Args:
-            baseline_tput: The baseline throughput; ``None`` reads it from
-                SharedState. A non-positive value short-circuits the enqueue.
-        """
+        """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline; skipped while warm-replay is in_flight (GPU/port contention)."""
         state = self.shared_state
         if _phase_state.warm_replay_in_flight(state):
             log.info(
@@ -2374,27 +2148,7 @@ class PreludePhase(PhaseHandler):
             )
 
     def _analysis_attempt_suffix(self, kind: str) -> str:
-        """Idempotency-key suffix separating a re-armed roofline retry from the
-        attempt that failed.
-
-        ``_needs_roofline_for_watermark`` deliberately re-arms once a roofline
-        has failed — a failed analysis must not suppress later refreshes. But
-        the key it re-enqueued under was a per-cycle singleton, so the registry
-        handed back the failed attempt and the retry the system had just armed
-        for was deduplicated away. One trace failure therefore blacked out the
-        GPU side of the search for a whole macro-cycle: four sessions ran with
-        an empty roofline, no kernel hot spots ever reached a specialist, and
-        the log said "enqueued" every time.
-
-        The failure streak is the attempt counter and already resets to zero on
-        a successful snapshot, so a roofline that worked is still never re-run.
-
-        Args:
-            kind: The analysis task kind; only ``roofline`` retries.
-
-        Returns:
-            ``"-a<streak>"`` while a roofline retry is outstanding, else ``""``.
-        """
+        """Idempotency-key suffix separating a re-armed roofline retry from the"""
         if kind != "roofline":
             return ""
         try:
@@ -2404,21 +2158,7 @@ class PreludePhase(PhaseHandler):
         return f"-a{streak}" if streak > 0 else ""
 
     async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> Task:
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>.
-
-        Args:
-            reason: Tag distinguishing the enqueue site; used in the
-                idempotency key and to select baseline vs current-best args.
-            inline_event: The timeline event this analysis belongs to, passed
-                by a phase that owns one. It travels on the params rather than
-                being looked up by the executor because the phase is the only
-                party that knows whether the run is its own sub-step or an
-                action in its own right, and it stays out of the idempotency
-                key so an event id can never split a reuse.
-
-        Returns:
-            The created (or existing idempotent) analysis :class:`Task`.
-        """
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>."""
         from ..actions.executors.roofline import INLINE_EVENT_PARAM
 
         state = self.shared_state
@@ -2432,9 +2172,8 @@ class PreludePhase(PhaseHandler):
         if reason != "prelude_initial":
             inject_stack_base_params(params, state)
         else:
-            # PRELUDE roofline profiles the baseline arm: inject baseline's own
-            # server args (never current_best's) so a later warm-replay can't
-            # swap in flags that skew the baseline ceiling.
+            # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
+            # a later warm-replay can't swap in flags that skew the baseline ceiling.
             try:
                 from ..kernel.roofline_ceiling import read_baseline_server_args
 

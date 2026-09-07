@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CursorStore
-
-Per-agent ``last_processed_seq`` cursor via a single SQL UPSERT.
-"""
+"""CursorStore"""
 
 from __future__ import annotations
 
@@ -19,14 +16,7 @@ _now_iso = now_iso
 
 @dataclass
 class CursorState:
-    """A single agent's bus-processing cursor.
-
-    Attributes:
-        agent (str): Identifier of the agent owning the cursor.
-        last_processed_seq (int): Highest bus sequence processed so far.
-        last_processed_msg_id (str): Message id at that sequence.
-        processed_at (str): ISO-8601 timestamp of the last advance.
-    """
+    """A single agent's bus-processing cursor."""
 
     agent: str
     last_processed_seq: int
@@ -35,14 +25,7 @@ class CursorState:
 
     @classmethod
     def empty(cls, agent: str) -> "CursorState":
-        """Build a zeroed cursor for an agent with no prior state.
-
-        Args:
-            agent (str): Identifier of the agent.
-
-        Returns:
-            CursorState: A cursor at sequence 0 with an empty msg id.
-        """
+        """Build a zeroed cursor for an agent with no prior state."""
         return cls(
             agent=agent,
             last_processed_seq=0,
@@ -52,16 +35,7 @@ class CursorState:
 
     @classmethod
     def from_row(cls, row) -> "CursorState":
-        """Build a cursor from a ``cursors`` table row.
-
-        Args:
-            row: Mapping-like DB row with ``agent``,
-                ``last_processed_seq``, ``last_processed_msg_id``, and
-                ``processed_at`` keys.
-
-        Returns:
-            CursorState: The cursor populated from the row.
-        """
+        """Build a cursor from a ``cursors`` table row."""
         return cls(
             agent=row["agent"],
             last_processed_seq=row["last_processed_seq"],
@@ -71,31 +45,14 @@ class CursorState:
 
 
 class CursorStore:
-    """SQLite-backed store of per-agent bus-processing cursors.
-
-    Attributes:
-        db (SqliteConnection): Connection used for cursor reads/writes.
-    """
+    """SQLite-backed store of per-agent bus-processing cursors."""
 
     def __init__(self, db: SqliteConnection):
-        """Bind the store to a SQLite connection.
-
-        Args:
-            db (SqliteConnection): Connection backing the ``cursors``
-                table.
-        """
+        """Bind the store to a SQLite connection."""
         self.db = db
 
     async def load(self, agent: str) -> CursorState:
-        """Load one agent's cursor, defaulting to empty when absent.
-
-        Args:
-            agent (str): Identifier of the agent to load.
-
-        Returns:
-            CursorState: The stored cursor, or an empty cursor when the
-            agent has no row.
-        """
+        """Load one agent's cursor, defaulting to empty when absent."""
         row = await self.db.fetchone("SELECT * FROM cursors WHERE agent=?", (agent,))
         if row is None:
             return CursorState.empty(agent)
@@ -108,18 +65,7 @@ class CursorStore:
         seq: int,
         msg_id: str,
     ) -> CursorState:
-        """Advance an agent's cursor via UPSERT, never moving backwards.
-
-        Args:
-            agent (str): Identifier of the agent to advance.
-            seq (int): Sequence to advance to; ignored when not greater
-                than the current sequence.
-            msg_id (str): Message id at the new sequence.
-
-        Returns:
-            CursorState: The resulting cursor state (unchanged when
-            ``seq`` would move the cursor backwards).
-        """
+        """Advance an agent's cursor via UPSERT, never moving backwards."""
         async with self.db.transaction() as cur:
             cur.execute(
                 "SELECT last_processed_seq, last_processed_msg_id, processed_at FROM cursors WHERE agent=?",

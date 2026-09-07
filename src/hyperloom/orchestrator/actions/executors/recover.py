@@ -1,37 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``recover`` ActionRunner — release leaked GPU VRAM.
-
-Counterpart of the Robustness ``gpu_memory_leaked`` signal: when a crashed
-server leaves the ROCm KFD tables attributing VRAM to dead PIDs, every
-subsequent server start aborts on insufficient free memory. Invoked via
-``delegate{action_name="recover", ...}`` (Robustness-only by PolicyGate)
-for a soft cleanup: SIGTERM then SIGKILL owners recorded in this session's
-pidfiles, wait ``SERVER_KILL_WAIT_S``, SIGKILL survivors. Co-located
-sessions and host-wide ``pgrep`` matches are never signalled.
-
-We deliberately do NOT reload amdgpu, reset the GPU, restart the pod/Ray
-head, or touch persistent runtime config (would kill the optimizer, need
-root, or affect other tenants). A failed recover surfaces as
-``state == "needs_review"``.
-
-Returned dict (the subset below is persisted to
-``runs/recover/<task_id>/result.json``)::
-
-    {
-        "state":                  "succeeded" | "needs_review",
-        "reason":                 echoed from params,
-        "force_gpu_cleanup":      bool,
-        "killed_pids":            [{pid, cmd, signal}, ...],  # actually killed
-        "pre_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # before cleanup
-        "mid_free_mb_per_gpu":    [{gpu_id, free_mb}, ...],   # after kills
-        "error_class":            str,                        # only on failure
-        "cpu_only_sandbox":       True,   # multi-node short-circuit only
-        "workspace":              str,    # return value only, not persisted
-        "result_path":            str,    # return value only, not persisted
-    }
-"""
+"""Real ``recover`` ActionRunner — release leaked GPU VRAM."""
 
 from __future__ import annotations
 
@@ -53,8 +23,8 @@ from ._server_lifecycle import _pid_cmdline as _shared_pid_cmdline
 log = logging.getLogger(__name__)
 
 
-# Process cmdline patterns for servers/benchmarks that can pin VRAM and must
-# be killed during recovery (``benchmark_serving`` can hold KV-cache).
+# Process cmdline patterns for servers/benchmarks that can pin VRAM and must be killed during recovery
+# (``benchmark_serving`` can hold KV-cache).
 _OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang.srt",
@@ -67,28 +37,7 @@ _OWNER_PATTERNS: tuple[str, ...] = (
 
 
 def _is_multi_node_sandbox() -> bool:
-    """True when running in multi-node mode (nodes >= 2).
-
-    In multi-node mode (both Infera and RayJob), the optimizer sandbox does
-    NOT own the inference server GPUs — those live in remote pods (Infera
-    worker pods or RayJob head/worker pods). The sandbox may be scheduled on
-    a GPU node and see local ``/dev/kfd`` + ``rocm-smi``, but:
-      - The local GPUs run OTHER workloads (not ours).
-      - ``rocm-smi --showmeminfo`` reports those workloads' VRAM usage.
-      - ``_all_recovered`` sees low free_mb and returns False.
-      - The orchestration LLM then proposes ``recover`` every tick forever.
-
-    In multi-node mode the local GPU probe is skipped entirely; remote GPU
-    health is handled by the Infera restart-server / kill-inference path
-    (SSH to the actual pods).
-
-    Single-node (``is_multi_node() == False``) is unaffected — the sandbox
-    IS the GPU pod, so the local rocm-smi probe is meaningful.
-
-    Returns:
-        ``True`` when running in multi-node mode (nodes >= 2); ``False`` for
-        single-node or when the mode cannot be determined.
-    """
+    """True when running in multi-node mode (nodes >= 2)."""
     try:
         from ._multi_node_env import is_multi_node
 
@@ -99,37 +48,18 @@ def _is_multi_node_sandbox() -> bool:
 
 
 class RecoverExecutor:
-    """Executable form of the ``recover`` action.
-
-    Side-effect-free construction (all work in :meth:`__call__`); stateless
-    besides the read-only tunables, so a single module-level instance suffices.
-    """
+    """Executable form of the ``recover`` action."""
 
     # Time we wait between SIGTERM and SIGKILL for a stuck owner.
     SERVER_KILL_WAIT_S: float = 5.0
-    # Free MiB above which a GPU is considered healthy. Matches the
-    # robustness-agent default ``GpuLeakConfig.free_mb_threshold``.
+    # Free MiB above which a GPU is considered healthy.
     FREE_MB_HEALTHY: float = 500.0
     # Owner patterns enforced by ``_kill_stale_owners``.
     OWNER_PATTERNS: tuple[str, ...] = _OWNER_PATTERNS
     _pid_cmdline = staticmethod(_shared_pid_cmdline)
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
-        """Run the GPU recovery sequence and report the outcome.
-
-        Probes GPU memory, optionally TERM/KILLs stale owner processes, and
-        re-probes to decide success. Writes ``result.json`` to the task
-        workspace when one is available.
-
-        Args:
-            ctx (RunnerContext): The action runner context carrying the
-                task params (``reason``, ``force_gpu_cleanup``) and extras.
-
-        Returns:
-            dict[str, Any]: The recovery result, including ``state``
-            (``"succeeded"`` / ``"needs_review"``), per-stage GPU memory
-            probes, and killed PIDs.
-        """
+        """Run the GPU recovery sequence and report the outcome."""
         params: dict[str, Any] = dict(getattr(ctx.task, "params", {}) or {})
         reason = str(params.get("reason", ""))
         force_cleanup = bool(params.get("force_gpu_cleanup", False))
@@ -143,10 +73,6 @@ class RecoverExecutor:
         )
 
         # Multi-node (Infera or RayJob): the serving GPUs live on remote pods.
-        # Even when this sandbox lands on a GPU node, local rocm-smi reports
-        # OTHER workloads' VRAM, so _all_recovered would never pass and the
-        # orchestrator would propose recover forever. Short-circuit to success;
-        # remote VRAM cleanup goes through the restart-server / kill-inference path.
         if _is_multi_node_sandbox():
             log.info(
                 "recover_executor: infera CPU-only sandbox detected; skipping "
@@ -209,15 +135,7 @@ class RecoverExecutor:
 
     # workspace
     def _workspace_dir(self, ctx: RunnerContext) -> Path | None:
-        """Resolve the task workspace directory from the runner context.
-
-        Args:
-            ctx (RunnerContext): The action runner context.
-
-        Returns:
-            Path | None: The workspace path, or ``None`` when none is
-            configured or the value is not path-like.
-        """
+        """Resolve the task workspace directory from the runner context."""
         ws = (ctx.extra or {}).get("workspace")
         if not ws:
             return None
@@ -227,14 +145,7 @@ class RecoverExecutor:
             return None
 
     def _session_dir(self, ctx: RunnerContext) -> Path | None:
-        """Resolve the session directory that owns recover pidfiles.
-
-        Args:
-            ctx (RunnerContext): The action runner context.
-
-        Returns:
-            Path | None: The session path, or ``None`` when none is configured.
-        """
+        """Resolve the session directory that owns recover pidfiles."""
         sd = (ctx.extra or {}).get("session_dir")
         if not sd:
             return None
@@ -244,15 +155,7 @@ class RecoverExecutor:
             return None
 
     def _write_result_json(self, workspace: Path, payload: dict[str, Any]) -> None:
-        """Write the recovery result payload to ``workspace/result.json``.
-
-        Args:
-            workspace (Path): Destination workspace directory.
-            payload (dict[str, Any]): The recovery result to serialize.
-
-        Returns:
-            None: Errors are logged and swallowed (best-effort write).
-        """
+        """Write the recovery result payload to ``workspace/result.json``."""
         try:
             workspace.mkdir(parents=True, exist_ok=True)
             (workspace / "result.json").write_text(
@@ -268,13 +171,7 @@ class RecoverExecutor:
 
     # GPU probe (rocm-smi --showmeminfo vram --csv)
     def _probe_gpu_free_mb(self) -> list[dict[str, Any]]:
-        """Probe per-GPU free VRAM via ``rocm-smi --showmeminfo vram``.
-
-        Returns:
-            list[dict[str, Any]]: One snapshot per visible GPU, or an
-            empty list when ``rocm-smi`` is unavailable or the probe
-            fails.
-        """
+        """Probe per-GPU free VRAM via ``rocm-smi --showmeminfo vram``."""
         if not shutil.which("rocm-smi"):
             return []
         try:
@@ -304,21 +201,7 @@ class RecoverExecutor:
 
     @staticmethod
     def _parse_rocm_smi_vram_csv(text: str) -> list[dict[str, Any]]:
-        """Parse rocm-smi `--showmeminfo vram --csv` output.
-
-        Format (one block):
-
-            device,VRAM Total Memory (B),VRAM Total Used Memory (B)
-            card0,206158430208,205678182400
-            card1,206158430208,205678182400
-
-        Args:
-            text (str): The raw ``rocm-smi --csv`` stdout to parse.
-
-        Returns:
-            list[dict[str, Any]]: ``{gpu_id, vram_total_mb, vram_used_mb,
-            free_mb}`` per visible card, sorted by ``gpu_id``.
-        """
+        """Parse rocm-smi `--showmeminfo vram --csv` output."""
         by_id: dict[int, dict[str, Any]] = {}
         header: list[str] | None = None
         for raw in text.splitlines():
@@ -360,15 +243,7 @@ class RecoverExecutor:
         return out
 
     def _all_recovered(self, gpus: list[dict[str, Any]]) -> bool:
-        """Return whether every probed GPU is above the healthy floor.
-
-        Args:
-            gpus (list[dict[str, Any]]): Per-GPU memory snapshots.
-
-        Returns:
-            bool: ``True`` iff the list is non-empty and every GPU's
-            ``free_mb`` is at least :attr:`FREE_MB_HEALTHY`.
-        """
+        """Return whether every probed GPU is above the healthy floor."""
         if not gpus:
             # No probe -> treat as unhealthy.
             return False
@@ -378,14 +253,7 @@ class RecoverExecutor:
 
     # soft cleanup — session pidfiles + kill loop
     def _kill_stale_owners(self) -> list[dict[str, Any]]:
-        """SIGTERM then SIGKILL owners recorded in this session's pidfiles.
-
-        Returns one record per signalled PID (cmdline at discovery + final
-        signal name ``"TERM"`` / ``"KILL"``).
-
-        Returns:
-            One record per signalled PID, or ``[]`` when none were stale.
-        """
+        """SIGTERM then SIGKILL owners recorded in this session's pidfiles."""
         candidates = self._discover_stale_pids()
         if not candidates:
             return []
@@ -503,14 +371,7 @@ class RecoverExecutor:
                 pass
 
     def _discover_stale_pids(self) -> list[dict[str, Any]]:
-        """Return unique PIDs from this session's ``runs/**/*.pid`` files.
-
-        Host-wide ``pgrep`` is not used: only processes this session recorded
-        are candidates. Missing ``session_dir`` yields an empty list.
-
-        Returns:
-            Unique PID records from session pidfiles, excluding our own PID.
-        """
+        """Return unique PIDs from this session's ``runs/**/*.pid`` files."""
         session_dir = getattr(self, "_active_session_dir", None)
         if session_dir is None:
             return []
@@ -549,16 +410,7 @@ class RecoverExecutor:
         return list(seen.values())
 
     def _send_signal(self, pid: int, sig: signal.Signals) -> bool:
-        """Send a signal to a PID, tolerating dead/forbidden processes.
-
-        Args:
-            pid (int): Target process id.
-            sig (signal.Signals): The signal to deliver.
-
-        Returns:
-            bool: ``True`` if the signal was delivered; ``False`` if the
-            process is gone or permission was denied.
-        """
+        """Send a signal to a PID, tolerating dead/forbidden processes."""
         try:
             os.kill(pid, sig)
             return True
@@ -575,14 +427,7 @@ class RecoverExecutor:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
-        """Check whether a process is still alive via signal 0.
-
-        Args:
-            pid (int): Target process id.
-
-        Returns:
-            bool: ``True`` if the process exists; ``False`` otherwise.
-        """
+        """Check whether a process is still alive via signal 0."""
         try:
             os.kill(pid, 0)
             return True
@@ -595,14 +440,7 @@ recover_executor = RecoverExecutor()
 
 
 def probe_gpu_free_mb() -> list[dict[str, Any]]:
-    """Per-GPU free VRAM, for callers that need the probe without the action.
-
-    Blocking (shells out to ``rocm-smi``); call via ``asyncio.to_thread``.
-
-    Returns:
-        list[dict[str, Any]]: One entry per visible GPU, or ``[]`` when the
-        probe is unavailable.
-    """
+    """Per-GPU free VRAM, for callers that need the probe without the action."""
     return recover_executor._probe_gpu_free_mb()
 
 
