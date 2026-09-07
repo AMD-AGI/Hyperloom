@@ -41,9 +41,9 @@
 #   DISPATCH_MAP      output file: JSON {leg: workloadId}
 #                     (default $RUNNER_TEMP/pre_release_dispatch.json)
 #   HOST_CPU / HOST_MEM / HOST_SHM / HOST_EPHEMERAL  privileged host resource request
-#                     (default 228 / 2560Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod
-#                     uses 128 CPU; +100 for dockerd + 5 parallel agent/setup processes on
-#                     top of 5x32 CPU-capped nested containers)
+#                     (default 196 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod
+#                     uses 128 CPU; +68 for dockerd + the parallel agent/setup processes.
+#                     SaFE's admission webhook caps this: 228 CPU was rejected 403)
 #   LEG_CPU  / LEG_MEM / LEG_EPHEMERAL   baremetal leg resource request
 #                     (default 32 / 512Gi / 512Gi -- sglang 14B-FP8 + roofline/aiter JIT
 #                     exceeded 128Gi/100Gi on 2026-08-28)
@@ -63,15 +63,21 @@ set -euo pipefail
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
 # Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128 baseline,
-# bumped to 228 for five parallel nested legs (5x32 container CPU caps + host/agent headroom).
-# mem 2560Gi: the nested `docker run --memory` caps alone now total 2048g (2x256g for the
-# 3h legs + 3x512g for the 12h legs, forge included), which exactly equalled the old 2048Gi
-# request and left the host's own dockerd/agent processes nothing. ephemeral 1792Gi.
+# bumped to 196 for the parallel nested legs, mem 2048Gi, ephemeral 1792Gi.
+#
+# Do NOT raise these to "make room" for another nested leg. A 5th leg was added on
+# 2026-09-07 and this request was bumped to 228 CPU / 2560Gi to match; SaFE's admission
+# webhook rejected the pod outright (HTTP 403, `vworkload.kb.io`: "Resource request
+# exceeds maximum available: cpu, requested: 228"), so the whole gate failed at dispatch
+# before a single leg started. 196/2048Gi is a value the cluster demonstrably accepts.
+# The nested `--memory`/`--cpus` values are per-container CAPS, not reservations, so legs
+# share this envelope rather than each needing a slice carved out of it.
+#
 # Every writable path the DinD host has -- the container
 # rootfs AND the /shared-data emptyDir the nested dockerd stores images in -- counts
 # toward this one ephemeralStorage quota, so the host bootstrap requires a
 # layer-deduplicating docker storage driver (overlay2) to stay inside it.
-HOST_CPU="${HOST_CPU:-228}"; HOST_MEM="${HOST_MEM:-2560Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
+HOST_CPU="${HOST_CPU:-196}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
 LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
