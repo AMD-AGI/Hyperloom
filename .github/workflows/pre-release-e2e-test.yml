@@ -3,16 +3,16 @@
 
 name: Pre-release E2E test
 
-# Full-path release gate: build the CI wheel, push it to NFS, then run 8 demo legs
+# Full-path release gate: build the CI wheel, push it to NFS, then run 9 demo legs
 # (baremetal/docker x vLLM/SGLang x 3h/12h) as SaFE Authoring workloads driven through
 # the Claude CLI + setup/demo skills -- the same path a user takes. Independent of the
 # per-PR smoke test (ci-e2e.yml). See hyperloom-pre-release-e2e-ci-design.md.
 #
 # Triggers (gate BEFORE merge, on the PR -- not after merge to main):
-#   * PR targeting main that bumps pyproject.toml's `version` field   -> FULL run (all 8 legs)
+#   * PR targeting main that bumps pyproject.toml's `version` field   -> FULL run (all 9 legs)
 #   * PR targeting main that only touches this CI's scripts/prompts/  -> SCRIPTS-ONLY run
 #     workflow (version unchanged)                                       (the 4 fast 3h legs)
-#   * manual workflow_dispatch (reuse a wheel, run a leg subset; default all 8)
+#   * manual workflow_dispatch (reuse a wheel, run a leg subset; default all 9)
 # NOTE: there is deliberately NO push-to-main trigger -- the gate runs while the PR is
 # open so a bad release is blocked before it lands, and merging does not re-run it.
 #
@@ -53,7 +53,7 @@ on:
         description: "Reuse an existing wheel dir (skip build); e.g. 1.0.0b3.dev202608261530+ci"
         required: false
       tasks:
-        description: "Comma-separated subset of leg IDs (default: all 8)"
+        description: "Comma-separated subset of leg IDs (default: all 9)"
         required: false
 
 # One pre-release run at a time: a NEWER push supersedes the in-flight run. Per-PR group
@@ -136,7 +136,7 @@ jobs:
           # branch below. Keep the name for downstream outputs (it feeds CI_VERSION).
           base_version="$(read_version < pyproject.toml)"
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            # Manual runs are full-scope; tasks default to all 8 (empty = all in dispatch).
+            # Manual runs are full-scope; tasks default to all 9 (empty = all in dispatch).
             run=true; run_scope="full"; reuse="${REUSE_IN:-}"
           else
             # pull_request targeting main. Classify against the PR BASE branch (not HEAD~1:
@@ -146,7 +146,7 @@ jobs:
             prev="$(git show "${BASE_SHA}:pyproject.toml" 2>/dev/null | read_version || true)"
             if [ "$base_version" != "$prev" ] && [ -n "$base_version" ]; then
               run=true; run_scope="full"
-              echo "version bump vs base ${BASE_REF}: '${prev}' -> '${base_version}' -> FULL run (all 8 legs)"
+              echo "version bump vs base ${BASE_REF}: '${prev}' -> '${base_version}' -> FULL run (all 9 legs)"
             else
               # Version unchanged vs base. pyproject.toml is itself a watched path -- it has
               # to be, or a PR that ONLY bumps the version would never start this workflow --
@@ -326,7 +326,7 @@ jobs:
         # The pods read all three off NFS, so anything missing is only discovered inside
         # them -- and only AFTER the pod has been scheduled, the ROCm image pulled, jq
         # apt-installed and the Claude CLI npm-installed, because the wheel check sits
-        # behind those in bootstrap's entry. All 8 legs then report the same
+        # behind those in bootstrap's entry. All 9 legs then report the same
         # "state.json missing (workload phase=Failed)", which names none of this, and SaFE
         # deletes a failed leg's pod (with its stdout) before anyone can look. `reuse`
         # skips the build job that publishes them, so it is the way to arrive here with
@@ -345,7 +345,7 @@ jobs:
           ls "$wheel_dir"/hyperloom_inference_optimizer-*.whl >/dev/null 2>&1 \
             || missing="${missing}\n  - a wheel in $wheel_dir"
           [ -f "$boot_dir/bootstrap-pre-release.sh" ] || missing="${missing}\n  - $boot_dir/bootstrap-pre-release.sh"
-          for p in demo-3h demo-12h setup-baremetal-vllm setup-baremetal-sglang \
+          for p in demo-3h demo-12h demo-12h-forge setup-baremetal-vllm setup-baremetal-sglang \
                    setup-docker-vllm setup-docker-sglang; do
             [ -f "$boot_dir/prompts/pre-release/${p}.md" ] \
               || missing="${missing}\n  - $boot_dir/prompts/pre-release/${p}.md"
@@ -371,7 +371,7 @@ jobs:
               echo "staged by run \`${rid}\` from commit \`${sha}\`, NOT this branch's copies."
             } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
           fi
-          echo "staged wheel + bootstrap + 6 prompts present for $CI_VERSION"
+          echo "staged wheel + bootstrap + 7 prompts present for $CI_VERSION"
 
       - name: Dispatch SaFE Authoring workloads
         run: |

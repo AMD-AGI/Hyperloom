@@ -12,9 +12,9 @@
 # bootstrap; PyTorchJob honors the submitted entrypoint. See
 # hyperloom-pre-release-e2e-ci-design.md §7.
 #
-# It creates 5 workloads for the 8 legs:
+# It creates 5 workloads for the 9 legs:
 #   * 4x non-privileged 1-GPU PyTorchJob  (one per baremetal leg)
-#   * 1x privileged   8-GPU PyTorchJob    (docker host; 4 nested containers, GPU 0-3)
+#   * 1x privileged   8-GPU PyTorchJob    (docker host; 5 nested containers, GPU 0-4)
 # and writes a dispatch map (leg -> workloadId) to $DISPATCH_MAP for the poll step.
 #
 # Requires: bash, curl, jq on the (self-hosted, in-network) runner.
@@ -37,13 +37,13 @@
 #                     into the workload env; bootstrap decodes it
 #                     into the leg's .env, which is on NFS       (required)
 #   ANTHROPIC_BASE_URL optional proxy / base url                 (optional)
-#   TASKS             comma-separated leg subset (default: all 8)
+#   TASKS             comma-separated leg subset (default: all 9)
 #   DISPATCH_MAP      output file: JSON {leg: workloadId}
 #                     (default $RUNNER_TEMP/pre_release_dispatch.json)
 #   HOST_CPU / HOST_MEM / HOST_SHM / HOST_EPHEMERAL  privileged host resource request
-#                     (default 196 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod
-#                     uses 128 CPU; +68 for dockerd + 4 parallel agent/setup processes on
-#                     top of 4x32 CPU-capped nested containers)
+#                     (default 228 / 2560Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod
+#                     uses 128 CPU; +100 for dockerd + 5 parallel agent/setup processes on
+#                     top of 5x32 CPU-capped nested containers)
 #   LEG_CPU  / LEG_MEM / LEG_EPHEMERAL   baremetal leg resource request
 #                     (default 32 / 512Gi / 512Gi -- sglang 14B-FP8 + roofline/aiter JIT
 #                     exceeded 128Gi/100Gi on 2026-08-28)
@@ -63,12 +63,15 @@ set -euo pipefail
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
 # Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128 baseline,
-# bumped to 196 for four parallel nested legs (4x32 container CPU caps + host/agent headroom).
-# mem 2048Gi, ephemeral 1792Gi. Every writable path the DinD host has -- the container
+# bumped to 228 for five parallel nested legs (5x32 container CPU caps + host/agent headroom).
+# mem 2560Gi: the nested `docker run --memory` caps alone now total 2048g (2x256g for the
+# 3h legs + 3x512g for the 12h legs, forge included), which exactly equalled the old 2048Gi
+# request and left the host's own dockerd/agent processes nothing. ephemeral 1792Gi.
+# Every writable path the DinD host has -- the container
 # rootfs AND the /shared-data emptyDir the nested dockerd stores images in -- counts
 # toward this one ephemeralStorage quota, so the host bootstrap requires a
 # layer-deduplicating docker storage driver (overlay2) to stay inside it.
-HOST_CPU="${HOST_CPU:-196}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
+HOST_CPU="${HOST_CPU:-228}"; HOST_MEM="${HOST_MEM:-2560Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
 LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
@@ -179,9 +182,14 @@ reap_stale_workloads() {
 }
 reap_stale_workloads
 
-# All 8 legs. Fields: mode backend hours model_path -- gpu index within the docker host
+# All 9 legs. Fields: mode backend hours model_path -- gpu index within the docker host
+#
+# `docker-sglang-forge-12h` keeps the duration suffix LAST on purpose: every field here
+# is parsed by suffix/infix glob (`*-12h`, `*-sglang-*`, `docker-*`), so a name like
+# `docker-sglang-12h-forge` would match none of the duration cases and be rejected as
+# "cannot infer duration". Insert future variants the same way.
 ALL_LEGS="baremetal-vllm-3h baremetal-vllm-12h baremetal-sglang-3h baremetal-sglang-12h \
-docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h"
+docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h docker-sglang-forge-12h"
 REQ_TASKS="${TASKS:-$ALL_LEGS}"
 REQ_TASKS="${REQ_TASKS//,/ }"
 
