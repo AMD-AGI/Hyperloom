@@ -150,6 +150,7 @@ def test_the_published_identity_states_the_derived_kernel_name(tmp_path: Path) -
 
 
 def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
+    """The refusal names the top level, the one thing the agent cannot resolve."""
     repo, _head = _repo(tmp_path)
     nested = repo / "nested"
     nested.mkdir()
@@ -160,7 +161,20 @@ def test_publish_rejects_a_repo_path_below_git_toplevel(tmp_path: Path) -> None:
 
     assert result.published is False
     assert "Git top-level" in result.reason
+    assert f"use {repo.resolve()}" in result.reason
     assert staged.is_dir()
+
+
+def test_a_repo_root_outside_git_is_told_what_to_pass(tmp_path: Path) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    staged = _staged(layout, loose)
+
+    result = publish_staged_task(layout, staged)
+
+    assert result.published is False
+    assert "Pass the Git top-level of the repository that holds kernel_path" in result.reason
 
 
 def test_publish_rejects_source_files_outside_the_pinned_repo(
@@ -179,6 +193,10 @@ def test_publish_rejects_source_files_outside_the_pinned_repo(
     assert result.published is False
     assert "source path is not tracked" in result.reason
     assert "python/other_repo/source.py" in result.reason
+    # The usual cause is a path from the repository on the other side of a call
+    # chain, which the bare rule reads as an ordinary typo.
+    assert str(repo.resolve()) in result.reason
+    assert "belongs in evidence rather than source_files" in result.reason
 
 
 def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path: Path) -> None:
@@ -191,7 +209,8 @@ def test_publish_rejects_duplicate_operator_without_deleting_new_draft(tmp_path:
     result = publish_staged_task(layout, duplicate)
 
     assert result.published is False
-    assert result.reason == "operator task is already published"
+    assert "is already published" in result.reason
+    assert "drop this draft or point it at a different operator" in result.reason
     assert duplicate.is_dir()
 
 

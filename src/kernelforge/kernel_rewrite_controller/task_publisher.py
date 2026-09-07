@@ -74,17 +74,33 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
 
 
 def _repo_head(repo_root: Path) -> str:
+    """Pin the repository's live HEAD, refusing anything but its top level.
+
+    A refusal here names the path to use rather than only the rule, because the
+    agent revises from the reason alone: it has no shell to resolve a top level
+    with, and the answer is already in hand by the time the rule can fail.
+    """
     try:
         top = Path(git("rev-parse", "--show-toplevel", cwd=repo_root).stdout.strip()).resolve()
         head = git("rev-parse", "HEAD", cwd=repo_root).stdout.strip().lower()
     except GitError as error:
-        raise ValueError(f"repo_root is not a Git checkout: {repo_root}: {error}") from error
+        raise ValueError(
+            f"repo_root is not a Git checkout: {repo_root}: {error}. "
+            "Pass the Git top-level of the repository that holds kernel_path."
+        ) from error
     if top != repo_root.resolve():
-        raise ValueError(f"repo_root must be the Git top-level directory: {repo_root}")
+        raise ValueError(f"repo_root must be the Git top-level directory: {repo_root} sits inside {top}; use {top}")
     return head
 
 
 def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
+    """Require every declared source to exist in this repository at the base.
+
+    The common way to fail this is to name a file from the repository on the
+    other side of a call chain, which reads here as an ordinary missing path, so
+    the refusal says which repository was searched and where a cross-repository
+    reference belongs instead.
+    """
     for relative in dict.fromkeys((task.kernel_path, *task.source_files)):
         try:
             git(
@@ -94,7 +110,11 @@ def _validate_task_sources_at_base(task: KernelRewriteTask) -> None:
                 cwd=task.repo_root,
             )
         except GitError as error:
-            raise ValueError(f"source path is not tracked in repo_root at base_commit: {relative}") from error
+            raise ValueError(
+                f"source path is not tracked in {task.repo_root} at {task.base_commit[:12]}: {relative}. "
+                "One task edits one repository: a file that lives in another repo, or one Git does "
+                "not track here, belongs in evidence rather than source_files."
+            ) from error
 
 
 def publish_staged_task(
@@ -142,7 +162,10 @@ def publish_staged_task(
         return TaskPublicationResult(
             source_dir=source,
             operator_id=task.operator_id,
-            reason="operator task is already published",
+            reason=(
+                f"an operator task for {task.operator_id} is already published; "
+                "drop this draft or point it at a different operator"
+            ),
         )
 
     layout.tasks_root.mkdir(parents=True, exist_ok=True)
