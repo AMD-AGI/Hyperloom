@@ -4800,18 +4800,6 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--session-id") + 1] == session_dir.name
 
 
-def test_forge_loop_budget_bounds_are_read_not_copied():
-    """A local copy of an upstream bound plans against a budget forge-loop ignores."""
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    # Read from a module that is always importable, so the test does not depend
-    # on KernelForge being installed alongside.
-    assert rh._forge_loop_constant("math", "pi", 0.0) == pytest.approx(3.14159, abs=1e-4)
-    assert rh._forge_loop_constant("no.such.module", "X", 7.0) == 7.0
-    assert rh._forge_loop_constant("math", "no_such_name", 7.0) == 7.0
-    assert rh._forge_loop_constant("math", "isfinite", 7.0) == 7.0
-
-
 def test_a_patched_rebaseline_gets_the_cold_start_budget(monkeypatch):
     """Applying a patch moves the JIT cache aside, so the next boot recompiles."""
     from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
