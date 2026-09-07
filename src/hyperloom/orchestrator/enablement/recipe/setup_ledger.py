@@ -43,6 +43,42 @@ _ARCHIVE_SUFFIXES: tuple[str, ...] = (".whl", ".tar.gz", ".tgz", ".zip", ".tar.b
 _VCS_PREFIXES: tuple[str, ...] = ("git+", "hg+", "svn+")
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+#: The word after which an installer's bare operands are the things installed
+#: rather than the program or its subcommand.
+_INSTALL_VERBS: frozenset[str] = frozenset({"install", "add", "get", "i", "ci", "reinstall", "update", "upgrade"})
+
+#: pip's hash-checking mode, which is the one way a bare requirement names bytes.
+_HASH_OPTION = "--hash"
+
+#: Options whose next token is their value rather than a thing being installed.
+#: An option missing from this set costs an over-refusal, never a false identity.
+_VALUE_OPTIONS: frozenset[str] = frozenset(
+    {
+        "-r",
+        "--requirement",
+        "-c",
+        "--constraint",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "-f",
+        "--find-links",
+        "--hash",
+        "-e",
+        "--editable",
+        "--registry",
+        "--channel",
+        "--target",
+        "--prefix",
+        "--root",
+        "--python-version",
+        "--platform",
+        "--abi",
+        "--implementation",
+        "--upgrade-strategy",
+    }
+)
+
 OUTCOMES: tuple[str, ...] = ("applied", "failed", "skipped")
 
 
@@ -76,16 +112,52 @@ def _looks_local(operand: str) -> bool:
     return operand.startswith((".", "/")) or operand.endswith(_ARCHIVE_SUFFIXES)
 
 
+def _package_operands(tokens: list[str]) -> list[str]:
+    """Return the things an install names directly, after its own verb.
+
+    A token following an option this module does not know to take a value reads
+    as a package, which over-refuses rather than inventing an identity.
+    """
+    out: list[str] = []
+    installing = False
+    previous = ""
+    for token in tokens:
+        if token.startswith("-"):
+            previous = token
+            continue
+        if not installing:
+            installing = token in _INSTALL_VERBS
+            previous = ""
+            continue
+        was = previous
+        previous = ""
+        if was in _VALUE_OPTIONS:
+            continue
+        if not (token.startswith(_VCS_PREFIXES) or "://" in token or _looks_local(token)):
+            out.append(token)
+    return out
+
+
+def _requirement_digests(pairs: list[tuple[str, str]]) -> list[str]:
+    """Return the digests a hash-checking install pinned its requirements to."""
+    return [operand.rsplit(":", 1)[-1] for option, operand in pairs if option == _HASH_OPTION and operand]
+
+
 def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, Any]], list[str]]:
-    """Identify the file, requirements-file and VCS inputs an install consumes.
+    """Identify every input an install consumes that decides what it installs.
 
     An installer allowlisted by prefix runs verbatim, so a local wheel, a
-    requirements file or a branch-pinned VCS ref can decide what gets installed
-    while nothing durable names the bytes it installed. Each such input is either
-    captured by content digest or reported unresolved, so ``sufficient`` can
-    never be reported over an install the recipe cannot reproduce. A plain
-    package spec is not listed: the KEEP-time distribution closure records what
-    it resolved to.
+    requirements file, a branch-pinned VCS ref or a plain package spec can
+    decide what gets installed while nothing durable names the bytes it
+    installed. Each is either captured by content digest or reported unresolved,
+    so ``sufficient`` is never reported over an install the recipe cannot
+    reproduce.
+
+    A version pin is not an identity: the same ``name==version`` against the
+    same index resolves to different bytes over time, and the install runs
+    against whatever that index then holds. Only pip's hash-checking mode names
+    the bytes, so a bare requirement is identified when the command carries a
+    ``--hash`` and unresolved when it does not.
 
     Returns:
         The identified inputs, and the sorted kinds that could not be identified.
@@ -95,9 +167,11 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
     requirement_options = set(_REQUIREMENT_OPTIONS)
     if installer_class(cmd) == "pip":
         requirement_options.add(_PIP_CONSTRAINT_SHORT)
+    pairs = option_operands(tokens)
+    digests = _requirement_digests(pairs)
     identities: list[dict[str, Any]] = []
     unresolved: list[str] = []
-    for option, operand in option_operands(tokens):
+    for option, operand in pairs:
         if not operand:
             continue
         if option in requirement_options:
@@ -120,6 +194,11 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
                 unresolved.append("local_file")
             else:
                 identities.append({"kind": "local_file", **identity})
+    for spec in _package_operands(tokens):
+        if digests:
+            identities.append({"kind": "pinned_package", "spec": spec, "digests": sorted(set(digests))})
+        else:
+            unresolved.append("mutable_package")
     return identities, sorted(set(unresolved))
 
 
