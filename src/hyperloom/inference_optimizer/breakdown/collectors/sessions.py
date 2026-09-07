@@ -1570,6 +1570,22 @@ def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
     return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
 
 
+def _delivered_payload_paths(out: dict[str, Any], session_dir: Path) -> set[str] | None:
+    """What the session bundle actually hands a consumer of this recipe.
+
+    Read from the packager itself rather than restated here, so a payload the
+    curated selection never matches, one the session no longer holds, and one a
+    size cap dropped are all the same answer: absent. ``None`` when the recipe
+    references no payload at all, which is the one case with nothing to deliver.
+    """
+    references = bool(out.get("source_snapshots")) or bool((out.get("accepted_config") or {}).get("config_path"))
+    if not references:
+        return None
+    from ..session_package import deliverable_relpaths
+
+    return deliverable_relpaths(session_dir)
+
+
 def _collect_recipe(
     out: dict[str, Any],
     state: dict[str, Any],
@@ -1622,6 +1638,7 @@ def _collect_recipe(
         enablement,
         steps=steps,
         section=out,
+        delivered_paths=_delivered_payload_paths(out, session_dir),
         launch_argv_refused=argv_refused,
     )
     out["replay_sufficiency"] = decision

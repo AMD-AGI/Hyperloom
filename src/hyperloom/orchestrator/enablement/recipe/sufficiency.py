@@ -463,16 +463,20 @@ def _credential_reasons(
     return reasons
 
 
-def _delivery_reasons(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-    delivered: Iterable[str],
-) -> list[dict[str, Any]]:
+def _delivery_reasons(section: Mapping[str, Any], delivered: Iterable[str]) -> list[dict[str, Any]]:
     """Refuse a bundle whose referenced bytes it does not actually carry.
 
     A reference the delivery omits is not a thinner recipe -- it is one an
     independent consumer cannot execute, so the export fails closed rather than
-    reporting a self-contained artifact it is not.
+    reporting a self-contained artifact it is not. Judged per captured file, not
+    per manifest: a snapshot whose overlay a packaging cap dropped names content
+    the consumer never receives, and its own manifest travels in this section
+    rather than in the bundle.
+
+    The patch steps are judged through their root's snapshot rather than through
+    their own ``path``, which names the authoring workspace the bundle does not
+    ship: the content those patches produced is the snapshot's payload, so a
+    delivered snapshot is what makes a patch step replayable.
     """
     packaged = {str(p).strip("/") for p in delivered}
     reasons: list[dict[str, Any]] = []
@@ -480,14 +484,17 @@ def _delivery_reasons(
         if not isinstance(snapshot, Mapping):
             continue
         ref = str(snapshot.get("snapshot_ref") or "").strip("/")
-        if not ref or ref not in packaged:
+        payloads = [
+            f"{ref}/files/{str(row.get('rel') or '').strip('/')}"
+            for row in (snapshot.get("files") or [])
+            # A declared deletion has no payload to deliver.
+            if isinstance(row, Mapping) and str(row.get("op") or "") != "delete"
+        ]
+        if not ref or any(payload not in packaged for payload in payloads):
             reasons.append(_reason("source_snapshot_missing", str(snapshot.get("root_id"))))
     config_path = str((section.get("accepted_config") or {}).get("config_path") or "").strip("/")
     if config_path and config_path not in packaged:
         reasons.append(_reason("artifact_not_self_contained", "config_path"))
-    for index, step in enumerate(steps):
-        if step.get("kind") == PATCH_KIND and str(step.get("path") or "").strip("/") not in packaged:
-            reasons.append(_reason("artifact_not_self_contained", f"step[{index}]"))
     return reasons
 
 
@@ -505,9 +512,10 @@ def evaluate_replay_sufficiency(
         enablement: The durable enablement state, keyed by field name.
         steps: The projected ``recipe_steps`` array.
         section: The emitted enablement section this decision travels in.
-        delivered_paths: The paths an export actually packages. When given, every
-            path the recipe references must be among them or the export fails
-            closed; when ``None`` no delivery is being assembled.
+        delivered_paths: The session-relative paths an export actually packages.
+            When given, every payload the recipe references must be among them
+            or the export fails closed; when ``None`` no delivery is being
+            assembled and the recipe is judged on its content alone.
         launch_argv_refused: Whether the sanitizer refused a launch line it could
             not represent, so the evidence carries no observed argv at all.
 
@@ -530,7 +538,7 @@ def evaluate_replay_sufficiency(
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
     if delivered_paths is not None:
-        reasons.extend(_delivery_reasons(section, steps, delivered_paths))
+        reasons.extend(_delivery_reasons(section, delivered_paths))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:
