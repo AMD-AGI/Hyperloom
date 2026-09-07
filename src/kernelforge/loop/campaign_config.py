@@ -35,6 +35,10 @@ SCHEMA_VERSION = 7
 # Versions a campaign on disk may be written in and still be read back.
 READABLE_SCHEMA_VERSIONS = (6, 7)
 _GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
+_AMDGPU_ASSEMBLY_RE = re.compile(
+    r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
+    re.MULTILINE,
+)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 log = logging.getLogger(__name__)
 
@@ -363,6 +367,8 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
             text = ""
         path_text = str(path).lower()
         suffix = path.suffix.lower()
+        if suffix in {".s", ".asm"} and _AMDGPU_ASSEMBLY_RE.search(text):
+            return "assembly"
         if "hipblaslt" in text or "hipblaslt" in path_text:
             return "hipblaslt"
         if "/aiter/" in path_text or "import aiter" in text:

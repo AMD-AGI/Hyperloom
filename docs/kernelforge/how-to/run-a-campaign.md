@@ -65,7 +65,7 @@ The flags that decide what a campaign is:
 - `--driver` — the measurement driver. The loop treats it as a black box,
   talks to it over stdout, and blocks edits to it.
 - `--kernel-backend` — which backend's domain knowledge is injected into the agent's
-  prompt: one of `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`, or
+  prompt: one of `assembly`, `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`, or
   `hipblaslt`, written as the bare `<backend>` key.
 - `--snr-threshold` — the correctness gate in dB, fixed for the campaign.
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
@@ -88,6 +88,11 @@ For a multi-file operator or a whole repository (for example AITER), add
 `--task-type repository` and list the implementation entry points with
 `--source-files a.py,b.hip,...`. Those paths seed orientation, profiling and
 knowledge-base identity; `--kernel` stays the anchor.
+
+To explore FlyDSL-to-assembly variants, use `--kernel-backend assembly` with
+the original Python launcher as the anchor. See
+{doc}`Assembly candidates </kernelforge/how-to/assembly>` for the compiler,
+launcher, and measurement contract.
 
 Before the first iteration, the loop checks the driver against the contract it
 enforces at run time and repairs it if needed. When that fails the run aborts

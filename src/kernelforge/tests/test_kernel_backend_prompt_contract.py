@@ -75,8 +75,9 @@ def forge_loop_prompts(monkeypatch):
 # else moved. See test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "322db8617f4b69ce31a3b582cdda4ed09c4037a411f8161b81afb07874d23385",
+    "assembly": "0242cd5843283a9ee9aff718efe7aeaa46a0bfb31b4d629ea8e4a351dffb9c52",
     "ck": "8c8bd5b1b15e4f21bf70e729c3831de55a8efb7f29e868f99d5e9f73ed0e908e",
-    "flydsl": "59115fbf5dd6c4cd22dc0c547d7a95c9992b64b6ac3f8f5f8a88853f03055937",
+    "flydsl": "4d5243fbaa2359693462baabcc1a7c24c102f895eda98cc2c10243f8ab8d26b9",
     "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
     "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
     "hip": "7399928977cf188ae30f49fc0087386285d0fd5c131cd70b3a9064095f03fba7",

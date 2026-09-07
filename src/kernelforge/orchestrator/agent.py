@@ -195,7 +195,8 @@ def make_agent_fn(
         )
 
     workspace_hygiene_rule = (
-        "Do NOT create or leave new non-ignored files in the workspace. Run "
+        "Do NOT create or leave new non-ignored files outside the campaign's "
+        "explicit --commit-new-path allowlist. Run "
         "one-off checks inline; if a temporary file is unavoidable, place it "
         "under forge_experiments/ and remove it before ending the turn."
     )
@@ -385,7 +386,9 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   The loop stages and keeps/reverts ALL your tracked source edits together, so a
   cross-file change is validated and benchmarked as one unit.
 - Do NOT change the kernel's public function signature or delete needed imports.
-- Keep the kernel in its original backend/DSL (do not rewrite in another language).
+- Implementation language may change through the supported routes in the selected
+  backend expertise, unless the task explicitly restricts languages. Preserve the
+  public callable, launch ABI, and the unchanged driver's correctness contract.
 - Do NOT edit the test harness / driver (the files that measure your kernel);
   such edits are blocked. Optimize the kernel, not the measurement. That is the
   whole boundary: gaming means changing what measures you. Caching, memoization
