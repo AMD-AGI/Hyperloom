@@ -3,7 +3,7 @@
 
 """The assembled KERNEL_AGENT prompt agrees with the request-kind ownership tables.
 
-``run_gemm_tuning`` / ``run_fusion`` / ``run_collective`` are Coordinator-owned lanes that
+``run_gemm_tuning`` / ``run_fusion`` are Coordinator-owned lanes that
 PolicyGate denies from an LLM, so no part of the prompt -- generated sections or
 the ``orchestration.md`` rules fragment -- may advertise them as requestable.
 """

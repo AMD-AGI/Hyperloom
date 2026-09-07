@@ -265,7 +265,7 @@ def _propose_channels():
     return [IntentType.DELEGATE, IntentType.PROPOSE_ACTION]
 
 
-@pytest.mark.parametrize("kind", ["run_collective", "run_fusion"])
+@pytest.mark.parametrize("kind", ["run_fusion"])
 def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     """A direct request skips the lane's own entry gate and accounting."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType

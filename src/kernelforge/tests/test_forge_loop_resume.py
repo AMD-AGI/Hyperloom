@@ -1557,7 +1557,7 @@ def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
     It used to be accepted and ignored so that a caller still passing it would
     not lose the run. Nothing passes it: this repo is the only consumer, and its
     own argv tests assert ``--max-iters`` is never sent (see
-    ``test_forge_collective`` and ``test_forge_long_horizon_cli``). What the
+    ``test_forge_long_horizon_cli``). What the
     tolerance actually bought was a run that silently ignored what the caller
     asked for, so it is refused at parse time instead.
     """
