@@ -226,6 +226,16 @@ _GRAPH_PROBE_SITECUSTOMIZE = r'''
 import atexit, json, os
 
 _n = [0]
+# Distributed observations, collected only when the caller declares a rank
+# count. A single-rank probe leaves torch.distributed untouched and unhooks the
+# import interposer as soon as the graph patch lands, exactly as before.
+_expect_ranks = 0
+try:
+    _expect_ranks = int(os.environ.get("GRAPH_PROBE_EXPECT_RANKS") or 0)
+except ValueError:
+    _expect_ranks = 0
+_reduce_ops = set()
+_gathers = [0]
 
 
 def _ancestor_pids():
@@ -264,7 +274,60 @@ def _install():
     return True
 
 
-if not _install():
+def _install_dist():
+    """Record which cross-rank reductions the run actually performs.
+
+    Which op a collective was given is the difference between reporting the
+    slowest rank and reporting an average that hides a laggard, and it cannot
+    be read off the source: the op is a runtime value.
+    """
+    try:
+        import torch.distributed as dist
+    except Exception:
+        return False
+    if not hasattr(dist, "all_reduce"):
+        return False
+
+    orig_all_reduce = dist.all_reduce
+    _sentinel = object()
+
+    def _all_reduce(tensor, op=_sentinel, *a, **k):
+        try:
+            if op is not _sentinel:
+                _reduce_ops.add(str(op))
+            elif "op" in k:
+                _reduce_ops.add(str(k["op"]))
+            else:
+                # The signature default is SUM, so an omitted op is a SUM.
+                _reduce_ops.add("ReduceOp.SUM")
+        except Exception:
+            pass
+        if op is _sentinel:
+            return orig_all_reduce(tensor, *a, **k)
+        return orig_all_reduce(tensor, op, *a, **k)
+
+    dist.all_reduce = _all_reduce
+
+    for name in ("all_gather", "all_gather_into_tensor", "gather"):
+        orig_gather = getattr(dist, name, None)
+        if orig_gather is None:
+            continue
+
+        def _wrap(fn):
+            def _gather(*a, **k):
+                _gathers[0] += 1
+                return fn(*a, **k)
+
+            return _gather
+
+        setattr(dist, name, _wrap(orig_gather))
+    return True
+
+
+_graph_ready = _install()
+_dist_ready = _install_dist() if _expect_ranks > 1 else True
+
+if not (_graph_ready and _dist_ready):
     # torch is imported by the driver, not by us. Hook the import so the patch
     # lands before any graph is created.
     import builtins
@@ -272,13 +335,38 @@ if not _install():
     _real_import = builtins.__import__
 
     def _hooked(name, *a, **k):
+        global _graph_ready, _dist_ready
         mod = _real_import(name, *a, **k)
         if name == "torch" or name.startswith("torch."):
-            if _install():
+            if not _graph_ready:
+                _graph_ready = _install()
+            if not _dist_ready:
+                _dist_ready = _install_dist()
+            if _graph_ready and _dist_ready:
                 builtins.__import__ = _real_import
         return mod
 
     builtins.__import__ = _hooked
+
+
+def _distributed_state():
+    """Which device this rank bound, and whether it left the group standing."""
+    device = None
+    live = None
+    try:
+        import torch
+
+        if torch.cuda.is_initialized():
+            device = int(torch.cuda.current_device())
+    except Exception:
+        device = None
+    try:
+        import torch.distributed as dist
+
+        live = bool(dist.is_initialized())
+    except Exception:
+        live = None
+    return device, live
 
 
 def _dump():
@@ -286,25 +374,29 @@ def _dump():
     if not out:
         return
     try:
+        payload = {
+            "replays": _n[0],
+            "rank": os.environ.get("RANK"),
+            "local_rank": os.environ.get("LOCAL_RANK"),
+            "world_size": os.environ.get("WORLD_SIZE"),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "ancestors": (
+                _ancestors
+                if os.getpid() == _import_pid
+                else _ancestor_pids()
+            ),
+        }
+        if _expect_ranks > 1:
+            device, live = _distributed_state()
+            payload["device"] = device
+            payload["dist_live"] = live
+            payload["reduce_ops"] = sorted(_reduce_ops)
+            payload["gathers"] = _gathers[0]
         # One file per process: ranks of a torchrun job would otherwise
         # overwrite each other and the count would be one rank's, or zero.
         with open(f"{out}.{os.getpid()}", "w") as fh:
-            json.dump(
-                {
-                    "replays": _n[0],
-                    "rank": os.environ.get("RANK"),
-                    "local_rank": os.environ.get("LOCAL_RANK"),
-                    "world_size": os.environ.get("WORLD_SIZE"),
-                    "pid": os.getpid(),
-                    "ppid": os.getppid(),
-                    "ancestors": (
-                        _ancestors
-                        if os.getpid() == _import_pid
-                        else _ancestor_pids()
-                    ),
-                },
-                fh,
-            )
+            json.dump(payload, fh)
     except Exception:
         pass
 
@@ -359,12 +451,26 @@ def _cleanup_probe(out_path: str, probe_dir: str) -> None:
         shutil.rmtree(probe_dir, ignore_errors=True)
 
 
+# Replay counts are non-negative, so negative values carry the reason a count
+# could not be produced. They are distinguished because they belong to
+# different stages: a probe that never ran says nothing about the driver, while
+# a violated distributed contract is a verdict on it.
+PROBE_FAILED = -1
+PROBE_DISTRIBUTED_VIOLATION = -2
+
+
 def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None = None) -> tuple[int, str]:
-    """Validate graph-probe shards and return the effective replay count."""
+    """Validate graph-probe shards and return the effective replay count.
+
+    ``expected_world_size`` additionally holds the shards to the distributed
+    contract: the declared rank count must be the one that actually launched,
+    each rank must own its own device, and the run must reduce across ranks and
+    tear its process group down.
+    """
     unranked_replays: list[int] = []
     ranked_processes: dict[
         int,
-        list[tuple[int, int | None, int | None, set[int]]],
+        list[tuple[int, int | None, int | None, set[int], dict]],
     ] = {}
     world_sizes: set[int] = set()
 
@@ -372,29 +478,29 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         try:
             payload = json.loads(Path(shard).read_text().strip())
         except (OSError, json.JSONDecodeError, ValueError) as exc:
-            return -1, f"invalid graph probe shard {Path(shard).name}: {exc}"
+            return PROBE_FAILED, f"invalid graph probe shard {Path(shard).name}: {exc}"
 
         if isinstance(payload, int) and not isinstance(payload, bool):
             if payload < 0:
-                return -1, f"invalid negative replay count in {Path(shard).name}"
+                return PROBE_FAILED, f"invalid negative replay count in {Path(shard).name}"
             unranked_replays.append(payload)
             continue
         if not isinstance(payload, dict):
-            return -1, f"invalid graph probe shard payload in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid graph probe shard payload in {Path(shard).name}"
 
         try:
             replays = int(payload["replays"])
         except (KeyError, TypeError, ValueError):
-            return -1, f"invalid replay count in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid replay count in {Path(shard).name}"
         if replays < 0:
-            return -1, f"invalid negative replay count in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid negative replay count in {Path(shard).name}"
 
         rank_value = payload.get("rank")
         local_rank_value = payload.get("local_rank")
         world_size_value = payload.get("world_size")
         if rank_value is None:
             if local_rank_value is not None:
-                return -1, f"incomplete rank identity in {Path(shard).name}"
+                return PROBE_FAILED, f"incomplete rank identity in {Path(shard).name}"
             # Launcher/helper processes are not workers even if they inherited
             # a WORLD_SIZE value from their environment.
             unranked_replays.append(replays)
@@ -405,55 +511,62 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
             unranked_replays.append(replays)
             continue
         if world_size_value is None:
-            return -1, f"incomplete rank identity in {Path(shard).name}"
+            return PROBE_FAILED, f"incomplete rank identity in {Path(shard).name}"
 
         try:
             rank = int(rank_value)
             local_rank = int(local_rank_value) if local_rank_value is not None else None
             world_size = int(world_size_value)
         except (TypeError, ValueError):
-            return -1, f"invalid rank identity in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid rank identity in {Path(shard).name}"
         if (
             world_size <= 0
             or rank < 0
             or rank >= world_size
             or (local_rank is not None and (local_rank < 0 or local_rank >= world_size))
         ):
-            return -1, f"invalid rank identity in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid rank identity in {Path(shard).name}"
         pid_value = payload.get("pid")
         ppid_value = payload.get("ppid")
         try:
             pid = int(pid_value) if pid_value is not None else None
             ppid = int(ppid_value) if ppid_value is not None else None
         except (TypeError, ValueError):
-            return -1, f"invalid process identity in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid process identity in {Path(shard).name}"
         if (pid is None) != (ppid is None) or (pid is not None and (pid <= 0 or ppid is None or ppid < 0)):
-            return -1, f"invalid process identity in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid process identity in {Path(shard).name}"
         raw_ancestors = payload.get("ancestors") or []
         if not isinstance(raw_ancestors, list):
-            return -1, f"invalid process ancestry in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid process ancestry in {Path(shard).name}"
         try:
             ancestors = {int(ancestor) for ancestor in raw_ancestors}
         except (TypeError, ValueError):
-            return -1, f"invalid process ancestry in {Path(shard).name}"
+            return PROBE_FAILED, f"invalid process ancestry in {Path(shard).name}"
         if any(ancestor <= 0 for ancestor in ancestors):
-            return -1, f"invalid process ancestry in {Path(shard).name}"
-        ranked_processes.setdefault(rank, []).append((replays, pid, ppid, ancestors))
+            return PROBE_FAILED, f"invalid process ancestry in {Path(shard).name}"
+        ranked_processes.setdefault(rank, []).append((replays, pid, ppid, ancestors, payload))
         world_sizes.add(world_size)
 
     if not ranked_processes:
         if expected_world_size is not None and expected_world_size > 1:
-            return -1, f"graph probe observed no distributed ranks; expected world_size {expected_world_size}"
+            return (
+                PROBE_DISTRIBUTED_VIOLATION,
+                f"the benchmark ran single-process; this task declares {expected_world_size} ranks, so the "
+                "driver must re-exec itself under torch.distributed.run when RANK is absent",
+            )
         # A normal single-process driver writes one shard. If helper processes
         # also imported sitecustomize, summing their partial counts could let
         # several eager/partial processes collectively satisfy one replay gate.
         return max(unranked_replays, default=0), ""
     if len(world_sizes) != 1:
-        return -1, "graph probe rank shards disagree on world_size"
+        return PROBE_FAILED, "graph probe rank shards disagree on world_size"
 
     world_size = next(iter(world_sizes))
     if expected_world_size is not None and world_size != expected_world_size:
-        return -1, f"graph probe observed world_size {world_size}, expected {expected_world_size}"
+        return (
+            PROBE_DISTRIBUTED_VIOLATION,
+            f"the benchmark launched {world_size} ranks; this task declares {expected_world_size}",
+        )
     expected_ranks = set(range(world_size))
     actual_ranks = set(ranked_processes)
     if actual_ranks != expected_ranks:
@@ -462,30 +575,82 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
         identity_error = f"incomplete graph probe rank set; missing ranks: {missing}"
         if unexpected:
             identity_error += f"; unexpected ranks: {unexpected}"
-        return -1, identity_error
+        return PROBE_FAILED, identity_error
 
     worker_replays: list[int] = []
+    worker_payloads: dict[int, dict] = {}
     for rank, processes in ranked_processes.items():
         if len(processes) == 1:
             worker_replays.append(processes[0][0])
+            worker_payloads[rank] = processes[0][4]
             continue
-        if any(pid is None for _, pid, _, _ in processes):
-            return -1, f"ambiguous graph probe shards for rank {rank}"
+        if any(pid is None for _, pid, _, _, _ in processes):
+            return PROBE_FAILED, f"ambiguous graph probe shards for rank {rank}"
         roots = [
-            replays
-            for replays, pid, _ppid, _ancestors in processes
+            (replays, shard)
+            for replays, pid, _ppid, _ancestors, shard in processes
             if all(
                 other_pid == pid or pid in other_ancestors or (not other_ancestors and other_ppid == pid)
-                for _other_replays, other_pid, other_ppid, other_ancestors in processes
+                for _other_replays, other_pid, other_ppid, other_ancestors, _other_shard in processes
             )
         ]
         if len(roots) != 1:
-            return -1, f"ambiguous graph probe process tree for rank {rank}"
-        worker_replays.append(roots[0])
+            return PROBE_FAILED, f"ambiguous graph probe process tree for rank {rank}"
+        worker_replays.append(roots[0][0])
+        worker_payloads[rank] = roots[0][1]
+
+    if expected_world_size is not None and expected_world_size > 1:
+        violation = _distributed_contract_violation(worker_payloads)
+        if violation:
+            return PROBE_DISTRIBUTED_VIOLATION, violation
 
     # Unranked launcher shards and ranked helper descendants must not count as
     # workers. Each real rank must independently satisfy the caller's iters gate.
     return min(worker_replays), ""
+
+
+def _distributed_contract_violation(worker_payloads: dict[int, dict]) -> str:
+    """Return why the observed multi-rank run is not a trustworthy measurement.
+
+    Only what the run itself reported is judged here. Properties a probe cannot
+    see -- that the correctness reference is itself distributed, that inputs
+    differ per rank, that no barrier sits inside the timed region -- are stated
+    in the driver contract instead of guessed at from the source.
+    """
+    devices = {rank: shard.get("device") for rank, shard in worker_payloads.items()}
+    bound = {rank: device for rank, device in devices.items() if isinstance(device, int)}
+    if len(bound) == len(worker_payloads) and len(set(bound.values())) != len(bound):
+        shared = sorted({device for device in bound.values() if list(bound.values()).count(device) > 1})
+        return (
+            f"ranks share GPU(s) {shared}: {bound}. Two ranks on one device measure intra-device copies, "
+            "so bind each rank to its own device with torch.cuda.set_device(LOCAL_RANK) and refuse to run "
+            "when fewer devices are visible than the task declares"
+        )
+
+    live = [rank for rank, shard in worker_payloads.items() if shard.get("dist_live") is True]
+    if live:
+        return (
+            f"rank(s) {sorted(live)} exited with the process group still initialized; destroy it before "
+            "exiting or the next stage inherits a wedged communicator"
+        )
+
+    observed_ops: set[str] = set()
+    gathers = 0
+    for shard in worker_payloads.values():
+        raw_ops = shard.get("reduce_ops")
+        if isinstance(raw_ops, list):
+            observed_ops.update(str(op) for op in raw_ops)
+        try:
+            gathers += int(shard.get("gathers") or 0)
+        except (TypeError, ValueError):
+            pass
+    if observed_ops and not any("MAX" in op for op in observed_ops) and not gathers:
+        return (
+            f"the benchmark reduced across ranks with {sorted(observed_ops)} and never took the slowest "
+            "rank. A collective is as fast as its laggard, so an averaging reduction reports a speedup a "
+            "slow rank did not earn: reduce latency with ReduceOp.MAX (or gather every rank's time)"
+        )
+    return ""
 
 
 async def _count_graph_replays(
@@ -514,7 +679,10 @@ async def _count_graph_replays(
         PYTHONPATH=os.pathsep.join([probe_dir, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]),
     )
     if require_ranks > 1:
+        # The driver reads the rank count it must launch; the probe reads it to
+        # decide whether to observe the distributed contract at all.
         env["FORGE_NPROC_PER_NODE"] = str(require_ranks)
+        env["GRAPH_PROBE_EXPECT_RANKS"] = str(require_ranks)
     cmd = [
         sys.executable,
         driver,
@@ -545,7 +713,7 @@ async def _count_graph_replays(
 
             cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
-        return -1, "benchmark timed out"
+        return PROBE_FAILED, "benchmark timed out"
     except asyncio.CancelledError:
         _kill_process_group(proc)
         with contextlib.suppress(Exception):
@@ -558,14 +726,14 @@ async def _count_graph_replays(
         raise
     except Exception as exc:  # noqa: BLE001
         _cleanup_probe(out_path, probe_dir)
-        return -1, f"{type(exc).__name__}: {exc}"
+        return PROBE_FAILED, f"{type(exc).__name__}: {exc}"
     tail = ((out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else ""))[-400:]
     if proc.returncode != 0:
         _cleanup_probe(out_path, probe_dir)
         detail = f"benchmark exited {proc.returncode}"
         if tail:
             detail += f": {tail}"
-        return -1, detail
+        return PROBE_FAILED, detail
 
     replays, shard_error = _read_graph_probe_shards(
         out_path,
@@ -576,7 +744,10 @@ async def _count_graph_replays(
         detail = shard_error
         if tail:
             detail += f": {tail}"
-        return -1, detail
+        # The reader's sentinel has to survive: a violated distributed contract
+        # is a verdict on the driver, and collapsing it into PROBE_FAILED would
+        # report it as "the probe did not work".
+        return (replays if replays == PROBE_DISTRIBUTED_VIOLATION else PROBE_FAILED), detail
     return replays, tail
 
 
@@ -612,41 +783,7 @@ async def _check_profile_contract(
     output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
     if proc.returncode != 0:
         return False, f"profile-run exited {proc.returncode}: {output[-200:]}"
-        return True, "verified"
-
-
-def _distributed_static_checks(driver: str, require_ranks: int) -> tuple[bool, list[str]]:
-    """Validate distributed driver source before a multi-rank preflight run."""
-    if require_ranks <= 1:
-        return True, []
-    reasons: list[str] = []
-    try:
-        text = Path(driver).read_text(encoding="utf-8")
-    except OSError as exc:
-        return False, [f"could not read driver for distributed checks: {exc}"]
-
-    if "torch.distributed.run" not in text:
-        reasons.append("distributed driver must self-launch under torch.distributed.run when RANK is absent")
-    if "nproc-per-node" not in text:
-        reasons.append("distributed driver must construct an --nproc-per-node launch")
-    if "ReduceOp.MAX" not in text and "_reduce_max" not in text:
-        reasons.append("distributed benchmark must reduce latency across ranks with MAX")
-    oversub_markers = (
-        "world_size > visible",
-        "visible < WORLD_SIZE",
-        "visible < world_size",
-        "visible < nproc",
-        "visible GPUs for TP",
-    )
-    if not any(marker in text for marker in oversub_markers):
-        reasons.append("distributed driver must refuse to oversubscribe visible GPUs")
-    if "destroy_process_group" not in text and "destroy_distributed_environment" not in text:
-        reasons.append("distributed driver must destroy the distributed environment before exiting")
-    if "torch.distributed." not in text and "dist." not in text:
-        reasons.append("distributed driver must reference torch.distributed collectives")
-    if "manual_seed(seed + " not in text and "manual_seed(seed + ctx.rank)" not in text:
-        reasons.append("distributed driver must seed inputs differently per rank")
-    return (not reasons, reasons)
+    return True, "verified"
 
 
 async def _preflight_async(
@@ -668,13 +805,6 @@ async def _preflight_async(
     def _stage_seconds(since: float) -> float:
         return round(time.monotonic() - since, 3)
 
-    ranks_ok = True
-    if require_ranks > 1:
-        ranks_ok, rank_reasons = _distributed_static_checks(driver, require_ranks)
-        if rank_reasons:
-            reasons.extend(rank_reasons)
-            details["distributed_static"] = {"ok": ranks_ok, "reasons": rank_reasons}
-
     if not driver or not Path(driver).is_file():
         return PreflightResult(
             ok=False,
@@ -682,8 +812,8 @@ async def _preflight_async(
             bench_ok=False,
             graph_ok=not require_graph,
             profile_ok=not require_profile,
-            ranks_ok=ranks_ok,
-            reasons=[f"driver file not found: {driver}", *reasons],
+            ranks_ok=require_ranks <= 1,
+            reasons=[f"driver file not found: {driver}"],
         )
 
     # Correctness: the driver must EMIT a parseable metric and not crash. Whether
@@ -781,7 +911,10 @@ async def _preflight_async(
     # by counting actual torch.cuda.CUDAGraph replays during the benchmark (not by
     # trusting a printed label), so a driver that times eagerly — or whose capture
     # silently fell back to eager — performs < iters replays and is rejected.
+    # One probe run answers both stages: it counts replays and, for a task that
+    # declares several ranks, reports what the ranks actually did.
     graph_ok = True
+    ranks_ok = require_ranks <= 1
     if require_graph:
         graph_ok = False
         if bench_ok:
@@ -800,6 +933,12 @@ async def _preflight_async(
             }
             if replays >= iters:
                 graph_ok = True
+                ranks_ok = True
+            elif replays == PROBE_DISTRIBUTED_VIOLATION:
+                # A verdict on the driver, not a failure of the probe, so it is
+                # reported against the rank contract rather than graph timing.
+                diagnostics["graph"] = tail
+                reasons.append(f"distributed measurement contract violated: {tail}")
             elif replays < 0:
                 diagnostics["graph"] = tail
                 reasons.append(f"could not verify graph timing (probe failed): {tail[-160:]}")
@@ -811,9 +950,15 @@ async def _preflight_async(
                 )
         else:
             reasons.append("cannot verify graph timing because bench produced no timing")
+    elif require_ranks > 1:
+        # The rank observations ride on the graph probe, so there is nothing to
+        # conclude from without it.
+        reasons.append(
+            f"cannot verify the {require_ranks}-rank measurement contract because graph timing was not required"
+        )
 
     if require_ranks > 1:
-        ranks_ok = ranks_ok and bench_ok and graph_ok
+        details["distributed"] = {"ok": ranks_ok, "required_ranks": require_ranks}
 
     profile_ok = True
     if require_profile:
@@ -1587,12 +1732,19 @@ def _distributed_contract_note(nproc: int) -> str:
 The kernel is a collective: it only computes the right answer when {nproc} ranks
 participate. Your driver owns the launch. One file, two roles:
 
-* No `RANK` in the environment: re-exec this same file under
+* No `LOCAL_RANK` in the environment: re-exec this same file under
   `torch.distributed.run --standalone --nproc-per-node={nproc}` and forward the
   exit code. Do NOT use `start_new_session`; the caller kills the whole process
   group on timeout and a detached torchrun would survive holding its GPUs.
-* `RANK` present: bind `LOCAL_RANK` with `torch.cuda.set_device`, call
+* `LOCAL_RANK` present: bind it with `torch.cuda.set_device`, call
   `dist.init_process_group`, and run the measurement as a worker.
+
+Branch on `LOCAL_RANK`, not on `RANK`. Job launchers routinely preset `RANK=0`
+and `WORLD_SIZE=1` in the environment forge-loop inherits, and a driver that
+reads those as "I am already a worker" never launches the other ranks and then
+measures a one-rank collective. Only torchrun sets `LOCAL_RANK`. Assert that
+`WORLD_SIZE` equals {nproc} once you are a worker, so an inherited value cannot
+pass for the real one.
 
 Requirements specific to a collective:
 
@@ -1607,6 +1759,25 @@ Requirements specific to a collective:
   wrong rank is a wrong collective). Print only from rank 0.
 * Destroy the process group before exiting, or the next stage inherits a wedged
   communicator.
+* Give each rank its own device via `LOCAL_RANK`, and refuse to run when fewer
+  than {nproc} devices are visible. Two ranks sharing one GPU measure
+  intra-device copies, and that speedup does not exist on the real path.
+* Seed inputs per rank (for example `manual_seed(seed + rank)`). Identical
+  inputs on every rank let a collective that silently drops a rank still pass
+  parity.
+* Keep the timed region free of synchronization. Issue at most one barrier
+  BEFORE `start.record()` and none between it and `end.record()`, and do not
+  re-synchronize between samples. A barrier inside the timed region resets the
+  ranks to a fully synchronised state, which is exactly the condition that
+  makes deleting an internal barrier look free — it turns a slower
+  implementation into an apparent speedup.
+
+The deterministic check observes the run itself and will reject it when the
+declared {nproc} ranks did not launch, when two ranks share a device, when the
+benchmark reduces across ranks without ever taking the slowest one, or when a
+rank exits with its process group still initialized. The remaining
+requirements above are yours to hold: nothing measures them for you, and
+getting one wrong buys a wasted end-to-end validation.
 """
 
 
