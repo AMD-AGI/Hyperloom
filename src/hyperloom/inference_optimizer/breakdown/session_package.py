@@ -84,6 +84,8 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "target_analysis/target_analysis_report.md",
     # ── coordinator DB ────────────────────────────────────────────────
     "storage/coordinator.db",
+    # ── enablement replay payloads the recipe references ──────────────
+    "optimization_stack/enablement/**",
     # ── TraceLens analysis/report family (dynamic <ts>/<tl-id> subdirs) ─
     "kernel-agent/runs/**/tracelens/analysis.md",
     "kernel-agent/runs/**/tracelens/tracelens_report.json",
@@ -400,6 +402,61 @@ def _manifest_text(manifest: dict) -> str:
     return "\n".join(lines)
 
 
+def _apply_caps(matched: list[Path], session_dir: Path) -> tuple[list[tuple[Path, str, int]], bool, list[str]]:
+    """Cut ``matched`` down to what the caps admit, in selection order.
+
+    Args:
+        matched: Selected absolute paths, already ordered by relative path.
+        session_dir: The resolved session root the paths are relative to.
+
+    Returns:
+        The admitted ``(path, relative path, size)`` triples, whether a cap was
+        hit, and the relative paths dropped by it.
+    """
+    included: list[tuple[Path, str, int]] = []
+    total = 0
+    for i, p in enumerate(matched):
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            continue
+        if len(included) >= _MAX_FILES or total + sz > _MAX_TOTAL_BYTES:
+            dropped = [q.relative_to(session_dir).as_posix() for q in matched[i:]]
+            log.warning(
+                "session package: hit size/count cap, TRUNCATING bundle "
+                "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
+                "truncated=true.",
+                len(included),
+                total,
+                len(dropped),
+            )
+            return included, True, dropped
+        included.append((p, p.relative_to(session_dir).as_posix(), sz))
+        total += sz
+    return included, False, []
+
+
+def deliverable_relpaths(session_dir: Path | str) -> set[str]:
+    """Return the session-relative paths this bundle would hand a consumer.
+
+    The same selection and the same caps ``package_session_artifacts`` applies,
+    so a caller judging whether a payload reaches an independent consumer reads
+    the packager's own answer rather than a second copy of its rules. A path
+    absent here is one the consumer never receives -- because nothing selects
+    it, because it is not there, or because a cap dropped it.
+    """
+    try:
+        sd = Path(session_dir).resolve()
+        if not sd.is_dir():
+            return set()
+        matched, _unmatched, _refused = _select(sd)
+        included, _truncated, _dropped = _apply_caps(matched, sd)
+    except OSError:
+        log.debug("session package: deliverable scan failed", exc_info=True)
+        return set()
+    return {rel for _p, rel, _sz in included}
+
+
 def package_session_artifacts(
     session_dir: Path | str,
     *,
@@ -433,31 +490,7 @@ def package_session_artifacts(
             log.warning("session package skipped: no artifacts matched in %s", sd)
             return None
 
-        # Apply safety caps. On hitting a cap, record what got dropped and
-        # flag the manifest as truncated.
-        included: list[tuple[Path, str, int]] = []
-        total = 0
-        truncated = False
-        dropped: list[str] = []
-        for i, p in enumerate(matched):
-            try:
-                sz = p.stat().st_size
-            except OSError:
-                continue
-            if len(included) >= _MAX_FILES or total + sz > _MAX_TOTAL_BYTES:
-                truncated = True
-                dropped = [q.relative_to(sd).as_posix() for q in matched[i:]]
-                log.warning(
-                    "session package: hit size/count cap, TRUNCATING bundle "
-                    "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
-                    "truncated=true.",
-                    len(included),
-                    total,
-                    len(dropped),
-                )
-                break
-            included.append((p, p.relative_to(sd).as_posix(), sz))
-            total += sz
+        included, truncated, dropped = _apply_caps(matched, sd)
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()
         out_dir = root / PACKAGE_SUBDIR
@@ -503,7 +536,7 @@ def package_session_artifacts(
             "session package: wrote %s (%d files, %d bytes pre-zip, complete=%s)",
             target,
             len(written),
-            total,
+            sum(sz for _p, _rel, sz in included),
             manifest["complete"],
         )
 
