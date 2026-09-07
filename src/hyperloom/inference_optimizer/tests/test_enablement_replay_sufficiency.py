@@ -167,14 +167,15 @@ def test_a_command_only_the_earlier_keep_ran_is_capped_out_of_the_final_one():
     assert "setup_ledger_truncated" in codes
 
 
-def test_command_from_a_discarded_round_raises_effect_outside_verified_launch():
+@pytest.mark.parametrize("disposition", ["apply_failed", "no_patches", "reverted"])
+def test_command_from_a_discarded_round_raises_effect_outside_verified_launch(disposition):
     rows = mark_round_disposition(
         [_row("pip install stranded", seq=1, task="r1")],
         round_task_id="r1",
-        disposition="apply_failed",
+        disposition=disposition,
         accepted=False,
     )
-    assert rows[0]["round_disposition"] == "apply_failed"
+    assert rows[0]["round_disposition"] == disposition
     assert rows[0]["present_at_final_launch"] is False
     assert "setup_effect_outside_verified_launch" in _codes(_decide({"setup_executions": rows}))
 
@@ -527,7 +528,12 @@ def _evidence(**kw):
         "requested_server_args": "--mem-fraction-static 0.9",
         "requested_server_env": {"HF_TOKEN": "shh", "SGLANG_X": "1"},
         "observed_server_launch_flags": "--mem-fraction-static 0.9",
-        "observed_server_identity": {"model_path": "/models/secret-model", "tp_size": 8},
+        "observed_server_identity": {
+            "model_path": "/models/secret-model",
+            "tokenizer_path": "/models/secret-tokenizer",
+            "served_model_name": "/models/secret-model",
+            "tp_size": 8,
+        },
         "observed_model_binding": {"model_digest": "sha256:m", "tp": 8},
         "requested_model_digest": "sha256:m",
         "warm_reuse": {
@@ -547,7 +553,7 @@ def test_launch_evidence_projection_drops_paths_values_and_secret_env_names():
     assert "/models/secret-model" not in flat and "/s/runs" not in flat and "shh" not in flat
     assert projected["requested_server_env_keys"] == ["SGLANG_X"]
     assert projected["recipe_digest"] == "sha256:cfg"
-    assert "model_path" not in projected["observed_server_identity"]
+    assert not {"model_path", "tokenizer_path", "served_model_name"}.intersection(projected["observed_server_identity"])
     assert projected["observed_server_identity"]["tp_size"] == 8
 
 
@@ -775,11 +781,18 @@ def test_pinned_acquisition_needs_no_rebuild_note():
 
 
 def test_credentialed_acquisition_url_is_exported_stripped_with_its_class():
-    provenance = project_runtime_provenance(
-        _runtime_state({"acquisition_method": "editable_ref", "repo_url": "https://u:t@h/r", "ref": "main"})
+    state = _runtime_state(
+        {
+            "acquisition_method": "editable_ref",
+            "repo_url": "https://u:t@h/r",
+            "ref": "main",
+            "resolved_ref": "c" * 40,
+        }
     )
+    provenance = project_runtime_provenance(state)
     assert provenance["acquisition"]["repo_url"] == "https://h/r"
     assert provenance["acquisition"]["credential_class"] == "opaque_credential"
+    assert "credential_required" in _codes(_decide(state, {"runtime_provenance": provenance}))
 
 
 # ---- 6 / 14. Credential class and ambient channels (OD2) -------------------
@@ -1163,9 +1176,13 @@ def test_absent_closure_and_assertions_fail_closed():
     assert "environment_closure_absent" in codes and "assertions_not_at_keep" in codes
 
 
-def test_non_python_installer_withholds_a_verified_closure():
-    rows = _accepted([_row("apt-get install -y libfoo", seq=1, task="kept")], task="kept")
-    state = {**_sufficient_state(), "setup_commands": ["apt-get install -y libfoo"], "setup_executions": rows}
+@pytest.mark.parametrize(
+    "cmd",
+    ["apt-get install -y libfoo", "npm install package", "conda install package"],
+)
+def test_non_python_installer_withholds_a_verified_closure(cmd):
+    rows = _accepted([_row(cmd, seq=1, task="kept")], task="kept")
+    state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": rows}
     assert "closure_scope_incomplete" in _codes(_decide(state, _sufficient_section()))
 
 
@@ -1845,12 +1862,16 @@ def test_a_capped_command_withholds_a_verified_closure():
     assert out["dependency_closure_status"] == "unverified"
 
 
-def test_closure_status_is_unverified_for_a_non_python_installer():
+@pytest.mark.parametrize(
+    "cmd",
+    ["apt-get install -y libfoo", "npm install package", "conda install package"],
+)
+def test_closure_status_is_unverified_for_a_non_python_installer(cmd):
     """Scope, not absence: the map is present and covers less than was installed."""
-    rows = _accepted([_row("apt-get install -y libfoo", seq=1, task="kept")], task="kept")
+    rows = _accepted([_row(cmd, seq=1, task="kept")], task="kept")
     out = _collect(
         {
-            "setup_commands": ["apt-get install -y libfoo"],
+            "setup_commands": [cmd],
             "setup_executions": rows,
             "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
             "installed_versions_at_keep": {"sglang": "0.4"},
@@ -1859,6 +1880,21 @@ def test_closure_status_is_unverified_for_a_non_python_installer():
     codes = [r["code"] for r in out["replay_sufficiency"]["reasons"]]
     assert "closure_scope_incomplete" in codes
     assert out["dependency_closure_status"] == "unverified"
+
+
+def test_closure_status_is_verified_with_complete_build_inputs():
+    row = _attempt("bA")
+    out = _collect(
+        {
+            **_sufficient_state(),
+            "build_manifest": [row, {"task_id": "bA", "probe_task_id": "probe"}],
+            "last_specialist_task_id": "probe",
+            "environment_closure": {"interpreter_tag": "3.10.14", "distributions": {"sglang": "0.4"}},
+            "installed_versions_at_keep": {"sglang": "0.4"},
+        }
+    )
+    assert "build_inputs_incomplete" not in _codes(out["replay_sufficiency"])
+    assert out["dependency_closure_status"] == "verified"
 
 
 def test_closure_status_is_unverified_while_the_build_inputs_are_incomplete():
