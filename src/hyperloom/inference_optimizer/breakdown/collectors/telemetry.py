@@ -164,6 +164,153 @@ def _aggregate_gpu_monitor(
     }
 
 
+# Occupancy thresholds, both reported because they answer different questions.
+# On a saturated MI355X run every one of 48 retracts happened at or above 0.99,
+# so that band is where the engine actually starts handing requests back. 0.95
+# covers all of them with room to spare and is the earlier signal, but roughly a
+# tenth of the run sat between the two without a single retract -- reporting one
+# number would either miss the warning or overstate the damage.
+_KV_SATURATION_THRESHOLD = 0.95
+_KV_RETRACT_BAND_THRESHOLD = 0.99
+
+#: Only this phase may enter a comparison. Boot has no traffic, warmup runs a
+#: deliberately cold cache, and eval drives request shapes unrelated to the
+#: throughput benchmark; averaging across them describes no phase at all.
+_KV_COMPARABLE_PHASE = "measured"
+
+
+def _scan_kv_artifacts(session_dir: Path) -> list[Path]:
+    """Find every round's ``kv_metrics.json`` under ``runs/``.
+
+    Args:
+        session_dir (Path): Absolute session root.
+
+    Returns:
+        list[Path]: Matching artifacts, sorted. Empty when none exist.
+    """
+    runs = session_dir / "runs"
+    if not runs.exists():
+        return []
+    return sorted(runs.rglob("kv_metrics.json"))
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    """Nearest-rank percentile of an unsorted sample.
+
+    Args:
+        values (list[float]): Sample values.
+        fraction (float): Percentile in ``[0, 1]``.
+
+    Returns:
+        float | None: The value at that rank, or ``None`` for an empty sample.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int(round(fraction * (len(ordered) - 1)))))
+    return round(ordered[index], 4)
+
+
+def _aggregate_kv_metrics(
+    artifacts: list[Path],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Aggregate per-round KV artifacts into one session-level summary.
+
+    Occupancy statistics are taken over the measured phase only. The mean is
+    deliberately not reported: on a real saturated run it read 0.763 while the
+    pool sat at or above 0.95 for 13.8% of the time and above 0.99 for 3.6% --
+    the mean hid precisely the episodes that were doing the damage. Time above
+    each threshold is reported instead.
+
+    Args:
+        artifacts (list[Path]): ``kv_metrics.json`` paths to fold together.
+        warnings (list[str]): Shared warnings list (mutated on parse failure).
+
+    Returns:
+        dict[str, Any]: The summary. ``{}`` when no artifact was readable.
+        ``available`` is tri-state: ``None`` means no round ever reached the
+        endpoint one way or the other, which is not the same as reaching it and
+        finding an idle pool. Every metric is ``float | None`` and is never
+        coerced to 0.0.
+    """
+    payloads: list[dict[str, Any]] = []
+    for path in artifacts:
+        loaded = _load_json_safe(path, warnings)
+        if isinstance(loaded, dict):
+            payloads.append(loaded)
+    if not payloads:
+        return {}
+
+    active: list[float] = []
+    physical: list[float] = []
+    engines: set[str] = set()
+    capacity_tokens: float | None = None
+    capacity_gb: float | None = None
+    retract = 0.0
+    preempt = 0.0
+    saw_retract = saw_preempt = False
+    aborted_rounds = 0
+    reached: list[bool] = []
+
+    for payload in payloads:
+        if payload.get("aborted"):
+            aborted_rounds += 1
+        state = payload.get("available")
+        if isinstance(state, bool):
+            reached.append(state)
+        if capacity_tokens is None:
+            capacity_tokens = _to_float(payload.get("capacity_tokens"))
+        if capacity_gb is None:
+            capacity_gb = _to_float(payload.get("capacity_gb"))
+        delta = _to_float(payload.get("retract_delta"))
+        if delta is not None:
+            retract += delta
+            saw_retract = True
+        delta = _to_float(payload.get("preempt_delta"))
+        if delta is not None:
+            preempt += delta
+            saw_preempt = True
+        for row in payload.get("samples") or []:
+            if not isinstance(row, dict) or row.get("phase") != _KV_COMPARABLE_PHASE:
+                continue
+            value = _to_float(row.get("active_pool_usage"))
+            if value is not None:
+                active.append(value)
+            value = _to_float(row.get("physical_pool_usage"))
+            if value is not None:
+                physical.append(value)
+        engine = str(payload.get("engine") or "").strip()
+        if engine:
+            engines.add(engine)
+
+    def _time_above(threshold: float) -> float | None:
+        """Share of measured samples at or above a threshold, as a percentage."""
+        if not active:
+            return None
+        return round(100.0 * sum(1 for v in active if v >= threshold) / len(active), 2)
+
+    return {
+        "schema_version": 1,
+        "source": "metrics",
+        "available": (any(reached) if reached else None),
+        "rounds": len(payloads),
+        "aborted_rounds": aborted_rounds,
+        "measured_samples": len(active),
+        "capacity_tokens": capacity_tokens,
+        "capacity_gb": capacity_gb,
+        "active_pool_usage_p50": _percentile(active, 0.50),
+        "active_pool_usage_p95": _percentile(active, 0.95),
+        "active_pool_usage_max": round(max(active), 4) if active else None,
+        "physical_pool_usage_max": round(max(physical), 4) if physical else None,
+        "time_at_saturation_pct": _time_above(_KV_SATURATION_THRESHOLD),
+        "time_at_retract_band_pct": _time_above(_KV_RETRACT_BAND_THRESHOLD),
+        "retract_total": retract if saw_retract else None,
+        "preempt_total": preempt if saw_preempt else None,
+        "engines": sorted(engines),
+    }
+
+
 def _collect_lane_timeline(
     session_dir: Path,
     warnings: list[str],
@@ -279,6 +426,8 @@ def collect_telemetry(
         ],
         "server_log_paths": [_rel(p, session_dir) or str(p) for p in _scan_server_logs(session_dir)],
         "gpu_monitor_aggregate": _aggregate_gpu_monitor(all_reports, warnings),
+        # KV pool occupancy and pressure, measured-phase only.
+        "kv_cache": _aggregate_kv_metrics(_scan_kv_artifacts(session_dir), warnings),
         # per-lane occupancy / capacity summary from the leases DB.
         "lane_timeline": _collect_lane_timeline(session_dir, warnings),
         "orchestration_context": {"tick_count": int(state.get("tick") or 0)},

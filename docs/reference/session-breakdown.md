@@ -549,8 +549,40 @@ signal (`crash` / `stall` / `disk_full` / `cluster_fault` / …).
 
 Paths only (no copied content): `baseline_report_path`,
 `profile_report_paths[]`, `torch_trace_paths[]`,
-`system_profile_paths[]`, `server_log_paths[]`, and a
-`gpu_monitor_aggregate` summary.
+`system_profile_paths[]`, `server_log_paths[]`, a
+`gpu_monitor_aggregate` summary, and a `kv_cache` summary.
+
+`kv_cache` covers KV pool occupancy and pressure, folded from the per-round
+`runs/**/kv_metrics.json` artifacts. It is absent when no round produced one.
+Every metric in it is `float | None`, and `None` means nothing sampled that
+metric — it is not zero. Test with `is None`; a genuine `0.0` is falsy too.
+
+Two things about this section are easy to misread:
+
+* **Occupancy is two different readings.** `active_pool_usage_*` counts only
+  what running requests hold; `physical_pool_usage_max` also counts blocks the
+  prefix cache holds but would release under pressure. A pool at 100% physical
+  can be under no pressure at all — that is prefix cache working — so only the
+  active figures indicate saturation. `physical` is SGLang-only.
+* **Occupancy is reported as time above a threshold, not as a mean.** A mean
+  hides the episodes that matter: one measured run averaged 0.763 while sitting
+  at or above 0.95 for 13.8% of its samples. `time_at_saturation_pct` uses 0.95
+  (the earlier signal) and `time_at_retract_band_pct` uses 0.99 (where retracts
+  were actually observed). Both are reported because roughly a tenth of that run
+  fell between them without a single retract.
+
+Statistics cover the **measured** phase only. Boot carries no traffic, warmup
+runs a deliberately cold cache, and the accuracy eval drives request shapes
+unrelated to the throughput benchmark; averaging across them describes no phase
+at all.
+
+`retract_total` (SGLang) and `preempt_total` (vLLM) are the same event — the KV
+pool running out — under two names and two measurement paths, which is why they
+are separate fields rather than one. `source` records how the numbers were
+obtained, so a future log-derived figure is not compared directly against a
+`/metrics`-derived one. `available` is tri-state: `None` means no round ever
+settled whether the endpoint was reachable, which is not the same as reaching it
+and finding an idle pool.
 
 Paths are session-dir relative when the producer can express them
 that way; absolute otherwise. Consumers that need to pull raw

@@ -621,6 +621,74 @@ class OrchestrationContext(TypedDict, total=False):
     tick_count: int
 
 
+class KvCacheAggregate(TypedDict, total=False):
+    """Session-level KV pool occupancy and pressure, measured phase only.
+
+    Every metric is ``float | None`` and is never coerced to 0.0: these gauges
+    legitimately read zero, and "the pool was empty" is a different finding from
+    "nobody sampled the pool". Test with ``is None``.
+
+    Occupancy is deliberately reported as time above a threshold rather than as
+    a mean. On a saturated run the mean read 0.763 while the pool was at or
+    above 0.95 for 13.8% of the time -- the mean hid exactly the episodes doing
+    the damage.
+
+    Attributes:
+        schema_version (int): Payload version of this section.
+        source (str): How the numbers were obtained; ``"metrics"`` for the
+            engine's HTTP endpoint. Recorded because the log fallback computes
+            hit rate and pressure by a different method, and two numbers under
+            one name will otherwise be compared directly.
+        available (bool | None): Whether any round reached the endpoint.
+            ``None`` means no round ever settled the question -- not the same as
+            reaching it and finding no pressure.
+        rounds (int): Round artifacts folded in.
+        aborted_rounds (int): Of those, how many left through an exception path,
+            so their window was cut short rather than closed.
+        measured_samples (int): Samples taken during the measured phase.
+        capacity_tokens (float | None): KV pool size in tokens.
+        capacity_gb (float | None): KV pool size as the engine reports it. The
+            engine's "GB" is 1024-based; do not rescale it.
+        active_pool_usage_p50 (float | None): Median occupancy by running
+            requests. Excludes blocks the prefix cache holds but would release.
+        active_pool_usage_p95 (float | None): 95th percentile of the same.
+        active_pool_usage_max (float | None): Peak of the same.
+        physical_pool_usage_max (float | None): Peak occupancy including
+            releasable prefix-cache blocks. A pool at 100% here can be under no
+            pressure at all, which is why it is never reported as "the"
+            occupancy. SGLang only; vLLM cannot express it.
+        time_at_saturation_pct (float | None): Share of measured time at or
+            above 0.95. The leading indicator: it covers every observed retract
+            with room to spare, but part of that band passes without one.
+        time_at_retract_band_pct (float | None): Share at or above 0.99, where
+            retracts were actually observed to happen.
+        retract_total (float | None): SGLang requests retracted. Diffed per
+            counter series so an engine restart does not read as a negative.
+        preempt_total (float | None): vLLM requests preempted. Same quantity by
+            a different name and a different measurement path, which is why the
+            two are separate fields rather than one.
+        engines (list[str]): Engines seen across the folded rounds.
+    """
+
+    schema_version: int
+    source: str
+    available: bool | None
+    rounds: int
+    aborted_rounds: int
+    measured_samples: int
+    capacity_tokens: float | None
+    capacity_gb: float | None
+    active_pool_usage_p50: float | None
+    active_pool_usage_p95: float | None
+    active_pool_usage_max: float | None
+    physical_pool_usage_max: float | None
+    time_at_saturation_pct: float | None
+    time_at_retract_band_pct: float | None
+    retract_total: float | None
+    preempt_total: float | None
+    engines: list[str]
+
+
 class Telemetry(TypedDict, total=False):
     """Pointers to telemetry artifacts and aggregated hardware metrics."""
 
@@ -630,6 +698,8 @@ class Telemetry(TypedDict, total=False):
     system_profile_paths: list[str]
     server_log_paths: list[str]
     gpu_monitor_aggregate: GpuMonitorAggregate
+    # KV pool occupancy and pressure, measured phase only.
+    kv_cache: KvCacheAggregate
     # per-lane capacity / occupancy summary.
     lane_timeline: list[LaneTimelineEntry]
     orchestration_context: OrchestrationContext
