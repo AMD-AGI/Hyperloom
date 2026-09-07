@@ -322,6 +322,12 @@ GEAK_REF="${GEAK_REF:-main}"
 # GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the
 # network (git ls-remote). Only do that when GEAK_ROOT was not overridden -- an
 # operator-pinned root must not pay for (or fail on) a network round-trip.
+# Record the override the way TRACELENS_ROOT does, so ensure_geak can leave an
+# operator's working checkout alone instead of realigning it to GEAK_REF.
+_geak_root_was_set=""
+if [ -n "${GEAK_ROOT:-}" ]; then
+  _geak_root_was_set=1
+fi
 if [ -z "${GEAK_ROOT:-}" ]; then
   _GEAK_SHA="$(_resolve_ref_sha "$GEAK_REPO" "$GEAK_REF")"
   GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
@@ -1301,7 +1307,14 @@ ensure_geak() {
     fi
   else
     log "e2e optimizer checkout already present: ${GEAK_ROOT}"
-    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    if [ -n "${_geak_root_was_set:-}" ]; then
+      # Operator override: this is someone's working checkout, not an
+      # installer-managed one. Realigning it would `checkout --force` them off
+      # their branch onto a detached FETCH_HEAD and leave .git/shallow behind,
+      # discarding uncommitted work. Same rule ensure_tracelens already applies
+      # to an overridden TRACELENS_ROOT.
+      log "operator-supplied GEAK_ROOT; leaving checkout at $(git -C "${GEAK_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown) untouched"
+    elif [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
       # Keep an existing checkout aligned with the requested GEAK_REF:
       # without this a ref bump (branch/tag/SHA) leaves the runtime pinned
       # to the stale e2e code it first cloned.
