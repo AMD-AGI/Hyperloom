@@ -99,9 +99,15 @@ def test_recipe_steps_patch_order_follows_kept_patches():
 def test_recipe_steps_fields_trace_to_state():
     steps = _steps(setup_commands=["pip install a"], kept_patches=["/p/1.patch"], framework_root="/fr")
     setup, patch = steps
-    assert set(setup) == {"kind", "cmd", "occurrence", "credential_class"}
+    assert set(setup) == {"kind", "cmd", "occurrence", "credential_class", "input_identity", "unresolved_inputs"}
     assert set(patch) == {"kind", "path", "root", "root_id"}
     assert patch["path"] == "/p/1.patch" and patch["root"] == "/fr"
+
+
+def test_a_step_from_state_predating_the_ledger_claims_no_input_identity():
+    """No identity was ever taken, which is not the same as none being needed."""
+    setup = _steps(setup_commands=["pip install ./local.whl"])[0]
+    assert setup["input_identity"] is None and setup["unresolved_inputs"] is None
 
 
 def test_recipe_steps_patch_root_records_framework_root_verbatim():

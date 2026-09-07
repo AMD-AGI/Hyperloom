@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import _build_attempt_summary
@@ -923,17 +924,64 @@ def test_plain_package_spec_needs_no_input_identity(tmp_path):
     assert setup_input_identity("pip install foo==1.0", cwd=tmp_path) == ([], [])
 
 
+def _projected_setup_steps(rows, commands):
+    return [
+        step
+        for step in build_recipe_steps(
+            {"setup_commands": commands, "setup_executions": rows},
+            attempt_summary=_build_attempt_summary,
+        )
+        if step["kind"] == "setup"
+    ]
+
+
+def test_a_local_file_installs_identity_reaches_the_consumer(tmp_path):
+    """Recording the digest is half of it: the replaying consumer reads the step."""
+    (tmp_path / "private.whl").write_bytes(b"wheel-bytes")
+    cmd = "pip install ./private.whl"
+    step = _projected_setup_steps(_accepted([_row(cmd, cwd=tmp_path)]), [cmd])[0]
+    assert step["unresolved_inputs"] == []
+    assert step["input_identity"][0]["kind"] == "local_file"
+    assert step["input_identity"][0]["sha256"] == hashlib.sha256(b"wheel-bytes").hexdigest()
+
+
+def test_an_unidentifiable_local_file_names_its_kind_on_the_step(tmp_path):
+    cmd = "pip install ./private.whl"
+    step = _projected_setup_steps(_accepted([_row(cmd, cwd=tmp_path)]), [cmd])[0]
+    assert step["input_identity"] == [] and step["unresolved_inputs"] == ["local_file"]
+
+
+def test_a_moving_vcs_ref_names_its_kind_on_the_step_and_blocks_replay(tmp_path):
+    cmd = "pip install git+https://host/repo@main"
+    rows = _accepted([_row(cmd, cwd=tmp_path)])
+    step = _projected_setup_steps(rows, [cmd])[0]
+    assert step["unresolved_inputs"] == ["vcs_ref"] and step["input_identity"] == []
+    assert "setup_inputs_incomplete" in _codes(_decide({"setup_commands": [cmd], "setup_executions": rows}))
+
+
+def test_a_commit_pinned_vcs_ref_reaches_the_step_pinned(tmp_path):
+    cmd = f"pip install git+https://host/repo@{'a' * 40}"
+    rows = _accepted([_row(cmd, cwd=tmp_path)])
+    step = _projected_setup_steps(rows, [cmd])[0]
+    assert step["input_identity"][0]["resolved_ref"] == "a" * 40
+    assert "setup_inputs_incomplete" not in _codes(_decide({"setup_commands": [cmd], "setup_executions": rows}))
+
+
 # ---- B43: portable delivery contract ---------------------------------------
+
+
+SNAPSHOT_PAYLOAD = "optimization_stack/enablement/r1/files/srt/a.py"
+CONFIG_PAYLOAD = "reports/enablement/spec-1/launch_config.yaml"
 
 
 def _delivery_section():
     section = _sufficient_section()
-    section["accepted_config"]["config_path"] = "runs/materialized.yaml"
+    section["accepted_config"]["config_path"] = CONFIG_PAYLOAD
     return section
 
 
 def _delivered_everything():
-    return ["runs/materialized.yaml", "optimization_stack/enablement/r1", "/p/1.patch"]
+    return [CONFIG_PAYLOAD, SNAPSHOT_PAYLOAD]
 
 
 def test_fully_packaged_delivery_stays_sufficient():
@@ -941,21 +989,96 @@ def test_fully_packaged_delivery_stays_sufficient():
     assert decision["status"] == "sufficient", decision["reasons"]
 
 
-def test_unpackaged_snapshot_flips_the_delivery_to_insufficient():
-    delivered = [p for p in _delivered_everything() if "optimization_stack" not in p]
-    decision = _decide(_sufficient_state(), _delivery_section(), delivered=delivered)
+def test_a_snapshot_whose_captured_file_is_undelivered_is_missing():
+    """The manifest travelling in the section is not the payload."""
+    decision = _decide(_sufficient_state(), _delivery_section(), delivered=[CONFIG_PAYLOAD])
     assert decision["status"] == "insufficient"
     assert "source_snapshot_missing" in _codes(decision)
 
 
-def test_unpackaged_config_and_patch_are_not_self_contained():
-    delivered = ["optimization_stack/enablement/r1"]
-    codes = _codes(_decide(_sufficient_state(), _delivery_section(), delivered=delivered))
-    assert codes.count("artifact_not_self_contained") == 2
+def test_a_declared_deletion_needs_no_delivered_payload():
+    section = _delivery_section()
+    section["source_snapshots"] = [_snapshot(files=(("srt/gone.py", "delete"),))]
+    decision = _decide(_sufficient_state(), section, delivered=[CONFIG_PAYLOAD])
+    assert "source_snapshot_missing" not in _codes(decision)
+
+
+def test_an_undelivered_config_is_not_self_contained():
+    codes = _codes(_decide(_sufficient_state(), _delivery_section(), delivered=[SNAPSHOT_PAYLOAD]))
+    assert codes.count("artifact_not_self_contained") == 1
 
 
 def test_no_delivery_assembled_leaves_the_contract_unapplied():
     assert _decide(_sufficient_state(), _delivery_section())["status"] == "sufficient"
+
+
+def _session_bundle(tmp_path, *, config=True, snapshot_bytes=b"x"):
+    """A session root shaped like the one the packager bundles."""
+    session = tmp_path / "session"
+    (session / "optimization_stack" / "enablement" / "r1" / "files" / "srt").mkdir(parents=True)
+    (session / "optimization_stack" / "enablement" / "r1" / "files" / "srt" / "a.py").write_bytes(snapshot_bytes)
+    if config:
+        archived = session / "reports" / "enablement" / "spec-1"
+        archived.mkdir(parents=True)
+        (archived / "launch_config.yaml").write_text("model: m\n", encoding="utf-8")
+    return session
+
+
+def _bundle_decision(session):
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable_relpaths
+
+    return _decide(_sufficient_state(), _delivery_section(), delivered=deliverable_relpaths(session))
+
+
+def test_a_session_bundle_carrying_every_payload_is_sufficient(tmp_path):
+    assert _bundle_decision(_session_bundle(tmp_path))["status"] == "sufficient"
+
+
+def test_a_session_bundle_missing_the_referenced_config_fails_closed(tmp_path):
+    codes = _codes(_bundle_decision(_session_bundle(tmp_path, config=False)))
+    assert "artifact_not_self_contained" in codes
+
+
+def _collected(session):
+    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
+
+    return collect_enablement(
+        session,
+        {
+            "enablement": {
+                "attempts": 1,
+                "kept_patches": ["/p/1.patch"],
+                "framework_root": "/fr",
+                "roots": [{**_root(), "path": "/fr"}],
+                "source_snapshots": [{**_snapshot(), "snapshot_ref": "optimization_stack/enablement/r1"}],
+            }
+        },
+        [],
+    )
+
+
+def test_the_emitted_section_judges_the_bundle_it_travels_in(tmp_path):
+    """The decision a consumer reads is made against what it will receive."""
+    section = _collected(_session_bundle(tmp_path))
+    assert "source_snapshot_missing" not in _codes(section["replay_sufficiency"])
+
+
+def test_the_emitted_section_fails_closed_on_an_undelivered_snapshot(tmp_path):
+    session = _session_bundle(tmp_path)
+    (session / "optimization_stack" / "enablement" / "r1" / "files" / "srt" / "a.py").unlink()
+    section = _collected(session)
+    assert section["replay_sufficiency"]["status"] == "insufficient"
+    assert "source_snapshot_missing" in _codes(section["replay_sufficiency"])
+
+
+def test_a_payload_a_size_cap_drops_fails_closed(tmp_path, monkeypatch):
+    """A cap is not a thinner bundle: the consumer never receives those bytes."""
+    from hyperloom.inference_optimizer.breakdown import session_package
+
+    session = _session_bundle(tmp_path, snapshot_bytes=b"y" * 4096)
+    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 64)
+    codes = _codes(_bundle_decision(session))
+    assert "source_snapshot_missing" in codes
 
 
 # ---- 16. Existing R1a assertions stay green --------------------------------
