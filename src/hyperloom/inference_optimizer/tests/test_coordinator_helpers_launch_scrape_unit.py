@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hyperloom.common.launch_log_evidence import launch_argv_from_log, split_launch_flags
 from hyperloom.orchestrator.loop import coordinator_helpers as ch
 
@@ -45,6 +47,48 @@ def test_split_env_and_flags_falls_back_on_shlex_error() -> None:
     envs, flags = ch._split_env_and_flags('FOO=1 --flag="unterminated')
     assert envs["FOO"] == "1"
     assert flags == '--flag="unterminated'
+
+
+def test_accepted_config_uses_published_env_map_for_revalidation() -> None:
+    from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    config = {
+        "flags": "--mem-fraction-static 0.95",
+        "env": 'SGLANG_USE_AITER=1 RUN_EVAL=true; BACKEND=sglang; EXTRA_ENV=")." --discarded-prose',
+        "env_map": {"SGLANG_USE_AITER": "1", "RUN_EVAL": "true", "BACKEND": "sglang"},
+        "env_unparsed": ["EXTRA_ENV=).", "--discarded-prose"],
+    }
+    flags, envs = KernelPhase._parse_geak_accepted_config({"accepted_config": config})
+    variant = GridVariant(name="geak_revalidate", extra_server_args=flags, extra_envs=envs)
+    assert variant.extra_server_args == config["flags"]
+    assert variant.extra_envs == config["env_map"]
+    assert variant.extra_envs["RUN_EVAL"] == "true"
+    assert not ch._geak_result_has_material({"accepted_config": config}, prev_best_flags=flags, prev_best_envs=envs)
+
+
+def test_empty_accepted_env_map_does_not_restore_raw_assignments() -> None:
+    config = {"env": "RUN_EVAL=false SGLANG_USE_AITER=1 --disable-cuda-graph", "env_map": {}}
+    assert ch._accepted_config_as_variant(config) == ("", {})
+    assert not ch._geak_result_has_material({"accepted_config": config}, prev_best_envs={"RUN_EVAL": "true"})
+
+
+def test_accepted_env_map_preserves_values_and_filters_loader_keys() -> None:
+    value = '{"path": "a b", "pattern": "x=y;z"}'
+    config = {"env_map": {"SGLANG_TEST_CONFIG": value, "PYTHONPATH": "/untrusted", "bad-key": "1"}}
+    assert ch._accepted_config_as_variant(config) == ("", {"SGLANG_TEST_CONFIG": value})
+
+
+@pytest.mark.parametrize("env_map", [None, "RUN_EVAL=true", [], {"RUN_EVAL": True}, {1: "x"}])
+def test_invalid_accepted_env_map_does_not_fall_back_to_raw_string(env_map) -> None:
+    with pytest.raises(ValueError, match="env_map must map strings to strings"):
+        ch._accepted_config_as_variant({"env": "RUN_EVAL=true;", "env_map": env_map})
+
+
+def test_legacy_accepted_config_still_parses_env_and_flags() -> None:
+    assert ch._accepted_config_as_variant(
+        {"flags": "--mem-fraction-static 0.95", "env": "SGLANG_USE_AITER=1 --disable-radix-cache"}
+    ) == ("--mem-fraction-static 0.95 --disable-radix-cache", {"SGLANG_USE_AITER": "1"})
 
 
 # ── _geak_sweep_measured_tput ─────────────────────────────────────────────

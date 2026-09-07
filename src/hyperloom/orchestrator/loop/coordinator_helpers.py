@@ -655,9 +655,16 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     """Normalize a GEAK ``accepted_config`` into the ``(args, envs)`` a variant runs."""
     cfg = cfg if isinstance(cfg, dict) else {}
     flags = str(cfg.get("flags") or "").strip()
-    envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
-    if extra_flags:
-        flags = (flags + " " + extra_flags).strip()
+    if "env_map" in cfg:
+        envs = cfg["env_map"]
+        if not isinstance(envs, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in envs.items()
+        ):
+            raise ValueError("GEAK accepted_config.env_map must map strings to strings")
+    else:
+        envs, extra_flags = _split_env_and_flags(str(cfg.get("env") or ""))
+        if extra_flags:
+            flags = (flags + " " + extra_flags).strip()
     envs, _dropped = filter_untrusted_env_mapping(envs, allow_predicate=is_allowed_variant_env_key)
     return flags, envs
 
