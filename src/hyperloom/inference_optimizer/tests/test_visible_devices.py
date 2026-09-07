@@ -109,6 +109,12 @@ def test_effective_tokens_drops_negative_ordinals_and_keeps_uuids() -> None:
     assert effective_mask_tokens("GPU-a1b2c3,GPU-d4e5f6") == ["GPU-a1b2c3", "GPU-d4e5f6"]
 
 
+def test_effective_tokens_dedup_on_the_ordinal_not_the_spelling() -> None:
+    """``0`` and ``00`` name one device; counting both inflates the width."""
+    assert effective_mask_tokens("0,00") == ["0"]
+    assert parse_device_list("0,00") == [0]
+
+
 def test_parse_device_list_agrees_with_effective_tokens() -> None:
     """The ids are the numeric members of the effective set, never a wider one.
 
@@ -116,8 +122,8 @@ def test_parse_device_list_agrees_with_effective_tokens() -> None:
     from disagreeing: counting the literal tokens inflates the count, and
     re-serializing the parsed ints deflates the id list.
     """
-    for raw in ("4,5", "3,3,2", "-1,2", "GPU-a1b2c3,4", "", " 4, 4 ,5"):
+    for raw in ("4,5", "3,3,2", "-1,2", "GPU-a1b2c3,4", "", " 4, 4 ,5", "0,00"):
         ids = parse_device_list(raw)
         tokens = effective_mask_tokens(raw)
         assert len(ids) <= len(tokens)
-        assert [str(i) for i in ids] == [t for t in tokens if t.lstrip("-").isdigit()]
+        assert ids == [int(t) for t in tokens if t.lstrip("-").isdigit()]

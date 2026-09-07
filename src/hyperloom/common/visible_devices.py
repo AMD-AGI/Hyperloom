@@ -164,12 +164,22 @@ def effective_mask_tokens(raw: Any) -> list[str]:
         raw: A ``,``/``;``-separated mask, or an already-parsed YAML sequence.
 
     Returns:
-        Tokens with duplicates and negative ordinals removed, first-seen order.
+        Tokens with duplicate ordinals and negative ordinals removed, in
+        first-seen order and their original spelling.
     """
     out: list[str] = []
+    seen: set[str] = set()
     for tok in mask_tokens(raw):
-        if tok in out or _is_negative_ordinal(tok):
+        if _is_negative_ordinal(tok):
             continue
+        # Dedup on the ORDINAL, not the spelling: ``0`` and ``00`` are one
+        # device, and letting both through inflates the device count the
+        # logical-index arithmetic depends on. A non-numeric token (a UUID)
+        # has no ordinal, so it dedups on itself.
+        key = str(int(tok)) if tok.isdigit() else tok
+        if key in seen:
+            continue
+        seen.add(key)
         out.append(tok)
     return out
 

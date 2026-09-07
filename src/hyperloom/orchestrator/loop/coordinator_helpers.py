@@ -1760,8 +1760,10 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     ``HIP_VISIBLE_DEVICES``/``CUDA_VISIBLE_DEVICES`` for the servers it
     launches, and HIP indexes into the ROCr-visible set. So:
 
-      * pinned with a ROCr-level mask the child INHERITS — that mask renumbers
-        the child's devices, so the ids must be LOGICAL positions inside it
+      * pinned with a ROCr-level mask, from the process env or from the
+        baseline recipe — either way it is in force for the servers GEAK
+        launches and renumbers their devices, so the ids must be LOGICAL
+        positions inside it
         (``ROCR=6`` → ``"0"``), capped at ``tp`` (``ROCR=4,5,6,7`` with
         ``tp=2`` → ``"0,1"``) and at the mask width when ``tp`` overshoots it.
         Counted from :func:`effective_mask_tokens`, so a UUID mask resolves to
@@ -1781,11 +1783,12 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
 
     The absolute pin travels separately in ``handoff["gpu_pin"]``, and
     :func:`_resolve_handoff_gpu_ids_space` says which of the two coordinate
-    systems the result is in. A consumer that exports the result as
-    ``HIP_VISIBLE_DEVICES`` without touching ROCr is correct in both; a
-    consumer that re-applies ``gpu_pin["value"]`` as ``ROCR_VISIBLE_DEVICES``
-    has just renumbered the devices itself and must use ``0..count-1``, NOT
-    these ids, for the inner HIP mask.
+    systems the result is in. Because EVERY ROCr-level pin now yields logical
+    ids, both consumer styles agree: exporting the result as
+    ``HIP_VISIBLE_DEVICES`` is correct, and so is re-applying
+    ``gpu_pin["value"]`` as ``ROCR_VISIBLE_DEVICES`` and then these ids as the
+    inner HIP mask. No case is left in which the consumer has to switch which
+    field it reads.
 
     Args:
         gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
@@ -1797,12 +1800,11 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     width = max(int(tp or 1), 1)
     pin = gpu_pin or {}
     ids = list(pin.get("ids") or [])
-    # Logical remapping applies only to a mask the GEAK child actually
-    # INHERITS. The phase launches it with ``dict(os.environ)``, so a
-    # process-env ROCR mask is inherited and its ids are logical; a mask that
-    # only exists in the recipe is not, ROCr shows every card, and the absolute
-    # ids are the correct HIP indices.
-    if _pin_is_inherited_rocr(pin):
+    # Logical remapping applies to any ROCr-level pin, from either source: a
+    # process-env mask reaches the servers through GEAK, and a recipe mask
+    # reaches them directly as ``handoff["launch_recipe"]``. Either way the
+    # servers see a renumbered set, so absolute ids would index out of it.
+    if _pin_renumbers_devices(pin):
         # Token count, not len(ids): a UUID mask parses to zero numeric ids but
         # still exposes that many cards to the child.
         visible = int(pin.get("count") or len(ids) or 0)
@@ -1811,7 +1813,10 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
             # in the child's logical coordinates, so it is forwarded as-is
             # rather than overwritten with ``0..n-1``. Out-of-range entries are
             # dropped: they name devices the ROCr mask never exposed.
-            inner = _mask_tokens((pin.get("inner") or {}).get("value"))
+            # Effective, not literal: ``-1`` names no device and a repeated
+            # ordinal is not a second one, and either would otherwise travel
+            # into ``gpu_ids`` and inflate the ``tp`` derived from it.
+            inner = effective_mask_tokens((pin.get("inner") or {}).get("value"))
             kept = [tok for tok in inner if not tok.isdigit() or int(tok) < visible]
             if kept:
                 return ",".join(kept[:width])
@@ -1826,29 +1831,35 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     return ",".join(str(i) for i in range(width))
 
 
-def _pin_is_inherited_rocr(pin: Mapping[str, Any] | None) -> bool:
-    """Will the GEAK child inherit this pin as a ROCr-level device slice?
+def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
+    """Will this pin's ROCr slice be in force for the servers GEAK launches?
 
-    Only then are the handoff's ``gpu_ids`` logical. The phase launches GEAK
-    with ``dict(os.environ)``, so a process-env ROCr mask is inherited and
-    renumbers the child's devices; a mask that only exists in the recipe is
-    not, ROCr shows every card, and absolute ids are the correct HIP indices.
+    Only then are the handoff's ``gpu_ids`` logical -- and the question is about
+    the SERVERS, not about the GEAK process. An earlier version asked whether
+    GEAK itself inherits the mask (``source == "process_env"``), which is true
+    of the process env and false of the recipe. That was the wrong level: GEAK
+    starts its servers from ``handoff["launch_recipe"]``, and a recipe-sourced
+    ``ROCR_VISIBLE_DEVICES`` is applied to exactly those servers. The
+    renumbering still happens, one level down, so calling those ids absolute
+    made a mask index out of its own slice -- ``ROCR=4,5,6,7`` re-exported as
+    ``HIP=4,5,6,7`` indexes 4..7 into a four-element set and the server dies on
+    an invalid ordinal. Both sources renumber; only the LEVEL of the mask
+    decides.
 
     Args:
         pin: The :func:`_resolve_gpu_pin` result.
 
     Returns:
-        ``True`` for a process-env ROCr-level pin.
+        ``True`` for any ROCr-level pin, whatever its source.
     """
-    pin = pin or {}
-    return is_rocr_level(str(pin.get("var") or "")) and str(pin.get("source") or "") == "process_env"
+    return is_rocr_level(str((pin or {}).get("var") or ""))
 
 
 def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     """Which coordinate system the handoff's ``gpu_ids`` are expressed in.
 
     ``gpu_ids`` alone is ambiguous: ``"0,1"`` is either "the first two cards of
-    the inherited ROCr mask" or "absolute cards 0 and 1", and a consumer that
+    the in-force ROCr mask" or "absolute cards 0 and 1", and a consumer that
     guesses wrong re-pins the servers onto physical GPU 0 — issue #1312. This
     field makes the distinction explicit so a consumer that composes masks
     itself (rather than exporting ``gpu_ids`` into HIP) can tell which it was
@@ -1869,13 +1880,13 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
 
     Returns:
         ``"none"`` when the pin exposes zero devices, ``"logical"`` when the
-        ids index into an inherited ROCr mask, ``"absolute"`` otherwise
-        (including unpinned).
+        ids index into a ROCr mask that is in force for the launched servers,
+        ``"absolute"`` otherwise (including unpinned).
     """
     pin = gpu_pin or {}
     if pin and int(pin.get("count") or 0) <= 0:
         return "none"
-    return "logical" if _pin_is_inherited_rocr(pin) else "absolute"
+    return "logical" if _pin_renumbers_devices(pin) else "absolute"
 
 
 def _coerce_tp(*args: Any, default: int = 1) -> int:
