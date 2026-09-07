@@ -278,7 +278,6 @@ class ExplorePhase(CoordinatorCollaborator):
         state = self.shared_state
         record = build_memory_record(
             parse_memory_reply(getattr(result, "raw_text", "") or ""),
-            seq=0,
             tick=int(state.tick or 0),
             previous=dict(state.orchestration_memory or {}),
         )

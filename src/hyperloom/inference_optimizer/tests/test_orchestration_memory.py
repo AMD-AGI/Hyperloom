@@ -130,69 +130,68 @@ class TestParsingTheHandoffReply:
 
 class TestBuildingThePersistedRecord:
     def test_a_first_capture_starts_the_bookkeeping(self):
-        rec = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), seq=7, tick=3)
+        rec = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), tick=3)
 
         assert rec["capture_count"] == 1
-        assert rec["last_capture_seq"] == 7
         assert rec["last_capture_tick"] == 3
         assert rec["last_capture_ts"].endswith("+00:00")
 
     def test_each_capture_increments_the_count(self):
-        first = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), seq=1, tick=1)
-        second = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), seq=2, tick=2, previous=first)
+        first = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), tick=1)
+        second = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), tick=2, previous=first)
         assert second["capture_count"] == 2
 
     def test_learnings_accumulate_across_cycles(self):
-        prev = build_memory_record({"learnings": ["lesson one"]}, seq=1, tick=1)
-        rec = build_memory_record({"learnings": ["lesson two"]}, seq=2, tick=2, previous=prev)
+        prev = build_memory_record({"learnings": ["lesson one"]}, tick=1)
+        rec = build_memory_record({"learnings": ["lesson two"]}, tick=2, previous=prev)
 
         assert rec["learnings"] == ["lesson one", "lesson two"]
 
     def test_a_repeated_learning_is_not_duplicated(self):
-        prev = build_memory_record({"learnings": ["lesson one"]}, seq=1, tick=1)
-        rec = build_memory_record({"learnings": ["lesson one"]}, seq=2, tick=2, previous=prev)
+        prev = build_memory_record({"learnings": ["lesson one"]}, tick=1)
+        rec = build_memory_record({"learnings": ["lesson one"]}, tick=2, previous=prev)
 
         assert rec["learnings"] == ["lesson one"]
 
     def test_learnings_are_capped_so_state_json_stays_bounded(self):
         prev = {"learnings": [f"lesson {i}" for i in range(60)]}
-        rec = build_memory_record({"learnings": ["newest"]}, seq=1, tick=1, previous=prev)
+        rec = build_memory_record({"learnings": ["newest"]}, tick=1, previous=prev)
 
         assert len(rec["learnings"]) == 50
         assert rec["learnings"][-1] == "newest"
         assert "lesson 0" not in rec["learnings"], "the oldest lessons are the ones dropped"
 
     def test_a_forgetful_reply_does_not_blank_an_in_flight_plan(self):
-        prev = build_memory_record({"current_plan": "drive down decode latency"}, seq=1, tick=1)
-        rec = build_memory_record({"current_plan": ""}, seq=2, tick=2, previous=prev)
+        prev = build_memory_record({"current_plan": "drive down decode latency"}, tick=1)
+        rec = build_memory_record({"current_plan": ""}, tick=2, previous=prev)
 
         assert rec["current_plan"] == "drive down decode latency"
 
     def test_a_forgetful_reply_does_not_blank_the_directive(self):
-        prev = build_memory_record({"next_cycle_directive": "attack the KV cache"}, seq=1, tick=1)
-        rec = build_memory_record({"next_cycle_directive": ""}, seq=2, tick=2, previous=prev)
+        prev = build_memory_record({"next_cycle_directive": "attack the KV cache"}, tick=1)
+        rec = build_memory_record({"next_cycle_directive": ""}, tick=2, previous=prev)
 
         assert rec["next_cycle_directive"] == "attack the KV cache"
 
     def test_a_new_plan_replaces_the_old_one(self):
-        prev = build_memory_record({"current_plan": "old"}, seq=1, tick=1)
-        rec = build_memory_record({"current_plan": "new"}, seq=2, tick=2, previous=prev)
+        prev = build_memory_record({"current_plan": "old"}, tick=1)
+        rec = build_memory_record({"current_plan": "new"}, tick=2, previous=prev)
 
         assert rec["current_plan"] == "new"
 
     @pytest.mark.parametrize("key", _MEMORY_LIST_KEYS)
     def test_an_omitted_list_thread_carries_forward(self, key: str):
-        prev = build_memory_record({key: ["still open"]}, seq=1, tick=1)
-        rec = build_memory_record({}, seq=2, tick=2, previous=prev)
+        prev = build_memory_record({key: ["still open"]}, tick=1)
+        rec = build_memory_record({}, tick=2, previous=prev)
 
         assert rec[key] == ["still open"]
 
     def test_the_parse_error_marker_travels_onto_the_record(self):
-        rec = build_memory_record(parse_memory_reply("not json"), seq=1, tick=1)
+        rec = build_memory_record(parse_memory_reply("not json"), tick=1)
         assert rec["parse_error"] == "no JSON object found in memory reply"
 
     def test_a_clean_capture_records_no_parse_error(self):
-        rec = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), seq=1, tick=1)
+        rec = build_memory_record(parse_memory_reply(_fenced(_FULL_REPLY)), tick=1)
         assert rec["parse_error"] == ""
 
 

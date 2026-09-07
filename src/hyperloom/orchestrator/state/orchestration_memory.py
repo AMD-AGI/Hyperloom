@@ -122,7 +122,6 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 def build_memory_record(
     parsed: dict[str, Any],
     *,
-    seq: int,
     tick: int,
     previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -145,7 +144,6 @@ def build_memory_record(
         "current_plan": plan,
         "learnings": learnings,
         "next_cycle_directive": directive,
-        "last_capture_seq": int(seq),
         "last_capture_tick": int(tick),
         "last_capture_ts": _now_iso(),
         "capture_count": int(prev.get("capture_count", 0)) + 1,
