@@ -234,23 +234,14 @@ run_leg() {
         #   $root/.claude/skills/<demo-skill-name>/SKILL.md
         # (empirically verified). The demo skill is chosen by leg duration:
         #   *-3h  -> hyperloom-qwen3-8b-3h ; *-12h -> hyperloom-qwen3-14b-fp8-12h.
-        # A `*-forge-*` leg takes the forge variant of its demo skill, which is the one
-        # that sets KERNEL_OPT_BACKEND_ORDER=forge. The forge branch must come first:
-        # `docker-sglang-forge-12h` also matches `*-12h`, and picking the GEAK skill
-        # there would make the leg a silent duplicate of the plain 12h leg.
+        # The forge branches must stay FIRST: `docker-sglang-forge-12h` also matches
+        # `*-12h`, and the GEAK skill there would silently duplicate the plain 12h leg.
         local demo_skill=""
         case "$leg" in
-          # The 3h demo runs --no-kernel, so it has no KERNEL_AGENT phase for a kernel
-          # backend to own. A forge 3h leg could only ever be a slower duplicate of the
-          # plain 3h leg; refuse it rather than report a meaningless PASS.
           *-forge-3h)  log "ERROR: leg '$leg' -- the 3h demo is --no-kernel; forge has no phase to run"; return 1 ;;
           *-forge-12h) demo_skill="hyperloom-qwen3-14b-fp8-12h-forge" ;;
           *-3h)        demo_skill="hyperloom-qwen3-8b-3h" ;;
           *-12h)       demo_skill="hyperloom-qwen3-14b-fp8-12h" ;;
-          # Unreachable for the dispatched leg set (dispatch rejects a leg whose duration
-          # it cannot infer), but an unmatched leg would otherwise write an empty skill
-          # path into .env and fail much later, inside the agent turn, as a confusing
-          # "skill not found". Fail here instead, naming the leg.
           *)           log "ERROR: leg '$leg' -- no demo skill for this leg name"; return 1 ;;
         esac
         echo "HYPERLOOM_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
@@ -295,10 +286,7 @@ run_leg() {
   export PYTHONPATH="${root}:${PYTHONPATH:-}"
 
   local setup_prompt="${PROMPTS_DIR}/setup-${run_mode}-${backend}.md"
-  # The demo prompt is keyed by duration, plus the kernel backend when the leg names
-  # one. A `*-forge-*` leg MUST NOT fall back to the plain demo-<hours>h.md: that prompt
-  # invokes the GEAK demo skill, so the leg would pass while testing nothing it exists
-  # to test.
+  # Keyed by duration, plus the kernel backend when the leg names one.
   local demo_prompt
   case "$leg" in
     *-forge-*) demo_prompt="${PROMPTS_DIR}/demo-${hours}h-forge.md" ;;

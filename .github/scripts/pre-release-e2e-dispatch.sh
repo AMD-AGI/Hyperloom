@@ -63,16 +63,9 @@ set -euo pipefail
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
 # Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128 baseline,
-# bumped to 196 for the parallel nested legs, mem 2048Gi, ephemeral 1792Gi.
-#
-# Do NOT raise these to "make room" for another nested leg. A 5th leg was added on
-# 2026-09-07 and this request was bumped to 228 CPU / 2560Gi to match; SaFE's admission
-# webhook rejected the pod outright (HTTP 403, `vworkload.kb.io`: "Resource request
-# exceeds maximum available: cpu, requested: 228"), so the whole gate failed at dispatch
-# before a single leg started. 196/2048Gi is a value the cluster demonstrably accepts.
-# The nested `--memory`/`--cpus` values are per-container CAPS, not reservations, so legs
-# share this envelope rather than each needing a slice carved out of it.
-#
+# bumped to 196 for the parallel nested legs, mem 2048Gi, ephemeral 1792Gi. Do NOT raise
+# these per added leg -- SaFE's admission webhook caps the request (228 CPU was rejected
+# 403), and the nested `--memory`/`--cpus` are per-container caps, not reservations.
 # Every writable path the DinD host has -- the container
 # rootfs AND the /shared-data emptyDir the nested dockerd stores images in -- counts
 # toward this one ephemeralStorage quota, so the host bootstrap requires a
@@ -189,11 +182,8 @@ reap_stale_workloads() {
 reap_stale_workloads
 
 # All 9 legs. Fields: mode backend hours model_path -- gpu index within the docker host
-#
-# `docker-sglang-forge-12h` keeps the duration suffix LAST on purpose: every field here
-# is parsed by suffix/infix glob (`*-12h`, `*-sglang-*`, `docker-*`), so a name like
-# `docker-sglang-12h-forge` would match none of the duration cases and be rejected as
-# "cannot infer duration". Insert future variants the same way.
+# Keep the duration suffix LAST: the helpers below parse by glob, so `...-12h-forge`
+# would match no duration case.
 ALL_LEGS="baremetal-vllm-3h baremetal-vllm-12h baremetal-sglang-3h baremetal-sglang-12h \
 docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h docker-sglang-forge-12h"
 REQ_TASKS="${TASKS:-$ALL_LEGS}"
