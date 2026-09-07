@@ -1607,20 +1607,95 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
     assert ctx._ip_base_sha_by_root[str(repo)] == pre_setup
 
 
+@pytest.mark.asyncio
+async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path: Path, monkeypatch):
+    """The declared root is a different tree from the session's, and setup hits it.
+
+    Nothing names that tree until the stash, which is after the setup commands,
+    so its recorded base commit was whatever those commands had already left.
+    """
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    session_root = tmp_path / "repo"
+    explicit_root = tmp_path / "framework"
+    init_git_repo(session_root)
+    init_git_repo(explicit_root)
+    assert session_root.resolve() != explicit_root.resolve()
+    _write_specialist_workspace(session_dir, "t-spec-explicit", patch_contents=[_BAD_PATCH])
+    pre_setup = subprocess.run(
+        ["git", "-C", str(explicit_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+        (explicit_root / "installed.py").write_text("x = 1\n", encoding="utf-8")
+        git_commit_all(explicit_root, "install")
+        return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
+
+    monkeypatch.setattr(ip_mod, "_run_setup_commands", _installing_commits)
+    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
+
+    shared_state = SimpleNamespace(
+        enablement=EnablementRound(),
+        save=lambda _dir: None,
+        get_specialist_patch_verdict=lambda _subject: "approve",
+    )
+    task = Task(
+        task_id="t-int-explicit",
+        kind="integrate_patch",
+        state="queued",
+        params={
+            "specialist_task_id": "t-spec-explicit",
+            "framework_source_root": str(explicit_root),
+            "enablement": True,
+            "enablement_setup_commands": ["pip install -U transformers"],
+        },
+        idempotency_key="t-int-explicit",
+        requires_lanes=tuple(),
+    )
+    ctx = RunnerContext(task=task, lease=None, extra={"shared_state": shared_state})
+    await IntegratePatchExecutor(session_dir=session_dir)(ctx)
+
+    after_setup = subprocess.run(
+        ["git", "-C", str(explicit_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert after_setup != pre_setup
+    assert ctx._ip_base_sha_by_root[str(explicit_root)] == pre_setup
+
+
+def test_candidate_roots_name_the_declared_root_beside_the_session_one(tmp_path: Path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    session_root = tmp_path / "repo"
+    explicit_root = tmp_path / "framework"
+    session_root.mkdir()
+    explicit_root.mkdir()
+    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
+
+    roots = ip_mod._candidate_mutation_roots(params={"framework_source_root": str(explicit_root)}, done_payload=None)
+    assert roots == [str(session_root), str(explicit_root)]
+
+
 def test_candidate_roots_cover_the_patch_and_artifact_bindings(tmp_path: Path, monkeypatch):
     """Every tree the round could touch is named before any of them is touched."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
 
+    primary = tmp_path / "primary"
     other = tmp_path / "second"
+    primary.mkdir()
     other.mkdir()
-    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(tmp_path / "primary"))
+    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(primary))
     monkeypatch.setattr(ip_mod, "_resolve_artifact_target", lambda _t: (other / "a.csv", "a.csv", other))
 
     roots = ip_mod._candidate_mutation_roots(
         params={"artifacts": [{"source": "s", "target": "a.csv"}]},
         done_payload={"patch_roots": {"/p/1.patch": str(tmp_path / "third")}},
     )
-    assert roots == [str(tmp_path / "primary"), str(tmp_path / "third"), str(other)]
+    assert roots == [str(primary), str(tmp_path / "third"), str(other)]
 
 
 def test_integrate_patch_executor_imports_clean():

@@ -538,12 +538,20 @@ def _git_head_sha(framework_root: Path | None) -> str:
 def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[str]:
     """Return every tree this round could mutate, before it mutates any of them.
 
-    Read from the payload alone -- the session apply root, the roots the
-    authoring stage bound per patch, and the root each artifact target resolves
-    into -- because the resolvers that return them run after the setup commands
-    have already installed into those same trees.
+    Read from the payload alone -- the root the round will apply into, the roots
+    the authoring stage bound per patch, and the root each artifact target
+    resolves into -- because the resolvers that return them run after the setup
+    commands have already installed into those same trees.
+
+    A declared ``framework_source_root`` is resolved here too: it is the tree the
+    patches land in whenever it differs from the session's own, and the round
+    does not otherwise name it until the stash, by which point setup has run.
     """
-    roots: list[str] = [str(resolve_session_framework_root() or "")]
+    explicit = str(params.get("framework_source_root") or "").strip() or None
+    # No patch input, so this returns the declared root when one is admitted and
+    # the session root otherwise -- the pair the apply itself chooses between.
+    effective = _resolve_framework_root(explicit, patch_paths=[])
+    roots: list[str] = [str(resolve_session_framework_root() or ""), str(effective or "")]
     roots.extend(str(v) for v in ((done_payload or {}).get("patch_roots") or {}).values())
     entries = params.get("artifacts")
     if not isinstance(entries, list) or not entries:
