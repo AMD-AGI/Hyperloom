@@ -517,7 +517,10 @@ exporter.py:394-400  → collect_recorded_optimizations(..., geak_invocations, f
 | 步 | 状态 |
 |---|---|
 | **S1** | **已完成**（2026-09-07）。`v6.py:358` 加 `warm_replay` guard + 修 docstring；新增 `test_a_recorded_replay_is_not_projected_a_second_time` 并验证其在无 guard 时确实失败（`['warm_replay','warm_replay']`）。批次 0 的 0b 经查为误判，已更正（见 §3 批次 0）。SBD 相关 1235 测试通过。 |
-| S2–S7 | 未开始 |
+| **S2** | **已完成**（2026-09-07）。净删 3147 行：5 个死 v4 section + 写入面、7 个无写入方的 `SECTION_SHAPES` 注册、6 个空报告小节 + `critic_robustness` renderer、`_SECTIONS_WITHOUT_PRODUCER` 抑制表、`attribution.py` 与两个测试专用 collector、7 个零 reader 顶层键。报告完整性测试改为断言"无 renderer 读不可产出的键"。 |
+| **S3** | **部分完成**（2026-09-07）。已做 3 项：#1 versions 进 `metadata`（探测机器搬到 `tool_versions.py`，v4 流 + assembler fold 一并删）、#9 robustness 新顶层字段（实时录 intents，含两条失败路径，修掉 §1.5.1 的空壳）、#3 critic 新顶层字段（对等门通过）。**#2 与 #10 卡在决策上，见 §6.5.1**。#4–#8 未开始。 |
+| **S4** | **部分完成**（2026-09-07）。versions / robustness / critic 三个 v4 写入面已退役，`critic_robustness` 合成字段 + collector + `kb_writes_summary` 一并删（净删 414 行）。**specialist_runs 那一面等 §6.5.1 的决策**。 |
+| S5–S7 | 未开始 |
 
 **提交边界的现实约束**：工作树当前有 90 个文件未提交（第 1–8 项的累积成果），所以 §6.2 "每步 1 个提交"要先把历史工作分离出去才成立。S1 的改动本身只涉及 2 个文件（`collectors/v6.py`、`test_sbd_v6_kb_timeline.py`）。
 
@@ -592,3 +595,36 @@ robustness 那一行是这批里唯一**不能**用对等法验收的：旧值�
 - **`collect_decision_trace` 不能删**（§3 例外）：它的 breakdown key 可删，collector 有 Langfuse 副作用。S2 只删 key。
 - **每步独立可跑**：每步做完 SBD 相关测试应全绿，不依赖后续步骤。
 - **不在本次范围**：`reporters/` 的最终去向（S6，待决策）、AST 扫描器的实现（已定不做）。
+
+### 6.5.1 S3 执行中浮现的两个决策点（2026-09-07）
+
+**#2 specialist runs：`framework_event` 的 run 行接不住全部 round。**
+
+§1.5 给的落点带了前提 (a)"不与现有 `framework_run` 重复"。执行时查明这条前提指向的是一个更硬的问题：
+
+| 事实 | 证据 |
+|---|---|
+| `framework_agent` 事件的生命周期绑在一次 FRAMEWORK 进入内 | `framework.py:399` 开、`framework.py:481` 退出时置 `None` |
+| `framework_run` 行只由 FRAMEWORK 阶段写 | `_record_run` 的 4 个调用点全在 `phases/framework.py` |
+| specialist round 是跨阶段录的 | `record_specialist_round` 的 `phase` 参数注释自陈"a specialist runs in more than one phase"；`entry` 带 `source_phase` |
+| 存在与 FRAMEWORK 无关的 specialist 派发 | `phases/internal.py`（research-scout / static-recon / trajectory-reviewer），模块 docstring 自陈 "phase-independent ... used across multiple phases" |
+
+所以 FRAMEWORK 阶段的 round 与 `framework_run` 同 key（`round_id` 默认取 `task_id`）确实重复，而 `internal.py` 那些 round **没有 `framework_agent` 事件可挂**。按原落点做，这批事实会在窗口期丢失——正是 §6.1 那条约束要避免的情况。
+
+三条路：
+
+- (a) **扩 `framework_run` 行 + 跨阶段 round 进 `timeline[phase]` 的 ext**：事实不丢，但一个事实分两处落点，读者要在两个地方拼
+- (b) **新建 `specialists` 顶层字段**（照 `critic` / `robustness` 的成例）：所有 round 一处落，跨阶段天然成立；代价是与 `framework_run` 的 role/arm/status 有字段重叠
+- (c) **只录 FRAMEWORK 的、扩 `framework_run`**：接受丢掉 `internal.py` 那批（需先确认它们是否有人读）
+
+**#10 `capability_summary`：耦合在 S6 上，不是独立一项。**
+
+§2.4 把它记为"不建 rollup 顶级字段，报告要的话由 renderer 从各事件聚合"，但它现在**不是零 reader**：
+
+```
+exporter.py:399-407              读 capability_summary.geak 做 GEAK 路由一致性检查（发 warning）
+reporters/cross_section.py:240   读
+reporters/_renderers/capability_summary.py   活的 renderer（S2 没删）
+```
+
+"停建字段"会同时打掉一个活的一致性检查和一个活的 renderer，而"由 renderer 从各事件聚合"就是 §2.3 那类 repoint 工作，属于 S6。**建议并入 S6，不作为 S3 的独立一项。**
