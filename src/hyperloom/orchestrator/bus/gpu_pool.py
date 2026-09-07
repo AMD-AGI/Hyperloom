@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hyperloom.common.timeutil import now_iso
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS, parse_device_list
 
 from .storage.connection import SqliteConnection
 
@@ -60,6 +61,10 @@ _now_iso = now_iso
 def _parse_gpu_list(raw: str) -> list[int]:
     """Parse a comma/semicolon-separated GPU id list.
 
+    Thin alias for :func:`hyperloom.common.visible_devices.parse_device_list`,
+    the single definition of this parse; kept as a module-local name because
+    call sites and tests already reference it.
+
     Args:
         raw: Raw string of GPU ids (``,`` or ``;`` separated).
 
@@ -67,18 +72,7 @@ def _parse_gpu_list(raw: str) -> list[int]:
         Unique non-negative GPU ids in first-seen order; malformed entries are
         skipped.
     """
-    out: list[int] = []
-    for part in (raw or "").replace(";", ",").split(","):
-        p = part.strip()
-        if not p:
-            continue
-        try:
-            idx = int(p)
-        except ValueError:
-            continue
-        if idx >= 0 and idx not in out:
-            out.append(idx)
-    return out
+    return parse_device_list(raw)
 
 
 def _explicit_pool() -> list[int] | None:
@@ -110,7 +104,7 @@ def _visible_device_mask() -> tuple[list[int], bool]:
         set (even to an empty string, which means "no visible GPUs" → ``[]``);
         ``present`` is False only when none of the masks is set.
     """
-    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
         raw = os.environ.get(env_name)
         if raw is None:
             continue
