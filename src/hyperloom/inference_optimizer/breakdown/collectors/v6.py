@@ -331,10 +331,11 @@ def collect_v6_timeline(
     rest are recorded by the phase or the action that produces them, which
     knows things no projection over ``state.json`` can recover -- when the
     work started, and the thresholds a decision actually ruled on, most
-    plainly. The KB stages are still projected here, and so is ``conc_sweep``
-    for a session recorded before its event existed, from V5 sections the
-    exporter has already built -- so both keyword arguments are optional: a
-    caller that passes none still gets every durable event.
+    plainly. ``conc_sweep`` and ``warm_replay`` are also recorded now, so what
+    remains here is the fallback for a session recorded before those events
+    existed: each is projected only when the durable read found none, from
+    V5 sections the exporter has already built -- so both keyword arguments
+    are optional: a caller that passes none still gets every durable event.
 
     Every projection is isolated (see :func:`_projected`). The durable events
     are read first and are never discarded by a later stage's failure.
@@ -354,7 +355,12 @@ def collect_v6_timeline(
                 warnings,
             )
         )
-    timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
+    if not _recorded_types(timeline, "warm_replay"):
+        # Same reason as the sweep above: PRELUDE records the replay with the
+        # skip code or the gate that decided it, which a projection over
+        # ``state.json`` cannot recover. Projecting alongside it would publish
+        # the same replay twice.
+        timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (

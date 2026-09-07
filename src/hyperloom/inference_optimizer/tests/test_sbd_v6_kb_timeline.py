@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
+from hyperloom.inference_optimizer.session.sbd_v6 import write_timeline_event_at
 from hyperloom.inference_optimizer.breakdown.kb_timeline import (
     collect_kb_write_back_event,
     collect_warm_replay_event,
@@ -398,6 +399,41 @@ def test_kb_events_join_the_timeline_in_execution_order(tmp_path: Path):
     )
     timeline = collect_v6_timeline(tmp_path, [], state=state)
     assert [event["type"] for event in timeline] == ["warm_replay"]
+
+
+def test_a_recorded_replay_is_not_projected_a_second_time(tmp_path: Path):
+    """PRELUDE's own record wins, and the projection stands down.
+
+    The projection rebuilds the replay from ``state.json``, which holds the
+    outcome but not the skip code or the gate that produced it. Running it
+    alongside the recorded event published the same replay twice -- the
+    second copy thinner than the first.
+    """
+    write_timeline_event_at(
+        tmp_path,
+        {
+            "type": "warm_replay",
+            "kind": "warm_replay",
+            "status": "reproduced",
+            "start_time": "2026-08-20T08:00:00+00:00",
+            "end_time": "2026-08-20T08:40:00+00:00",
+            "ext": {"decided_by": "gate_promotion"},
+        },
+    )
+    state = _matched_state(
+        warm_replay_outcome={
+            "status": "reproduced",
+            "enqueued_at": "2026-08-20T08:00:00+00:00",
+            "settled_at": "2026-08-20T08:40:00+00:00",
+        },
+    )
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state)
+
+    assert [event["type"] for event in timeline] == ["warm_replay"]
+    # The surviving copy is the recorded one: it carries what the projection
+    # has no way to rebuild.
+    assert timeline[0]["ext"] == {"decided_by": "gate_promotion"}
 
 
 def test_timeline_stays_empty_for_a_session_that_touched_no_kb(tmp_path: Path):
