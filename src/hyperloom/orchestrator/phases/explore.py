@@ -281,6 +281,11 @@ class ExplorePhase(CoordinatorCollaborator):
             tick=int(state.tick or 0),
             previous=dict(state.orchestration_memory or {}),
         )
+        if record.get("parse_error"):
+            log.warning(
+                "_capture_cycle_memory: %s; carrying the previous cycle's memory forward",
+                record["parse_error"],
+            )
         state.orchestration_memory = record
         state.orchestration_memory_history = [*(state.orchestration_memory_history or []), record][-10:]
         return True
