@@ -57,10 +57,6 @@ class EnablementLane(CoordinatorCollaborator):
             return ""
         if state.enablement.validation_pending:
             return ""
-        if self._refused_argv_is_terminal():
-            return ""
-        if self._environment_fault_is_terminal():
-            return ""
         if await self.rounds.held() is not None:
             # Renews the open round's lease as a side effect; the reconciler,
             # which runs ahead of this pump, ends a round nobody is working on.
@@ -69,6 +65,14 @@ class EnablementLane(CoordinatorCollaborator):
         if state.baseline_tput > 0:
             return ""
         if state.baseline_failure_streak < 1:
+            return ""
+        # Below the baseline guards on purpose: both stop the whole run, so they
+        # may only speak for a baseline that actually failed. Above them, a
+        # healthy session ran this host preflight every tick, and one stat that
+        # came back False -- a network mount hiccup is enough -- ended it.
+        if self._refused_argv_is_terminal():
+            return ""
+        if self._environment_fault_is_terminal():
             return ""
         stalled = await self.rounds.consecutive_stalled()
         if stalled >= _ENABLEMENT_MAX_ATTEMPTS:
