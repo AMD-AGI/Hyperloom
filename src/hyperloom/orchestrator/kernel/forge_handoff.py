@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -78,7 +79,22 @@ def _environment_overrides(
     return dict(sorted(merged.items()))
 
 
-def _source_repository_roots(state: Any) -> tuple[Path, ...]:
+def _head_commit(repo: Path) -> str:
+    """Return the repository's HEAD, or an empty string when it cannot be read."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return completed.stdout.strip().lower()
+
+
+def source_repository_roots(state: Any) -> tuple[Path, ...]:
     """Resolve configured source paths to distinct Git repository roots."""
     raw_paths = [
         getattr(state, "framework_repo_path", ""),
@@ -133,9 +149,13 @@ def build_serving_context_md(state: Any, env_spec: Mapping[str, Any] | None = No
         "## Source Repositories",
         "",
     ]
-    source_roots = _source_repository_roots(state)
+    source_roots = source_repository_roots(state)
     if source_roots:
-        lines.extend(f"- `{root}`" for root in source_roots)
+        # Reported with the commit each one currently sits at, which the caller
+        # sealed just before this was written. That object id is the base every
+        # rewrite of this repository diffs from, so a task naming a path Git does
+        # not carry there is answerable from this document alone.
+        lines.extend(f"- `{root}` @ `{_head_commit(root) or 'unknown'}`" for root in source_roots)
     else:
         lines.append("- not available")
     lines.extend(

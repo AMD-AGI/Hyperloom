@@ -3951,6 +3951,24 @@ class KernelPhase(PhaseHandler):
             int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         )
         handoff_dir = attempt_dir / "handoff"
+        # Sealed before the handoff is written and before the controller starts,
+        # which is the last moment the serving trees stand still: reprofile,
+        # fusion and collective have all finished, and every uncommitted change
+        # they left is part of what the server is now running. Committing it is
+        # what lets a campaign name its own baseline -- the diff's starting
+        # point, and the state a borrowed repository is handed back at.
+        try:
+            from ..kernel.campaign_baseline import seal_campaign_baseline
+
+            pins = seal_campaign_baseline(
+                self.shared_state,
+                session_id=str(getattr(self.shared_state, "session_id", "") or self.session_dir.name),
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            )
+            if pins:
+                log.info("KERNEL entry: sealed campaign baselines %s", pins)
+        except Exception:  # noqa: BLE001
+            log.exception("KERNEL entry: sealing the campaign baseline failed")
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
