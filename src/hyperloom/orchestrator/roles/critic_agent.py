@@ -895,18 +895,19 @@ class CriticAgentBackend:
 
         # Record this critic iteration before the workdir can be pruned.
         try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import critic_out, instrument
 
-            instrument.record_critic_iteration(
-                self.session_dir,
-                iter_n=turn_idx,
-                request=request,
-                judge_bundle=judge_bundle,
-                review=review,
-                emit=emit,
-                workdir=workdir,
-                kb_priors=kb_priors_trace,
-            )
+            for record in (critic_out.record_critic_iteration, instrument.record_critic_iteration):
+                record(
+                    self.session_dir,
+                    iter_n=turn_idx,
+                    request=request,
+                    judge_bundle=judge_bundle,
+                    review=review,
+                    emit=emit,
+                    workdir=workdir,
+                    kb_priors=kb_priors_trace,
+                )
         except Exception:  # noqa: BLE001
             pass
 

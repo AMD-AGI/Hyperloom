@@ -4408,6 +4408,21 @@ class V6CriticReview(TypedDict, total=False):
     outcome: dict[str, Any]
 
 
+class V6Critic(TypedDict, total=False):
+    """The critic agent's own run, outside the business timeline.
+
+    The per-proposal verdicts stay with the proposals they judge; this key
+    carries the agent's session-level run -- how many times it was asked, about
+    what, and what it concluded each time.
+
+    Attributes:
+        iterations (list[CriticIteration]): One row per review pass, in the
+            order the agent ran them.
+    """
+
+    iterations: list[CriticIteration]
+
+
 class V6RobustnessIntent(TypedDict, total=False):
     """One intent the robustness agent raised on a turn.
 
@@ -5604,6 +5619,7 @@ class SessionBreakdown(TypedDict, total=False):
     outcome: V6Outcome
     timeline: list[V6TimelineEvent]
     close: V6Close
+    critic: V6Critic
     robustness: V6Robustness
 
     warnings: list[str]
@@ -5712,6 +5728,7 @@ __all__ = [
     "V6ToolVersion",
     "V6BaselineProgress",
     "V6Close",
+    "V6Critic",
     "V6Robustness",
     "V6RobustnessIntent",
     "V6RobustnessTurn",

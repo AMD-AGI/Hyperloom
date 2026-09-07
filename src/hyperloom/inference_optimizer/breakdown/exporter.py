@@ -535,6 +535,12 @@ def build(
         v6_warnings,
         default={},
     )
+    v6_critic = _safe_collect(
+        "critic",
+        lambda: collectors.collect_v6_critic(assembled.get("critic")),
+        v6_warnings,
+        default={},
+    )
     v6_robustness = _safe_collect(
         "robustness",
         lambda: collectors.collect_v6_robustness(assembled.get("robustness")),
@@ -592,6 +598,7 @@ def build(
         "outcome": outcome,
         "timeline": timeline,
         "close": v6_close,
+        "critic": v6_critic,
         "robustness": v6_robustness,
         "warnings": warnings,
         "source_files": source_files,

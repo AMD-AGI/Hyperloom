@@ -193,6 +193,7 @@ def assemble_parts(
         out[section] = rec.get("payload")
 
     _normalize_kernel_route_operations(out)
+    _compose_critic(out)
     _compose_robustness(out)
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
@@ -509,6 +510,31 @@ def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
         return []
     steps = close.get("steps")
     return [row for row in steps if isinstance(row, dict)] if isinstance(steps, list) else []
+
+
+def _compose_critic(out: dict[str, Any]) -> None:
+    """Fold the ``critic_iteration`` item substream into the ``critic`` view,
+    ordered as the agent ran. Pops the raw substream so it doesn't leak into
+    the breakdown envelope.
+
+    Args:
+        out: The assembled section mapping mutated in place.
+    """
+    rows = out.pop("critic_iteration", None)
+    if not isinstance(rows, list):
+        return
+
+    def _iter_of(row: dict[str, Any]) -> int:
+        try:
+            return int(row.get("iter") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    iterations = sorted(
+        (r for r in rows if isinstance(r, dict)),
+        key=lambda r: (_iter_of(r), str(r.get("ts") or "")),
+    )
+    out["critic"] = {"iterations": iterations}
 
 
 def _compose_robustness(out: dict[str, Any]) -> None:
