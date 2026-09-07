@@ -357,18 +357,27 @@ _HELP_TEXT_CACHE: dict[str, str] = {}
 # Framework -> monotonic deadline before which a failed probe is not retried.
 _HELP_PROBE_FAILED_UNTIL: dict[str, float] = {}
 _HELP_PROBE_RETRY_SEC: float = 300.0
+# Importing a serving framework to read its parser costs seconds (sglang: ~4s warm,
+# more on a cold pod). The result is cached per framework, so this is paid once.
+_HELP_PROBE_TIMEOUT_SEC: float = 30.0
 
 # Per-framework ``--help`` extraction commands. Each is a single-shot
 # ``python3 -c <inline>`` so the probe's 10s timeout covers the import cost.
 # Argv tails; the interpreter is resolved per framework at call time.
 _HELP_PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
+    # Both build a parser and hand it to the framework's own registrar, the shape
+    # `atom` already used: neither exposes a ready-made parser at module scope.
     "sglang": (
         "-c",
-        "from sglang.launch_server import parser; parser.print_help()",
+        "import argparse; from sglang.srt.server_args import ServerArgs; "
+        "p = argparse.ArgumentParser(); ServerArgs.add_cli_args(p); "
+        "p.print_help()",
     ),
     "vllm": (
         "-c",
-        "from vllm.entrypoints.openai.api_server import make_arg_parser; make_arg_parser(None).print_help()",
+        "from vllm.entrypoints.openai.cli_args import make_arg_parser; "
+        "from vllm.utils.argparse_utils import FlexibleArgumentParser; "
+        "make_arg_parser(FlexibleArgumentParser()).print_help()",
     ),
     # atom exposes EngineArgs.add_cli_args (mirrors vLLM).
     "atom": (
@@ -416,13 +425,19 @@ def _probe_server_help_text(framework: str) -> str:
             [interpreter, *argv_tail],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_HELP_PROBE_TIMEOUT_SEC,
         )
         # Only a clean exit is help text. stderr on a failed run is a
         # traceback, and treating that as help makes every flag look absent,
         # which drops the variants carrying them rather than sparing them.
         out = (proc.stdout or "") + (proc.stderr or "") if proc.returncode == 0 else ""
         reason = f"exit={proc.returncode}"
+        if proc.returncode != 0:
+            # Without the tail the log says only "exit=1", which cannot tell a
+            # missing framework from a probe command that no longer matches it.
+            tail = " ".join((proc.stderr or "").split())[-300:]
+            if tail:
+                reason = f"{reason}: {tail}"
     except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
         out, reason = "", repr(exc)
     if out:
