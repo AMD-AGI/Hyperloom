@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import _build_attempt_summary
@@ -159,6 +160,35 @@ def test_durable_command_capped_out_of_the_accepted_round_is_reported():
     assert "setup_ledger_truncated" in _codes(_decide(state))
 
 
+def test_a_command_the_accepted_round_failed_was_not_capped_out_of_it():
+    """A row of that round is a command the replay reached, whatever it returned."""
+    cmd = "pip install foo"
+    rows = _accepted(
+        [_row(cmd, seq=1, task="kept"), _row("pip install bar", seq=2, outcome="failed", task="kept")],
+        task="kept",
+    )
+    codes = _codes(_decide({"setup_commands": [cmd, "pip install bar"], "setup_executions": rows}))
+    assert "setup_ledger_truncated" not in codes
+
+
+def test_a_durable_command_no_row_of_the_accepted_round_reached_is_truncated():
+    cmd = "pip install foo"
+    rows = _accepted([_row(cmd, seq=1, task="kept")], task="kept")
+    codes = _codes(_decide({"setup_commands": [cmd, "pip install capped"], "setup_executions": rows}))
+    assert "setup_ledger_truncated" in codes
+
+
+def test_a_failed_non_python_installer_still_scopes_the_closure():
+    """apt writes outside the distribution set whether or not it exits zero."""
+    rows = _accepted([_row("apt-get install -y libfoo", seq=1, outcome="failed", task="kept")], task="kept")
+    assert "closure_scope_incomplete" in _codes(_decide({"setup_executions": rows}))
+
+
+def test_a_skipped_non_python_installer_scopes_nothing():
+    rows = _accepted([_row("apt-get install -y libfoo", seq=1, outcome="skipped", task="kept")], task="kept")
+    assert "closure_scope_incomplete" not in _codes(_decide({"setup_executions": rows}))
+
+
 def test_credentialed_command_is_sanitized_without_losing_its_digest():
     """Sanitization is of the recorded text only: the digest that counts
     occurrences is over the verbatim string, so the three spellings the
@@ -274,6 +304,8 @@ def test_env_value_change_alone_changes_the_digest_and_emits_no_value():
     two = build_input_record(_Action({"K": "2"}), installed_versions={}, ambient_env={}, fs_root=NO_FS)
     assert one["env_digest"] != two["env_digest"]
     assert one["env_keys"] == two["env_keys"] == ["K"]
+    # The digest separates them while neither value travels.
+    assert '"1"' not in json.dumps(one) and '"2"' not in json.dumps(two)
     # The driver's resolved value stands in where the action carried a blank.
     assert one["repo_url"] == "https://github.com/ROCm/aiter" and one["max_jobs"] == 8
 
@@ -291,6 +323,29 @@ def test_driver_overwritten_names_are_per_driver():
     assert "PYTORCH_ROCM_ARCH" not in ambient_closure(env, component="aiter")
     assert "PYTORCH_ROCM_ARCH" in ambient_closure(env, component="sgl_kernel")
     assert "HOME" in ambient_closure(env, component="aiter")
+
+
+def test_a_build_spawned_with_a_credentialed_index_env_classifies_it(tmp_path):
+    """The build inherits the whole environment, so the channel is its input too."""
+
+    class _Action:
+        component = "aiter"
+        repo_url = "https://github.com/ROCm/aiter"
+        ref = "v1"
+        gpu_arch = "gfx950"
+        max_jobs = 8
+        torch_constraint_mode = "constraint_file"
+        build_command = ()
+        envs: dict = {}
+
+    record = build_input_record(
+        _Action(),
+        installed_versions={"aiter_ref": "v1", "sha": "s"},
+        ambient_env={"PIP_INDEX_URL": "https://user:token@h/simple", "PATH": "/b", "HOME": "/h"},
+        fs_root=NO_FS,
+    )
+    assert record["credential_channels"] == ["pip_index_env"]
+    assert "token" not in json.dumps(record)
 
 
 def test_credentialed_repo_url_is_stripped_and_classified():
@@ -530,6 +585,12 @@ def test_an_empty_accepted_config_emits_a_null_source_and_null_evidence():
     assert out["accepted_config_source"] is None and out["launch_evidence"] is None
 
 
+def test_a_recipe_no_launch_observed_is_activation_incomplete_without_a_config():
+    """An unconfigured round is one more launch nothing observed, not an exemption."""
+    codes = _codes(_decide({"kept_patches": ["/p/1.patch"], "framework_root": "/fr"}, {}))
+    assert "activation_incomplete" in codes
+
+
 def test_five_accepted_config_keys_survive_the_projection():
     projected = project_accepted_config(
         {
@@ -576,6 +637,12 @@ def test_unpinned_acquisitions_require_a_runtime_rebuild():
         state = _runtime_state(action)
         section = {"runtime_provenance": project_runtime_provenance(state)}
         assert "runtime_rebuild_required" in _codes(_decide(state, section)), action
+
+
+def test_a_runtime_with_neither_rebuild_source_requires_a_rebuild():
+    """No acquisition and no build is no path back to the graded venv."""
+    section = {"runtime_provenance": project_runtime_provenance(_runtime_state(None))}
+    assert "runtime_rebuild_required" in _codes(_decide({}, section))
 
 
 def test_pinned_acquisition_needs_no_rebuild_note():

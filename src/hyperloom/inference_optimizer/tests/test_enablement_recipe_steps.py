@@ -153,6 +153,21 @@ def test_recipe_steps_build_nulls_absent_component_and_max_jobs():
         assert key in build
 
 
+def test_the_build_element_declares_its_contract_keys_and_no_others():
+    """Shape is fixed by the contract: a key is never omitted, only null."""
+    build = _steps(**_linked_build_state())[0]
+    assert set(build) == {
+        "kind",
+        "component",
+        "ref",
+        "gpu_arch",
+        "max_jobs",
+        "build_task_id",
+        "build_driver",
+        "build_inputs",
+    }
+
+
 def test_recipe_steps_build_populates_component_when_present():
     steps = _steps(
         build_manifest=[_attempt(action={"component": "vllm", "max_jobs": 12}), _sentinel()],
@@ -321,18 +336,39 @@ def test_recipe_steps_build_step_stands_with_no_joinable_row():
 # ---- AC4: declarativeness --------------------------------------------------
 
 
+#: A template placeholder or a line break is what separates a value from an
+#: instruction; a declarative step carries neither.
+_NON_DECLARATIVE = ("{{", "${", "%(", "\n")
+
+
+def _leaves(value):
+    """Yield every scalar reachable from ``value``, whatever nests it."""
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _leaves(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _leaves(nested)
+    else:
+        yield value
+
+
 def test_recipe_steps_is_pure_declarative_data():
     steps = _steps(
         setup_commands=["pip install a"],
         kept_patches=["/p/1.patch"],
+        build_manifest=[_attempt(build_inputs={"component": "aiter", "env_keys": ["K"]}), _sentinel()],
+        last_specialist_task_id=SPEC_TASK,
         framework_root="/fr",
-        **_linked_build_state(),
     )
     assert json.loads(json.dumps(steps)) == steps
+    assert any(isinstance(step.get("build_inputs"), dict) for step in steps)
     for step in steps:
         assert step["kind"] in ("setup", "build", "patch")
         for key, value in step.items():
-            assert value is None or isinstance(value, (str, int, dict, list)), key
+            for leaf in _leaves(value):
+                assert leaf is None or isinstance(leaf, (str, int)), key
+                assert not isinstance(leaf, str) or not any(m in leaf for m in _NON_DECLARATIVE), key
 
 
 # ---- AC5: non-regression ---------------------------------------------------
@@ -353,7 +389,15 @@ def test_enablement_state_roundtrip_ignores_recipe_steps():
 
 
 def test_remote_recipe_unaffected_by_recipe_steps():
-    from hyperloom.orchestrator.knowledge.remote_recipe.values import build_publishable_recipe_config
+    from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+        RECIPE_SECTIONS,
+        build_publishable_recipe_config,
+    )
+
+    # The published key set is closed and built explicitly; nothing this design
+    # emits is a member, so the recipe cannot inherit one by accident.
+    emitted = {"recipe_steps", "replay_sufficiency", "roots", "source_snapshots", "launch_evidence"}
+    assert emitted.isdisjoint(set(RECIPE_SECTIONS))
 
     base = {"extra_envs": {"A": "1"}, "extra_server_args": "--x 1"}
     assert build_publishable_recipe_config(dict(base)) == build_publishable_recipe_config(

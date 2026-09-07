@@ -362,6 +362,113 @@ def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
     assert assertions == {}
 
 
+def test_an_override_naming_no_interpreter_off_the_bypass_path_observes_nothing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Naming a plausible interpreter would reproduce the defect being closed.
+
+    An AITER runtime names no interpreter; only the bypass backend can say which
+    one launched the graded server, so under any other backend both probes
+    report nothing rather than an environment the server never ran in.
+    """
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
+    assert executor._probe_keep_environment(ctx, params, specialist_task_id=PROBE_TASK, provision_result=None) == (
+        {},
+        {},
+    )
+
+
+def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path, monkeypatch):
+    """The counterpart: the backend, not the override, is what decides."""
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
+    monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
+    )
+    params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
+    closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id=PROBE_TASK, provision_result=None
+    )
+    assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
+
+
+def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path):
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
+    assert executor._probe_keep_environment(ctx, {}, specialist_task_id=PROBE_TASK, provision_result=None) == ({}, {})
+
+
+def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path, tmp_path: Path):
+    """framework_root keeps only one tree; a second root is a real second answer.
+
+    Reading the git identity off the apply root alone reported every other
+    contributing tree as non-git with no base commit, which is a claim about
+    that tree rather than an absence.
+    """
+    second = tmp_path / "artifacts_root"
+    (second / "lib").mkdir(parents=True)
+    (second / "lib" / "a.so").write_bytes(b"\x00artifact")
+    _git(second.parent, "init", "-q", str(second))
+    _git(second, "config", "user.email", "t@example.com")
+    _git(second, "config", "user.name", "t")
+    _git(second, "add", "-A")
+    _git(second, "commit", "-qm", "artifact base")
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_base_sha=_git_head_sha(repo), _ip_shared_state=SimpleNamespace(enablement=None))
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
+        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        provision_result=None,
+        bench_result={},
+    )
+    records = {r["path"]: r for r in out["enablement_roots"]}
+    assert set(records) == {str(repo), str(second)}
+    assert records[str(repo)]["contributions"] == ["patch_apply"]
+    assert records[str(second)]["contributions"] == ["artifact_install"]
+    assert all(r["is_git"] for r in records.values())
+    assert records[str(second)]["base_sha"] == _git(second, "rev-parse", "HEAD")
+    assert records[str(second)]["base_sha"] != records[str(repo)]["base_sha"]
+
+
+def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path: Path):
+    plain = tmp_path / "plain_root"
+    (plain / "lib").mkdir(parents=True)
+    (plain / "lib" / "a.so").write_bytes(b"\x00artifact")
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_base_sha=_git_head_sha(repo), _ip_shared_state=SimpleNamespace(enablement=None))
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        provision_result=None,
+        bench_result={},
+    )
+    record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
+    assert record["is_git"] is False and record["base_sha"] == ""
+
+
 def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Path):
     """The caller must distinguish an absent provisioning result from an empty one."""
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
