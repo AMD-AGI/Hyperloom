@@ -192,7 +192,12 @@ async def test_profile_retry_records_successful_child_runtime(tmp_path, monkeypa
 
     assert result["status"] == "succeeded"
     assert calls == 2
-    assert "--enforce-eager" in state.last_profile_workload["server_args"]
+    # vLLM drops only the capture (cudagraph_mode=NONE), keeping inductor
+    # compilation, so the profiled kernels match the measured ones.
+    assert (
+        "--compilation-config.cudagraph_mode NONE"
+        in state.last_profile_workload["server_args"]
+    )
     assert state.last_profile_args == state.last_profile_workload["server_args"]
 
 
@@ -1363,7 +1368,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
     assert "cuda_graph_attribution_degraded" in codes, warnings
     w = next(w for w in warnings if w.get("code") == "cuda_graph_attribution_degraded")
     assert w["capture_traces_present"] is True
-    assert "--enforce-eager" in w["message"]
+    assert "--compilation-config.cudagraph_mode NONE" in w["message"]
 
 
 @pytest.mark.asyncio

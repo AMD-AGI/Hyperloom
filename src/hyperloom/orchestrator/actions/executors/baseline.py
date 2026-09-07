@@ -218,10 +218,26 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
 
 
 # Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph,
-# vllm uses --enforce-eager.
+# vllm uses the dotted form --compilation-config.cudagraph_mode NONE.
+#
+# vLLM deliberately does NOT use --enforce-eager here. That flag disables
+# torch.compile/inductor as well as graph capture, so a trace taken under it
+# profiles the *uncompiled* kernels -- not the ones the measured runs execute,
+# which makes the roofline attribution misleading in a different way. Setting
+# cudagraph_mode=NONE drops only the capture and keeps inductor compilation, so
+# the profiled kernels match production.
+#
+# The DOTTED form is deliberate, not stylistic. The JSON form
+# ``--compilation-config {"cudagraph_mode":"NONE"}`` does not survive this
+# pipeline: a shlex round-trip in the config merge strips the double quotes to
+# the bareword ``{cudagraph_mode:NONE}``, which vLLM's json.loads rejects at
+# boot, so the server never starts. The dotted form is two plain tokens with
+# nothing for a shell or shlex to eat. vLLM parses it in
+# vllm/utils/argparse_utils.py (dotted config args): json.loads("NONE") fails,
+# so it falls through to the raw string and merges to {"cudagraph_mode":"NONE"}.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
-    "vllm": "--enforce-eager",
+    "vllm": "--compilation-config.cudagraph_mode NONE",
 }
 
 
@@ -268,8 +284,17 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
     """Append the framework-correct disable-cuda-graph flag once (idempotent).
 
-    Token-level dedup so a longer flag (e.g. ``--disable-cuda-graph-extra``)
-    is not mistaken for an existing ``--disable-cuda-graph``.
+    Dedup is on the option's BASE NAME, not the whole flag, because vLLM's flag
+    is two tokens with a dotted option (``--compilation-config.cudagraph_mode
+    NONE``). Whole-string matching would never fire for it, so the flag would be
+    appended again on every call. Comparing the part before any ``.``/``=`` also
+    means an operator-supplied ``--compilation-config`` (JSON form) or
+    ``--compilation-config.<field>`` counts as already present, so we never emit
+    a second ``--compilation-config`` for vLLM to resolve ambiguously.
+
+    The original property still holds: a longer flag (e.g.
+    ``--disable-cuda-graph-extra``) is not mistaken for ``--disable-cuda-graph``,
+    because base names are compared whole.
 
     Args:
         extra_server_args: Existing extra server args string (may be empty).
@@ -277,10 +302,16 @@ def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
 
     Returns:
         ``extra_server_args`` with the framework-correct disable-cuda-graph
-        flag appended once; unchanged when the flag is already present.
+        flag appended once; unchanged when that option is already present.
     """
+
+    def _base(token: str) -> str:
+        return token.split("=", 1)[0].split(".", 1)[0]
+
     flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or "").split():
+    option_base = _base(flag.split()[0])
+    existing = (extra_server_args or "").split()
+    if any(_base(t) == option_base for t in existing if t.startswith("-")):
         return extra_server_args or ""
     return f"{extra_server_args} {flag}".strip()
 
