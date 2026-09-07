@@ -1515,37 +1515,34 @@ ensure_aiperf() {
   fi
 }
 
-# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
-# The Hyperloom #C1 script-tearing race (vllm_mi300x.sh / sglang_mi300x.sh
-# sourced by a leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
-# `syntax error near unexpected token 'fi'`). Magpie is invoked as a
-# subprocess, so monkey-patching from the Coordinator process does not
-# reach it; we patch the cloned source in place at install time. The
-# patcher itself is idempotent + flock-serialised + atomic-rename
-# (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
+# --- 2b. SGLang trust + eval-concurrency compatibility patches ---
+# Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
+# needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
+# (Magpie's client call sites never forward the `trust` flag upstream), and
+# the redundant `--concurrent-requests` flag InferenceX's `run_lm_eval`
+# rejects. Magpie is invoked as a subprocess, so monkey-patching from the
+# Coordinator process does not reach it; we patch the cloned source in place
+# at install time. The patcher itself is idempotent + flock-serialised +
+# atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# Fail-soft (was fail-loud): a `False` return means the legacy
-# `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
-# upstream commit that already copies scripts atomically
-# (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
-# the #C1 race is already mitigated upstream, so we `warn` and continue
-# instead of aborting every install. (A sibling branch makes the patcher
-# itself upstream-aware; this warn is the defense-in-depth complement.) If
-# you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
-# apply, the script-tearing race is genuinely unpatched — review the
-# warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
+# (Hyperloom used to also carry a "#C1" atomic-write patch here for
+# `_prepare_benchmark_scripts`'s non-atomic `shutil.copy2`. It was removed:
+# the pinned MAGPIE_REF already copies benchmark scripts atomically upstream
+# via `_copy_benchmark_script_atomic`, confirmed against the current pin, so
+# there was nothing left for that patch to do.)
+#
+# Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
 ensure_magpie_atomic_scripts_patch() {
   if is_falsy "${PATCH_MAGPIE:-1}"; then
-    log "PATCH_MAGPIE is falsy — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
+    log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_PATH}/Magpie/modes/benchmark/benchmarker.py"
+    log "would apply Magpie SGLang trust + eval-concurrency compatibility patches under ${MAGPIE_PATH}"
     return 0
   fi
-  log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
-  # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
-  # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
+  log "applying Magpie SGLang trust + eval-concurrency compatibility patches"
+  # Exit-code contract (read below): 0 ok · 2 remote-trust drift · 5 eval-flag survives.
   # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
   # InferenceX ``benchmarks/`` copies Magpie executes and teach
   # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
@@ -1560,19 +1557,11 @@ status = magpie_scripts_patch_status(
     os.environ["MAGPIE_PATH"],
     os.environ.get("INFERENCEX_PATH") or None,
 )
-print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
-      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
+print(f"_magpie_patcher: remote_trust_ok={status.remote_trust_ok} "
       f"eval_flag_ok={status.eval_flag_ok}",
       file=sys.stderr)
 if status.ok:
     sys.exit(0)
-# A GENUINE atomic failure (unrecognized shape / I/O error) means the
-# script-tearing race is actually unmitigated — distinct exit so a strict
-# install can fail-loud instead of swallowing it as an expected no-op.
-if status.atomic_genuine_failure:
-    sys.exit(4)
-if not status.atomic_ok:
-    sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
 # eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
@@ -1584,26 +1573,15 @@ if not status.remote_trust_ok:
 # install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
-# Defensive catch-all: a not-ok status with none of the bits above set should
+# Defensive catch-all: a not-ok status with neither bit above set should
 # never happen, but exit non-zero so we never fall through to exit 0.
 sys.exit(3)
 PY
   then
-    log "Magpie #C1 patch OK"
+    log "Magpie compatibility patches OK"
   else
     rc=$?
-    if [ "$rc" -eq 4 ]; then
-      # GENUINE failure: the legacy block is gone AND upstream is not atomic
-      # (or a read/write error). The Hyperloom #C1 script-tearing race is NOT
-      # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
-      # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
-      # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
-      if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
-        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
-      else
-        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. The Hyperloom #C1 script-tearing race is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
-      fi
-    elif [ "$rc" -eq 2 ]; then
+    if [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
     elif [ "$rc" -eq 5 ]; then
       # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
@@ -1620,11 +1598,7 @@ PY
         die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
       fi
     else
-      # Benign no-op (rc=1): MAGPIE_PATH unset / benchmarker.py missing. With
-      # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
-      # ``upstream_atomic`` (exit 0) instead, so this branch is just the
-      # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
-      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_PATH). Fine for tests/dry-runs; otherwise check MAGPIE_PATH or set PATCH_MAGPIE=0."
+      warn "Magpie compatibility patches failed in an unexpected way (rc=$rc); review _magpie_patcher.py."
     fi
   fi
 }
