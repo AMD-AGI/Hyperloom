@@ -68,15 +68,21 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
 
 
 def _pdeathsig_preexec() -> None:
-    """Best-effort ``PR_SET_PDEATHSIG``: reaches the direct child only, so a server that forks its own workers still
-    leaves grandchildren holding GPU memory. It narrows the window; the durable backstop is the pidfile scanned by
-    :func:`._server_lifecycle.reap_orphaned_servers`. No-op where prctl is unavailable."""
+    """Ask the OS to SIGTERM this child if its parent dies (Linux ``PR_SET_PDEATHSIG``).
+
+    The signal must be trappable. This child is the benchmark wrapper, and the wrapper -- not us -- owns the server:
+    the server is ``setsid``'d into its own process group, so the only in-band teardown that can reach it is the
+    wrapper's own ``trap cleanup EXIT INT TERM``. SIGKILL cannot be trapped, so arming it here killed the one process
+    that knew how to stop the server and orphaned a multi-GPU vLLM tree. A no-op where prctl is unavailable, and no
+    guarantee either way -- the durable backstop is the pidfile scanned by
+    :func:`._server_lifecycle.reap_orphaned_servers`.
+    """
     try:
         import ctypes  # noqa: PLC0415
 
         # PR_SET_PDEATHSIG = 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(1, signal.SIGKILL)
+        libc.prctl(1, signal.SIGTERM)
     except Exception:  # noqa: BLE001 — best-effort hardening only
         pass
 
@@ -85,8 +91,8 @@ def _pdeathsig_preexec() -> None:
 class ManagedServerProcess:
     """Supervise a single GPU/serving subprocess tied to this object's lifetime.
 
-    Launched in a new POSIX session (distinct pgid) so the tree can be reaped atomically; PR_SET_PDEATHSIG narrows the
-    window on an unexpected owner death (direct child only -- see :func:`_pdeathsig_preexec`).
+    Launched in a new POSIX session (distinct pgid) so the tree can be reaped atomically; PR_SET_PDEATHSIG is armed so
+    an unexpected owner death still triggers the child's own cleanup (see :func:`_pdeathsig_preexec`).
     """
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)

@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -149,6 +151,84 @@ def test_managed_process_start_and_reap():
         time.sleep(0.05)
     assert not mgr.is_alive()
     assert not _pid_alive(pid), "supervised process must not survive stop()"
+
+
+def test_pdeathsig_arms_a_trappable_signal(tmp_path: Path):
+    """The parent-death signal must be SIGTERM, never SIGKILL.
+
+    The direct child here is the benchmark wrapper, and the server it boots is
+    ``setsid``'d into its own process group -- so the wrapper's own signal trap
+    is the only in-band teardown that can reach the server. SIGKILL cannot be
+    trapped, so arming it kills the wrapper without cleanup and orphans the
+    server. Reads the signal back out of the child with ``PR_GET_PDEATHSIG``.
+    """
+    log_path = tmp_path / "pdeathsig.log"
+    mgr = ManagedServerProcess()
+    mgr.start(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes; v = ctypes.c_int(0); "
+            "ctypes.CDLL('libc.so.6').prctl(2, ctypes.byref(v)); print(v.value)",
+        ],
+        log_path=str(log_path),
+    )
+    deadline = time.time() + 10.0
+    while time.time() < deadline and mgr.exit_code() is None:
+        time.sleep(0.05)
+    assert mgr.exit_code() == 0
+    assert log_path.read_text(encoding="utf-8").strip() == str(int(signal.SIGTERM))
+
+
+def test_owner_death_still_reaps_the_wrappers_setsid_server(tmp_path: Path):
+    """An abrupt owner death leaves no server behind.
+
+    Reproduces the production topology that leaked four GPUs: the wrapper is
+    our direct child, the server is ``setsid``'d into a *different* process
+    group (so a ``killpg`` on the wrapper cannot reach it), and only the
+    wrapper's trap knows the server's pgid. The owner dies via ``os._exit``,
+    standing in for the Ray actor death that triggered the real leak.
+    """
+    pgid_file = tmp_path / "server.pgid"
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'cleanup() { kill -TERM "-$SERVER_PGID" 2>/dev/null; exit 0; }\n'
+        "trap cleanup EXIT INT TERM\n"
+        f"setsid bash -c 'echo $$ > {pgid_file}; while true; do sleep 0.2; done' &\n"
+        "sleep 0.5\n"
+        f'SERVER_PGID=$(cat {pgid_file})\n'
+        "while true; do sleep 0.2; done\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    owner = tmp_path / "owner.py"
+    owner.write_text(
+        "import os, time\n"
+        "from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess\n"
+        f"ManagedServerProcess().start([{str(wrapper)!r}])\n"
+        "time.sleep(1.5)\n"
+        "os._exit(9)\n",
+        encoding="utf-8",
+    )
+    subprocess.run([sys.executable, str(owner)], check=False, timeout=60)
+
+    deadline = time.time() + 20.0
+    while time.time() < deadline and not pgid_file.exists():
+        time.sleep(0.05)
+    assert pgid_file.exists(), "wrapper never launched its server"
+    server_pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+
+    try:
+        while time.time() < deadline:
+            if not _pid_alive(server_pgid):
+                break
+            time.sleep(0.1)
+        assert not _pid_alive(server_pgid), "owner death orphaned the setsid'd server"
+    finally:
+        with suppress(OSError, ProcessLookupError):
+            os.killpg(server_pgid, signal.SIGKILL)
 
 
 def test_managed_process_stop_idempotent():

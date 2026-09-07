@@ -1149,9 +1149,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
     def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
         """Reap leftover single-node serving processes via this session's pidfiles.
 
-        Runs at boot and again at shutdown. The shutdown pass is the only mechanism covering a server whose owner died
-        without running its own teardown: the in-band paths all die with the owner, whereas a pidfile plus a cmdline
-        check outlives it.
+        Runs at boot and again at shutdown. Every other teardown here is in-band -- a benchmark wrapper's own signal
+        trap, or a ``killpg`` on a handle we still hold -- so none of it runs when the owner dies without getting to
+        execute. This is the backstop for that case, and with no cgroup or pid-namespace available it is the only one:
+        the pidfile outlives whatever wrote it. Scoped to this session's own pidfiles and gated on a cmdline match, so
+        a co-located session's server and a recycled pid are never touched.
         """
         try:
             from ..actions.executors._multi_node_env import is_multi_node
@@ -1592,8 +1594,8 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     pass
             with timed_teardown_step(self.shared_state, "close_backends"):
                 await self._close_backends()
-            # A benchmark server outliving the run holds every GPU it was given,
-            # so the last thing the session does is reap its own pidfiles.
+            # A server outliving the run holds every GPU it was given, so the
+            # session's last act is to reap its own pidfiles.
             with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
                 await asyncio.to_thread(self._reap_orphaned_servers_best_effort, phase="shutdown")
             self.shared_state.save(self.session_dir)
