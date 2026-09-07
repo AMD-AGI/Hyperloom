@@ -23,6 +23,7 @@ from hyperloom.orchestrator.enablement.recipe.keep_records import (
     declared_targets,
 )
 from hyperloom.orchestrator.enablement.recipe.keep_probe import (
+    _probe_env,
     keep_assertion_packages,
     probe_environment_closure,
     resolve_keep_interpreter,
@@ -612,3 +613,44 @@ def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Pa
     )
     assert assertions == {}
     assert closure["distributions"]["demo"] == "2.0"
+
+
+def test_a_provisioned_keep_reports_the_version_the_setup_replay_left(tmp_path: Path):
+    """Provisioning names the package; the version is the probe's observation.
+
+    The provisioning stage runs before the setup replay, so carrying its map
+    forward would report the version a later install had already replaced.
+    """
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
+    override = {
+        "runtime_python_exe": sys.executable,
+        "pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")],
+    }
+    provisioned = SimpleNamespace(
+        ok=True,
+        installed_versions={"demo": "1.0"},
+        runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
+    )
+    _closure, assertions = executor._probe_keep_environment(
+        ctx, {}, specialist_task_id=PROBE_TASK, provision_result=provisioned
+    )
+    assert assertions == {"demo": "2.0"}
+
+
+def test_the_probe_environment_carries_the_prefixes_and_the_runtime_env(tmp_path: Path):
+    """An AITER runtime names no interpreter: a prefix list and a runtime_env
+    are the whole of what makes its build importable."""
+    prefix = _installed_dist(tmp_path, "overlaid", "3.1")
+    env = _probe_env({"pythonpath_prefixes": [prefix], "runtime_env": {"AITER_REBUILD": "1"}})
+    assert env["PYTHONPATH"].split(":")[0] == prefix
+    assert env["AITER_REBUILD"] == "1"
+
+
+def test_an_interpreter_the_probe_cannot_run_observes_nothing(tmp_path: Path):
+    """Fail closed on the invocation too, not only on an unresolved interpreter."""
+    assert probe_environment_closure(str(tmp_path / "absent-python"), override=None, packages=("demo",)) == ({}, {})
+    silent = tmp_path / "silent-python"
+    silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    silent.chmod(0o755)
+    assert probe_environment_closure(str(silent), override=None, packages=("demo",)) == ({}, {})

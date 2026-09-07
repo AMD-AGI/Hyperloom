@@ -83,6 +83,12 @@ def _accepted(rows, task="r1"):
 # ---- 1. Occurrence identity survives the collapse (D4) ---------------------
 
 
+def test_an_outcome_outside_the_recorded_vocabulary_is_refused():
+    """The ledger's rules read the outcome, so an unknown one is a silent gap."""
+    with pytest.raises(ValueError):
+        _row(outcome="partially_applied")
+
+
 def test_one_string_executed_twice_yields_two_steps_with_ordinals():
     cmd = "pip install foo"
     rows = _accepted([_row(cmd, seq=1, task="r1"), _row(cmd, seq=2, task="r2")], task="r2")
@@ -452,6 +458,15 @@ def test_an_ambient_closure_narrower_than_the_inherited_environment_is_incomplet
         assert "build_inputs_incomplete" in _codes(_decide(state)), keys
 
 
+def test_a_row_carrying_no_input_record_at_all_is_incomplete():
+    """State written before the input contract joins, and reproduces nothing."""
+    row = _attempt("bA")
+    row.pop("build_inputs")
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    codes = _codes(_decide(state))
+    assert "build_inputs_incomplete" in codes and "build_attempt_unjoined" not in codes
+
+
 def test_an_empty_installed_versions_map_is_incomplete():
     row = _attempt("bA", installed_versions={})
     state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
@@ -582,10 +597,34 @@ def test_a_width_no_binding_axis_reports_is_activation_incomplete():
     assert "activation_incomplete" in _codes(_decide({}, section))
 
 
+def test_a_setting_only_the_observed_identity_confirms_is_confirmed():
+    """On an SGLang log with no argv line the identity parse is the only
+    observed evidence there is, so an argv-only test would refuse every one."""
+    section = _parallelism_section(
+        observed_server_launch_flags="", observed_server_identity={"mem_fraction_static": 0.9}
+    )
+    codes = _codes(_decide({}, section))
+    assert "activation_incomplete" not in codes and "launch_evidence_mismatch" not in codes
+
+
+def test_a_setting_the_observed_identity_contradicts_is_a_mismatch():
+    section = _parallelism_section(
+        observed_server_launch_flags="", observed_server_identity={"mem_fraction_static": 0.5}
+    )
+    assert "launch_evidence_mismatch" in _codes(_decide({}, section))
+
+
 def test_observed_value_contradicting_the_requested_one_is_a_mismatch():
     projected, _ = project_launch_evidence(_evidence(observed_server_launch_flags="--mem-fraction-static 0.5"))
     section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": projected}
     assert "launch_evidence_mismatch" in _codes(_decide({}, section))
+
+
+def test_the_attached_spelling_of_a_requested_flag_is_the_separated_one():
+    """Both sides normalize before comparison, so a launcher's spelling choice
+    is not a contradiction."""
+    codes = _codes(_decide({}, _parallelism_section(requested_server_args="--mem-fraction-static=0.9")))
+    assert "launch_evidence_mismatch" not in codes and "activation_incomplete" not in codes
 
 
 def test_model_digest_disagreement_is_a_mismatch():
@@ -690,6 +729,19 @@ def test_runtime_provenance_carries_no_filesystem_path():
     assert "/attempt" not in str(provenance)
 
 
+def test_a_runtime_env_naming_an_attempt_directory_does_not_travel():
+    """The switches that decide what gets launched survive; the attempt
+    directories beside them are re-derived by the rebuild."""
+    state = _runtime_state({"acquisition_method": "editable_ref", "repo_url": "https://h/r", "ref": "main"})
+    state["active_runtime"]["runtime_env"] = {
+        "INFERENCE_OPTIMIZER_AITER_JIT_DIR": "/attempt/jit",
+        "AITER_REBUILD": "1",
+    }
+    provenance = project_runtime_provenance(state)
+    assert provenance["runtime_env"] == {"AITER_REBUILD": "1"}
+    assert "/attempt" not in str(provenance)
+
+
 def test_unpinned_acquisitions_require_a_runtime_rebuild():
     unpinned = (
         {"acquisition_method": "editable_ref", "repo_url": "https://h/r", "ref": "main"},
@@ -738,6 +790,10 @@ def test_credential_classes_over_the_admitted_grammar():
     assert classify_credential_class("pip install git+https://user:token@host/repo@main") == "vcs_url"
     assert classify_credential_class("pip install --find-links https://u:t@h/links foo") == "find_links"
     assert classify_credential_class("conda install -c https://u:t@h/chan foo") == "channel"
+    assert classify_credential_class("npm install --registry https://u:t@h/ foo") == "registry"
+    # An auth token is not a URL, so the option alone is what names the class.
+    assert classify_credential_class("npm install --_authToken t0ken foo") == "registry"
+    assert classify_credential_class("apt-get install -y https://u:t@h/foo.deb") == "apt_source"
     assert classify_credential_class("pip install foo") is None
 
 
@@ -1119,6 +1175,13 @@ def test_unrecognized_code_is_itself_insufficient():
     assert read_status(forged)["status"] == "insufficient"
 
 
+def test_a_recorded_decision_reads_back_as_the_producer_wrote_it():
+    """Only an absent key and an unrecognized code are overridden; a decision
+    over the closed vocabulary is the one the consumer acts on."""
+    recorded = _decide(_sufficient_state(), _sufficient_section())
+    assert read_status({"replay_sufficiency": recorded}) == recorded
+
+
 # ---- Setup input identity for mutable, local and VCS inputs ----------------
 
 
@@ -1264,6 +1327,15 @@ def test_a_snapshot_whose_captured_file_is_undelivered_is_missing():
     assert "source_snapshot_missing" in _codes(decision)
 
 
+def test_a_snapshot_naming_no_reference_has_nowhere_to_carry_its_payload():
+    """A capture that recorded files under no reference names no deliverable
+    bytes, so the delivery cannot be asked about them."""
+    section = _delivery_section()
+    section["source_snapshots"] = [{**_snapshot(), "snapshot_ref": ""}]
+    decision = _decide(_sufficient_state(), section, delivered=_delivered_everything())
+    assert "source_snapshot_missing" in _codes(decision)
+
+
 def test_a_declared_deletion_needs_no_delivered_payload():
     section = _delivery_section()
     section["source_snapshots"] = [_snapshot(files=(("srt/gone.py", "delete"),))]
@@ -1291,6 +1363,22 @@ def test_an_installs_local_payload_must_reach_the_consumer_too(tmp_path):
         delivered=[*_delivered_everything(), ("private.whl", wheel_digest)],
     )
     assert "artifact_not_self_contained" not in _codes(delivered)
+
+
+def test_an_install_from_outside_the_session_names_only_its_file(tmp_path):
+    """No bundle rooted at the session can carry it, so the reference stands
+    unsatisfied and the delivery refuses rather than reporting it carried."""
+    (tmp_path / "outside.whl").write_bytes(b"wheel-bytes")
+    session = tmp_path / "session"
+    session.mkdir()
+    cmd = "pip install ../outside.whl"
+    rows = _accepted([_row(cmd, cwd=session)])
+    assert rows[0]["input_identity"] == [
+        {"kind": "local_file", "rel": "outside.whl", "sha256": hashlib.sha256(b"wheel-bytes").hexdigest()}
+    ]
+    state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": rows}
+    codes = _codes(_decide(state, _delivery_section(), delivered=_delivered_everything()))
+    assert "artifact_not_self_contained" in codes
 
 
 def test_one_occurrences_bytes_do_not_answer_for_anothers_at_that_path(tmp_path):

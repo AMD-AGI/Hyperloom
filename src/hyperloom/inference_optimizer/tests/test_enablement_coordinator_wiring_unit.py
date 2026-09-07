@@ -1467,3 +1467,38 @@ async def test_rearm_advanced_deduplicates_artifacts(monkeypatch):
         }
     )
     assert len(fake.shared_state.enablement.kept_artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    "status,accepted",
+    [("kept", True), ("apply_failed", False), ("no_patches", False), ("reverted", False)],
+)
+def test_rearm_records_the_rounds_disposition_on_the_executions_it_performed(status, accepted):
+    """Only the accepted round's applied commands reach the validated launch.
+
+    A discarded round still mutated the shared venv, so its rows stay in the
+    ledger carrying the outcome the lane reported for them.
+    """
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+
+    fake = _enqueue_self(enablement_inflight_task_id="spec-1")
+    fake.shared_state.enablement.setup_executions = [
+        build_execution_row(
+            seq=1,
+            round_task_id="spec-1",
+            cmd_index=0,
+            cmd="pip install -U transformers",
+            source="proposed",
+            outcome="applied",
+            env={},
+            cwd="/tmp",
+            fs_root="/nonexistent-probe-root",
+        )
+    ]
+    fake._maybe_rearm_enablement(
+        {"enablement": True, "status": status, "specialist_task_id": "spec-1", "patches_applied": []}
+    )
+    row = fake.shared_state.enablement.setup_executions[0]
+    assert row["round_disposition"] == status
+    assert row["at_accepted_round"] is accepted
+    assert row["present_at_final_launch"] is accepted
