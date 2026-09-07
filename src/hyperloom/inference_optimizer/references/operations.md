@@ -104,22 +104,47 @@ export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+# $RUN_TAG is timestamped and cannot be recomputed. Persist the run-scoped vars
+# so later blocks can source them: under Claw the launch is its own background
+# tool call and the health check is a separate foreground call, which inherits
+# none of these exports. Session-scoped filename for the same WekaFS reason
+# setup_env.sh must never be shared; set $RUN_ENV yourself if two non-Claw runs
+# share a host.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
+
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --launch-info-file "$LAUNCH_INFO_FILE" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-`setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
-written above is the **setsid wrapper** PID, which exits immediately — the
-robustness monitor reads `$PID_FILE` and would misfire a spurious resume if
-it kept the dead wrapper PID. After launch, reconcile `$PID_FILE` to the **real**
-optimizer PID, which the CLI records as `.pid` in the launch-info JSON.
+**Detach it the way the harness understands.** Under Claw (`$CLAW_SESSION_ID`
+set), hand that block to the bash tool with `run_in_background=true` — no
+`setsid nohup`, no trailing `&`. Everywhere else, prefix `setsid nohup`, append
+` &`, and `echo $! > "$PID_FILE"`; that form is required for runs longer than 5
+minutes under Cursor. See the **Launch** section of `SKILL.md` for why the
+distinction matters: a hand-detached run is invisible to Claw, and the sandbox
+is reclaimed about fifteen minutes after the agent turn ends, with the run still
+going.
+
+Either way, reconcile `$PID_FILE` to the **real** optimizer PID, which the CLI
+records as `.pid` in the launch-info JSON. Under `setsid` the `$!` written above
+is the wrapper, which exits immediately; under Claw the tool returns a
+`shell_id` and never a pid. The robustness monitor reads `$PID_FILE` and would
+misfire a spurious resume on a dead wrapper pid.
+
+When no authoritative pid can be had — no `.pid` in the launch-info JSON and a
+`pgrep` that is empty or ambiguous — **delete** `$PID_FILE` instead of leaving
+the wrapper pid in it. A missing pidfile reads as "unknown" to the monitor,
+which then relies on the owner pid, heartbeat, and lease signals; a stale one
+reads as "dead optimizer" and triggers a resume of a session that is still
+running.
 
 Health-check after 30 seconds (the launch-info JSON carries the authoritative
 `.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
@@ -127,14 +152,48 @@ a tiny `python3` reader):
 
 ```bash
 sleep 30
+# Separate shell from the launch under Claw, so re-source the run-scoped env
+# instead of assuming $RUN_DIR/$PID_FILE/$LAUNCH_INFO_FILE carried over.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 
 # Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
 # and rewrite $PID_FILE so the monitor watches the right process.
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
-[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
-[ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
-test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
+if [ -z "$REAL_PID" ]; then
+  # Best-effort only, and UNSAFE when several sessions optimize on this host:
+  # the pattern matches all of them and nothing in it ties a hit to this run.
+  # Accept it only when unambiguous; never `head -1` a multi-hit list, which
+  # silently adopts another session's pid and points the monitor -- and its
+  # resume -- at the wrong process.
+  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+  if [ "$N_MATCHES" = "1" ]; then
+    REAL_PID="$MATCHES"
+  else
+    echo "ERROR: no .pid in $LAUNCH_INFO_FILE and pgrep is ambiguous" \
+         "($N_MATCHES matches); refusing to guess. Inspect the" \
+         "HYPERLOOM_LAUNCH line and $RUN_LOG." >&2
+  fi
+fi
+if [ -n "$REAL_PID" ]; then
+  echo "$REAL_PID" > "$PID_FILE"
+else
+  # Never leave the setsid `$!` wrapper pid sitting in the file: it exited at
+  # launch, and the monitor would read a dead pid and fire a spurious resume.
+  # Remove it instead -- the monitor guards its read with `[ -f "$PID_FILE" ]`,
+  # so an absent file means "unknown" and it falls through to the authoritative
+  # signals (optimizer.lock owner pid, state.json freshness, live leases).
+  rm -f "$PID_FILE"
+  echo "WARN: removed $PID_FILE (no authoritative pid); the monitor will use" \
+       "the lock/heartbeat/lease signals instead of a stale wrapper pid." >&2
+fi
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
+# does not reap, so that check reports a dead optimizer as alive indefinitely.
+# Ask for the process state and reject Z.
+ps -o stat= -p "$REAL_PID" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$REAL_PID"
 
 SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$SESSION_DIR" ]; then
@@ -162,23 +221,26 @@ non-default session.
 
 ## Robustness Monitor
 
-For runs longer than 5 minutes, start the monitor in its own `setsid nohup`
-process. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
+For runs longer than 5 minutes, start the monitor in its own detached process,
+by the same rule as the optimizer above: `run_in_background=true` under Claw,
+`setsid nohup ... &` elsewhere. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
 else `.session_dir` from `$LAUNCH_INFO_FILE`. Its only allowed relaunch is the
 same session via `optimize --resume-from "$SESSION_DIR"` after the
 optimizer process disappears without a terminal marker; it must not start a
 fresh run.
 
 ```bash
-export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
+# Source the run-scoped env for $RUN_DIR / $PID_FILE / $LAUNCH_INFO_FILE: under
+# Claw this is another separate tool call and inherits no exports.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 mkdir -p "$RUN_DIR"
-export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
    "$RUN_DIR/robustness_monitor.sh"
 chmod +x "$RUN_DIR/robustness_monitor.sh"
-setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
+bash "$RUN_DIR/robustness_monitor.sh" \
   > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
-  2>&1 < /dev/null &
+  2>&1 < /dev/null
 ```
 
 ## Monitoring
@@ -186,7 +248,10 @@ setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
 Poll every 300s unless debugging startup failure.
 
 ```bash
-export SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE")"
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+export SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 test -n "$SESSION_DIR"
 "$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION_DIR"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION_DIR"
