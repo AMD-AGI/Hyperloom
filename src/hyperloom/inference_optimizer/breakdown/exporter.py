@@ -348,10 +348,6 @@ def build(
         "explore_search",
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
-    critic_robustness = _pick(
-        "critic_robustness",
-        _safe_collect("critic_robustness", lambda: collectors.collect_critic_robustness(sd, warnings), warnings),
-    )
     telemetry = _pick(
         "telemetry", _safe_collect("telemetry", lambda: collectors.collect_telemetry(sd, state, warnings), warnings)
     )
@@ -580,7 +576,6 @@ def build(
         # which never reaches ``optimizations``.
         "collective": collective,
         "param_search": explore_search,
-        "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         # Canonical downstream optimization API.
         "optimizations": optimizations,
@@ -1038,7 +1033,7 @@ def write_minimal_final_report(
         "## Structured detail",
         "",
         f"See `{breakdown_link.name}` (sibling of session root) for the "
-        f"complete `phase_history` / `critic_robustness` blocks.",
+        f"complete `timeline` / `critic` / `robustness` blocks.",
         "",
     ]
 

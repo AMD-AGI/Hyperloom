@@ -195,7 +195,6 @@ def assemble_parts(
     _normalize_kernel_route_operations(out)
     _compose_critic(out)
     _compose_robustness(out)
-    _compose_critic_robustness(out)
     _compose_kernel_journey(out)
     _compose_close(out)
     if not keep_event_rows:
@@ -559,27 +558,6 @@ def _compose_robustness(out: dict[str, Any]) -> None:
         key=lambda r: (_turn_of(r), str(r.get("ts") or "")),
     )
     out["robustness"] = {"turns": turns}
-
-
-def _compose_critic_robustness(out: dict[str, Any]) -> None:
-    """Fold the ``critic_iterations`` item substream into the
-    ``critic_robustness`` singleton. Pops the raw substream so it doesn't leak
-    into the breakdown envelope.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
-    critic_iters = out.pop("critic_iterations", None)
-    if critic_iters is None:
-        return
-    # A directly-recorded singleton takes precedence over substreams.
-    if "critic_robustness" in out:
-        return
-    critic_iters = critic_iters if isinstance(critic_iters, list) else []
-    out["critic_robustness"] = {
-        "critic_iterations": critic_iters,
-        "kb_writes_summary": _kb_writes_summary(critic_iters),
-    }
 
 
 #: The KERNEL substreams, in the order a reader follows them.
@@ -1027,28 +1005,6 @@ def _kernel_outcome(
     if dispatch:
         return "dispatched" if dispatch.get("dispatched") else "skipped"
     return "discovered"
-
-
-def _kb_writes_summary(critic_iters: list[Any]) -> dict[str, Any]:
-    """Count each critic iteration's verdict (mirrors the collector).
-
-    Args:
-        critic_iters: Critic iteration entries to tally by verdict.
-
-    Returns:
-        A summary ``{"total": int, "by_verdict": {verdict: count}}``.
-    """
-    by_verdict: dict[str, int] = {}
-    total = 0
-    for entry in critic_iters:
-        if not isinstance(entry, dict):
-            continue
-        verdict = str(entry.get("verdict") or "").strip().upper()
-        if not verdict:
-            continue
-        total += 1
-        by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
-    return {"total": total, "by_verdict": by_verdict}
 
 
 __all__ = [

@@ -148,8 +148,6 @@ from .decision import (
     _write_decision_trace_jsonl as _write_decision_trace_jsonl,
 )
 from .telemetry import (
-    collect_critic_robustness as collect_critic_robustness,
-    _critic_kb_writes_summary as _critic_kb_writes_summary,
     _scan_all_benchmark_reports as _scan_all_benchmark_reports,
     _scan_run_dirs as _scan_run_dirs,
     _scan_server_logs as _scan_server_logs,
@@ -180,7 +178,6 @@ from .v6_stages import project_conc_sweep_event as project_conc_sweep_event
 __all__ = [
     "collect_baseline",
     "collect_capability_summary",
-    "collect_critic_robustness",
     "collect_decision_trace",
     "collect_final",
     "collect_explore_search",

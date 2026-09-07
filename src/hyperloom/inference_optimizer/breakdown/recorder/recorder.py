@@ -93,13 +93,9 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "geak_invocations": "item",
     "forge_invocations": "item",
     "explore_search": "singleton",
-    "critic_robustness": "singleton",
-    # Author-time item substreams composed into the ``critic_robustness``
-    # singleton at assembly (recorded per-iteration so the backend's workdir
-    # pruning never erases history).
-    "critic_iterations": "item",
     # One row per critic iteration, recorded when its review comes back and
-    # folded into the ``critic`` view at assembly.
+    # folded into the ``critic`` view at assembly. Keyed by content rather than
+    # by iteration number, which a resume reuses after workdir pruning.
     "critic_iteration": "item",
     # One row per robustness-agent turn, recorded when its envelope settles and
     # folded into the ``robustness`` view at assembly.
@@ -112,8 +108,8 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "roofline_progress": "singleton",
     # Kernel-major lifecycle substreams. Recorded by their respective owners at
     # author time and folded into the ``kernel_journey`` view at assembly (same
-    # compose-on-read pattern as ``critic_robustness``); none of these leak into
-    # the breakdown envelope on their own.
+    # compose-on-read pattern as ``critic``); none of these leak into the
+    # breakdown envelope on their own.
     "kernel_discovery": "item",  # one per hot-kernel discovery run (tracelens/roofline)
     "kernel_dispatch": "item",  # one per kernel: dispatched? which backends?
     "kernel_backend_result": "item",  # one per backend attempt

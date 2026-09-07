@@ -1063,23 +1063,6 @@ class CriticIteration(TypedDict, total=False):
     framework_reviews: list[dict[str, Any]]
 
 
-class CriticRobustness(TypedDict, total=False):
-    """Critic-review iterations for the session.
-
-    What the robustness agent raised is carried by the top-level
-    :class:`V6Robustness` instead.
-
-    Attributes:
-        critic_iterations (list[CriticIteration]): Critic-agent review passes.
-        kb_writes_summary (CriticKBWritesSummary): Tally of the critic
-            iterations' verdicts (``total`` plus ``by_verdict``).
-    """
-
-    critic_iterations: list[CriticIteration]
-    # KB writes proxied through the critic's ``commit-review`` protocol.
-    kb_writes_summary: "CriticKBWritesSummary"
-
-
 # Telemetry
 class GpuMonitorAggregate(TypedDict, total=False):
     """Aggregated GPU power/thermal/clock telemetry over the session.
@@ -1429,14 +1412,6 @@ class SpecialistRound(TypedDict, total=False):
     domain_breakdown: dict[str, SpecialistDomainBreakdown]
     transcripts: list[SpecialistTranscriptRef]
     notes: list[str]
-
-
-# critic_robustness.kb_writes_summary sub-block
-class CriticKBWritesSummary(TypedDict, total=False):
-    """Summary of critic-agent ``commit-review`` outputs."""
-
-    total: int
-    by_verdict: dict[str, int]  # APPROVE / REJECT / REDIRECT / ADVISE / NEEDS_REVIEW (upper-cased critic verdicts)
 
 
 # Top-level shape
@@ -5560,7 +5535,6 @@ class SessionBreakdown(TypedDict, total=False):
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
         param_search (ParamSearch): Merged explore-search ledger.
-        critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
         optimizations (Optimizations): Canonical adopted-optimization read
             model spanning Warm Replay, Explore, Framework Agent, and Kernel
@@ -5592,7 +5566,6 @@ class SessionBreakdown(TypedDict, total=False):
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch
-    critic_robustness: CriticRobustness
     telemetry: Telemetry
     # Single downstream read model for every formally adopted optimization.
     optimizations: Optimizations
@@ -5641,8 +5614,6 @@ __all__ = [
     "CapabilitySummary",
     "ConcSweepSummary",
     "CriticIteration",
-    "CriticKBWritesSummary",
-    "CriticRobustness",
     "DecisionTokens",
     "DecisionTrace",
     "DecisionTraceEntry",

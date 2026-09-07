@@ -149,14 +149,19 @@ def test_the_first_recognised_id_field_decides_identity():
 # ---- substream composition ----
 
 
-def test_the_critic_substream_folds_into_one_section():
-    out = {"critic_iterations": [{"iteration": 1}]}
-    asm._compose_critic_robustness(out)
+def test_critic_iterations_fold_in_the_order_the_agent_ran_them():
+    out = {"critic_iteration": [{"iter": 2}, {"iter": 1}]}
+    asm._compose_critic(out)
 
-    assert "critic_iterations" not in out
-    section = out["critic_robustness"]
-    assert section["critic_iterations"] == [{"iteration": 1}]
-    assert "kb_writes_summary" in section
+    assert "critic_iteration" not in out
+    assert [r["iter"] for r in out["critic"]["iterations"]] == [1, 2]
+
+
+def test_a_session_the_critic_never_reviewed_gets_no_section():
+    out = {}
+    asm._compose_critic(out)
+
+    assert "critic" not in out
 
 
 def test_robustness_turns_fold_in_turn_order():
@@ -180,15 +185,3 @@ def test_a_session_with_no_robustness_turns_gets_no_section():
     assert "robustness" not in out
 
 
-def test_a_recorded_section_outranks_the_substreams():
-    """A producer that wrote the whole section already said what it means."""
-    out = {"critic_robustness": {"critic_iterations": ["kept"]}, "critic_iterations": [{"i": 1}]}
-    asm._compose_critic_robustness(out)
-    assert out["critic_robustness"] == {"critic_iterations": ["kept"]}
-    assert "critic_iterations" not in out
-
-
-def test_composing_critic_robustness_is_a_no_op_without_either_substream():
-    out = {"other": 1}
-    asm._compose_critic_robustness(out)
-    assert out == {"other": 1}
