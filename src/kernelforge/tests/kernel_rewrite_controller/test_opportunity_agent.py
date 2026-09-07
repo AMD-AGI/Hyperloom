@@ -489,3 +489,47 @@ def test_shell_and_subagent_tools_are_explicitly_denied(tmp_path: Path) -> None:
     assert "Bash|Shell|Task.*|Agent" in matchers
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "direct read, search" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_the_analysis_records_what_it_spent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that publishes nothing still pays, and had been reporting zero."""
+
+    class _SpendingBackend(_Backend):
+        async def run(self, spec, usage=None):
+            self.spec = spec
+            self.callback(Path(spec.cwd))
+            if usage is not None:
+                usage.add_usage(
+                    {"input_tokens": 11, "output_tokens": 22},
+                    total_cost_usd=0.5,
+                )
+            return AgentRunResult(text="", end_reason="agent_stopped")
+
+    layout = ControllerLayout(tmp_path / "output")
+    handoff = _handoff(tmp_path)
+    agent = OpportunityAnalysisAgent(
+        backend=_SpendingBackend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=handoff, layout=layout))
+
+    assert outcome.llm_usage["calls"] == 1
+    assert outcome.llm_usage["input_tokens"] == 11
+    assert outcome.llm_usage["output_tokens"] == 22
+    assert outcome.agent_model == "fake"
+
+
+def test_an_analysis_that_called_nothing_reports_no_usage(tmp_path: Path) -> None:
+    """``calls == 0`` is "not observed", which is not a claim of zero spend."""
+    layout = ControllerLayout(tmp_path / "output")
+    agent = OpportunityAnalysisAgent(
+        backend=_Backend(lambda _cwd: None),
+        timeout_sec=30,
+        max_turns=5,
+    )
+
+    outcome = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert outcome.llm_usage == {}

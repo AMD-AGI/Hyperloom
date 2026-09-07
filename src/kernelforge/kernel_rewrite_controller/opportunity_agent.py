@@ -11,8 +11,9 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -38,6 +39,7 @@ from kernelforge.kernel_rewrite_controller.task_publisher import (
     publish_complete_staged_tasks,
 )
 from kernelforge.llm.git import git
+from kernelforge.tracker.usage import UsageAccumulator
 
 ANALYSIS_STATUS_COMPLETED = "completed"
 ANALYSIS_STATUS_FAILED = "failed"
@@ -75,6 +77,14 @@ class OpportunityAnalysisResult:
     #: the count alone cannot say which rule it broke. Durable because Hyperloom
     #: discards this process's streams when it hard-kills the controller.
     rejected_tasks: tuple[dict[str, str], ...] = ()
+    #: What this session spent on the model, in ``UsageAccumulator.totals()``
+    #: shape, or ``{}`` when no provider call was counted. Recorded because the
+    #: analysis is the one part of a campaign whose spend nothing else observes:
+    #: it runs in the controller's own process, and a run that publishes no task
+    #: publishes no forge-loop to account for it either.
+    llm_usage: dict[str, Any] = field(default_factory=dict)
+    #: Model the analysis ran on, for the ledger row.
+    agent_model: str = ""
     started_at_unix: float = 0.0
     finished_at_unix: float = 0.0
 
@@ -420,6 +430,7 @@ class OpportunityAnalysisAgent:
         layout.agent_staging_root.mkdir(parents=True, exist_ok=True)
         _ensure_agent_workspace(layout.agent_staging_root)
         progress: list[str] = []
+        usage = UsageAccumulator()
         spec = AgentRunSpec(
             system_prompt=_system_prompt(),
             user_prompt=_user_prompt(handoff, layout.agent_staging_root),
@@ -455,6 +466,7 @@ class OpportunityAnalysisAgent:
             run_session_with_api_resume(
                 self.backend,
                 spec,
+                usage=usage,
                 deadline_sec=self.timeout_sec,
             )
         )
@@ -517,12 +529,19 @@ class OpportunityAnalysisAgent:
             for name, result in sorted(publications.items())
             if not result.published
         )
+        # Read off the accumulator rather than off the run result: the session
+        # may have been resumed or cancelled, and the accumulator counted every
+        # provider call either way. ``calls == 0`` means nothing was observed,
+        # which is not the same claim as zero spend.
+        totals = usage.totals()
         outcome = OpportunityAnalysisResult(
             status=status,
             reason=reason,
             published_task_count=published,
             rejected_task_count=len(rejected),
             rejected_tasks=rejected,
+            llm_usage=totals if int(totals.get("calls") or 0) > 0 else {},
+            agent_model=str(self.backend.runtime.model or ""),
             started_at_unix=started,
             finished_at_unix=time.time(),
         )
