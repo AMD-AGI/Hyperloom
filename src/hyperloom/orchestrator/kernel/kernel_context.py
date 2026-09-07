@@ -110,10 +110,7 @@ class ServingFacts:
     #: persisted context and an LLM-facing handoff cannot leak a credential.
     extra_envs: Mapping[str, str] = field(default_factory=dict)
     unset_envs: tuple[str, ...] = ()
-    source_repo_roots: tuple[str, ...] = ()
-    #: The serving framework's own checkout, kept apart from the sorted
-    #: ``source_repo_roots`` because a consumer that accepts a single root needs
-    #: to know which one, and alphabetical order does not say.
+    #: The serving framework checkout recorded on the session.
     framework_repo_root: str = ""
 
 
@@ -165,24 +162,19 @@ def _pick(
     context: Mapping[str, Any],
     state: Any,
     key: str,
-    *,
-    env_key: str = "",
 ) -> Any:
-    """Resolve one fact: explicit request, live profile, session, environment.
+    """Resolve one fact: explicit request, live profile, then session.
 
-    The environment tail is discovery, not defaulting. A lane that wants
-    ``tp=1`` rather than "unknown" applies that itself, so an absent fact stays
-    legible as absent to the handoff that has to report it.
+    A lane that wants ``tp=1`` rather than "unknown" applies that itself, so an
+    absent fact stays legible as absent to the handoff that has to report it.
     """
-    import os
-
     for source in (overrides, context):
         if source.get(key) not in (None, ""):
             return source[key]
     value = getattr(state, key, None)
     if value not in (None, "", 0):
         return value
-    return os.environ.get(env_key) if env_key else value
+    return value
 
 
 def build_workload_facts(
@@ -198,7 +190,7 @@ def build_workload_facts(
 
     incoming = dict(overrides or {})
     context = _workload_context(state)
-    model_path = _text(_pick(incoming, context, state, "model_path", env_key="MODEL_PATH"))
+    model_path = _text(_pick(incoming, context, state, "model_path"))
     precision, quant_type = _resolve_forge_precision_and_quant(state, incoming)
     # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
     # serve; probing only the hub cache here would reject a repo id the running
@@ -211,12 +203,12 @@ def build_workload_facts(
         model_class=_text(getattr(state, "model_class", "")),
         precision=precision,
         quant_type=quant_type,
-        gpu_type=_text(_pick(incoming, context, state, "gpu_type", env_key="GPU_TYPE")).lower(),
-        tp=_positive_int(_pick(incoming, context, state, "tp", env_key="TP")),
+        gpu_type=_text(_pick(incoming, context, state, "gpu_type")).lower(),
+        tp=_positive_int(_pick(incoming, context, state, "tp")),
         ep=_positive_int(getattr(state, "ep", 0)),
         isl=_positive_int(_pick(incoming, context, state, "isl")),
         osl=_positive_int(_pick(incoming, context, state, "osl")),
-        conc=_positive_int(_pick(incoming, context, state, "conc", env_key="CONC")),
+        conc=_positive_int(_pick(incoming, context, state, "conc")),
         max_model_len=_positive_int(_pick(incoming, context, state, "max_model_len")),
     )
 
@@ -248,19 +240,6 @@ def _git_root(value: Any) -> str:
     return ""
 
 
-def _source_repository_roots(state: Any) -> tuple[str, ...]:
-    """Resolve every configured source path to its distinct Git repository root."""
-    import os
-
-    raw_paths = [
-        getattr(state, "framework_repo_path", ""),
-        os.environ.get("FRAMEWORK_REPO_PATH", ""),
-        *os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").split(os.pathsep),
-    ]
-    roots = {root for root in (_git_root(raw) for raw in raw_paths) if root}
-    return tuple(sorted(roots))
-
-
 def build_serving_facts(
     state: Any,
     *,
@@ -290,7 +269,6 @@ def build_serving_facts(
         ),
         extra_envs=_redacted_envs(context, config),
         unset_envs=tuple(_text(value) for value in unset if _text(value)) if isinstance(unset, list) else (),
-        source_repo_roots=_source_repository_roots(state),
         framework_repo_root=_git_root(getattr(state, "framework_repo_path", "")),
     )
 

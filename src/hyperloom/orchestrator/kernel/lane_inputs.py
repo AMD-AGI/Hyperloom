@@ -16,7 +16,6 @@ passed in already resolved.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -179,26 +178,11 @@ def fusion_input(
     }
 
 
-def apply_overrides(payload: dict[str, Any], overrides: Mapping[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
-    """Let an explicit request win over the projected value, for ``keys`` only.
-
-    Scoped to a named set rather than a blanket update: a request payload also
-    carries routing fields such as ``task_id`` that are not wrapper arguments,
-    and forwarding those made the wrapper reject the run.
-    """
-    for key in keys:
-        value = overrides.get(key)
-        if value not in (None, ""):
-            payload[key] = value
-    return payload
-
-
 __all__ = [
     "FusionAgent",
     "FusionExecution",
     "GemmExecution",
     "GemmShapeSources",
-    "apply_overrides",
     "fusion_input",
     "gemm_input",
 ]

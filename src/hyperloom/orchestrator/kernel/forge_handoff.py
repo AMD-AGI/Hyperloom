@@ -59,8 +59,8 @@ def build_serving_context_md(context: KernelContext) -> str:
         "## Source Repositories",
         "",
     ]
-    if serving.source_repo_roots:
-        lines.extend(f"- `{root}`" for root in serving.source_repo_roots)
+    if serving.framework_repo_root:
+        lines.append(f"- `{serving.framework_repo_root}`")
     else:
         lines.append("- not available")
     lines.extend(
