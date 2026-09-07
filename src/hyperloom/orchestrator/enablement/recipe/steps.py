@@ -13,11 +13,10 @@ grouping key and no round index in an element.
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .credentials import classify_credential_class
-from .projections import project_build_inputs
+from .projections import project_build_inputs, select_linked_build
 
 SETUP_KIND = "setup"
 BUILD_KIND = "build"
@@ -41,49 +40,6 @@ _BUILD_CONTRACT_KEYS: tuple[str, ...] = (
 def command_digest(cmd: str) -> str:
     """Return the sha256 of a verbatim setup command."""
     return hashlib.sha256(str(cmd).encode("utf-8")).hexdigest()
-
-
-def _is_attempt_row(entry: Any) -> bool:
-    """True for a build-attempt row; a row with no outcome recorded none."""
-    return isinstance(entry, dict) and entry.get("ok") is not None
-
-
-def select_linked_build(enablement: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Return the ``(sentinel, attempt_row)`` pair of the final round's build.
-
-    A build is linked to the final round when its routing sentinel's
-    ``probe_task_id`` equals ``last_specialist_task_id`` -- an equality between
-    two fields product code already writes, so "this build produced the
-    environment the final round validated" is decidable from data rather than
-    inferred from recency. The attempt row is then joined by
-    ``Path(attempt_root).name == task_id``; being an equality it is
-    order-independent, so concurrent completions interleaving in the manifest
-    cannot bind a step to another build's row.
-
-    A sentinel is recognized by that equality alone, never by the absence of an
-    outcome: routing merges its fields into the attempt row of the same build
-    whenever one is already in the manifest, which for a build the executor ran
-    is always, so the linked sentinel and the joined row are usually one row.
-
-    Returns:
-        ``(None, None)`` when no sentinel is linked; ``(sentinel, None)`` when
-        the linked build has no matching attempt row.
-    """
-    manifest = enablement.get("build_manifest")
-    final_task = str(enablement.get("last_specialist_task_id") or "").strip()
-    if not isinstance(manifest, list) or not final_task:
-        return None, None
-    for entry in manifest:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("probe_task_id") or "").strip() != final_task:
-            continue
-        task_id = str(entry.get("task_id") or "").strip()
-        for row in manifest:
-            if _is_attempt_row(row) and task_id and Path(str(row.get("attempt_root") or "")).name == task_id:
-                return entry, row
-        return entry, None
-    return None, None
 
 
 def _build_step(

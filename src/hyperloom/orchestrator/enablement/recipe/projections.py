@@ -12,6 +12,7 @@ a digest, a class name, an anchor plus a relative path.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
@@ -99,6 +100,49 @@ def _is_filesystem_path(value: str) -> bool:
     return text.startswith("/") or text.startswith("~/")
 
 
+def _is_attempt_row(entry: Any) -> bool:
+    """True for a build-attempt row; a row with no outcome recorded none."""
+    return isinstance(entry, dict) and entry.get("ok") is not None
+
+
+def select_linked_build(enablement: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return the ``(sentinel, attempt_row)`` pair of the final round's build.
+
+    A build is linked to the final round when its routing sentinel's
+    ``probe_task_id`` equals ``last_specialist_task_id`` -- an equality between
+    two fields product code already writes, so "this build produced the
+    environment the final round validated" is decidable from data rather than
+    inferred from recency. The attempt row is then joined by
+    ``Path(attempt_root).name == task_id``; being an equality it is
+    order-independent, so concurrent completions interleaving in the manifest
+    cannot bind a step to another build's row.
+
+    A sentinel is recognized by that equality alone, never by the absence of an
+    outcome: routing merges its fields into the attempt row of the same build
+    whenever one is already in the manifest, which for a build the executor ran
+    is always, so the linked sentinel and the joined row are usually one row.
+
+    Returns:
+        ``(None, None)`` when no sentinel is linked; ``(sentinel, None)`` when
+        the linked build has no matching attempt row.
+    """
+    manifest = enablement.get("build_manifest")
+    final_task = str(enablement.get("last_specialist_task_id") or "").strip()
+    if not isinstance(manifest, list) or not final_task:
+        return None, None
+    for entry in manifest:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("probe_task_id") or "").strip() != final_task:
+            continue
+        task_id = str(entry.get("task_id") or "").strip()
+        for row in manifest:
+            if _is_attempt_row(row) and task_id and Path(str(row.get("attempt_root") or "")).name == task_id:
+                return entry, row
+        return entry, None
+    return None, None
+
+
 def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] | None:
     """Export the graded runtime as a rebuild path, never as a location.
 
@@ -116,8 +160,6 @@ def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] 
     override = FrameworkRuntime.from_state(runtime).to_runtime_override()
     if not override:
         return None
-    from .steps import select_linked_build
-
     sentinel, _row = select_linked_build(enablement)
     return {
         "override_keys": sorted(override),
