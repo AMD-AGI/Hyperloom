@@ -1110,9 +1110,14 @@ def _session_bundle(tmp_path, *, config=True, snapshot_bytes=b"x"):
 
 
 def _bundle_decision(session):
-    from hyperloom.inference_optimizer.breakdown.session_package import deliverable_relpaths
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
 
-    return _decide(_sufficient_state(), _delivery_section(), delivered=deliverable_relpaths(session))
+    section = _delivery_section()
+    state = _sufficient_state()
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    referenced = referenced_payloads(section, steps)
+    return _decide(state, section, delivered=deliverable(session, referenced))
 
 
 def test_a_session_bundle_carrying_every_payload_is_sufficient(tmp_path):
@@ -1121,13 +1126,13 @@ def test_a_session_bundle_carrying_every_payload_is_sufficient(tmp_path):
 
 def test_the_bundle_carries_the_captured_bytes_and_not_the_capture_manifest(tmp_path):
     """The on-disk manifest names the absolute root it was taken under."""
-    from hyperloom.inference_optimizer.breakdown.session_package import deliverable_relpaths
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable
 
     session = _session_bundle(tmp_path)
-    (session / "optimization_stack" / "enablement" / "r1" / "manifest.json").write_text("{}", encoding="utf-8")
-    delivered = deliverable_relpaths(session)
-    assert SNAPSHOT_PAYLOAD in delivered
-    assert "optimization_stack/enablement/r1/manifest.json" not in delivered
+    manifest_rel = "optimization_stack/enablement/r1/manifest.json"
+    (session / manifest_rel).write_text("{}", encoding="utf-8")
+    delivered = deliverable(session, [SNAPSHOT_PAYLOAD, manifest_rel])
+    assert delivered == {SNAPSHOT_PAYLOAD}
 
 
 def test_a_session_bundle_missing_the_referenced_config_fails_closed(tmp_path):
@@ -1167,7 +1172,7 @@ def test_the_emitted_section_fails_closed_on_an_undelivered_snapshot(tmp_path):
     assert "source_snapshot_missing" in _codes(section["replay_sufficiency"])
 
 
-def test_a_payload_a_size_cap_drops_fails_closed(tmp_path, monkeypatch):
+def test_a_payload_no_bundle_could_carry_fails_closed(tmp_path, monkeypatch):
     """A cap is not a thinner bundle: the consumer never receives those bytes."""
     from hyperloom.inference_optimizer.breakdown import session_package
 

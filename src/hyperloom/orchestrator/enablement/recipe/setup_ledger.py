@@ -186,12 +186,18 @@ def mark_round_disposition(
     an entry of the accepted round, while another occurrence of the same digest
     merely reproduces its effect. Keying both off the command string would let a
     failed occurrence be certified by a later successful one.
+
+    Only one round terminates the lane, so an accepted round takes presence away
+    from whichever earlier round held it: leaving it standing would let a stale
+    row answer for a command the validated launch never ran.
     """
     rows = [dict(row) for row in ledger]
     for row in rows:
-        if str(row.get("round_task_id") or "") == str(round_task_id or ""):
+        own = str(row.get("round_task_id") or "") == str(round_task_id or "")
+        if own:
             row["round_disposition"] = str(disposition)
-            row["present_at_final_launch"] = bool(accepted and str(row.get("outcome")) == "applied")
+        if own or accepted:
+            row["present_at_final_launch"] = bool(own and accepted and str(row.get("outcome")) == "applied")
     if not accepted:
         return rows
     replayed = {str(row.get("cmd_digest") or "") for row in rows if row.get("present_at_final_launch")}

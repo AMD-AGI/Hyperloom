@@ -32,7 +32,7 @@ from ._common import (
     _to_float,
     _to_int,
 )
-from ..session_package import deliverable_relpaths
+from ..session_package import deliverable
 
 
 log = logging.getLogger(__name__)
@@ -1579,23 +1579,24 @@ def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
     return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
 
 
-def _delivered_payload_paths(out: dict[str, Any], session_dir: Path) -> set[str] | None:
+def _delivered_payload_paths(
+    out: dict[str, Any],
+    steps: list[dict[str, Any]],
+    session_dir: Path,
+) -> set[str] | None:
     """What the session bundle actually hands a consumer of this recipe.
 
-    Read from the packager itself rather than restated here, so a payload the
-    curated selection never matches, one the session no longer holds, and one a
-    size cap dropped are all the same answer: absent. That answer costs one walk
-    of the session tree, which is why it is taken only for a recipe that
-    references a payload. ``None`` when none does, or when the tree cannot be
-    read at all.
+    The recipe names the bytes behind its manifests and digests, and the
+    packager says which of them arrive; neither side restates the other's rules.
+    ``None`` when the recipe references nothing, which is the one case with
+    nothing to deliver.
     """
-    references = bool(out.get("source_snapshots")) or bool((out.get("accepted_config") or {}).get("config_path"))
-    # A session tree the scan cannot read would report every payload absent,
-    # which asserts something about the recipe's content rather than about the
-    # delivery, so no delivery is judged at all.
-    if not references or not session_dir.is_dir():
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
+
+    referenced = referenced_payloads(out, steps)
+    if not referenced:
         return None
-    return deliverable_relpaths(session_dir)
+    return deliverable(session_dir, referenced)
 
 
 def _collect_recipe(
@@ -1650,7 +1651,7 @@ def _collect_recipe(
         enablement,
         steps=steps,
         section=out,
-        delivered_paths=_delivered_payload_paths(out, session_dir),
+        delivered_paths=_delivered_payload_paths(out, steps, session_dir),
         launch_argv_refused=argv_refused,
     )
     out["replay_sufficiency"] = decision

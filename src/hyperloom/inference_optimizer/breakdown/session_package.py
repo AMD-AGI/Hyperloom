@@ -36,6 +36,7 @@ import zipfile
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 from ..session.paths import is_path_within
 
@@ -439,25 +440,35 @@ def _apply_caps(matched: list[Path], session_dir: Path) -> tuple[list[tuple[Path
     return included, False, []
 
 
-def deliverable_relpaths(session_dir: Path | str) -> set[str]:
-    """Return the session-relative paths this bundle would hand a consumer.
+def deliverable(session_dir: Path | str, rel_paths: Iterable[str]) -> set[str]:
+    """Return which of ``rel_paths`` this bundle would hand a consumer.
 
-    The same selection and the same caps ``package_session_artifacts`` applies,
-    so a caller judging whether a payload reaches an independent consumer reads
-    the packager's own answer rather than a second copy of its rules. A path
-    absent here is one the consumer never receives -- because nothing selects
-    it, because it is not there, or because a cap dropped it.
+    The packager's own rules answer, rather than a second copy of them: a path
+    the curated selection does not match, one the session does not hold as a
+    regular file inside itself, and one no bundle could carry because it alone
+    exceeds the byte cap are all the same answer -- absent.
+
+    Asked per candidate rather than by enumerating the tree, because a caller
+    judging a handful of payloads should not pay a walk of a session whose
+    ``runs/`` trees hold tens of thousands of files.
     """
     try:
         sd = Path(session_dir).resolve()
-        if not sd.is_dir():
-            return set()
-        matched, _unmatched, _refused = _select(sd)
-        included, _truncated, _dropped = _apply_caps(matched, sd)
     except OSError:
-        log.debug("session package: deliverable scan failed", exc_info=True)
+        log.debug("session package: deliverable check failed to resolve %s", session_dir, exc_info=True)
         return set()
-    return {rel for _p, rel, _sz in included}
+    out: set[str] = set()
+    for raw in rel_paths:
+        rel = str(raw).strip("/")
+        if not rel or not any(_glob_match(rel, pattern) for pattern in PACKAGE_GLOBS):
+            continue
+        candidate = sd / rel
+        try:
+            if _is_packageable(candidate, sd) and candidate.stat().st_size <= _MAX_TOTAL_BYTES:
+                out.add(rel)
+        except OSError:
+            log.debug("session package: deliverable check failed for %s", rel, exc_info=True)
+    return out
 
 
 def package_session_artifacts(

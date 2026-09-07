@@ -468,6 +468,49 @@ def _credential_reasons(
     return reasons
 
 
+def _payload_references(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str, str]]:
+    """Return ``(code, scope, path)`` for every byte a replay must be handed.
+
+    The recipe carries manifests, digests and class names; these name the bytes
+    behind them, each with the refusal its absence earns. A patch step is not
+    among them: its own ``path`` names the authoring workspace no bundle ships,
+    while the content it produced is its root's snapshot payload.
+    """
+    refs: list[tuple[str, str, str]] = []
+    for snapshot in section.get("source_snapshots") or []:
+        if not isinstance(snapshot, Mapping):
+            continue
+        ref = str(snapshot.get("snapshot_ref") or "").strip("/")
+        root_id = str(snapshot.get("root_id"))
+        rows = [row for row in (snapshot.get("files") or []) if isinstance(row, Mapping)]
+        # A declared deletion has no payload to deliver; a snapshot with no
+        # reference at all has nowhere for one to be.
+        payloads = [str(row.get("rel") or "").strip("/") for row in rows if str(row.get("op") or "") != "delete"]
+        if not ref:
+            refs.append(("source_snapshot_missing", root_id, ""))
+            continue
+        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}") for rel in payloads if rel)
+    config_path = str((section.get("accepted_config") or {}).get("config_path") or "").strip("/")
+    if config_path:
+        refs.append(("artifact_not_self_contained", "config_path", config_path))
+    for index, step in enumerate(steps):
+        # A digest names the bytes an install consumed; only the delivery makes
+        # them obtainable.
+        for identity in step.get("input_identity") or ():
+            rel = str(identity.get("rel") or "").strip("/") if isinstance(identity, Mapping) else ""
+            if rel:
+                refs.append(("artifact_not_self_contained", f"step[{index}]", rel))
+    return refs
+
+
+def referenced_payloads(section: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return the paths a delivery must be asked about, for :func:`evaluate_replay_sufficiency`."""
+    return [path for _code, _scope, path in _payload_references(section, steps) if path]
+
+
 def _delivery_reasons(
     section: Mapping[str, Any],
     steps: Sequence[Mapping[str, Any]],
@@ -478,39 +521,14 @@ def _delivery_reasons(
     A reference the delivery omits is not a thinner recipe -- it is one an
     independent consumer cannot execute, so the export fails closed rather than
     reporting a self-contained artifact it is not. Judged per captured file, not
-    per manifest: a snapshot whose overlay a packaging cap dropped names content
-    the consumer never receives, and its own manifest travels in this section
-    rather than in the bundle.
-
-    A patch step is judged through its root's snapshot, which carries the
-    content that patch produced; its own ``path`` names the authoring workspace,
-    which no bundle ships.
+    per manifest: the manifest travels in this section, and the bytes it names
+    do not.
     """
     packaged = {str(p).strip("/") for p in delivered}
     reasons: list[dict[str, Any]] = []
-    for snapshot in section.get("source_snapshots") or []:
-        if not isinstance(snapshot, Mapping):
-            continue
-        ref = str(snapshot.get("snapshot_ref") or "").strip("/")
-        payloads = [
-            f"{ref}/files/{str(row.get('rel') or '').strip('/')}"
-            for row in (snapshot.get("files") or [])
-            # A declared deletion has no payload to deliver.
-            if isinstance(row, Mapping) and str(row.get("op") or "") != "delete"
-        ]
-        if not ref or any(payload not in packaged for payload in payloads):
-            reasons.append(_reason("source_snapshot_missing", str(snapshot.get("root_id"))))
-    config_path = str((section.get("accepted_config") or {}).get("config_path") or "").strip("/")
-    if config_path and config_path not in packaged:
-        reasons.append(_reason("artifact_not_self_contained", "config_path"))
-    for index, step in enumerate(steps):
-        # A digest names the bytes an install consumed; only the delivery makes
-        # them obtainable, and a wheel the bundle omits is one the consumer must
-        # be told to supply.
-        for identity in step.get("input_identity") or ():
-            rel = str(identity.get("rel") or "").strip("/") if isinstance(identity, Mapping) else ""
-            if rel and rel not in packaged:
-                reasons.append(_reason("artifact_not_self_contained", f"step[{index}]"))
+    for code, scope, path in _payload_references(section, steps):
+        if path not in packaged:
+            reasons.append(_reason(code, scope))
     return reasons
 
 
