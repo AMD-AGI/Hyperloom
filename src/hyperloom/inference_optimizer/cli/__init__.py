@@ -98,7 +98,7 @@ from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.framework.paths import resolve_source_file_allowlist
+from hyperloom.orchestrator.framework.paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
 from hyperloom.orchestrator.state.shared_state import SharedState, timed_teardown_step
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -426,7 +426,8 @@ def _build_orchestration_prompt(
         phase=phase,
         transport=transport,
         rules_fragment_path=_orchestration_rules_fragment_path(),
-        framework_source_roots=resolve_source_file_allowlist(),
+        framework_source_roots=resolve_kernel_search_roots(),
+        session_framework_tree=resolve_framework_tree(framework),
     )
 
 

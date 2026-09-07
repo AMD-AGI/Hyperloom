@@ -53,14 +53,14 @@ def _req(log: str = "") -> EnablementRequest:
 def test_mandate_always_lists_framework_and_rocm_hip_roots() -> None:
     """Default-on: both the framework and ROCm/HIP source roots are in scope."""
     mandate = build_mandate(_req())
-    assert any("serving-framework" in h for h in mandate.allowed_root_hints)
-    assert any("ROCm" in h for h in mandate.allowed_root_hints)
+    assert any("serving-framework" in h for h in mandate.source_root_hints)
+    assert any("ROCm" in h for h in mandate.source_root_hints)
 
 
 def test_mandate_rocm_hip_root_present_for_hip_failure() -> None:
     """A HIP failure still carries the ROCm/HIP source root family (always allowed)."""
     mandate = build_mandate(_req(log="RuntimeError: hipErrorNoBinaryForGpu"))
-    assert any("ROCm" in h for h in mandate.allowed_root_hints)
+    assert any("ROCm" in h for h in mandate.source_root_hints)
 
 
 def test_task_description_carries_failure_context() -> None:
@@ -324,17 +324,17 @@ def test_build_mandate_uses_resolved_roots_in_task_description():
     ):
         mandate = build_mandate(_roots_req(), signature=_roots_sig())
     assert "/sgl-workspace/vllm" in mandate.task_description
-    assert any("/sgl-workspace/vllm" in h for h in mandate.allowed_root_hints)
+    assert any("/sgl-workspace/vllm" in h for h in mandate.source_root_hints)
 
 
 def test_build_mandate_explicit_root_hints_override_discovery():
-    """Caller-supplied root_hints bypass _resolve_actual_root_hints."""
+    """Caller-supplied source_root_hints bypass _resolve_actual_root_hints."""
     mandate = build_mandate(
         _roots_req(),
         signature=_roots_sig(),
-        root_hints=["/custom/root"],
+        source_root_hints=["/custom/root"],
     )
-    assert "/custom/root" in mandate.allowed_root_hints
+    assert "/custom/root" in mandate.source_root_hints
     assert "/custom/root" in mandate.task_description
 
 
@@ -344,5 +344,5 @@ def test_build_mandate_falls_back_gracefully_when_no_roots():
         return_value="",
     ):
         mandate = build_mandate(_roots_req(), signature=_roots_sig())
-    assert _FRAMEWORK_ROOT_HINT in mandate.allowed_root_hints
+    assert _FRAMEWORK_ROOT_HINT in mandate.source_root_hints
     assert _FRAMEWORK_ROOT_HINT in mandate.task_description

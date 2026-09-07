@@ -252,3 +252,94 @@ def test_format_version_note_empty_when_same_or_unknown():
     assert _format_version_note(inp, {}) == ""
     note = _format_version_note(inp, {"framework_version": "0.9"})
     assert "0.9" in note
+
+
+# -- Section 7: local source navigation hint --------------------------------
+def _section_seven(user_prompt: str) -> str:
+    """Return the Section 7 block of a rendered specialist user prompt."""
+    start = user_prompt.index("## 7. LOCAL SOURCE NAVIGATION HINT")
+    end = user_prompt.find("## 8.", start)
+    return user_prompt[start : end if end != -1 else None]
+
+
+def test_section_seven_leads_with_the_session_tree(tmp_path):
+    tree = tmp_path / "dist-packages" / "vllm"
+    tree.mkdir(parents=True)
+    other = tmp_path / "aiter"
+    other.mkdir()
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(
+            session_framework_tree=f"{tree}/",
+            framework_source_roots=(f"{other}/", f"{tree}/"),
+            source_hint_directories=(),
+        )
+    )
+    section = _section_seven(user_p)
+    assert "The tree this session is optimising — start here:" in section
+    # The session tree leads and is not repeated among the others.
+    assert section.index(str(tree)) < section.index(str(other))
+    assert section.count(str(tree)) == 1
+    assert "installed package, no git tree" in section
+
+
+def test_section_seven_marks_the_worktree_base_checkout(tmp_path):
+    tree = tmp_path / "sglang"
+    (tree / ".git").mkdir(parents=True)
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(
+            session_framework_tree=f"{tree}/",
+            framework_source_roots=(f"{tree}/",),
+            worktree_base=str(tree),
+            source_hint_directories=(),
+        )
+    )
+    assert "your worktree was cut from it" in _section_seven(user_p)
+
+
+def test_section_seven_states_the_hint_is_not_a_boundary(tmp_path):
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(session_framework_tree=f"{tree}/", framework_source_roots=(f"{tree}/",))
+    )
+    section = _section_seven(user_p)
+    assert "starting points, not a boundary" in section
+    assert "read-only" not in section
+
+
+def test_section_seven_resolves_focus_dirs_against_the_session_tree(tmp_path):
+    """A repo-relative hint must not repeat the package name of a pip-installed tree."""
+    tree = tmp_path / "dist-packages" / "vllm"
+    (tree / "model_executor" / "layers" / "fused_moe").mkdir(parents=True)
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(
+            session_framework_tree=f"{tree}/",
+            framework_source_roots=(f"{tree}/",),
+            source_hint_directories=("vllm/model_executor/layers/fused_moe/", "/abs/elsewhere/"),
+        )
+    )
+    section = _section_seven(user_p)
+    assert f"- {tree}/model_executor/layers/fused_moe/" in section
+    assert "vllm/vllm/" not in section
+    assert "- /abs/elsewhere/" in section
+
+
+def test_section_seven_focus_dir_join_survives_an_absent_tree(tmp_path):
+    """The rendered path must not depend on the tree existing on this host."""
+    tree = tmp_path / "dist-packages" / "vllm"
+    tree.mkdir(parents=True)
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(
+            session_framework_tree=f"{tree}/",
+            framework_source_roots=(f"{tree}/",),
+            source_hint_directories=("vllm/model_executor/kernels/linear/mxfp8/",),
+        )
+    )
+    assert f"- {tree}/model_executor/kernels/linear/mxfp8/" in _section_seven(user_p)
+
+
+def test_section_seven_is_none_without_any_root():
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(session_framework_tree="", framework_source_roots=(), source_hint_directories=())
+    )
+    assert "(none)" in _section_seven(user_p)

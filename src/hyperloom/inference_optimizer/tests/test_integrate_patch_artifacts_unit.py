@@ -18,7 +18,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
-from .conftest import init_git_repo, patch_integrate_patch_allowlist
+from .conftest import init_git_repo, patch_integrate_patch_roots
 from .test_integrate_patch_executor import _VALID_PATCH, _write_specialist_workspace
 
 
@@ -49,7 +49,7 @@ def test_resolve_artifact_specs_valid(tmp_path, monkeypatch):
 
     fw = tmp_path / "framework"
     (fw / "vllm" / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -79,7 +79,7 @@ def test_resolve_artifact_specs_reads_done_payload(tmp_path, monkeypatch):
     (ws / "worktree" / "a.json").write_text("{}", encoding="utf-8")
     fw = tmp_path / "framework"
     (fw / "vllm").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -94,7 +94,7 @@ def test_resolve_artifact_specs_source_not_found(tmp_path, monkeypatch):
     ws = _make_workspace(tmp_path)
     fw = tmp_path / "framework"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -111,7 +111,7 @@ def test_resolve_artifact_specs_source_outside_workspace(tmp_path, monkeypatch):
     outside.write_text("{}", encoding="utf-8")
     fw = tmp_path / "framework"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -127,7 +127,7 @@ def test_resolve_artifact_specs_target_escapes_root(tmp_path, monkeypatch):
     (ws / "worktree" / "a.json").write_text("{}", encoding="utf-8")
     fw = tmp_path / "framework"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -140,7 +140,7 @@ def test_resolve_artifact_specs_target_escapes_root(tmp_path, monkeypatch):
 
 def test_resolve_artifact_specs_missing_source_or_target(tmp_path, monkeypatch):
     ws = _make_workspace(tmp_path)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(tmp_path)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(tmp_path)])
 
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -220,13 +220,13 @@ def test_apply_keeps_artifact_when_not_reverted(tmp_path):
     assert target.read_text(encoding="utf-8") == "NEW"
 
 
-# ---- _resolve_artifact_target: absolute-within-allowlist (Option A) --------
-def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch):
-    """An ABSOLUTE target pointing inside an allowlisted framework root (e.g.
-    the installed aiter package dir) must resolve."""
+# ---- _resolve_artifact_target: absolute-within-root (Option A) ------------
+def test_resolve_artifact_target_absolute_within_root(tmp_path, monkeypatch):
+    """An ABSOLUTE target pointing inside a framework search root (e.g. the
+    installed aiter package dir) must resolve."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
     abs_target = str(fw / "configs" / "model_configs" / "tuned_fmoe.csv")
     out = ip._resolve_artifact_target(abs_target)
     assert out == (
@@ -236,38 +236,19 @@ def test_resolve_artifact_target_absolute_within_allowlist(tmp_path, monkeypatch
     )
 
 
-def test_resolve_artifact_target_absolute_outside_allowlist_rejected(tmp_path, monkeypatch):
-    """An absolute target OUTSIDE every allowlisted root must stay rejected."""
+def test_resolve_artifact_target_absolute_outside_roots_rejected(tmp_path, monkeypatch):
+    """An absolute target OUTSIDE every framework root must stay rejected."""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
     assert ip._resolve_artifact_target("/etc/passwd") is None
 
 
-def test_resolve_artifact_target_rejects_rocm_runtime_object(tmp_path, monkeypatch):
-    rocm = tmp_path / "opt" / "rocm"
-    (rocm / "lib").mkdir(parents=True)
-    (rocm / "include").mkdir()
-    so_path = rocm / "lib" / "libhip_hcc.so"
-    hdr_path = rocm / "include" / "hip_runtime.h"
-    so_path.write_bytes(b"x")
-    hdr_path.write_text("typedef int hipError_t;\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(rocm)])
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths._ROCM_HIP_SOURCE_ROOTS",
-        (str(rocm) + "/",),
-    )
-    assert ip._resolve_artifact_target(str(so_path)) is None
-    out = ip._resolve_artifact_target(str(hdr_path))
-    assert out is not None
-    assert out[0] == hdr_path.resolve()
-
-
 def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
-    """Relative targets keep resolving under an allowlisted root."""
+    """Relative targets keep resolving under a framework search root."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
     out = ip._resolve_artifact_target("configs/model_configs/tuned_fmoe.csv")
     assert out == (
         (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
@@ -281,12 +262,12 @@ def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeyp
     normalise inside a root."""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
     assert ip._resolve_artifact_target(str(fw / "configs" / ".." / ".." / "x.csv")) is None
 
 
 def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_path, monkeypatch):
-    """An absolute target inside an allowlisted root must be recorded with a
+    """An absolute target inside a framework root must be recorded with a
     FRAMEWORK-RELATIVE ``rel_target`` so the KEEP source-snapshot (which treats
     rel_target as framework-relative via ``snapshot_source_layer``) captures the
     installed artifact."""
@@ -295,7 +276,7 @@ def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_
     ws = tmp_path / "ws"
     (ws / "worktree" / "artifacts").mkdir(parents=True)
     (ws / "worktree" / "artifacts" / "tuned.csv").write_text("x", encoding="utf-8")
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
     abs_target = str(fw / "configs" / "model_configs" / "tuned.csv")
     specs, errors = ip._resolve_artifact_specs(
         specialist_workspace=ws,
@@ -329,11 +310,11 @@ def _base_art_params(fw: Path, source: Path, target: Path, session_dir: Path) ->
     }
 
 
-def test_replay_base_artifacts_installs_into_allowlist_root(tmp_path, monkeypatch):
-    """Happy path: a base artifact with a valid source and allowlisted target is installed."""
+def test_replay_base_artifacts_installs_into_framework_root(tmp_path, monkeypatch):
+    """Happy path: a base artifact with a valid source and in-root target is installed."""
     fw = tmp_path / "sglang"
     (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     session_dir = tmp_path / "session"
     source = session_dir / "runs" / "specialist" / "t1" / "artifact.py"
@@ -347,11 +328,11 @@ def test_replay_base_artifacts_installs_into_allowlist_root(tmp_path, monkeypatc
     assert target.read_text(encoding="utf-8") == "# fixed\n"
 
 
-def test_replay_base_artifacts_rejects_target_outside_allowlist(tmp_path, monkeypatch):
-    """A target that resolves outside any allowlisted root must be skipped silently."""
+def test_replay_base_artifacts_rejects_target_outside_roots(tmp_path, monkeypatch):
+    """A target that resolves outside every framework root must be skipped silently."""
     fw = tmp_path / "sglang"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     session_dir = tmp_path / "session"
     source = session_dir / "runs" / "specialist" / "t1" / "artifact.py"
@@ -373,7 +354,7 @@ def test_replay_base_artifacts_rejects_source_outside_session(tmp_path, monkeypa
     """A source file that lives outside the session directory must be skipped."""
     fw = tmp_path / "sglang"
     (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -394,7 +375,7 @@ def test_replay_base_artifacts_skips_missing_source(tmp_path, monkeypatch):
     """A recorded source path that no longer exists must be skipped without error."""
     fw = tmp_path / "sglang"
     (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -420,7 +401,7 @@ def test_replay_base_artifacts_noop_for_non_enablement(tmp_path, monkeypatch):
     """Must be a no-op when params['enablement'] is falsy."""
     fw = tmp_path / "sglang"
     (fw / "srt").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
+    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
 
     session_dir = tmp_path / "session"
     source = session_dir / "runs" / "t1" / "artifact.py"
@@ -445,7 +426,7 @@ async def test_stash_bookkeeping_is_published_before_the_replay_writes(tmp_path,
     session_dir.mkdir()
     repo = tmp_path / "repo"
     init_git_repo(repo)
-    patch_integrate_patch_allowlist(monkeypatch, tmp_path)
+    patch_integrate_patch_roots(monkeypatch, tmp_path)
     _write_specialist_workspace(session_dir, "t-spec-replay", patch_contents=[_VALID_PATCH])
 
     ex = IntegratePatchExecutor(session_dir=session_dir)

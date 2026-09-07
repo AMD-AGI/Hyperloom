@@ -1205,7 +1205,10 @@ class SpecialistSubprocessDispatcher:
         """Return the dirs an agent CLI may write, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands), then each distinct framework source root.
+        ``specialist_done.json`` lands). The framework source trees are not
+        here: ``integrate_patch`` is the only writer of those, so handing them
+        to the agent as writable contradicted the rule the prompt states.
+        Reading them is unaffected.
 
         Args:
             workspace (Path): Task workspace.
@@ -1218,9 +1221,6 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             dirs.append(str(worktree))
         dirs.append(str(workspace))
-        for root in self.config.framework_source_roots:
-            if root and Path(root).is_dir() and root not in dirs:
-                dirs.append(root)
         return dirs
 
     def _build_codex_launch(

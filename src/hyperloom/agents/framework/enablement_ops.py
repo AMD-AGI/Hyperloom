@@ -12,13 +12,13 @@ Two halves of the enablement flow that both build on a
   fix / port to ROCm"). See :func:`build_search_plan`, :func:`rank_titles`,
   :func:`score_enablement_title`.
 * **Authoring** — turn a request + ranked candidates into the
-  :class:`EnablementMandate` (allowed source roots + task description + patch
+  :class:`EnablementMandate` (source roots + task description + patch
   invariants) handed to the patch-authoring specialist. See
   :func:`build_mandate`.
 
 Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
 the local filesystem (source-root probe + installed package version) unless
-``root_hints`` is passed explicitly.
+``source_root_hints`` is passed explicitly.
 """
 
 from __future__ import annotations
@@ -259,9 +259,9 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "tree.  A serve-flag, env-var, or dependency-install fix requires no patch at "
     "all — set ``patches_written: []`` and record the change in ``proposal_set`` "
     "(for env/flag) or ``setup_commands`` (for installs).",
-    "Only *source edits* must stay under the allowed source roots listed below; "
-    "touching any other path with a code patch is a hard reject. (Environment "
-    "setup via ENVIRONMENT SETUP below is separate and allowed.)",
+    "Keep *source edits* under the source roots listed below; patching any other "
+    "path is outside this mandate. (Environment setup via ENVIRONMENT SETUP below "
+    "is separate and allowed.)",
     "Do NOT fabricate throughput/latency/accuracy numbers, and do NOT alter the "
     "eval dataset/task/metric/limit or the result parsing to inflate a score — the "
     "gate here is RUNNABILITY (server boots + minimal inference) or, for an "
@@ -479,7 +479,7 @@ class EnablementMandate:
         framework: Target serving framework.
         model: Model id/path that must become runnable.
         signature: The classified failure driving the fix.
-        allowed_root_hints: Human-readable source-root families in scope.
+        source_root_hints: Human-readable source-root families to search.
         candidate_refs: Ranked bridging PR/ref hints (best first).
         task_description: The rendered specialist mandate (prompt body).
         invariants: The patch invariants (see :data:`ENABLEMENT_PATCH_INVARIANTS`).
@@ -488,7 +488,7 @@ class EnablementMandate:
     framework: str
     model: str
     signature: FailureSignature
-    allowed_root_hints: tuple[str, ...]
+    source_root_hints: tuple[str, ...]
     candidate_refs: tuple[str, ...] = ()
     task_description: str = ""
     invariants: tuple[str, ...] = field(default_factory=lambda: ENABLEMENT_PATCH_INVARIANTS)
@@ -498,7 +498,7 @@ def _render_task_description(
     req: EnablementRequest,
     sig: FailureSignature,
     candidate_refs: Sequence[str],
-    allowed_root_hints: Sequence[str],
+    source_root_hints: Sequence[str],
     source_context: str = "",
 ) -> str:
     """Render the specialist mandate text for an enablement failure.
@@ -507,7 +507,7 @@ def _render_task_description(
         req: The enablement request (framework/model/opt-in).
         sig: The classified failure signature.
         candidate_refs: Ranked bridging refs (best first).
-        allowed_root_hints: Source-root families in scope.
+        source_root_hints: Source-root families to search.
         source_context: Optional snippet of source lines near the offending
             site, injected verbatim to ground the authoring sub-agent. Empty
             omits the block.
@@ -542,8 +542,8 @@ def _render_task_description(
         for ref in candidate_refs:
             lines.append(f"  - {ref}")
         lines.append("")
-    lines.append("ALLOWED SOURCE ROOTS (code edits outside these are rejected):")
-    for hint in allowed_root_hints:
+    lines.append("SOURCE ROOTS TO SEARCH (advisory — where this session's code lives):")
+    for hint in source_root_hints:
         lines.append(f"  - {hint}")
     lines.append("")
     lines.append(build_enablement_ladder_book(sig))
@@ -560,7 +560,7 @@ def build_mandate(
     signature: FailureSignature | None = None,
     candidate_refs: Sequence[str] = (),
     source_context: str = "",
-    root_hints: Sequence[str] | None = None,
+    source_root_hints: Sequence[str] | None = None,
 ) -> EnablementMandate:
     """Build an :class:`EnablementMandate` from a request + candidates.
 
@@ -570,7 +570,7 @@ def build_mandate(
         candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional source snippet near the offending site to
             ground the authoring sub-agent (best-effort; empty omits it).
-        root_hints: Explicit source-root hints; when ``None`` (default) they
+        source_root_hints: Explicit source-root hints; when ``None`` (default) they
             are resolved via :func:`_resolve_actual_root_hints` (which calls
             ``probe_framework_source_roots_for_env()`` and falls back to the
             generic prose constants on failure).
@@ -580,8 +580,8 @@ def build_mandate(
         specialist runner.
     """
     sig = signature if signature is not None else req.signature
-    if root_hints is not None:
-        hints: list[str] = list(root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
+    if source_root_hints is not None:
+        hints: list[str] = list(source_root_hints) or [_FRAMEWORK_ROOT_HINT, _ROCM_HIP_ROOT_HINT]
     else:
         hints = _resolve_actual_root_hints(req.framework)
     refs = tuple(r for r in candidate_refs if r)
@@ -590,7 +590,7 @@ def build_mandate(
         framework=req.framework,
         model=req.model,
         signature=sig,
-        allowed_root_hints=tuple(hints),
+        source_root_hints=tuple(hints),
         candidate_refs=refs,
         task_description=task,
     )

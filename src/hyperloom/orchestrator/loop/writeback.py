@@ -2444,6 +2444,19 @@ class WritebackCollaborator:
             source=source,
             run_error=run_error,
         )
+        # A patch nobody could ground is a result the next round has to act on,
+        # and the specialist's own notes reach the prompt only through the
+        # single inbox line for this task. Record it where SEED renders it.
+        ungrounded = done_payload.get("patches_ungrounded")
+        if isinstance(ungrounded, list) and ungrounded:
+            self.shared_state.record_action_failure(
+                action="specialist",
+                task_id=task.task_id,
+                result={
+                    "error_class": "patch_targets_ungrounded",
+                    "error": "; ".join(str(d) for d in ungrounded[:4]),
+                },
+            )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
         if _scorer is not None and proposals:
@@ -3086,6 +3099,18 @@ class WritebackCollaborator:
         """
         if not isinstance(result, dict):
             return
+        # A promoted result can still carry a failure the Orchestration LLM has
+        # to see: integrate_patch settles "apply_failed" / "reverted", both of
+        # which promote, so the rolling failure log never learned why a patch
+        # did not land. ``last_action_failures`` is the only surface rendered
+        # every SEED turn; the inbox line for this task is shown once.
+        error_class = str(result.get("error_class") or "").strip()
+        if error_class and task is not None:
+            self.shared_state.record_action_failure(
+                action=task_kind,
+                task_id=task.task_id,
+                result=result,
+            )
         # ``replay_warm_recipe`` is mirrored by _promote_replay_warm_recipe
         # instead: its executor settles on "succeeded" and the keep decision is
         # only reached further down this call, so mirroring it here published

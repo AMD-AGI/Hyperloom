@@ -1,16 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Framework source-root resolution and path containment.
+"""Framework source-root resolution.
 
 Centralises probe order across container layouts (``/sgl-workspace/...``,
-``/app/ATOM/atom``, ``/app/xDiT``, site/dist-packages) so PolicyGate, AST
-discovery, install.sh, and ``apply_kernel_patch`` all agree. First-class
-frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is in the
-allowlist as a shared kernel library.
+``/app/ATOM/atom``, ``/app/xDiT``, site/dist-packages) so navigation hints,
+AST discovery, install.sh, and ``apply_kernel_patch`` all agree. First-class
+frameworks: atom, sglang, vllm, xdit (``xfuser`` package); aiter is discovered
+as a shared kernel library.
 
-Owning the roots and the containment test together keeps every caller on one
-boundary rule: :func:`resolved_within` against a root from this module.
+Two questions, two functions, and they are not interchangeable.
+:func:`resolve_framework_tree` names *the* tree a session is optimising, keyed
+by the framework's own name. :func:`resolve_kernel_search_roots` lists every
+tree worth searching, filtered to what exists on this host. Neither is a
+permission set: specialists run unsandboxed, and what may be written is decided
+by the integration step that applies the patch, not by a list of prefixes.
 """
 
 from __future__ import annotations
@@ -19,9 +23,7 @@ import importlib.util
 import logging
 import os
 import re
-import site
 import sys
-import sysconfig
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -89,77 +91,6 @@ def _site_packages_patterns(packages: Sequence[str], *, flavours: Sequence[str])
     return tuple(f"python*/{flavour}-packages/{package}" for flavour in flavours for package in packages)
 
 
-# aiter device sources often live in the sibling ``aiter_meta`` package.
-_AITER_META_CSRC_ROOT = "/aiter_meta/csrc/"
-
-# ROCm / HIP source roots for the enablement path, always merged into the
-# allowlist.
-_ROCM_HIP_SOURCE_ROOTS: tuple[str, ...] = ("/opt/rocm/",)
-
-
-def resolve_rocm_hip_source_roots() -> tuple[str, ...]:
-    """Return the ROCm/HIP source roots for the enablement path.
-
-    Always included in :func:`resolve_source_file_allowlist`.
-
-    Returns:
-        tuple[str, ...]: :data:`_ROCM_HIP_SOURCE_ROOTS`.
-    """
-    return _ROCM_HIP_SOURCE_ROOTS
-
-
-#: File types an enablement patch may write under the ROCm/HIP roots.
-#: Runtime objects (``.so``, binaries) stay readable via the source allowlist
-#: but are not writable through localization or artifact install.
-_ROCM_HIP_WRITE_SUFFIXES: frozenset[str] = frozenset(
-    {
-        ".c",
-        ".cc",
-        ".cpp",
-        ".cxx",
-        ".cu",
-        ".cuh",
-        ".h",
-        ".hh",
-        ".hpp",
-        ".hxx",
-        ".hip",
-        ".cl",
-        ".cmake",
-        ".txt",
-        ".in",
-        ".py",
-        ".s",
-        ".asm",
-        ".inc",
-        ".inl",
-    }
-)
-_ROCM_HIP_WRITE_NAMES: frozenset[str] = frozenset({"cmakelists.txt", "makefile"})
-
-
-def is_rocm_hip_path(value: str) -> bool:
-    """True when ``value`` resolves under a ROCm/HIP source root."""
-    return any(resolved_within(value, root) for root in resolve_rocm_hip_source_roots())
-
-
-def is_rocm_hip_writable_path(value: str) -> bool:
-    """True when ``value`` may be written (not a ROCm runtime object).
-
-    Non-ROCm paths return True so callers can AND this with their own
-    allowlist. Paths under ``/opt/rocm/`` must be source/header/CMake files.
-    """
-    if not is_rocm_hip_path(value):
-        return True
-    try:
-        path = Path(str(value)).resolve()
-    except (OSError, RuntimeError):
-        return False
-    if path.name.lower() in _ROCM_HIP_WRITE_NAMES:
-        return True
-    return path.suffix.lower() in _ROCM_HIP_WRITE_SUFFIXES
-
-
 # FlyDSL checkout roots. Env overrides come first, then the image defaults.
 _FLYDSL_ROOT_ENV_KEYS: tuple[str, ...] = ("DSL2_ROOT", "FLYDSL_ROOT")
 _FLYDSL_DEFAULT_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl/")
@@ -168,9 +99,8 @@ _FLYDSL_DEFAULT_ROOTS: tuple[str, ...] = ("/opt/flydsl/", "/sgl-workspace/flydsl
 def resolve_flydsl_source_roots() -> tuple[str, ...]:
     """Return the FlyDSL checkout roots for patch-target matching.
 
-    Included in :func:`resolve_patch_target_roots` but deliberately not in
-    :func:`resolve_source_file_allowlist`: FlyDSL is a rewrite target for the
-    kernel agent, not a framework the specialist may edit.
+    FlyDSL is a rewrite target for the kernel agent, so its roots join the
+    search roots rather than being discovered as a framework package.
 
     An env-supplied root is emitted both case-preserved and lower-cased,
     because the patchability and apply gates match a lower-cased path against
@@ -214,30 +144,6 @@ def flydsl_extra_source_dirs() -> str:
         if path.is_dir() and str(path) not in found:
             found.append(str(path))
     return ":".join(found)
-
-
-# Minimal static fallbacks when importlib/glob find nothing (image defaults).
-_STATIC_PATCH_FALLBACK_ROOTS: tuple[str, ...] = (
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/atom/",
-    "/opt/venv/lib/python3.12/site-packages/aiter/",
-    "/opt/venv/lib/python3.12/site-packages/sglang/",
-    "/opt/venv/lib/python3.12/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/atom/",
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/atom/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/atom/",
-    "/app/ATOM/atom/",
-    "/app/xDiT/",
-    _AITER_META_CSRC_ROOT,
-)
 
 
 def _normalize_root(path: str) -> str:
@@ -479,52 +385,16 @@ def _discover_explicit_framework_root() -> tuple[str, ...]:
     return (root,) if root else ()
 
 
-def _discover_installed_package_roots() -> tuple[str, ...]:
-    """Return active site/dist-packages roots available to specialists."""
-    candidates: list[Path] = []
-    try:
-        candidates.extend(Path(p) for p in site.getsitepackages())
-    except (AttributeError, OSError):
-        pass
-    try:
-        user_site = site.getusersitepackages()
-        if user_site:
-            candidates.append(Path(user_site))
-    except (AttributeError, OSError):
-        pass
-    for key in ("purelib", "platlib"):
-        value = sysconfig.get_path(key)
-        if value:
-            candidates.append(Path(value))
-    candidates.extend(Path(p) for p in sys.path if p and Path(p).name in {"site-packages", "dist-packages"})
-    for env_name in ("VIRTUAL_ENV", "VLLM_VENV_ROOT"):
-        root = Path(os.environ.get(env_name, "").strip())
-        lib = root / "lib"
-        if lib.is_dir():
-            candidates.extend(lib.glob("python*/site-packages"))
-            candidates.extend(lib.glob("python*/dist-packages"))
+def _env_source_roots() -> tuple[str, ...]:
+    """Roots named by ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
 
-    found: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate.is_dir():
-            continue
-        root = _normalize_root(str(candidate))
-        if root and root not in seen:
-            seen.add(root)
-            found.append(root)
-    return tuple(found)
-
-
-def resolve_source_file_allowlist() -> tuple[str, ...]:
-    """Return trusted source roots available to specialists and integration.
-
-    Includes editable framework trees and every active site/dist-packages root.
-    File-level editability is decided during reviewed integration rather than by
-    restricting specialist discovery to named framework packages.
+    Written by install.sh's ``_probe_framework_source_roots`` so an operator can
+    point a session at a tree that neither importlib nor the site-packages globs
+    would find.
 
     Returns:
-        tuple[str, ...]: The merged, de-duplicated allowlist roots.
+        tuple[str, ...]: Normalised absolute roots; non-absolute entries are
+            dropped with a warning.
     """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
     kept: list[str] = []
@@ -536,28 +406,19 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
             log.warning("ignoring non-absolute framework source root: %r", entry)
             continue
         kept.append(_normalize_root(entry))
-    env_roots = tuple(kept)
-    return _merge_roots(
-        _DEFAULT_SOURCE_ROOTS,
-        _discover_installed_package_roots(),
-        _discover_installed_framework_roots(),
-        _discover_scriptable_repo_roots(),
-        _discover_explicit_framework_root(),
-        env_roots,
-        resolve_rocm_hip_source_roots(),
-    )
+    return tuple(kept)
 
 
 def resolve_session_framework_root() -> str:
     """The one source tree this session was explicitly pointed at, or ``""``.
 
-    :func:`resolve_source_file_allowlist` answers "may this be edited", and its
-    order is an artefact of how the roots were discovered — ``/sgl-workspace/aiter/``
+    :func:`resolve_kernel_search_roots` answers "where might this code be", and
+    its order is an artefact of how the roots were discovered — ``/sgl-workspace/aiter/``
     heads the static defaults, so it comes first whatever the session is
     optimising. Anything that needs to name *the* tree under optimisation must
-    ask for it, not read position 0 of a permission set: a session that picked
-    the head of the allowlist got an aiter checkout, and every patch naming a
-    file in the real tree failed to apply against it.
+    ask for it, not read position 0 of a discovery order: a session that picked
+    the head of that list got an aiter checkout, and every patch naming a file
+    in the real tree failed to apply against it.
 
     Only the explicitly-named checkout counts. Discovery by import or by
     globbing site-packages finds whatever the image happens to ship, which is
@@ -590,7 +451,7 @@ def resolve_framework_tree(framework: str) -> str:
 
     Every source consulted here is keyed by the framework's own name — its env
     vars, its Python package, its default path. That is what distinguishes this
-    from :func:`resolve_source_file_allowlist`, whose order reflects only how
+    from :func:`resolve_kernel_search_roots`, whose order reflects only how
     roots were discovered and so cannot name the tree a session is optimising.
 
     Args:
@@ -615,20 +476,57 @@ def resolve_framework_tree(framework: str) -> str:
     return ""
 
 
-def resolve_patch_target_roots() -> tuple[str, ...]:
-    """Roots for substring matching in patch apply + kernel classifiers.
+#: Wheel layouts that exist on the serving images but are not importable from
+#: the orchestrator process, so discovery cannot find them. Only
+#: :func:`resolve_known_source_prefixes` uses them: they are string prefixes for
+#: classification, never directories anyone reads.
+_STATIC_SOURCE_LAYOUTS: tuple[str, ...] = (
+    "/opt/venv/lib/python3.10/site-packages/aiter/",
+    "/opt/venv/lib/python3.10/site-packages/sglang/",
+    "/opt/venv/lib/python3.10/site-packages/vllm/",
+    "/opt/venv/lib/python3.10/site-packages/atom/",
+    "/opt/venv/lib/python3.12/site-packages/aiter/",
+    "/opt/venv/lib/python3.12/site-packages/sglang/",
+    "/opt/venv/lib/python3.12/site-packages/vllm/",
+    "/opt/venv/lib/python3.12/site-packages/atom/",
+    "/usr/local/lib/python3.12/dist-packages/aiter/",
+    "/usr/local/lib/python3.12/dist-packages/sglang/",
+    "/usr/local/lib/python3.12/dist-packages/vllm/",
+    "/usr/local/lib/python3.12/dist-packages/atom/",
+    "/usr/local/lib/python3.10/dist-packages/aiter/",
+    "/usr/local/lib/python3.10/dist-packages/sglang/",
+    "/usr/local/lib/python3.10/dist-packages/vllm/",
+    "/usr/local/lib/python3.10/dist-packages/atom/",
+    "/app/ATOM/atom/",
+    "/app/xDiT/",
+    # aiter device sources often live in the sibling ``aiter_meta`` package.
+    "/aiter_meta/csrc/",
+)
 
-    Same as :func:`resolve_source_file_allowlist` plus static fallbacks for
-    layouts that are not importable until first use (e.g. ``aiter_meta/csrc``)
-    and the FlyDSL checkout roots.
+
+def resolve_known_source_prefixes() -> tuple[str, ...]:
+    """Root prefixes for recognising a path *string* as framework source.
+
+    Deliberately not existence-filtered, unlike :func:`resolve_kernel_search_roots`:
+    a kernel path reaches the classifier from a trace or a patch manifest
+    produced on a serving pod, so a root absent from the host doing the
+    classifying still names real source on the host that emitted it. Filtering
+    them away turned every FlyDSL and multi-node path into "unknown source".
+
+    Membership permits nothing. A path that matches is reported as belonging to
+    a known tree; one that does not is reported as unrecognised.
 
     Returns:
-        tuple[str, ...]: The allowlist roots merged with the static patch
-            fallback roots and the FlyDSL roots.
+        tuple[str, ...]: Discovered roots, image defaults, static wheel layouts
+            and FlyDSL roots, de-duplicated in that order.
     """
     return _merge_roots(
-        resolve_source_file_allowlist(),
-        _STATIC_PATCH_FALLBACK_ROOTS,
+        _discover_installed_framework_roots(),
+        _discover_scriptable_repo_roots(),
+        _discover_explicit_framework_root(),
+        _env_source_roots(),
+        _DEFAULT_SOURCE_ROOTS,
+        _STATIC_SOURCE_LAYOUTS,
         resolve_flydsl_source_roots(),
     )
 
@@ -636,11 +534,10 @@ def resolve_patch_target_roots() -> tuple[str, ...]:
 def resolve_kernel_search_roots() -> tuple[str, ...]:
     """Roots to grep when locating the source that defines a GPU kernel.
 
-    Deliberately narrower than :func:`resolve_source_file_allowlist`, which also
-    reports the bare site/dist-packages parents. Those are correct for a "may
-    this file be edited" containment test and wrong for a recursive grep: they
-    pull in every installed package (torch included), which costs seconds per
-    keyword and matches unrelated code.
+    Named framework trees only. The bare site/dist-packages parents are
+    deliberately absent: they pull in every installed package (torch included),
+    which costs seconds per keyword, matches unrelated code, and tells a reader
+    nothing about where this session's code lives.
 
     Only roots that exist on this host are returned. An empty result therefore
     means "there is nothing here to search", which a caller must surface as a
@@ -655,6 +552,7 @@ def resolve_kernel_search_roots() -> tuple[str, ...]:
         _discover_installed_framework_roots(),
         _discover_scriptable_repo_roots(),
         _discover_explicit_framework_root(),
+        _env_source_roots(),
         _DEFAULT_SOURCE_ROOTS,
         resolve_flydsl_source_roots(),
     )
@@ -664,17 +562,10 @@ def resolve_kernel_search_roots() -> tuple[str, ...]:
 def probe_framework_source_roots_for_env() -> str:
     """Colon-separated roots for ``INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
 
-    Filters the resolved allowlist down to roots that exist on disk.
-
     Returns:
-        str: Existing roots joined by ``:`` (empty string when none exist).
+        str: The search roots joined by ``:`` (empty string when none exist).
     """
-    found: list[str] = []
-    for root in resolve_source_file_allowlist():
-        p = Path(root.rstrip("/"))
-        if p.is_dir():
-            found.append(_normalize_root(str(p)))
-    return ":".join(found)
+    return ":".join(resolve_kernel_search_roots())
 
 
 # Ordered for deterministic substring matching (atom before vllm/sglang).
@@ -722,7 +613,7 @@ def resolved_within(value: str, root: str) -> bool:
 
     Args:
         value (str): the candidate path string.
-        root (str): an allowlist root (may carry a trailing slash).
+        root (str): a source root (may carry a trailing slash).
 
     Returns:
         bool: True when the resolved ``value`` equals or is nested under the
@@ -741,15 +632,14 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
 
     Roofline evidence reaches the orchestration prompt as trace frames and the
     model cites them verbatim, so a relative frame must be resolved against the
-    session's framework tree rather than the process CWD, or every citation is
-    denied. Each candidate is still bounded by :func:`resolved_within`.
+    session's framework tree rather than the process CWD.
 
     A pip-installed framework names no checkout, so
     :func:`resolve_session_framework_root` is empty and that join never fires --
-    while the frame's file does sit under an allowlist root. Those roots are
-    tried too, but only where the join names a file that exists: a root is a
-    permission set, not evidence that the frame belongs to it, and admitting
-    every root would turn one unresolvable frame into a path in each of them.
+    while the frame's file does sit under a search root. Those roots are tried
+    too, but only where the join names a file that exists: a root is a discovery
+    order, not evidence that the frame belongs to it, and admitting every root
+    would turn one unresolvable frame into a path in each of them.
 
     Args:
         value (str): The raw field value.
@@ -757,7 +647,7 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: ``value`` first, then the de-annotated form, then that
             form resolved against the tree this session is optimizing, then
-            against each allowlist root that holds the named file.
+            against each search root that holds the named file.
     """
     raw = str(value).strip()
     out: list[str] = [raw]
@@ -768,8 +658,8 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
         root = resolve_session_framework_root()
         if root:
             out.append(str(Path(root) / bare))
-        for allow_root in resolve_source_file_allowlist():
-            joined = Path(allow_root) / bare
+        for search_root in resolve_kernel_search_roots():
+            joined = Path(search_root) / bare
             try:
                 exists = joined.is_file()
             except OSError:
@@ -786,12 +676,8 @@ __all__ = [
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",
-    "resolve_patch_target_roots",
-    "resolve_rocm_hip_source_roots",
-    "is_rocm_hip_path",
-    "is_rocm_hip_writable_path",
+    "resolve_known_source_prefixes",
     "resolve_session_framework_root",
-    "resolve_source_file_allowlist",
     "resolved_within",
     "source_file_candidates",
     "summarise_framework_root_discovery",
