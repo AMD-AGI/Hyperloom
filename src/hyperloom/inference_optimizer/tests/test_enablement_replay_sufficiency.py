@@ -250,24 +250,24 @@ def test_a_skipped_non_python_installer_scopes_nothing():
     assert "closure_scope_incomplete" not in _codes(_decide({"setup_executions": rows}))
 
 
-def test_credentialed_command_is_sanitized_without_losing_its_digest():
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "pip install --index-url https://user:token@host/simple pkg",
+        "pip install --index-url=https://user:token@host/simple pkg",
+        "pip install --index-url 'https://user:token@host/simple' pkg",
+    ],
+)
+def test_credentialed_command_is_sanitized_without_losing_its_digest(cmd):
     """Sanitization is of the recorded text only: the digest that counts
     occurrences is over the verbatim string, so the three spellings the
     allowlist admits equally still collapse onto one command."""
-    cmd = "pip install --index-url https://user:token@host/simple pkg"
     rows = [_row(cmd, seq=i, outcome=outcome) for i, outcome in enumerate(("applied", "failed", "skipped"), start=1)]
     for row in rows:
         assert "user:token" not in row["cmd_sanitized"] and "host" not in row["cmd_sanitized"]
         assert row["cmd_digest"] == command_digest(cmd)
     assert len({row["cmd_digest"] for row in rows}) == 1
-
-    attached = "pip install --index-url=https://user:token@host/simple pkg"
-    quoted = "pip install --index-url 'https://user:token@host/simple' pkg"
-    for spelling in (attached, quoted):
-        row = _row(spelling)
-        assert row["credential_class"] == "index_url"
-        assert "user:token" not in row["cmd_sanitized"]
-        assert row["cmd_digest"] == command_digest(spelling)
+    assert {row["credential_class"] for row in rows} == {"index_url"}
 
 
 def _attempt(task_id, **kw):
@@ -797,6 +797,21 @@ def test_credential_classes_over_the_admitted_grammar():
     assert classify_credential_class("pip install foo") is None
 
 
+@pytest.mark.parametrize(
+    ("command", "credential_class"),
+    [
+        ("pip install -ihttps://user:token@host/simple foo", "index_url"),
+        ("pip install -fhttps://user:token@host/links foo", "find_links"),
+        ("conda install -chttps://user:token@host/channel foo", "channel"),
+    ],
+)
+def test_compact_short_options_are_classified_and_sanitized(command, credential_class):
+    row = _row(command)
+    assert row["credential_class"] == credential_class
+    assert "user:token" not in row["cmd_sanitized"]
+    assert "host" not in row["cmd_sanitized"]
+
+
 def test_an_inline_index_assignment_classifies_and_sanitizes_as_the_flag_does():
     """The allowlist strips a leading KEY=VALUE, so both spellings are admitted."""
     cmd = "PIP_INDEX_URL=https://user:token@host/simple pip install foo"
@@ -1204,7 +1219,31 @@ def test_requirements_file_install_is_identified_or_blocks_replay(tmp_path):
     assert "setup_inputs_incomplete" in _codes(_decide({"setup_executions": [row]}))
     (tmp_path / "requirements.txt").write_text("foo==1.0\n", encoding="utf-8")
     identities, unresolved = setup_input_identity("pip install -r requirements.txt", cwd=tmp_path)
-    assert unresolved == [] and identities[0]["kind"] == "requirements_file"
+    assert unresolved == ["requirements_contents"] and identities[0]["kind"] == "requirements_file"
+
+
+def test_a_captured_requirements_file_does_not_claim_its_dependencies_are_pinned(tmp_path):
+    """The file digest pins the input text, not the artifacts its specs resolve to."""
+    (tmp_path / "requirements.txt").write_text("foo==1.0\n", encoding="utf-8")
+    cmd = "pip install -r requirements.txt"
+    rows = _accepted([_row(cmd, cwd=tmp_path)])
+    state = {"setup_commands": [cmd], "setup_executions": rows}
+    assert rows[0]["input_identity"][0]["kind"] == "requirements_file"
+    assert rows[0]["unresolved_inputs"] == ["requirements_contents"]
+    assert "setup_inputs_incomplete" in _codes(_decide(state))
+
+
+def test_compact_requirements_and_constraint_options_keep_their_operands(tmp_path):
+    (tmp_path / "requirements.txt").write_text("foo==1.0\n", encoding="utf-8")
+    (tmp_path / "constraints.txt").write_text("foo==1.0\n", encoding="utf-8")
+
+    requirements, requirements_unresolved = setup_input_identity("pip install -rrequirements.txt", cwd=tmp_path)
+    constraints, constraints_unresolved = setup_input_identity("pip install -cconstraints.txt foo", cwd=tmp_path)
+
+    assert requirements[0]["kind"] == "requirements_file"
+    assert requirements_unresolved == ["requirements_contents"]
+    assert constraints[0]["kind"] == "requirements_file"
+    assert constraints_unresolved == ["mutable_package", "requirements_contents"]
 
 
 def test_pips_short_constraint_spelling_is_a_requirements_file(tmp_path):
@@ -1216,7 +1255,8 @@ def test_pips_short_constraint_spelling_is_a_requirements_file(tmp_path):
 
     (tmp_path / "constraints.txt").write_text("foo==1.0\n", encoding="utf-8")
     identities, unresolved = setup_input_identity("pip install -c constraints.txt foo", cwd=tmp_path)
-    assert unresolved == ["mutable_package"] and identities[0]["kind"] == "requirements_file"
+    assert unresolved == ["mutable_package", "requirements_contents"]
+    assert identities[0]["kind"] == "requirements_file"
 
 
 def test_a_conda_channel_is_not_read_as_a_constraints_file(tmp_path):
@@ -1228,6 +1268,12 @@ def test_a_conda_channel_is_not_read_as_a_constraints_file(tmp_path):
 def test_moving_vcs_ref_install_blocks_replay(tmp_path):
     row = _row("pip install git+https://host/repo@main", cwd=tmp_path)
     assert row["unresolved_inputs"] == ["vcs_ref"]
+    assert "setup_inputs_incomplete" in _codes(_decide({"setup_executions": [row]}))
+
+
+def test_remote_artifact_install_blocks_replay(tmp_path):
+    row = _row("pip install https://host/packages/private.whl", cwd=tmp_path)
+    assert row["unresolved_inputs"] == ["remote_artifact"]
     assert "setup_inputs_incomplete" in _codes(_decide({"setup_executions": [row]}))
 
 

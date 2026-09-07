@@ -35,6 +35,7 @@ _INDEX_URL_OPTIONS: frozenset[str] = frozenset({"--index-url", "--extra-index-ur
 _FIND_LINKS_OPTIONS: frozenset[str] = frozenset({"--find-links", "-f"})
 _REGISTRY_OPTIONS: frozenset[str] = frozenset({"--registry", "--_auth", "--_authToken"})
 _CHANNEL_OPTIONS: frozenset[str] = frozenset({"-c", "--channel"})
+_ATTACHED_SHORT_VALUE_OPTIONS: tuple[str, ...] = ("-r", "-c", "-i", "-f")
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 
@@ -115,8 +116,9 @@ def option_operands(tokens: Iterable[str]) -> list[tuple[str, str]]:
     """Pair each token with the option it is an operand of.
 
     An attached ``--opt=value`` yields one pair; a separated ``--opt value``
-    yields the pair for ``value``. A bare operand pairs with ``""``. This is what
-    lets a quoted, attached and separated spelling of one flag classify alike.
+    yields the pair for ``value``. Compact short options such as ``-rFILE`` and
+    ``-iURL`` are split the same way. A bare operand pairs with ``""``. This is
+    what lets quoted, attached and separated spellings classify alike.
     """
     pairs: list[tuple[str, str]] = []
     pending = ""
@@ -124,6 +126,14 @@ def option_operands(tokens: Iterable[str]) -> list[tuple[str, str]]:
         if token.startswith("-") and "=" in token:
             option, _, operand = token.partition("=")
             pairs.append((option, operand))
+            pending = ""
+            continue
+        attached = next(
+            (option for option in _ATTACHED_SHORT_VALUE_OPTIONS if token.startswith(option) and token != option),
+            "",
+        )
+        if attached:
+            pairs.append((attached, token[len(attached) :].removeprefix("=")))
             pending = ""
             continue
         if token.startswith("-"):

@@ -159,6 +159,9 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
     the bytes, so a bare requirement is identified when the command carries a
     ``--hash`` and unresolved when it does not.
 
+    A requirements-file digest identifies the file itself, not the artifacts
+    its contents resolve to, so that resolution remains explicitly unresolved.
+
     Returns:
         The identified inputs, and the sorted kinds that could not be identified.
     """
@@ -180,6 +183,7 @@ def setup_input_identity(cmd: str, *, cwd: Path | str) -> tuple[list[dict[str, A
                 unresolved.append("requirements_file")
             else:
                 identities.append({"kind": "requirements_file", **identity})
+                unresolved.append("requirements_contents")
         elif operand.startswith(_VCS_PREFIXES):
             identity, missing = _vcs_identity(operand)
             if identity is None:
