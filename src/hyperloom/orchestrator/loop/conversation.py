@@ -829,24 +829,24 @@ class ConversationCollaborator:
         return out
 
     def _specialist_findings_block(self) -> str:
-        """Render persisted specialist findings, any domain, most confident first.
+        """Render persisted specialist findings, any domain, most recent first.
 
         Executable proposals are not rendered here: they go through
         ``=== Untested proposals (current cycle) ===`` alongside every other
         domain's, which also drops the ones already benched.
+
+        Rows are ordered by recency rather than by the round's self-reported
+        ``confidence``: that field is an audit record of what the specialist
+        claimed, never an input to a decision here.
         """
         from ..knowledge import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
-        rounds = sorted(
-            (
-                row
-                for row in (getattr(self.shared_state, "specialist_rounds", []) or [])
-                if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
-            ),
-            key=lambda r: float(r.get("confidence") or 0),
-            reverse=True,
-        )
+        rounds = [
+            row
+            for row in reversed(getattr(self.shared_state, "specialist_rounds", []) or [])
+            if isinstance(row, dict) and (row.get("new_findings") or row.get("residual_questions"))
+        ]
         if not hints and not rounds:
             return ""
 
