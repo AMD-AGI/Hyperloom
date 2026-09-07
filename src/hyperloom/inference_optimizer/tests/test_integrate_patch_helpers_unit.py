@@ -8,6 +8,8 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors import _git as gitmod
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
@@ -20,6 +22,53 @@ class _CP:
 
 def test_now_iso():
     assert "T" in ip._now_iso()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "selected", "expected"),
+    [
+        (None, ["handwritten.patch"], None),
+        ({}, ["handwritten.patch"], None),
+        ({"harvest.patch": "/aiter"}, [], None),
+        ({"harvest.patch": "/aiter"}, ["handwritten.patch", "harvest.patch"], None),
+        ({"harvest.patch": "/aiter"}, ["handwritten.patch"], None),
+        ({"harvest.patch": "/aiter"}, ["base.patch", "harvest.patch"], None),
+        ({"harvest.patch": "/aiter"}, ["harvest.patch"], "/aiter"),
+        ({"a.patch": "/sglang", "b.patch": "/sglang"}, ["a.patch", "b.patch"], "/sglang"),
+        ({"a.patch": "/sglang", "b.patch": "/aiter"}, ["a.patch", "b.patch"], None),
+        ({"a.patch": "/sglang", "unused.patch": "/aiter"}, ["a.patch"], "/sglang"),
+        ({"a.patch": None}, ["a.patch"], None),
+        ({"a.patch": " "}, ["a.patch"], None),
+    ],
+)
+def test_recorded_root_covers_selected_patches(tmp_path, metadata, selected, expected):
+    for path in set(selected) | set(metadata or {}):
+        (tmp_path / path).touch()
+    payload = {"patch_roots": metadata, "patches_written": ["harvest.patch"]}
+    assert (
+        ip._sole_patch_root(payload, [tmp_path / path for path in selected], specialist_workspace=tmp_path) == expected
+    )
+
+
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("conflicting_alias", [False, True])
+def test_recorded_root_matches_resolved_patch_identity(tmp_path, relative, conflicting_alias):
+    workspace = tmp_path / "workspace"
+    patches = workspace / "worktree" / "patches"
+    patches.mkdir(parents=True)
+    patch = patches / "harvest.patch"
+    patch.touch()
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    recorded = "patches/harvest.patch" if relative else str(alias / "worktree" / "patches" / patch.name)
+    metadata = {recorded: "/aiter"}
+    if conflicting_alias:
+        metadata[str(patch)] = "/sglang"
+    payload = {"patch_roots": metadata}
+
+    result = ip._sole_patch_root(payload, [patch.resolve()], specialist_workspace=alias)
+
+    assert result == (None if conflicting_alias else "/aiter")
 
 
 def test_resolve_framework_root_explicit_dir(tmp_path):
