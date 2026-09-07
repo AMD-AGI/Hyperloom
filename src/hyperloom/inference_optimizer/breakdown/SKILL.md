@@ -38,7 +38,6 @@ authoritative.
 | `geak`               | GEAK route diagnostics, normalized result, accepted artifacts, and recovery evidence when the route ran outside the native kernel-agent layout. |
 | `optimizations`      | Canonical adopted-optimization API, projected from author-time recorder streams. **Read `available` first**: `false` means the records are missing, not that nothing was adopted. `attempts[]` holds every attempt, `entries[]` the adopted ledger, `validation` the reconciliation. |
 | `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
-| `collective`         | Collective-lane campaigns: `only_mode` / `attempts[]` / `last`. Adoption is decided by `integration_decision` (E2E gate), not `decision` (microbenchmark). |
 | `param_search`       | Compatibility alias for the merged explore ledger (tested / accepted / rejected / top_by_gain / winner_history). |
 | `sweep`              | Grid size, best_overall, pareto_front, every variant's benchmark numbers.                                |
 | `critic_robustness`  | Per-iter critic verdicts + robustness signals.                                                           |
@@ -141,7 +140,6 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `capability_summary` | Reduces invocations + per-action attempts + search ledgers into 8 rows: geak / forge / explore / sweep / specialist plus the backends / params / validate_stack compatibility rows |
 | `optimizations`      | The recorder's own streams only — `operations` / `adoptions` / `measurements` / `artifacts`, as the producers wrote them. Never rebuilt from `state.json`; when the records are absent the section reports `available: false` instead. |
 | `kernel_lifecycle`   | `runs/profile/*/benchmark_*/benchmark_report.json` (detected) + `state.last_trace_analyze` (recommended) + invocations folded (optimized) + `state.{kernel_integrate_attempts, rejected_kernel_*}` (adopted/rejected) |
-| `collective`         | `state.{collective_only_mode, collective_attempts, last_collective}`                                                  |
 | `param_search`       | `state.{explore_search, discovered_flags}` (`synergy_attempted` now comes from `explore_search`; `winner_history` / `backend_winners_history` are emitted empty); `params` / `backends` ledgers are historical aliases only |
 | `critic_robustness`  | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json` + `robustness-workdir/<NNN>/{signal,action}.json`   |
 | `telemetry`          | All `runs/**/benchmark_*/benchmark_report.json` + `torch_trace/` + `system_profile/` + `server*.log`                  |

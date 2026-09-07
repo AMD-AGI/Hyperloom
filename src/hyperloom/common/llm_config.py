@@ -375,8 +375,8 @@ def resolve_forge_llm_model(
 ) -> str:
     """Resolve the Forge LLM model id for a chosen agent backend.
 
-    Shared by forge-fusion, forge rewrite (``forge_submit``), and forge-collective
-    so every Forge LLM surface honors the same precedence:
+    Shared by forge-fusion and forge rewrite (``forge_submit``) so every Forge
+    LLM surface honors the same precedence:
 
     1. ``explicit`` (request ``llm_model``);
     2. forge-specific env (``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``), the

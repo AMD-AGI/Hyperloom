@@ -382,12 +382,6 @@ def build(
     telemetry = _pick(
         "telemetry", _safe_collect("telemetry", lambda: collectors.collect_telemetry(sd, state, warnings), warnings)
     )
-    collective = _safe_collect(
-        "collective",
-        lambda: collectors.collect_collective(state),
-        warnings,
-        default={},
-    )
     # Canonical optimization read model. This is the single downstream entry
     # point for adopted warm-replay, Explore, Framework Agent, and Kernel Agent
     # changes.
@@ -662,9 +656,6 @@ def build(
         # or incomplete runs that produced no adoption.
         "geak": geak,
         "kernel_lifecycle": kernel_lifecycle,
-        # Collective lane audit trail; survives a campaign the E2E gate rejected,
-        # which never reaches ``optimizations``.
-        "collective": collective,
         "param_search": explore_search,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,

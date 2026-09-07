@@ -72,7 +72,6 @@ REQUEST_KIND_TO_OWNED_ACTION: Mapping[str, str] = MappingProxyType(
 # the valid-kind vocabulary, which is the better answer for a typo.
 COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
-        "run_collective",
         "run_fusion",
         # Dispatched once at phase entry from a lane budget. An LLM re-issuing it
         # per tick would spend budget the allocation never granted.

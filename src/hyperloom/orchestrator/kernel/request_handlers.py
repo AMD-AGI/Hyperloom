@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import hashlib
 import importlib
 import importlib.util
 import json
@@ -75,8 +74,6 @@ from ._kernel_decisions import (
     has_keep_pending_integrate as has_keep_pending_integrate,
     kernel_opt_attempts_count as kernel_opt_attempts_count,
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
-    is_collective_candidate as is_collective_candidate,
-    SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
     enqueue_nominated_patch as enqueue_nominated_patch,
 )
 from .nomination_result import parse_outcome as parse_outcome
@@ -742,8 +739,7 @@ def _final_content_snapshot(
     pristine dir can never satisfy that: it is missing, by construction, every
     module the fusion authored, so the apply pre-flight refuses the whole patch
     with "snapshot missing content for <...>_fused_<recipe>.py" and a real KEEP
-    is lost. (The collective lane never hit this only because its record carries
-    no ``snapshot_dir`` at all, so it always took the materialize path.)
+    is lost.
 
     Rather than trust the field, check it: a usable snapshot has the final bytes
     for every path the patch writes. When it does not, materialize one from the
@@ -834,23 +830,6 @@ def _maybe_apply_kernel_patch(
         repo_root=repo_root,
         producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
     )
-
-
-def _checkpoint_collective_apply(
-    checkpoint_path: str,
-    apply_result: HandlerResult,
-) -> None:
-    """Persist an applied-patch checkpoint before Collective E2E measurement."""
-    if not checkpoint_path or apply_result.get("status") != "ok":
-        return
-    path = Path(checkpoint_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps(apply_result, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
-    )
-    os.replace(tmp, path)
 
 
 def materialize_unified_patch_snapshot(
@@ -4720,8 +4699,8 @@ def _resolve_forge_agent(
 ) -> tuple[str, str]:
     """Resolve the Forge agent backend and model as one decision.
 
-    Shared by forge-fusion and forge-collective (rewrite uses the same model
-    ladder via :func:`llm_config.resolve_forge_llm_model`). The canonical
+    Shared by forge-fusion and the rewrite lane, which uses the same model
+    ladder via :func:`llm_config.resolve_forge_llm_model`. The canonical
     provider-shape predicates decide the default backend: OpenAI-only uses
     Codex, while Anthropic-only and dual-configured deployments use Claude, the
     established default for this agentic role. A valid explicit
@@ -5000,471 +4979,6 @@ async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResu
     kernels and returns a source patch + env flags for the integrate gate.
     """
     return await _run_forge_fusion(payload, session_dir=session_dir)
-
-
-def _parse_forge_collective_sentinel(stdout: str) -> dict[str, Any]:
-    """Parse and validate the collective wrapper result sentinel."""
-    match = re.search(
-        r"FORGE_COLLECTIVE_RESULT_BEGIN\s*\n(.*?)\nFORGE_COLLECTIVE_RESULT_END",
-        stdout,
-        re.DOTALL,
-    )
-    if not match:
-        raise ValueError("collective wrapper emitted no result sentinel")
-    try:
-        parsed = json.loads(match.group(1))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("collective wrapper emitted malformed result JSON") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("collective wrapper result must be a JSON object")
-    if parsed.get("engine") != "forge_collective":
-        raise ValueError("collective wrapper result has invalid engine")
-    if not isinstance(parsed.get("status"), str) or not parsed["status"]:
-        raise ValueError("collective wrapper result has invalid status")
-    decision = parsed.get("decision")
-    if decision not in {"KEEP", "REVERT"}:
-        raise ValueError("collective wrapper result has invalid decision")
-    if not isinstance(parsed.get("kept"), bool):
-        raise ValueError("collective wrapper result has invalid kept")
-    if not isinstance(parsed.get("requires_e2e_validation"), bool):
-        raise ValueError("collective wrapper result has invalid requires_e2e_validation")
-    if parsed["kept"] != (decision == "KEEP"):
-        raise ValueError("collective wrapper result has inconsistent decision")
-    if parsed["requires_e2e_validation"] != parsed["kept"]:
-        raise ValueError("collective wrapper result has inconsistent E2E gate")
-    return parsed
-
-
-def _enriched_kernel_candidates(state: Any) -> list[dict[str, Any]]:
-    """Load full candidate rows from the latest trace artifact."""
-    analysis = getattr(state, "last_trace_analyze", None)
-    if analysis is None:
-        return []
-    if not isinstance(analysis, dict):
-        raise ValueError("last_trace_analyze must be a mapping")
-    if not analysis:
-        return []
-    path = str(analysis.get("candidates_path") or "").strip()
-    if not path:
-        raise ValueError("latest trace analysis has no candidates_path")
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"invalid collective candidate artifact: {path}") from exc
-    rows = payload.get("hot_kernels") if isinstance(payload, dict) else None
-    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise ValueError(f"candidate artifact has no valid hot_kernels list: {path}")
-    return rows
-
-
-def collective_analysis_key(state: Any) -> str:
-    """Return a stable identity for the latest trace analysis."""
-    analysis = getattr(state, "last_trace_analyze", None)
-    if analysis is None:
-        return ""
-    if not isinstance(analysis, dict):
-        raise ValueError("last_trace_analyze must be a mapping")
-    if not analysis:
-        return ""
-    path = str(analysis.get("candidates_path") or "").strip()
-    if path:
-        return path
-    encoded = json.dumps(analysis, sort_keys=True).encode("utf-8")
-    return f"inline:{hashlib.sha256(encoded).hexdigest()}"
-
-
-def _validate_collective_candidate(
-    candidate: dict[str, Any],
-    *,
-    index: int | None = None,
-) -> None:
-    """Validate fields required by the collective driver."""
-    label = f"collective candidate[{index}]" if index is not None else "collective candidate"
-    required_strings = ("kernel_id", "source_file", "source_function")
-    missing = [
-        field for field in required_strings if not isinstance(candidate.get(field), str) or not candidate[field].strip()
-    ]
-    for field in ("input_shapes", "input_dtypes"):
-        value = candidate.get(field)
-        if not isinstance(value, list) or not value:
-            missing.append(field)
-    if missing:
-        raise ValueError(f"{label} is missing {', '.join(missing)}")
-    gpu_pct = candidate.get("gpu_pct")
-    if (
-        isinstance(gpu_pct, bool)
-        or not isinstance(gpu_pct, (int, float))
-        or not math.isfinite(float(gpu_pct))
-        or gpu_pct < 0
-    ):
-        raise ValueError(f"{label}.gpu_pct must be finite and non-negative")
-
-
-def select_collective_candidate(state: Any) -> dict[str, Any] | None:
-    """Pick the hottest source-resolved traced collective."""
-    eligible: list[dict[str, Any]] = []
-    for index, entry in enumerate(_enriched_kernel_candidates(state)):
-        if entry.get("reusable_native_kernel") is not True:
-            continue
-        contract = entry.get("kernel_contract")
-        if not isinstance(contract, dict) or str(contract.get("kind") or "") != "collective":
-            continue
-        if str(contract.get("collective_op") or "") not in SUPPORTED_COLLECTIVE_OPS:
-            continue
-        try:
-            _validate_collective_candidate(entry, index=index)
-        except ValueError as exc:
-            log.warning("Skipping unusable collective candidate: %s", exc)
-            continue
-        eligible.append(entry)
-    if not eligible:
-        return None
-    resolved = [entry for entry in eligible if str(entry.get("candidate_source") or "").strip() == "nccl_summary"]
-    pool = resolved or eligible
-
-    def _gpu_pct(entry: dict[str, Any]) -> float:
-        """Return a sortable GPU-time share for one collective candidate."""
-        return float(entry["gpu_pct"])
-
-    return max(pool, key=_gpu_pct)
-
-
-def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
-    """Read a forge-loop budget bound, falling back when KernelForge is off the path.
-
-    A local copy of the number drifts the moment upstream changes it, and the
-    lane then plans against a budget the campaign will not honour.
-
-    The fallback is logged rather than taken silently. KernelForge now ships in
-    this distribution, so a failed import means a renamed module or a broken
-    install, not an optional dependency -- and the symptom otherwise is a
-    campaign quietly planned against the wrong wall-clock budget, which no run
-    ever reports.
-    """
-    try:
-        return float(getattr(importlib.import_module(module), name))
-    except (ImportError, AttributeError, TypeError, ValueError) as exc:
-        log.warning(
-            "forge-loop constant %s.%s unreadable (%s); planning against the fallback %s. "
-            "KernelForge ships with Hyperloom, so this is a rename or a broken install.",
-            module,
-            name,
-            exc,
-            fallback,
-        )
-        return fallback
-
-
-# Session time held back for the E2E integrate round plus reporting.
-_COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-_COLLECTIVE_PREP_GRACE_SEC = int(_forge_loop_constant("kernelforge.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000))
-# Wrapper grace to export the patch and restore the repository.
-_COLLECTIVE_FINALIZE_GRACE_SEC = 300
-# forge-loop rejects a campaign shorter than its own minimum.
-_COLLECTIVE_MIN_CAMPAIGN_SEC = int(_forge_loop_constant("kernelforge.cli", "MIN_MAX_HOURS", 1.0) * 3600)
-# Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
-_COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
-
-
-def _collective_revert_result(
-    error_class: str,
-    error: str,
-    *,
-    status: str = "failed",
-    **fields: Any,
-) -> HandlerResult:
-    """Build a non-KEEP collective handler result."""
-    result: HandlerResult = {
-        "status": status,
-        "backend": "forge",
-        "engine": "forge_collective",
-        "error_class": error_class,
-        "error": error,
-        "decision": "REVERT",
-        "kept": False,
-        "requires_e2e_validation": False,
-    }
-    result.update(fields)
-    return result
-
-
-def _collective_budget(state: Any, requested_hours: Any, timeout_sec: int) -> tuple[float | None, int]:
-    """Derive campaign and wrapper budgets from remaining session time."""
-    remaining_fn = getattr(state, "remaining_minutes", None)
-    remaining = remaining_fn() if callable(remaining_fn) else None
-    wall_limits: list[int] = []
-    if remaining is not None:
-        if isinstance(remaining, bool):
-            raise ValueError("remaining session minutes must be numeric")
-        remaining = float(remaining)
-        if not math.isfinite(remaining) or remaining < 0:
-            raise ValueError(f"remaining session minutes must be finite and non-negative: {remaining}")
-        wall_limits.append(
-            max(
-                0,
-                int((remaining - _COLLECTIVE_BUDGET_RESERVE_MIN) * 60),
-            )
-        )
-    if isinstance(timeout_sec, bool) or not isinstance(timeout_sec, int) or timeout_sec < 0:
-        raise ValueError(f"collective timeout must be a non-negative integer: {timeout_sec!r}")
-    if timeout_sec > 0:
-        wall_limits.append(timeout_sec)
-    if requested_hours is None and not wall_limits:
-        # Unbounded session: no budget to divide, so the reserve and
-        # minimum-campaign contracts below cannot apply.
-        log.info(
-            "collective budget: unbounded session, defaulting the wrapper to %ds",
-            _COLLECTIVE_UNBOUNDED_WRAPPER_SEC,
-        )
-        return None, _COLLECTIVE_UNBOUNDED_WRAPPER_SEC
-
-    wall_limit = min(wall_limits) if wall_limits else 0
-    campaign_capacity = wall_limit - _COLLECTIVE_PREP_GRACE_SEC - _COLLECTIVE_FINALIZE_GRACE_SEC
-    if requested_hours is None:
-        campaign_sec = campaign_capacity
-    else:
-        if isinstance(requested_hours, bool):
-            raise ValueError("collective max_hours must be numeric")
-        requested = float(requested_hours)
-        if not math.isfinite(requested) or requested <= 0:
-            raise ValueError(f"collective max_hours must be finite and positive: {requested_hours!r}")
-        requested_sec = int(requested * 3600)
-        if requested_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
-            return None, 0
-        campaign_sec = min(requested_sec, campaign_capacity) if wall_limits else requested_sec
-    if campaign_sec < _COLLECTIVE_MIN_CAMPAIGN_SEC:
-        return None, 0
-    # Truncate to two decimals so the hours we hand forge-loop never round up
-    # past the budget they were derived from.
-    hours = math.floor(campaign_sec / 3600 * 100) / 100.0
-    required = _COLLECTIVE_PREP_GRACE_SEC + int(hours * 3600) + _COLLECTIVE_FINALIZE_GRACE_SEC
-    return hours, required
-
-
-async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run the strict collective Forge lane and parse its result contract."""
-    from ..state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-
-    candidate_value = payload.get("candidate")
-    if candidate_value is not None and (not isinstance(candidate_value, dict) or not candidate_value):
-        return _collective_revert_result(
-            "invalid_collective_candidate",
-            "candidate must be a non-empty object",
-        )
-    try:
-        candidate = dict(candidate_value) if isinstance(candidate_value, dict) else select_collective_candidate(state)
-    except (OSError, TypeError, ValueError) as exc:
-        return _collective_revert_result(
-            "invalid_collective_candidate_artifact",
-            str(exc),
-            status="skipped",
-            analysis_key=collective_analysis_key(state),
-        )
-    if not candidate:
-        return _collective_revert_result(
-            "no_collective_candidate",
-            ("no rewritable collective in the latest trace analysis (nccl/rccl are vendor binaries and never qualify)"),
-            status="skipped",
-            analysis_key=collective_analysis_key(state),
-        )
-
-    contract = candidate.get("kernel_contract")
-    if (
-        not isinstance(contract, dict)
-        or contract.get("kind") != "collective"
-        or contract.get("collective_op") not in SUPPORTED_COLLECTIVE_OPS
-    ):
-        return _collective_revert_result(
-            "unsupported_collective_contract",
-            "collective Forge supports " + ", ".join(sorted(SUPPORTED_COLLECTIVE_OPS)),
-        )
-    try:
-        _validate_collective_candidate(candidate)
-    except ValueError as exc:
-        return _collective_revert_result(
-            "invalid_collective_candidate",
-            str(exc),
-        )
-
-    source_file = candidate["source_file"].strip()
-    source_function = candidate["source_function"].strip()
-    # The anchor alone hides the op's sibling sources, so a fused variant of the
-    # same collective stays uneditable. Keep the anchor first, then whatever the
-    # candidate declares as the op's source set.
-    raw_kernel_sources = candidate.get("kernel_sources") or []
-    if isinstance(raw_kernel_sources, str):
-        raw_kernel_sources = [raw_kernel_sources]
-    collective_sources = list(
-        dict.fromkeys(str(path).strip() for path in (source_file, *raw_kernel_sources) if str(path or "").strip())
-    )
-    kernel_repo_raw = candidate.get("kernel_repo")
-    if kernel_repo_raw is not None and not isinstance(kernel_repo_raw, str):
-        return _collective_revert_result(
-            "invalid_collective_candidate",
-            "collective candidate kernel_repo must be a string",
-        )
-    kernel_repo = (kernel_repo_raw or "").strip() or _find_repo_root_for_source(source_file)
-    if not kernel_repo:
-        return _collective_revert_result(
-            "kernel_repo_missing",
-            f"cannot resolve a repo root for {source_file!r}",
-        )
-
-    tp_raw = payload.get("tp")
-    if tp_raw in (None, ""):
-        tp_raw = getattr(state, "tp", 0) or os.environ.get("TP")
-    try:
-        if isinstance(tp_raw, bool) or isinstance(tp_raw, float):
-            raise ValueError
-        tp = int(tp_raw)
-    except (TypeError, ValueError):
-        tp = 0
-    if tp <= 1:
-        return _collective_revert_result(
-            "invalid_collective_world_size",
-            f"collective TP must be greater than one, got {tp_raw!r}",
-        )
-
-    timeout_raw = payload.get("timeout")
-    if timeout_raw in (None, ""):
-        timeout_raw = os.environ.get("FORGE_COLLECTIVE_TIMEOUT")
-    try:
-        if isinstance(timeout_raw, bool) or isinstance(timeout_raw, float):
-            raise ValueError
-        timeout = int(timeout_raw) if timeout_raw not in (None, "") else 0
-        max_hours, timeout = _collective_budget(state, payload.get("max_hours"), timeout)
-    except (OverflowError, TypeError, ValueError) as exc:
-        return _collective_revert_result(
-            "invalid_collective_budget",
-            str(exc),
-        )
-    if timeout <= 0:
-        return _collective_revert_result(
-            "insufficient_collective_budget",
-            (
-                "remaining session budget cannot fit collective preparation, "
-                "KernelForge's one-hour minimum campaign, and finalization"
-            ),
-            status="skipped",
-            analysis_key=collective_analysis_key(state),
-        )
-    workspace = (
-        session_dir
-        / "runs"
-        / "collective"
-        / str(payload.get("task_id") or "kernel_entry_collective")
-        / f"attempt-{time.time_ns()}"
-    )
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    try:
-        agent_backend, llm_model = _resolve_forge_agent(payload)
-    except (RuntimeError, ValueError) as exc:
-        return _collective_revert_result(
-            "llm_provider_unconfigured" if isinstance(exc, RuntimeError) else "invalid_agent_backend",
-            str(exc),
-            analysis_key=collective_analysis_key(state),
-        )
-
-    input_payload = {
-        "candidate": candidate,
-        "source_file": source_file,
-        "kernel_repo": kernel_repo,
-        "output_dir": str(workspace),
-        "tp": tp,
-        "timeout": timeout,
-        "finalize_grace_sec": _COLLECTIVE_FINALIZE_GRACE_SEC,
-        "agent_timeout_sec": payload.get("agent_timeout_sec") or os.environ.get("FORGE_COLLECTIVE_AGENT_TIMEOUT"),
-        "gpu_target": str(payload.get("gpu_target") or getattr(state, "gpu_type", "") or ""),
-        "max_hours": max_hours,
-        "agent_backend": agent_backend,
-        "llm_model": llm_model,
-        "target_functions": [source_function],
-        "source_files": collective_sources,
-        "operator_name": source_function,
-        "framework": str(getattr(state, "framework", "") or ""),
-        "experience_id": workspace.name,
-    }
-    input_json = workspace / "forge_collective_input.json"
-    input_json.write_text(
-        json.dumps(input_payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-    cmd = ["python3", str(_kernel_agent_tool_path("forge_collective.py")), "--input-json", str(input_json)]
-
-    wrapper_timeout = timeout + _COLLECTIVE_FINALIZE_GRACE_SEC
-    try:
-        rc, stdout, stderr = await _run_subprocess(
-            cmd,
-            timeout_sec=wrapper_timeout,
-        )
-        try:
-            result = _parse_forge_collective_sentinel(stdout)
-        except ValueError as exc:
-            result = _collective_revert_result(
-                "invalid_collective_result",
-                str(exc),
-                returncode=rc,
-                stdout_tail=stdout[-2000:],
-                stderr_tail=stderr[-2000:],
-            )
-    except subprocess.TimeoutExpired as exc:
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = _collective_revert_result(
-            "subprocess_timeout",
-            f"TimeoutExpired after {wrapper_timeout}s: {cmd_repr[:1500]}",
-        )
-
-    result.setdefault("backend", "forge")
-    result.setdefault("engine", "forge_collective")
-    result.setdefault("workspace", str(workspace))
-    result.setdefault("kernel_id", candidate.get("kernel_id"))
-    result.setdefault("kernel_name", candidate.get("name"))
-    result.setdefault("source_file", source_file)
-    result.setdefault("kernel_repo", kernel_repo)
-    result.setdefault("gpu_pct", candidate.get("gpu_pct"))
-    result.setdefault("collective_op", contract["collective_op"])
-    result.setdefault("world_size", tp)
-    result.setdefault("requires_e2e_validation", False)
-    result.setdefault("source", "forge_collective")
-    if str(result.get("status") or "") == "skipped" and str(result.get("error_class") or "") in {
-        "no_collective_candidate",
-        "insufficient_collective_budget",
-    }:
-        result.setdefault("analysis_key", collective_analysis_key(state))
-    return result
-
-
-def _find_repo_root_for_source(source_file: str) -> str:
-    """Nearest ancestor of ``source_file`` containing a ``.git`` directory."""
-    if not source_file:
-        return ""
-    try:
-        current = Path(source_file).resolve()
-    except OSError:
-        return ""
-    for parent in current.parents:
-        if (parent / ".git").exists():
-            return str(parent)
-    return ""
-
-
-async def run_collective_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Run the coordinator-owned collective optimization lane.
-
-    The attempt identity is deliberately left unset: the KERNEL phase derives it
-    from the result's content so a replayed or salvaged campaign deduplicates
-    against its earlier record. Stamping a wall-clock id here would make every
-    replay look like a new campaign.
-    """
-    result = await _run_forge_collective(payload, session_dir=session_dir)
-    if not isinstance(result, dict):
-        raise TypeError("Collective handler result must be a mapping")
-    result.setdefault("requires_e2e_validation", False)
-    return result
 
 
 # A tuner error is a diagnostic pointer, not the diagnosis: the full text lives
@@ -6645,10 +6159,6 @@ async def integrate_handler(
             session_dir=session_dir,
             kernel_id=kernel_id,
         )
-    _checkpoint_collective_apply(
-        str(payload.get("apply_checkpoint_path") or ""),
-        apply_result,
-    )
     if apply_result.get("status") == "skipped" and env_only_validation:
         apply_result = {
             "status": "ok",
@@ -7013,15 +6523,10 @@ async def integrate_handler(
         if decision == "KEEP"
         else _maybe_revert_kernel_patch(apply_result)
     )
-    defer_patch_finalize = bool(payload.get("defer_patch_finalize", False))
     finalize_result = (
-        {"status": "skipped", "reason": "deferred to caller durability checkpoint"}
-        if decision == "KEEP" and defer_patch_finalize
-        else (
-            _maybe_finalize_kernel_patch(apply_result)
-            if decision == "KEEP"
-            else {"status": "skipped", "reason": "non-KEEP decision"}
-        )
+        _maybe_finalize_kernel_patch(apply_result)
+        if decision == "KEEP"
+        else {"status": "skipped", "reason": "non-KEEP decision"}
     )
     revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
     top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
@@ -7119,7 +6624,6 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "trace_analyze": trace_analyze_handler,
     "run_gemm_tuning": run_gemm_tuning_handler,
     # No run_fusion entry: KernelPhase awaits run_fusion_handler directly.
-    "run_collective": run_collective_handler,
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
 }

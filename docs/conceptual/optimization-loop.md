@@ -240,9 +240,9 @@ look very different from Orchestration's side:
   Orchestration does tick until the rebench lands (or the revalidation turns out
   to be unavailable, which drops the pending slot and lets the exit through).
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
-  KERNEL-entry ladder — GEMM tuning, the fusion and collective lanes, then
-  per-kernel `kernel_opt` — and Orchestration drives the remaining kernel work
-  through the request channel.
+  KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
+  rewrite controller, which selects its own operators and publishes patches
+  Hyperloom re-measures end to end.
 
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.

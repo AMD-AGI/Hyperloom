@@ -95,10 +95,6 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
     (lambda s: s == "gemm_tuning", "gemm_tuning"),
-    # COLLECTIVE: Coordinator-gated forge collective campaigns, bucketed apart
-    # from generic ``kernel`` so multi-rank communication gain gets a dedicated
-    # row instead of falling through to ``other``.
-    (lambda s: s == "collective", "collective"),
     # GEAK e2e: whole-pipeline KERNEL-phase optimizer, bucketed apart
     # from generic ``kernel`` so its gain gets a dedicated row instead of vanishing into
     # ``other`` or being mis-credited to a backend.
@@ -115,7 +111,7 @@ def _action_family(action: str) -> str:
     Returns:
         str: One of ``kernel_agent`` / ``backends`` / ``params`` /
         ``validate`` / ``sweep`` / ``explore`` / ``replay_warm_recipe`` /
-        ``framework`` / ``gemm_tuning`` / ``collective`` / ``geak``, or
+        ``framework`` / ``gemm_tuning`` / ``geak``, or
         ``"other"`` when unrecognized.
     """
     s = (action or "").lower()
@@ -483,7 +479,6 @@ def collect_attribution(
         "framework": 0.0,
         "replay_warm_recipe": 0.0,
         "gemm_tuning": 0.0,
-        "collective": 0.0,
         "geak": 0.0,
     }
     unattributed_actions: set[str] = set()
@@ -557,7 +552,6 @@ def collect_attribution(
             "replay_warm_recipe_pct_of_total": round(family_totals.get("replay_warm_recipe", 0.0), 2),
             "framework_pct_of_total": round(family_totals.get("framework", 0.0), 2),
             "gemm_tuning_pct_of_total": round(family_totals.get("gemm_tuning", 0.0), 2),
-            "collective_pct_of_total": round(family_totals.get("collective", 0.0), 2),
             "geak_pct_of_total": round(family_totals.get("geak", 0.0), 2),
             # Legacy rows, kept so archived-session reports reconcile.
             "backends_pct_of_total": round(family_totals.get("backends", 0.0), 2),
@@ -664,7 +658,7 @@ def _collect_phase_breakdown(
         elif phase not in phase_buckets:
             if fam in ("explore", "backends", "params"):
                 phase = "explore"
-            elif fam in ("kernel_agent", "collective"):
+            elif fam == "kernel_agent":
                 phase = "kernel_agent"
             elif fam == "sweep":
                 phase = "sweep"
