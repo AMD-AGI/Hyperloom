@@ -3382,10 +3382,17 @@ class IntegratePatchExecutor:
             _patch_touched_paths_split(framework_root, applied) if framework_root is not None else ([], [])
         )
         base_sha = str(getattr(ctx, "_ip_base_sha", "") or "")
+        git_roots = [r for r in contributions if r and _is_git_tree(Path(r))]
+        # The apply root's HEAD was read before the stash; every other tree is
+        # read here, which names the same commit because enablement commits into
+        # none of them.
+        base_sha_by_root = {r: _git_head_sha(Path(r)) for r in git_roots}
+        if root and base_sha:
+            base_sha_by_root[root] = base_sha
         records = build_root_records(
             contributions=contributions,
-            base_sha_by_root={root: base_sha} if root else {},
-            git_roots=[root] if root and _is_git_tree(Path(root)) else [],
+            base_sha_by_root=base_sha_by_root,
+            git_roots=git_roots,
             session_framework_root=resolve_session_framework_root(),
         )
         targets = declared_targets(
