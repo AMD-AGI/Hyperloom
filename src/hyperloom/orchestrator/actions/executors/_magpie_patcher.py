@@ -15,12 +15,6 @@ defensively right before a benchmark launches:
 
 Every patch is idempotent via a sentinel substring, serialized via
 ``fcntl.flock``, and written atomically through :func:`atomic_write_text`.
-
-Note: this module used to also carry a Hyperloom "#C1" atomic-write patch for
-Magpie's ``_prepare_benchmark_scripts`` (working around a non-atomic
-``shutil.copy2``). That patch was removed after confirming the pinned
-``MAGPIE_REF`` already copies benchmark scripts atomically upstream via
-``_copy_benchmark_script_atomic`` — there was nothing left for it to do.
 """
 
 from __future__ import annotations

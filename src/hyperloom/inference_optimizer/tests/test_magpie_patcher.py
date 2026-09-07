@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 """Tests for the redundant ``--concurrent-requests`` eval-flag strip in
-``_magpie_patcher.py``.
+``_magpie_patcher.py`` (the flag-strip regex and per-script apply helper).
 
 SGLang custom-tokenizer trust patching and end-to-end
 ``magpie_scripts_patch_status`` / ``ensure_eval_concurrency_compat`` /
 ``ensure_client_trust_compat`` coverage lives in
-``test_magpie_patcher_unit.py`` and ``test_preflight_client_trust_compat.py``;
-this file only covers the flag-strip regex and per-script apply helper, which
-those do not exercise at this granularity.
+``test_magpie_patcher_unit.py`` and ``test_preflight_client_trust_compat.py``.
 """
 
 from __future__ import annotations

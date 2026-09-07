@@ -1525,12 +1525,6 @@ ensure_aiperf() {
 # at install time. The patcher itself is idempotent + flock-serialised +
 # atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# (Hyperloom used to also carry a "#C1" atomic-write patch here for
-# `_prepare_benchmark_scripts`'s non-atomic `shutil.copy2`. It was removed:
-# the pinned MAGPIE_REF already copies benchmark scripts atomically upstream
-# via `_copy_benchmark_script_atomic`, confirmed against the current pin, so
-# there was nothing left for that patch to do.)
-#
 # Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
 ensure_magpie_atomic_scripts_patch() {
   if is_falsy "${PATCH_MAGPIE:-1}"; then
