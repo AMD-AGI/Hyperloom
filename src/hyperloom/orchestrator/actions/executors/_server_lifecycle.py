@@ -23,8 +23,16 @@ log = logging.getLogger(__name__)
 _SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
     "sglang.launch_server",
     "sglang serve",
+    "sglang.srt",
     "vllm.entrypoints",
     "vllm serve",
+    "atom.entrypoints",
+    # The launcher's own cmdline is what the pidfile records, but the processes
+    # still holding VRAM once that launcher exits are the engine/worker ranks,
+    # and they carry none of the names above -- so the dead-leader-live-group
+    # branch below needs them too.
+    "EngineCore",
+    "VLLM::Worker",
     "launch_server",
 )
 
