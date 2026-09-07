@@ -481,9 +481,6 @@ def build(
         warnings,
         default={},
     )
-    # Authoritative external-tool versions, folded into a {tool: meta} map by
-    # the recorder assembler. Pure recorder section (no collector fallback).
-    versions = _pick("versions", {})
     source_files = _safe_collect(
         "source_files",
         lambda: collectors.collect_source_files(
@@ -531,7 +528,6 @@ def build(
             workload=workload,
             model_info=model_info,
             langfuse=langfuse,
-            versions=versions,
             state=state,
             warnings=v6_warnings,
             recorded=assembled.get("metadata"),

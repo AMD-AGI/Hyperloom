@@ -325,7 +325,6 @@ def _collect(recorded=None, **overrides):
         workload={"framework_name": "sglang", "model_class": "moe"},
         model_info={"model_type": "deepseek_v3", "hidden_size": 7168},
         langfuse={"enabled": False},
-        versions={"geak": {"tool": "geak", "commit": "dead", "root_dir": "/opt/geak", "version": "1.2"}},
         state={},
         warnings=["w"],
         recorded=recorded,
@@ -362,7 +361,8 @@ def test_versions_does_not_restate_the_envelope():
 
 def test_tool_provenance_keeps_commit_and_root_dir():
     """A bare version string cannot tell you which checkout produced a result."""
-    tools = _collect()["versions"]["tools"]
+    recorded = {"versions": {"tools": {"geak": {"tool": "geak", "commit": "dead", "root_dir": "/opt/geak"}}}}
+    tools = _collect(recorded=recorded)["versions"]["tools"]
     assert tools["geak"]["commit"] == "dead"
     assert tools["geak"]["root_dir"] == "/opt/geak"
 

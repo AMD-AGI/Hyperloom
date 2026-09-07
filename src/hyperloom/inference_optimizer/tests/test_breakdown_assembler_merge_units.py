@@ -149,24 +149,6 @@ def test_the_first_recognised_id_field_decides_identity():
 # ---- substream composition ----
 
 
-def test_versions_fold_into_one_entry_per_tool():
-    out = {"versions": [{"tool": "TraceLens", "v": "1"}, {"tool": "tracelens", "v": "2"}]}
-    asm._compose_versions(out)
-    assert out["versions"] == {"tracelens": {"tool": "tracelens", "v": "2"}}
-
-
-def test_versions_ignore_rows_that_name_no_tool():
-    out = {"versions": [{"v": "1"}, "junk"]}
-    asm._compose_versions(out)
-    assert out["versions"] == {}
-
-
-def test_versions_are_left_alone_when_nothing_was_recorded():
-    out = {}
-    asm._compose_versions(out)
-    assert "versions" not in out
-
-
 def test_critic_and_robustness_substreams_fold_into_one_section():
     out = {
         "critic_iterations": [{"iteration": 1}],

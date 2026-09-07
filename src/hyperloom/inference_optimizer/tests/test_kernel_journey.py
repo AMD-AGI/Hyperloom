@@ -17,6 +17,7 @@ from pathlib import Path
 from hyperloom.inference_optimizer.breakdown.recorder import (
     assemble_parts,
     instrument,
+    tool_versions,
 )
 
 
@@ -295,7 +296,7 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
         },
     )
     out = assemble_parts(tmp_path)
-    versions = out["versions"]
+    versions = out["metadata"]["versions"]["tools"]
     assert isinstance(versions, dict)
     assert set(versions) >= {"tracelens", "geak"}
     assert versions["geak"]["tool"] == "geak"
@@ -333,7 +334,7 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     out = assemble_parts(tmp_path)
     atts = out["kernel_journey"]["kernels"][0]["backend_attempts"]
     assert atts[0]["backend"] == "forge"
-    versions = out["versions"]
+    versions = out["metadata"]["versions"]["tools"]
     assert versions["forge"]["tool"] == "forge"
     # KernelForge ships inside this distribution, so its version IS Hyperloom's;
     # there is no separate checkout left to ``git rev-parse``. The producer-supplied
@@ -351,7 +352,7 @@ def test_geak_provenance_resolves_geak_root_env_without_explicit_root(tmp_path: 
     geak_sha = _init_git_repo(geak_root)
     monkeypatch.setenv("GEAK_ROOT", str(geak_root))
 
-    meta = instrument._tool_metadata("geak")
+    meta = tool_versions._tool_metadata("geak")
 
     assert meta["tool"] == "geak"
     assert meta["root_dir"] == str(geak_root)
@@ -392,7 +393,7 @@ def test_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
     assert runs[0]["hot_kernel_count"] == 1
     assert runs[0]["scan"]["analysis_route"] == "bypass"
     # Version provenance follows the underlying tool, not the route alias.
-    versions = out["versions"]
+    versions = out["metadata"]["versions"]["tools"]
     assert "geak" in versions
     assert "bypass" not in versions
 
@@ -410,7 +411,7 @@ def test_bypass_discovery_mints_a_versioned_bypass_entry(tmp_path: Path) -> None
         scan={"analysis_route": "bypass", "candidates_path": str(tmp_path / "c.json")},
     )
     out = assemble_parts(tmp_path)
-    entry = out["versions"]["bypass"]
+    entry = out["metadata"]["versions"]["tools"]["bypass"]
     assert entry["tool"] == "bypass"
     assert entry["version"] == _distribution_version()
 
@@ -425,27 +426,27 @@ def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
         scan={},
     )
     out = assemble_parts(tmp_path)
-    assert "tracelens" in out["versions"]
+    assert "tracelens" in out["metadata"]["versions"]["tools"]
 
 
 def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     sha = _init_git_repo(tmp_path)
     # geak -> git short SHA; commit == version.
-    meta = instrument._tool_metadata("geak", root=str(tmp_path))
+    meta = tool_versions._tool_metadata("geak", root=str(tmp_path))
     assert meta["commit"] == sha
     assert meta["version"] == sha
     # tracelens -> git describe (--always falls back to the short sha here).
-    meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
+    meta_tl = tool_versions._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
     # forge -> the distribution version: it is vendored into Hyperloom, not a
     # checkout, so the git strategy geak uses does not apply to it. The commit
     # still comes from the root the caller passed.
-    meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
+    meta_forge = tool_versions._tool_metadata("forge", root=str(tmp_path))
     assert meta_forge["commit"] == sha
     assert meta_forge["version"] == _distribution_version()
     assert meta_forge["version"] != sha
     # A caller-supplied version always wins over the probe.
-    meta_explicit = instrument._tool_metadata(
+    meta_explicit = tool_versions._tool_metadata(
         "geak",
         root=str(tmp_path),
         version="v9.9",
@@ -456,7 +457,7 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
 def test_tool_version_probe_cmd_and_dist() -> None:
     # CLI strategy: python3 --version.
     assert (
-        instrument._probe_tool_version(
+        tool_versions._probe_tool_version(
             ("cmd", ("python3", "--version")),
             "",
         )
@@ -464,8 +465,8 @@ def test_tool_version_probe_cmd_and_dist() -> None:
         .startswith("python")
     )
     # dist strategy resolves an installed package and rejects a bogus name.
-    assert instrument._dist_version(("pytest",))
-    assert instrument._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
+    assert tool_versions._dist_version(("pytest",))
+    assert tool_versions._dist_version(("definitely-not-a-real-dist-xyz",)) == ""
 
 
 def test_attach_kernel_roofline_enriches_journey() -> None:

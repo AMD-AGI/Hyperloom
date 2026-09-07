@@ -2288,9 +2288,23 @@ class KernelPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
                 log.debug("kernel timeline: geak attempts record failed", exc_info=True)
 
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument, tool_versions
 
         sdir = self.session_dir
+        # GEAK reports the build of every tool its run went through, and this
+        # journey is the only place those reach the optimizer.
+        for tool, meta in (journey.get("versions") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            try:
+                tool_versions.record_tool_version(
+                    sdir,
+                    tool=str(tool),
+                    root=str(meta.get("root_dir") or "") or None,
+                    version=str(meta.get("version") or meta.get("commit") or "") or None,
+                )
+            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+                log.debug("kernel timeline: geak tool version record failed", exc_info=True)
         commit = str(getattr(self.shared_state, "code_revision", "") or "")
         # Replay GEAK-e2e's discovery substream so the assembler backfills each
         # kernel's discovery-sourced fields; GEAK profiles via rocprofv3 (route
@@ -2355,18 +2369,6 @@ class KernelPhase(PhaseHandler):
                     )
             except Exception:  # noqa: BLE001
                 log.debug("geak kernel_journey replay failed for %s", kid, exc_info=True)
-        for tool, meta in (journey.get("versions") or {}).items():
-            if not isinstance(meta, dict):
-                continue
-            try:
-                instrument.record_tool_version(
-                    sdir,
-                    tool=str(tool),
-                    root=str(meta.get("root_dir") or "") or None,
-                    version=str(meta.get("version") or meta.get("commit") or "") or None,
-                )
-            except Exception:  # noqa: BLE001
-                pass
 
     def _reject_geak_kernel_journey(
         self,

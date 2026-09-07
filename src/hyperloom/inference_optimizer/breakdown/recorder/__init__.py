@@ -121,9 +121,9 @@ from .instrument import (
     record_robustness_signal,
     record_singleton_section,
     record_specialist_round,
-    record_tool_version,
     snapshot_state_sections,
 )
+from .tool_versions import record_tool_version
 from .recorder import (
     DERIVED_SECTIONS,
     SECTION_SHAPES,

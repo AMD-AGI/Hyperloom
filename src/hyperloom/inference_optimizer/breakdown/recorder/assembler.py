@@ -198,7 +198,6 @@ def assemble_parts(
     _compose_close(out)
     if not keep_event_rows:
         _drop_event_rows(out)
-    _compose_versions(out)
     return out
 
 
@@ -420,25 +419,6 @@ def _merge_lists(
                 entity_root=False,
             )
     return merged
-
-
-def _compose_versions(out: dict[str, Any]) -> None:
-    """Fold the ``versions`` item substream into a top-level ``{tool: meta}``
-    map (last write per tool wins). No-op when nothing was recorded.
-
-    Args:
-        out: The assembled section mapping mutated in place.
-    """
-    rows = out.get("versions")
-    if not isinstance(rows, list):
-        return
-    merged: dict[str, Any] = {}
-    for r in rows:
-        if isinstance(r, dict):
-            tool = str(r.get("tool") or "").lower()
-            if tool:
-                merged[tool] = r
-    out["versions"] = merged
 
 
 def _compose_close(out: dict[str, Any]) -> None:

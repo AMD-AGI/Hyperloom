@@ -65,30 +65,6 @@ _ARCHITECTURE_FIELDS = (
 )
 
 
-def _tool_versions(versions: Any) -> dict[str, dict[str, Any]]:
-    """Fold the recorded ``versions`` item stream into a per-tool provenance map.
-
-    Each tool keeps its full recorded row (``root_dir`` / ``commit`` /
-    ``version``); a bare string is the shape a legacy session recorded before
-    the row carried provenance.
-    """
-    if not isinstance(versions, dict):
-        return {}
-    tools: dict[str, dict[str, Any]] = {}
-    for name, value in versions.items():
-        tool = str(name or "").strip()
-        if not tool:
-            continue
-        if isinstance(value, str):
-            tools[tool] = {"tool": tool, "version": value or None}
-            continue
-        if isinstance(value, dict):
-            row = {k: v for k, v in value.items() if v not in (None, "")}
-            row.setdefault("tool", tool)
-            tools[tool] = row
-    return tools
-
-
 def _architecture(workload: dict[str, Any], model_info: dict[str, Any]) -> dict[str, Any]:
     """The structural model summary, carried whole rather than digested.
 
@@ -135,7 +111,6 @@ def collect_v6_metadata(
     workload: dict[str, Any],
     model_info: dict[str, Any],
     langfuse: dict[str, Any],
-    versions: dict[str, Any],
     state: dict[str, Any],
     warnings: list[str],
     recorded: dict[str, Any] | None = None,
@@ -157,7 +132,6 @@ def collect_v6_metadata(
         workload: The resolved ``workload`` section.
         model_info: The parsed model config summary.
         langfuse: The Langfuse push receipt.
-        versions: The assembled per-tool version map.
         state: Parsed ``state.json``.
         warnings: The V6 warnings accumulated by this export.
         recorded: The recorder's ``metadata`` fragment, when present.
@@ -188,7 +162,10 @@ def collect_v6_metadata(
         "versions": {
             "framework": str(workload.get("framework_name") or "") or None,
             "framework_version": str(workload.get("framework_version") or "") or None,
-            "tools": _tool_versions(versions),
+            # Probed per tool the moment it is first used and written straight
+            # into the recorded ``metadata`` singleton, so there is nothing to
+            # re-derive here: the overlay supplies the whole map.
+            "tools": {},
         },
         "session": {
             "session_id": str(session.get("session_id") or ""),
