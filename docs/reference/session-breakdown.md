@@ -552,6 +552,14 @@ Paths only (no copied content): `baseline_report_path`,
 `system_profile_paths[]`, `server_log_paths[]`, and a
 `gpu_monitor_aggregate` summary.
 
+`gpu_monitor_aggregate` is absent entirely when no benchmark report carried a
+`gpu_monitor` block. When present, `samples` counts the underlying telemetry
+samples and `blocks` counts the report entries they came from, while each
+metric (`avg_power_w`, `max_power_w`, `avg_temp_c`, `max_temp_c`,
+`avg_clock_mhz`) is `float | None`. **`None` means nothing sampled that
+metric — it is not zero.** Test with `is None` rather than truthiness, since a
+genuine `0.0` reading is falsy too.
+
 Paths are session-dir relative when the producer can express them
 that way; absolute otherwise. Consumers that need to pull raw
 artifacts (for example, for a replay) should resolve relative paths against

@@ -122,12 +122,62 @@ def _scan_server_logs(session_dir: Path) -> list[Path]:
     return sorted(runs.rglob("server*.log"))
 
 
+# ``gpu_monitor`` metric aliases, current producer name first. Magpie -- the
+# only writer in the tree today -- emits ``power_watts`` / ``temperature_c`` /
+# ``gpu_clock_mhz``. The shorter spellings are older shapes, kept so archived
+# reports still parse. Reading only the short names is what left every
+# single-node session's GPU section reading 0.0.
+_GPU_POWER_KEYS = ("power_watts", "power_w", "power")
+_GPU_TEMP_KEYS = ("temperature_c", "temp_c", "temperature")
+_GPU_CLOCK_KEYS = ("gpu_clock_mhz", "clock_mhz", "sclk_mhz")
+
+
+def _gpu_metric(block: dict[str, Any], keys: tuple[str, ...], field: str) -> float | None:
+    """Read one GPU metric out of a single ``gpu_monitor`` block.
+
+    Two producer shapes exist and both are read here:
+
+    * a flat scalar per sample (``{"power_w": 301.2}``) -- ``field`` does not
+      apply, the scalar is both that sample's mean and its peak;
+    * a pre-aggregated block (``{"power_watts": {"min", "max", "avg"}}``),
+      which is what Magpie's ``GPUMonitor`` returns. ``field`` picks the
+      statistic. The previous implementation coerced this dict through
+      ``_to_float``, which returns ``None`` for a dict, so the value was
+      dropped even when the key name matched.
+
+    Args:
+        block (dict[str, Any]): One ``gpu_monitor`` entry.
+        keys (tuple[str, ...]): Metric aliases to try, in order.
+        field (str): ``"avg"`` or ``"max"``; consulted only for nested blocks.
+
+    Returns:
+        float | None: The reading, or ``None`` when this block carries none.
+        ``None`` rather than ``0.0`` on purpose -- a metric that was never
+        sampled has to stay distinguishable from one that measured zero.
+    """
+    for key in keys:
+        if key not in block:
+            continue
+        raw = block[key]
+        value = _to_float(raw.get(field)) if isinstance(raw, dict) else _to_float(raw)
+        if value is not None:
+            return value
+    return None
+
+
 def _aggregate_gpu_monitor(
     reports: list[Path],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Aggregate GPU-monitor samples across benchmark reports."""
-    samples: list[dict[str, Any]] = []
+    """Aggregate GPU-monitor blocks across benchmark reports.
+
+    Every metric is tri-state and never coerced to ``0.0``: absent and "measured
+    zero" have to stay apart, and the previous ``_avg(a) or _avg(b)`` form could
+    not express that -- a real 0.0 fell through to the alias, and an all-absent
+    metric shipped as a plausible-looking zero. Returns ``{}`` when no report
+    carried a ``gpu_monitor`` block.
+    """
+    blocks: list[dict[str, Any]] = []
     for r in reports:
         d = _load_json_safe(r, warnings)
         if not isinstance(d, dict):
@@ -136,31 +186,47 @@ def _aggregate_gpu_monitor(
         if isinstance(gm, list):
             for s in gm:
                 if isinstance(s, dict):
-                    samples.append(s)
+                    blocks.append(s)
         elif isinstance(gm, dict):
-            samples.append(gm)
-    if not samples:
+            blocks.append(gm)
+    if not blocks:
         return {}
 
-    def _avg(key: str) -> float:
-        """Mean of a numeric field across the collected samples."""
-        vals = [_to_float(s.get(key)) for s in samples]
-        vals = [v for v in vals if v is not None]
-        return round(sum(vals) / len(vals), 2) if vals else 0.0
+    # A Magpie block already summarises ``sample_count`` underlying samples, so
+    # weight its mean by that count; a flat per-sample block counts as one.
+    # Unweighted, a 10-sample block would pull the session mean as hard as a
+    # 10,000-sample one.
+    weights = [max(1.0, _to_float(b.get("sample_count")) or 1.0) for b in blocks]
 
-    def _max(key: str) -> float:
-        """Maximum of a numeric field across the collected samples."""
-        vals = [_to_float(s.get(key)) for s in samples]
-        vals = [v for v in vals if v is not None]
-        return round(max(vals), 2) if vals else 0.0
+    def _avg(keys: tuple[str, ...]) -> float | None:
+        """Sample-count-weighted mean of one metric, or ``None`` if unread."""
+        total = 0.0
+        weight_sum = 0.0
+        for block, weight in zip(blocks, weights):
+            value = _gpu_metric(block, keys, "avg")
+            if value is None:
+                continue
+            total += value * weight
+            weight_sum += weight
+        return round(total / weight_sum, 2) if weight_sum else None
+
+    def _max(keys: tuple[str, ...]) -> float | None:
+        """Peak of one metric across all blocks, or ``None`` if unread."""
+        values: list[float] = []
+        for block in blocks:
+            value = _gpu_metric(block, keys, "max")
+            if value is not None:
+                values.append(value)
+        return round(max(values), 2) if values else None
 
     return {
-        "samples": len(samples),
-        "avg_power_w": _avg("power_w") or _avg("power"),
-        "max_power_w": _max("power_w") or _max("power"),
-        "avg_temp_c": _avg("temperature_c") or _avg("temperature"),
-        "max_temp_c": _max("temperature_c") or _max("temperature"),
-        "avg_clock_mhz": _avg("clock_mhz") or _avg("sclk_mhz"),
+        "samples": int(sum(weights)),
+        "blocks": len(blocks),
+        "avg_power_w": _avg(_GPU_POWER_KEYS),
+        "max_power_w": _max(_GPU_POWER_KEYS),
+        "avg_temp_c": _avg(_GPU_TEMP_KEYS),
+        "max_temp_c": _max(_GPU_TEMP_KEYS),
+        "avg_clock_mhz": _avg(_GPU_CLOCK_KEYS),
     }
 
 

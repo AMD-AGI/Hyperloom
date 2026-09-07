@@ -592,14 +592,21 @@ class CriticRobustness(TypedDict, total=False):
 
 # Telemetry
 class GpuMonitorAggregate(TypedDict, total=False):
-    """Aggregated GPU power/thermal/clock telemetry over the session."""
+    """Aggregated GPU power/thermal/clock telemetry over the session.
+
+    Metrics are tri-state: ``None`` means nobody sampled them, not zero. Test
+    with ``is None`` -- a real 0.0 reading is falsy too. ``samples`` counts
+    underlying samples behind the metrics; ``blocks`` counts the entries read,
+    so a collection gap stays distinguishable from a quiet GPU.
+    """
 
     samples: int
-    avg_power_w: float
-    max_power_w: float
-    avg_temp_c: float
-    max_temp_c: float
-    avg_clock_mhz: float
+    blocks: int
+    avg_power_w: float | None
+    max_power_w: float | None
+    avg_temp_c: float | None
+    max_temp_c: float | None
+    avg_clock_mhz: float | None
 
 
 class LaneTimelineEntry(TypedDict, total=False):
