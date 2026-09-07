@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
 from hyperloom.orchestrator.kernel.campaign_baseline import (
@@ -51,6 +54,19 @@ def _repo(tmp_path: Path, name: str = "framework") -> Path:
 
 def _state(repo: Path) -> SimpleNamespace:
     return SimpleNamespace(framework_repo_path=str(repo))
+
+
+@pytest.fixture(autouse=True)
+def _no_runtime_discovery(monkeypatch: pytest.MonkeyPatch):
+    """Keep these tests off whatever framework the host has installed.
+
+    ``seal_campaign_baseline`` commits, and it finds its repositories from the
+    interpreter. Left alone it would reach a real sglang or aiter checkout.
+
+    Stubbed at ``find_spec`` rather than at ``_package_repository`` so the
+    resolver itself still runs for the tests that are about it.
+    """
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
 
 
 def test_a_clean_repository_is_pinned_without_a_new_commit(tmp_path: Path) -> None:
@@ -174,7 +190,6 @@ def test_a_configured_root_is_added_to_what_the_runtime_found(
 
 def test_a_wheel_installed_framework_is_not_a_repository_to_seal(monkeypatch) -> None:
     """A wheel carries no source to rewrite, so it has no base to pin."""
-    import importlib.util
     from types import SimpleNamespace as Spec
 
     monkeypatch.setattr(
@@ -211,3 +226,56 @@ def test_a_repository_the_controller_returned_cleanly_is_left_alone(tmp_path: Pa
 
     assert reclaim_campaign_repositories({str(repo): base}) == {}
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == branch_before
+
+
+def test_a_configured_file_resolves_to_the_repository_holding_it(tmp_path: Path) -> None:
+    """A launch recipe or a source file names its repository just as well."""
+    repo = _repo(tmp_path)
+    inside = repo / "nested" / "config.yaml"
+    inside.parent.mkdir()
+    inside.write_text("{}\n", encoding="utf-8")
+
+    roots = campaign_repositories(SimpleNamespace(framework_repo_path=str(inside)))
+
+    assert roots == (repo.resolve(),)
+
+
+def test_a_configured_path_in_no_repository_is_dropped(tmp_path: Path) -> None:
+    loose = tmp_path / "loose"
+    loose.mkdir()
+
+    assert campaign_repositories(SimpleNamespace(framework_repo_path=str(loose))) == ()
+
+
+def test_a_package_that_cannot_be_imported_names_no_repository(monkeypatch) -> None:
+    """A broken install is not a repository, and must not raise on the way out."""
+    def _raise(_name):
+        raise ImportError("boom")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _raise)
+    assert campaign_baseline._package_repository("sglang") is None
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    assert campaign_baseline._package_repository("sglang") is None
+
+
+def test_a_namespace_package_with_no_origin_names_no_repository(monkeypatch) -> None:
+    from types import SimpleNamespace as Spec
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: Spec(origin=None))
+
+    assert campaign_baseline._package_repository("sglang") is None
+
+
+def test_reclaiming_a_repository_that_is_gone_is_reported_not_raised(tmp_path: Path) -> None:
+    """One unusable tree must not stop the repositories beside it."""
+    good = _repo(tmp_path, "good")
+    base = _git(good, "rev-parse", "HEAD").lower()
+    _git(good, "checkout", "-b", f"{CAMPAIGN_BRANCH_PREFIX}abandoned")
+
+    reclaimed = reclaim_campaign_repositories(
+        {str(tmp_path / "absent"): "b" * 40, str(good): base},
+    )
+
+    assert str(good) in reclaimed
+    assert str(tmp_path / "absent") not in reclaimed

@@ -38,9 +38,6 @@ from kernelforge.loop.editable_repo import (
     acquire_repo_lock as _acquire_repo_lock,
 )
 from kernelforge.loop.editable_repo import (
-    editable_roots as _editable_roots,
-)
-from kernelforge.loop.editable_repo import (
     needs_inplace as _needs_inplace,
 )
 from kernelforge.loop.editable_repo import (

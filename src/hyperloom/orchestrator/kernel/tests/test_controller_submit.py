@@ -190,6 +190,8 @@ def test_a_controller_result_without_usage_files_nothing(tmp_path: Path) -> None
 
 def test_the_analysis_spend_reaches_the_ledger_beside_the_forge_loops(tmp_path: Path) -> None:
     """The sessions that spent most and bought least were reporting nothing."""
+    from hyperloom.orchestrator.trace.llm_trace import llm_calls_path
+
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 

@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+import hyperloom.orchestrator.kernel.campaign_baseline as campaign_baseline
+
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -86,7 +88,11 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
     # Entry tests are about what leads up to that, so the handoff is the last
     # step they exercise; the test that covers the handoff stubs this itself.
-    async def _skip_controller(_handoff_dir: Path, _output_dir: Path) -> None:
+    async def _skip_controller(
+        _handoff_dir: Path,
+        _output_dir: Path,
+        _baseline_pins: dict[str, str] | None = None,
+    ) -> None:
         return None
 
     monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
@@ -390,10 +396,23 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
         return None
 
     handed_off: list[tuple[Path, Path]] = []
+    pins_seen: list[dict[str, str]] = []
 
-    async def _controller(handoff_dir: Path, output_dir: Path) -> None:
+    async def _controller(
+        handoff_dir: Path,
+        output_dir: Path,
+        baseline_pins: dict[str, str] | None = None,
+    ) -> None:
         handed_off.append((handoff_dir, output_dir))
+        pins_seen.append(dict(baseline_pins or {}))
 
+    # Sealing commits, and it finds its repositories from the interpreter, so it
+    # would reach whatever framework this host has installed.
+    monkeypatch.setattr(
+        campaign_baseline,
+        "seal_campaign_baseline",
+        lambda _state, **_kwargs: {"/repo": "a" * 40},
+    )
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_run_collective_before_kernel_opt", _skip)
@@ -409,6 +428,9 @@ async def test_kernel_entry_always_hands_rewrite_control_to_controller(
         (attempt_root / "attempt-0" / "handoff", attempt_root / "attempt-0"),
         (attempt_root / "attempt-1" / "handoff", attempt_root / "attempt-1"),
     ]
+    # The base each repository was sealed at travels with the handoff, because
+    # reclaiming a repository after a killed controller needs to know it.
+    assert pins_seen == [{"/repo": "a" * 40}, {"/repo": "a" * 40}]
     for handoff_dir, _output_dir in handed_off:
         assert (handoff_dir / "workload.md").is_file()
         assert (handoff_dir / "serving-context.md").is_file()
