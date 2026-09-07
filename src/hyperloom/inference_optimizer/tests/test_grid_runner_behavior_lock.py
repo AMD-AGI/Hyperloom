@@ -54,7 +54,7 @@ def _write_base_yaml(path: Path, *, framework: str = "sglang") -> None:
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "benchmark_script": "sglang_mi300x.sh",
+            "benchmark_script": f"{framework}_mi300x.sh",
             "timeout_seconds": 600,
             "profiler": {
                 "torch_profiler": {"enabled": False},
@@ -359,7 +359,8 @@ class TestAutoWarmupTeardown:
             )
         return results, teardown_calls
 
-    def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+    def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch, framework):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
         # Pin the free-port picker so the teardown-port assertion is
         # deterministic (baseline uses a per-session free port).
@@ -368,7 +369,7 @@ class TestAutoWarmupTeardown:
             lambda: 8888,
         )
         base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
+        _write_base_yaml(base, framework=framework)
         state = {"n": 0}
 
         def _run(cmd, *a, **k):
@@ -384,7 +385,7 @@ class TestAutoWarmupTeardown:
         assert state["n"] == 2
         # Exactly one teardown: the measured-round ``finally`` block.
         assert len(teardown_calls) == 1
-        assert teardown_calls[0]["framework"] == "sglang"
+        assert teardown_calls[0]["framework"] == framework
         assert teardown_calls[0]["port"] == 8888
         assert "run_grid_warmup_discarded_first" in results[0].nonfatal_warnings
 

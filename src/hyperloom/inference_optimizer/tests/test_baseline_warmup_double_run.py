@@ -179,10 +179,11 @@ def _executor(
     )
 
 
-def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch, framework):
     """The double-run reports the HOT second-round throughput."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
+    _write_yaml(base, framework=framework)
     output_dir = tmp_path / "ws"
 
     captured: list = []
@@ -221,7 +222,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert measure_lc["cleanup"] is True
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
-    assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+    assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
 
 
 def _run_capturing_rounds(executor, ctx, notes):
