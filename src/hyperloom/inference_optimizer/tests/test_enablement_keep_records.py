@@ -15,6 +15,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _git_head_sha
 from hyperloom.orchestrator.enablement.recipe.keep_records import (
+    accepted_stack_artifacts,
     build_root_records,
     capture_root_snapshots,
     classify_root,
@@ -234,6 +235,70 @@ def test_a_later_capture_of_one_root_leaves_no_earlier_target_behind(repo: Path,
     overlay = session_dir / manifests[0]["snapshot_ref"] / "files"
     assert (overlay / "srt/b.py").is_file()
     assert not (overlay / TARGET).exists()
+
+
+def test_a_root_absent_from_this_keep_leaves_no_packageable_overlay(repo: Path, tmp_path: Path):
+    """Packaging selects the overlay by path, so a stale directory would ship."""
+    session_dir = tmp_path / "session"
+    dest_root = session_dir / "optimization_stack" / "enablement"
+    other = tmp_path / "other"
+    (other / "srt").mkdir(parents=True)
+    (other / TARGET).write_text("value = 9\n", encoding="utf-8")
+
+    def _capture(root: Path):
+        records = build_root_records(
+            contributions={str(root): {"patch_apply"}},
+            base_sha_by_root={},
+            git_roots=[],
+            session_framework_root=str(repo),
+        )
+        return records, capture_root_snapshots(
+            records=records,
+            targets={str(root): {TARGET: "upsert"}},
+            dest_root=dest_root,
+            session_dir=session_dir,
+        )
+
+    stale_records, _stale = _capture(other)
+    stale_dir = dest_root / stale_records[0]["id"]
+    assert (stale_dir / "files" / TARGET).is_file()
+
+    _records, manifests = _capture(repo)
+    assert not stale_dir.exists()
+    assert (session_dir / manifests[0]["snapshot_ref"] / "files" / TARGET).is_file()
+
+
+def test_a_record_declaring_no_target_keeps_no_earlier_overlay(repo: Path, tmp_path: Path):
+    session_dir = tmp_path / "session"
+    dest_root = session_dir / "optimization_stack" / "enablement"
+    records = build_root_records(
+        contributions={str(repo): {"patch_apply"}},
+        base_sha_by_root={},
+        git_roots=[],
+        session_framework_root=str(repo),
+    )
+    capture_root_snapshots(
+        records=records, targets={str(repo): {TARGET: "upsert"}}, dest_root=dest_root, session_dir=session_dir
+    )
+    assert capture_root_snapshots(records=records, targets={}, dest_root=dest_root, session_dir=session_dir) == []
+    assert not (dest_root / records[0]["id"]).exists()
+
+
+def test_the_captured_stack_is_the_accepted_one_not_this_rounds_installs():
+    inherited = [{"target": "/fr/srt/base.py", "rel_target": "srt/base.py", "root": "/fr"}]
+    applied = [{"target": "/fr/srt/new.py", "rel_target": "srt/new.py", "root": "/fr"}]
+    stack = accepted_stack_artifacts(inherited=inherited, applied=applied)
+    assert declared_targets(framework_root="/fr", upserted=[], deleted=[], artifacts=stack)["/fr"] == {
+        "srt/base.py": "upsert",
+        "srt/new.py": "upsert",
+    }
+
+
+def test_this_rounds_install_supersedes_the_inherited_record_at_one_target():
+    inherited = [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root": "/fr", "source": "old"}]
+    applied = [{"target": "/fr/srt/a.py", "rel_target": "srt/a.py", "root": "/fr", "source": "new"}]
+    stack = accepted_stack_artifacts(inherited=inherited, applied=applied)
+    assert [a["source"] for a in stack] == ["new"]
 
 
 def test_undeclared_absent_target_is_recorded_missing_and_incomplete(repo: Path, tmp_path: Path):
@@ -467,6 +532,39 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
     assert all(r["is_git"] for r in records.values())
     assert records[str(second)]["base_sha"] == _git(second, "rev-parse", "HEAD")
     assert records[str(second)]["base_sha"] != records[str(repo)]["base_sha"]
+
+
+def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Path, tmp_path: Path):
+    """The lane replaces these records with the latest KEEP's, so a round that
+    captured only its own installs would drop an earlier round's payload."""
+    inherited_rel = "srt/inherited.py"
+    (repo / inherited_rel).write_text("value = 7\n", encoding="utf-8")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        _ip_shared_state=SimpleNamespace(enablement=None),
+    )
+    out = executor._enablement_keep_records(
+        ctx,
+        params={
+            "enablement_base_artifacts": [
+                {"target": str(repo / inherited_rel), "rel_target": inherited_rel, "root": str(repo)}
+            ]
+        },
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        done_payload={},
+        provision_result=None,
+        bench_result={},
+    )
+    root_id = out["enablement_roots"][0]["id"]
+    assert out["enablement_accepted_stack_targets"][root_id] == {TARGET: "upsert", inherited_rel: "upsert"}
+    snapshot = out["enablement_source_snapshots"][0]
+    assert {f["rel"] for f in snapshot["files"]} == {TARGET, inherited_rel}
+    overlay = executor.session_dir / snapshot["snapshot_ref"] / "files"
+    assert (overlay / inherited_rel).read_text(encoding="utf-8") == "value = 7\n"
 
 
 def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path: Path):

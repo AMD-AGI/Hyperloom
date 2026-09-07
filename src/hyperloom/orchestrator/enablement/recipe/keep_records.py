@@ -60,8 +60,8 @@ def build_root_records(
     """Build one record per root that contributed to the accepted stack.
 
     A root carrying a ``patch_apply`` contribution is a build input and one
-    carrying ``artifact_install`` is an output target: the split the defect asks
-    for, in the only terms the resolvers can produce.
+    carrying ``artifact_install`` is an output target: the input/output split, in
+    the only terms the two binding resolvers can produce.
     """
     git = {str(r) for r in git_roots}
     records: list[dict[str, Any]] = []
@@ -81,6 +81,27 @@ def build_root_records(
             }
         )
     return records
+
+
+def accepted_stack_artifacts(
+    *,
+    inherited: Sequence[Mapping[str, Any]],
+    applied: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the artifact set present at this validation, deduped by target.
+
+    The stack a KEEP launched is every artifact the round inherited plus the
+    ones it installed; deduplication is by ``target`` with this round's record
+    last, matching the durable stacking that hands the next round its base set.
+    """
+    by_target: dict[str, dict[str, Any]] = {}
+    for artifact in (*(inherited or ()), *(applied or ())):
+        if not isinstance(artifact, Mapping):
+            continue
+        target = str(artifact.get("target") or "")
+        if target:
+            by_target[target] = dict(artifact)
+    return list(by_target.values())
 
 
 def collect_contributions(
@@ -145,6 +166,7 @@ def capture_root_snapshots(
     snapshot rather than an empty-but-complete one.
     """
     manifests: list[dict[str, Any]] = []
+    captured: set[str] = set()
     for record in records:
         root = str(record.get("path") or "")
         declared = dict(targets.get(root) or {})
@@ -167,8 +189,24 @@ def capture_root_snapshots(
         )
         if not manifest:
             continue
+        captured.add(str(record.get("id") or ""))
         manifests.append(_portable_manifest(manifest, record=record, session_dir=session_dir))
+    _prune_overlay(dest_root, keep=captured)
     return manifests
+
+
+def _prune_overlay(dest_root: Path, *, keep: set[str]) -> None:
+    """Drop overlay directories for roots absent from this KEEP's manifests.
+
+    The delivery selects the overlay by path glob rather than by manifest, so a
+    directory an earlier round left behind still ships and the shipped stack
+    becomes the union of the rounds instead of the accepted one.
+    """
+    if not dest_root.is_dir():
+        return
+    for child in dest_root.iterdir():
+        if child.is_dir() and child.name not in keep:
+            shutil.rmtree(child, ignore_errors=True)
 
 
 def _portable_manifest(

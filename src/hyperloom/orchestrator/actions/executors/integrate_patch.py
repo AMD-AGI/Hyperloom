@@ -3088,6 +3088,55 @@ class IntegratePatchExecutor:
             verdict["dropped_env_overrides"] = dropped_env_overrides
         return verdict
 
+    @staticmethod
+    def _enablement_correctness(
+        params: dict[str, Any],
+        gate_evidence: dict[str, Any],
+    ) -> tuple[bool | None, dict[str, Any]]:
+        """Judge the candidate's accuracy against the floor its origin demands.
+
+        Returns:
+            ``(correctness_ok, eval_provenance)``. ``correctness_ok`` is ``None``
+            only for a boot-origin round with no score at all, which claimed
+            nothing about accuracy; every other absence fails closed.
+        """
+        enablement_accuracy = gate_evidence.get("enablement_accuracy")
+        param_floor = params.get("enablement_accuracy_floor")
+        floor = float(param_floor) if isinstance(param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+        eval_origin = _is_eval_origin(params)
+        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
+        correctness_ok: bool | None
+        if enablement_accuracy is None:
+            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
+            correctness_ok = False if eval_origin else None
+        else:
+            # Present but below floor / non-positive / non-finite is a refusal.
+            correctness_ok = accuracy_meets_floor(enablement_accuracy, floor)
+        # eval-origin only: a score with no task/metric did not come from a real
+        # eval, so it cannot clear the gate. This reads the candidate's OWN run
+        # (both keys are stamped beside the accuracy it is judging), unlike the
+        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
+        # field, so an eval-less re-baseline could poison the stored digest and
+        # veto every later candidate without ever consulting its accuracy.
+        if (
+            eval_origin
+            and correctness_ok
+            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
+        ):
+            correctness_ok = False
+            log.warning(
+                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
+                enablement_accuracy,
+            )
+        return correctness_ok, {
+            "enablement_origin": str(params.get("enablement_origin") or ""),
+            "enablement_observed_accuracy": enablement_accuracy,
+            "enablement_accuracy_floor": floor,
+            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
+            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
+            "enablement_eval_failure_kind": accuracy_kind or "",
+        }
+
     async def _gate_enablement(
         self,
         *,
@@ -3159,44 +3208,7 @@ class IntegratePatchExecutor:
         booted = isinstance(new_tput, (int, float)) and new_tput > 0
         probe_timed_out = bool(gate_evidence.get("timed_out"))
 
-        enablement_accuracy = gate_evidence.get("enablement_accuracy")
-        _param_floor = params.get("enablement_accuracy_floor")
-        floor = float(_param_floor) if isinstance(_param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
-        eval_origin = _is_eval_origin(params)
-        accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
-        correctness_ok: bool | None
-        if enablement_accuracy is None:
-            # Truly absent: eval-origin fails closed; boot-origin stays provisional.
-            correctness_ok = False if eval_origin else None
-        elif accuracy_meets_floor(enablement_accuracy, floor):
-            correctness_ok = True
-        else:
-            # Present but below floor / non-positive / non-finite.
-            correctness_ok = False
-        # eval-origin only: a score with no task/metric did not come from a real
-        # eval, so it cannot clear the gate. This reads the candidate's OWN run
-        # (both keys are stamped beside the accuracy it is judging), unlike the
-        # contract fingerprint it replaces: RUN_EVAL is itself a hashed contract
-        # field, so an eval-less re-baseline could poison the stored digest and
-        # veto every later candidate without ever consulting its accuracy.
-        if (
-            eval_origin
-            and correctness_ok
-            and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
-        ):
-            correctness_ok = False
-            log.warning(
-                "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
-                enablement_accuracy,
-            )
-        eval_provenance = {
-            "enablement_origin": str(params.get("enablement_origin") or ""),
-            "enablement_observed_accuracy": enablement_accuracy,
-            "enablement_accuracy_floor": floor,
-            "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
-            "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
-            "enablement_eval_failure_kind": accuracy_kind or "",
-        }
+        correctness_ok, eval_provenance = self._enablement_correctness(params, gate_evidence)
 
         after_signature = classify_failure(str(bench_result.get("error") or ""))
         before_signature: FailureSignature | None = None
@@ -3411,9 +3423,13 @@ class IntegratePatchExecutor:
         Every value here is read at the KEEP: the roots the resolvers bound, the
         pre-mutation ``base_sha`` captured before the apply, the byte-exact
         content of each declared target, and the versions observed through the
-        interpreter the accepted bench launched.
+        interpreter the accepted bench launched. The declared set is the whole
+        accepted stack, inherited artifacts included: the lane replaces these
+        records with the latest KEEP's, so a round capturing only its own
+        installs would drop an earlier round's payload from the recipe.
         """
         from ...enablement.recipe.keep_records import (
+            accepted_stack_artifacts,
             build_root_records,
             capture_root_snapshots,
             collect_contributions,
@@ -3424,10 +3440,15 @@ class IntegratePatchExecutor:
 
         root = str(framework_root or "")
         patch_roots = {str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(v)}
+        base_artifacts = params.get("enablement_base_artifacts")
+        stack_artifacts = accepted_stack_artifacts(
+            inherited=base_artifacts if isinstance(base_artifacts, list) else [],
+            applied=applied_artifacts,
+        )
         contributions = collect_contributions(
             framework_root=root,
             patch_roots=patch_roots,
-            artifacts=applied_artifacts,
+            artifacts=stack_artifacts,
         )
         upserted, deleted = (
             _patch_touched_paths_split(framework_root, applied) if framework_root is not None else ([], [])
@@ -3448,7 +3469,7 @@ class IntegratePatchExecutor:
             framework_root=root,
             upserted=upserted,
             deleted=deleted,
-            artifacts=applied_artifacts,
+            artifacts=stack_artifacts,
         )
         snapshots = capture_root_snapshots(
             records=records,
