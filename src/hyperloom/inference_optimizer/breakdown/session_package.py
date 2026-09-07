@@ -27,7 +27,6 @@ Contract:
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import json
 import logging
 import os
@@ -37,7 +36,6 @@ import zipfile
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 from ..session.paths import is_path_within
 
@@ -86,11 +84,6 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "target_analysis/target_analysis_report.md",
     # ── coordinator DB ────────────────────────────────────────────────
     "storage/coordinator.db",
-    # ── enablement replay payloads the recipe references ──────────────
-    # The captured bytes only: each snapshot's own manifest records the absolute
-    # framework root it was taken under, and the portable projection of it
-    # travels in the breakdown instead.
-    "optimization_stack/enablement/**/files/**",
     # ── TraceLens analysis/report family (dynamic <ts>/<tl-id> subdirs) ─
     "kernel-agent/runs/**/tracelens/analysis.md",
     "kernel-agent/runs/**/tracelens/tracelens_report.json",
@@ -407,90 +400,6 @@ def _manifest_text(manifest: dict) -> str:
     return "\n".join(lines)
 
 
-def _apply_caps(matched: list[Path], session_dir: Path) -> tuple[list[tuple[Path, str, int]], bool, list[str]]:
-    """Cut ``matched`` down to what the caps admit, in selection order.
-
-    Args:
-        matched: Selected absolute paths, already ordered by relative path.
-        session_dir: The resolved session root the paths are relative to.
-
-    Returns:
-        The admitted ``(path, relative path, size)`` triples, whether a cap was
-        hit, and the relative paths dropped by it.
-    """
-    included: list[tuple[Path, str, int]] = []
-    total = 0
-    for i, p in enumerate(matched):
-        try:
-            sz = p.stat().st_size
-        except OSError:
-            continue
-        if len(included) >= _MAX_FILES or total + sz > _MAX_TOTAL_BYTES:
-            dropped = [q.relative_to(session_dir).as_posix() for q in matched[i:]]
-            log.warning(
-                "session package: hit size/count cap, TRUNCATING bundle "
-                "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
-                "truncated=true.",
-                len(included),
-                total,
-                len(dropped),
-            )
-            return included, True, dropped
-        included.append((p, p.relative_to(session_dir).as_posix(), sz))
-        total += sz
-    return included, False, []
-
-
-def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
-    """Return which of ``expected``'s payloads this bundle would hand a consumer.
-
-    ``expected`` pairs each session-relative path with the sha256 its recorder
-    took of it, or ``""`` where none was taken; the same path may appear under
-    two digests, and at most one of them can be satisfied by what is on disk. A
-    payload is deliverable when the curated selection matches its path, the
-    session holds it as a regular file resolving inside itself, it alone fits
-    the byte cap, and -- where a digest was recorded -- the bytes still hash to
-    it.
-
-    Each payload is judged alone. The bundle's byte budget is spent in selection
-    order, so charging a referenced payload for unrelated files sorted ahead of
-    it would refuse a recipe over content it does not name; what a truncated
-    bundle actually dropped is the packager's own manifest to report.
-    """
-    try:
-        sd = Path(session_dir).resolve()
-    except OSError:
-        log.debug("session package: deliverable scan failed for %s", session_dir, exc_info=True)
-        return set()
-    out: set[tuple[str, str]] = set()
-    for raw_path, raw_digest in expected:
-        rel = str(raw_path).strip("/")
-        if not rel or not any(_glob_match(rel, pattern) for pattern in PACKAGE_GLOBS):
-            continue
-        candidate = sd / rel
-        try:
-            if not _is_packageable(candidate, sd) or candidate.stat().st_size > _MAX_TOTAL_BYTES:
-                continue
-        except OSError:
-            log.debug("session package: deliverable check failed for %s", rel, exc_info=True)
-            continue
-        digest = str(raw_digest or "")
-        if _digest_matches(candidate, digest):
-            out.add((rel, digest))
-    return out
-
-
-def _digest_matches(path: Path, expected_sha256: str) -> bool:
-    """Whether ``path`` still hashes to the digest its recorder took, if any."""
-    if not expected_sha256:
-        return True
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
-    except OSError:
-        log.debug("session package: could not re-read %s to verify its digest", path, exc_info=True)
-        return False
-
-
 def package_session_artifacts(
     session_dir: Path | str,
     *,
@@ -524,7 +433,31 @@ def package_session_artifacts(
             log.warning("session package skipped: no artifacts matched in %s", sd)
             return None
 
-        included, truncated, dropped = _apply_caps(matched, sd)
+        # Apply safety caps. On hitting a cap, record what got dropped and
+        # flag the manifest as truncated.
+        included: list[tuple[Path, str, int]] = []
+        total = 0
+        truncated = False
+        dropped: list[str] = []
+        for i, p in enumerate(matched):
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if len(included) >= _MAX_FILES or total + sz > _MAX_TOTAL_BYTES:
+                truncated = True
+                dropped = [q.relative_to(sd).as_posix() for q in matched[i:]]
+                log.warning(
+                    "session package: hit size/count cap, TRUNCATING bundle "
+                    "(included=%d, bytes=%d, dropped=%d). Manifest flagged "
+                    "truncated=true.",
+                    len(included),
+                    total,
+                    len(dropped),
+                )
+                break
+            included.append((p, p.relative_to(sd).as_posix(), sz))
+            total += sz
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()
         out_dir = root / PACKAGE_SUBDIR
@@ -570,7 +503,7 @@ def package_session_artifacts(
             "session package: wrote %s (%d files, %d bytes pre-zip, complete=%s)",
             target,
             len(written),
-            sum(sz for _p, _rel, sz in included),
+            total,
             manifest["complete"],
         )
 

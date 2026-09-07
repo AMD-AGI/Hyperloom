@@ -180,6 +180,44 @@ def test_contributions_split_inputs_from_output_targets():
     assert contributions["/pkg"] == {"artifact_install"}
 
 
+def test_artifact_only_contributions_do_not_fabricate_a_patch_binding():
+    contributions = collect_contributions(
+        framework_root="/fr",
+        patch_roots={},
+        artifacts=[{"target": "/pkg/a.py", "rel_target": "a.py", "root": "/pkg"}],
+    )
+    assert contributions == {"/pkg": {"artifact_install"}}
+
+
+def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tmp_path: Path, monkeypatch):
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    evidence = {
+        "framework": "sglang",
+        "requested_server_args": "--tp 2",
+        "requested_server_env": {"HF_TOKEN": "secret", "SAFE_SWITCH": "1"},
+        "materialized_config_path": "/host/session/config.yaml",
+        "actual_server_log_path": "/host/session/server.log",
+    }
+    out = executor._enablement_keep_records(
+        SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=SimpleNamespace(enablement=None)),
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[],
+        done_payload={},
+        provision_result=None,
+        bench_result={"launch_evidence": evidence},
+    )
+    durable = out["enablement_launch_evidence"]
+    assert durable["requested_server_env_keys"] == ["SAFE_SWITCH"]
+    assert "requested_server_env" not in durable
+    assert "materialized_config_path" not in durable
+    assert "actual_server_log_path" not in durable
+    assert "secret" not in str(durable)
+
+
 def test_declared_targets_separate_upserts_from_deletions():
     targets = declared_targets(
         framework_root="/fr",

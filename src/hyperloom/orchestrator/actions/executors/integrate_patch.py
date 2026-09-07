@@ -76,6 +76,7 @@ from ._nogit_patch import (
     _revert_patches_no_git,
 )
 from ...enablement.recipe.credentials import detect_credential_channels
+from ...enablement.recipe.projections import project_launch_evidence
 from ...enablement.recipe.setup_ledger import build_execution_row
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
@@ -488,7 +489,6 @@ def _run_setup_commands(
                 source=(sources or {}).get(str(cmd).strip(), "proposed"),
                 outcome=outcome,
                 env=env,
-                cwd=cwd,
             )
         )
 
@@ -3483,6 +3483,7 @@ class IntegratePatchExecutor:
             specialist_task_id=specialist_task_id,
             provision_result=provision_result,
         )
+        launch_evidence = project_launch_evidence(bench_result.get("launch_evidence"))[0]
         return {
             "enablement_roots": records,
             "enablement_patch_roots": patch_roots,
@@ -3491,7 +3492,7 @@ class IntegratePatchExecutor:
             "enablement_accepted_stack_targets": {
                 str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
             },
-            "enablement_launch_evidence": dict(bench_result.get("launch_evidence") or {}),
+            "enablement_launch_evidence": launch_evidence or {},
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
         }

@@ -1451,7 +1451,6 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
             source="proposed",
             outcome="applied",
             env={},
-            cwd=cwd,
         )
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": [row]}
 

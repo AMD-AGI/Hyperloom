@@ -15,7 +15,7 @@ from ..actions.executors._grid_server_args import merge_server_args
 from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator import _ENABLEMENT_MAX_STALL
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
-from ..phases._enablement_artifacts import role_digest, role_path, snapshot_round, write_setting_script
+from ..phases._enablement_artifacts import role_path, snapshot_round, write_setting_script
 from .recipe.setup_ledger import mark_round_disposition
 
 import logging as _logging
@@ -308,7 +308,6 @@ class EnablementLane(CoordinatorCollaborator):
         archived_config = role_path(archived, "launch_config")
         if status == "kept" and archived_config:
             state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
-            state.enablement.accepted_config_digest = role_digest(archived, "launch_config")
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:

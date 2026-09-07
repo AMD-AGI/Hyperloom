@@ -1491,7 +1491,6 @@ def test_rearm_records_the_rounds_disposition_on_the_executions_it_performed(sta
             source="proposed",
             outcome="applied",
             env={},
-            cwd="/tmp",
             fs_root="/nonexistent-probe-root",
         )
     ]

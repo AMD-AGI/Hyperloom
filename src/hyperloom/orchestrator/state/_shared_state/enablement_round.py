@@ -61,10 +61,6 @@ class EnablementRound:
     human_review_logged: list = field(default_factory=list)
     # Path to the materialized config produced by the KEEP'd candidate bench.
     accepted_config_path: str = ""
-    # sha256 of the archived copy at accepted_config_path, taken when it was
-    # archived: the recipe references those bytes, so an edit to the delivered
-    # file has to be detectable against an identity nothing downstream re-derives.
-    accepted_config_digest: str = ""
     # Env/arg layers the KEEP'd bench ran with; replayed by the revalidation baseline.
     accepted_config: dict = field(default_factory=dict)
     # Task identity for the current revalidation baseline task.
@@ -111,8 +107,8 @@ class EnablementRound:
     # Which branch produced accepted_config: a booted kept bench, or an advanced
     # round's proposal merge, which is by construction never booted.
     accepted_config_source: str = ""
-    # Sanitized projection of the graded launch's evidence; never the builder's
-    # own object, which carries raw env values and host-internal paths.
+    # Persisted projection of the graded launch evidence; raw env values and
+    # host-internal paths are removed before the result reaches durable state.
     launch_evidence: dict = field(default_factory=dict)
     # Version assertions observed AT the KEEP, after every mutation that reaches
     # the launched image.

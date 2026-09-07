@@ -12,7 +12,7 @@ produced by an older writer cannot be mistaken for one this contract judged.
 from __future__ import annotations
 
 import shlex
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .steps import BUILD_KIND, PATCH_KIND, SETUP_KIND, command_digest, select_linked_build
 
@@ -38,7 +38,6 @@ REASON_BLOCKS: dict[str, str] = {
     "setup_occurrences_unknown": BLOCKS_BOTH,
     "setup_effect_outside_verified_launch": BLOCKS_BOTH,
     "setup_ledger_truncated": BLOCKS_BOTH,
-    "setup_inputs_incomplete": BLOCKS_REPLAY,
     "build_attempt_unjoined": BLOCKS_REPLAY,
     "build_inputs_incomplete": BLOCKS_REPLAY,
     "environment_closure_absent": BLOCKS_REPLAY,
@@ -161,10 +160,7 @@ def _activation_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
         reasons.append(_reason("activation_incomplete", "config_path"))
     evidence = section.get("launch_evidence")
     if not isinstance(evidence, Mapping) or not evidence:
-        # The reason names the launch of a projected configuration; with none
-        # projected there is no launch to have been observed.
-        if accepted_config:
-            reasons.append(_reason("activation_incomplete", "launch_evidence"))
+        reasons.append(_reason("activation_incomplete", "launch_evidence"))
         return reasons
     binding = evidence.get("observed_model_binding")
     binding = binding if isinstance(binding, Mapping) else {}
@@ -245,16 +241,35 @@ def _acquisition_is_pinned(acquisition: Mapping[str, Any]) -> bool:
     return False
 
 
-def _runtime_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _build_inputs_complete(row: Mapping[str, Any] | None) -> bool:
+    """Return whether a joined attempt carries the complete replayable build set."""
+    if not isinstance(row, Mapping):
+        return False
+    inputs = row.get("build_inputs")
+    if not isinstance(inputs, Mapping) or not inputs:
+        return False
+    if str(row.get("build_driver") or "") != "builtin_plan":
+        return False
+    if any(not inputs.get(key) for key in _BUILTIN_REQUIRED_INPUTS):
+        return False
+    if not row.get("installed_versions"):
+        return False
+    return _AMBIENT_FLOOR.issubset({str(k) for k in inputs.get("ambient_keys") or []})
+
+
+def _runtime_reasons(enablement: Mapping[str, Any], section: Mapping[str, Any]) -> list[dict[str, Any]]:
     """A runtime override the recipe cannot rebuild is not a replay path."""
     provenance = section.get("runtime_provenance")
     if not isinstance(provenance, Mapping) or not provenance.get("override_keys"):
         return []
-    if provenance.get("build_task_id"):
-        return []
     acquisition = provenance.get("acquisition")
     if isinstance(acquisition, Mapping) and _acquisition_is_pinned(acquisition):
         return []
+    build_task_id = str(provenance.get("build_task_id") or "")
+    if build_task_id:
+        sentinel, row = select_linked_build(enablement)
+        if str((sentinel or {}).get("task_id") or "") == build_task_id and _build_inputs_complete(row):
+            return []
     return [_reason("runtime_rebuild_required", "runtime_provenance")]
 
 
@@ -370,7 +385,7 @@ def _artifact_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _setup_reasons(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Judge occurrence identity, mutation reach, input identity and scope."""
+    """Judge occurrence identity, mutation reach and closure scope."""
     commands = [str(c) for c in (enablement.get("setup_commands") or []) if str(c)]
     ledger = [row for row in (enablement.get("setup_executions") or []) if isinstance(row, Mapping)]
     if not ledger:
@@ -388,8 +403,6 @@ def _setup_reasons(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
         # one is already named an effect outside the verified launch.
         if outcome == "applied" and str(row.get("installer") or "") not in ("", "pip"):
             reasons.append(_reason("closure_scope_incomplete", scope))
-        if outcome == "applied" and row.get("unresolved_inputs"):
-            reasons.append(_reason("setup_inputs_incomplete", scope))
     reasons.extend(_truncation_reasons(commands, ledger))
     return reasons
 
@@ -427,18 +440,7 @@ def _build_reasons(
     task_id = str((sentinel or {}).get("task_id") or "")
     if row is None:
         return [_reason("build_attempt_unjoined", task_id)]
-    inputs = row.get("build_inputs")
-    if not isinstance(inputs, Mapping) or not inputs:
-        return [_reason("build_inputs_incomplete", task_id)]
-    driver = str(row.get("build_driver") or "")
-    missing = [key for key in _BUILTIN_REQUIRED_INPUTS if not inputs.get(key)]
-    if not row.get("installed_versions"):
-        missing.append("installed_versions")
-    if not _AMBIENT_FLOOR.issubset({str(k) for k in inputs.get("ambient_keys") or []}):
-        missing.append("ambient_keys")
-    # A command the platform spawns unread cannot be shown to depend only on the
-    # recorded inputs, so it is incomplete however complete the rest is.
-    if missing or driver == "custom_command":
+    if not _build_inputs_complete(row):
         return [_reason("build_inputs_incomplete", task_id)]
     return []
 
@@ -485,91 +487,11 @@ def _credential_reasons(
     return reasons
 
 
-def _payload_references(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> list[tuple[str, str, str, str]]:
-    """Return ``(code, scope, path, sha256)`` for every byte a replay is handed.
-
-    The recipe carries manifests, digests and class names; these name the bytes
-    behind them, each with the refusal its absence earns and, where its recorder
-    took one, the digest the delivered bytes must still hash to. A patch step is
-    not among them: its own ``path`` names the authoring workspace no bundle
-    ships, while the content it produced is its root's snapshot payload.
-    """
-    refs: list[tuple[str, str, str, str]] = []
-    for snapshot in section.get("source_snapshots") or []:
-        if not isinstance(snapshot, Mapping):
-            continue
-        ref = str(snapshot.get("snapshot_ref") or "").strip("/")
-        root_id = str(snapshot.get("root_id"))
-        rows = [row for row in (snapshot.get("files") or []) if isinstance(row, Mapping)]
-        # A declared deletion has no payload to deliver; a snapshot with no
-        # reference at all has nowhere for one to be.
-        payloads = [str(row.get("rel") or "").strip("/") for row in rows if str(row.get("op") or "") != "delete"]
-        if not ref:
-            refs.append(("source_snapshot_missing", root_id, "", ""))
-            continue
-        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel)
-    accepted_config = section.get("accepted_config") or {}
-    config_path = str(accepted_config.get("config_path") or "").strip("/")
-    if config_path:
-        digest = str(accepted_config.get("config_digest") or "")
-        refs.append(("artifact_not_self_contained", "config_path", config_path, digest))
-    for index, step in enumerate(steps):
-        # A digest names the bytes an install consumed; only the delivery makes
-        # them obtainable.
-        for identity in step.get("input_identity") or ():
-            if not isinstance(identity, Mapping):
-                continue
-            rel = str(identity.get("rel") or "").strip("/")
-            if rel:
-                refs.append(("artifact_not_self_contained", f"step[{index}]", rel, str(identity.get("sha256") or "")))
-    return refs
-
-
-def referenced_payloads(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-) -> set[tuple[str, str]]:
-    """Return the ``(path, sha256)`` payloads a delivery must be asked about.
-
-    The digest is ``""`` where the recipe recorded none; where it recorded one,
-    a delivery carrying different bytes is not carrying this payload. One path
-    referenced under two digests yields two entries: two occurrences consumed
-    different bytes there, and a delivery holding one is not holding the other.
-    """
-    return {(path, digest) for _code, _scope, path, digest in _payload_references(section, steps) if path}
-
-
-def _delivery_reasons(
-    section: Mapping[str, Any],
-    steps: Sequence[Mapping[str, Any]],
-    delivered: Iterable[tuple[str, str]],
-) -> list[dict[str, Any]]:
-    """Refuse a bundle whose referenced bytes it does not actually carry.
-
-    A reference the delivery omits is not a thinner recipe -- it is one an
-    independent consumer cannot execute, so the export fails closed rather than
-    reporting a self-contained artifact it is not. Judged per captured file, not
-    per manifest: the manifest travels in this section, and the bytes it names
-    do not. Judged per ``(path, digest)`` besides, so a delivery satisfying one
-    occurrence's bytes does not answer for another occurrence's at that path.
-    """
-    packaged = {(str(path).strip("/"), str(digest or "")) for path, digest in delivered}
-    reasons: list[dict[str, Any]] = []
-    for code, scope, path, digest in _payload_references(section, steps):
-        if (path, digest) not in packaged:
-            reasons.append(_reason(code, scope))
-    return reasons
-
-
 def evaluate_replay_sufficiency(
     enablement: Mapping[str, Any],
     *,
     steps: Sequence[Mapping[str, Any]],
     section: Mapping[str, Any],
-    delivered_payloads: Iterable[tuple[str, str]] | None = None,
     launch_argv_refused: bool = False,
 ) -> dict[str, Any]:
     """Decide whether the projected recipe can be replayed.
@@ -578,11 +500,6 @@ def evaluate_replay_sufficiency(
         enablement: The durable enablement state, keyed by field name.
         steps: The projected ``recipe_steps`` array.
         section: The emitted enablement section this decision travels in.
-        delivered_payloads: The ``(session-relative path, sha256)`` payloads an
-            export actually delivers. When given, every payload the recipe
-            references must be among them or the export fails closed; when
-            ``None`` no delivery is being assembled and the recipe is judged on
-            its content alone.
         launch_argv_refused: Whether the sanitizer refused a launch line it could
             not represent, so the evidence carries no observed argv at all.
 
@@ -596,7 +513,7 @@ def evaluate_replay_sufficiency(
         # object; nothing observed remains to confirm the requested settings.
         reasons.append(_reason("activation_incomplete", "observed_server_launch_flags"))
     reasons.extend(_activation_reasons(section))
-    reasons.extend(_runtime_reasons(section))
+    reasons.extend(_runtime_reasons(enablement, section))
     reasons.extend(_root_reasons(section, steps))
     reasons.extend(_snapshot_reasons(section, steps))
     reasons.extend(_artifact_reasons(section))
@@ -604,8 +521,6 @@ def evaluate_replay_sufficiency(
     reasons.extend(_build_reasons(enablement, steps))
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
-    if delivered_payloads is not None:
-        reasons.extend(_delivery_reasons(section, steps, delivered_payloads))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:

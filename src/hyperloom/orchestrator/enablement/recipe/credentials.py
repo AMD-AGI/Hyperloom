@@ -38,6 +38,7 @@ _CHANNEL_OPTIONS: frozenset[str] = frozenset({"-c", "--channel"})
 _ATTACHED_SHORT_VALUE_OPTIONS: tuple[str, ...] = ("-r", "-c", "-i", "-f")
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+_CREDENTIALED_URL_RE = re.compile(r"(?:(?:git|hg|svn)\+)?[A-Za-z][A-Za-z0-9+.-]*://[^\s/@\"']+@[^\s\"']+")
 
 #: The ambient spelling of ``--index-url``; an inline assignment of one is the
 #: same flag by another name, and the allowlist admits it as readily.
@@ -286,7 +287,8 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
     try:
         shlex.split(text)
     except ValueError:
-        return _clip(redact_secret_values(text), clip)
+        redacted = _CREDENTIALED_URL_RE.sub("<opaque_credential>", text)
+        return _clip(redact_secret_values(redacted), clip)
     assignments, tokens = split_env_assignments(text)
     family = installer_class(text)
     rebuilt: list[str] = ["sudo"] if shlex.split(text)[:1] == ["sudo"] else []

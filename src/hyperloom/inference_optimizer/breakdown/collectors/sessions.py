@@ -32,8 +32,6 @@ from ._common import (
     _to_float,
     _to_int,
 )
-from ..session_package import deliverable
-
 
 log = logging.getLogger(__name__)
 
@@ -1558,6 +1556,7 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
 _CLOSURE_DENYING_CODES: frozenset[str] = frozenset(
     {
         "build_inputs_incomplete",
+        "build_attempt_unjoined",
         "environment_closure_absent",
         "closure_scope_incomplete",
         "setup_occurrences_unknown",
@@ -1585,26 +1584,6 @@ def _closure_status(decision: dict[str, Any], enablement: dict[str, Any]) -> str
 def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
     """Read the enablement fields the recipe contract is projected from."""
     return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
-
-
-def _delivered_payloads(
-    out: dict[str, Any],
-    steps: list[dict[str, Any]],
-    session_dir: Path,
-) -> set[tuple[str, str]] | None:
-    """What the session bundle actually hands a consumer of this recipe.
-
-    The recipe names the bytes behind its manifests and digests, and the
-    packager says which of them arrive as the recipe describes them; neither
-    side restates the other's rules. ``None`` when the recipe references
-    nothing, which is the one case with nothing to deliver.
-    """
-    from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
-
-    referenced = referenced_payloads(out, steps)
-    if not referenced:
-        return None
-    return deliverable(session_dir, referenced)
 
 
 def _collect_recipe(
@@ -1639,11 +1618,6 @@ def _collect_recipe(
         config_path = archived or str(_eg(state, "probe_config_path", "") or "")
         if config_path:
             accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
-        # Only the archived copy was digested when it was written; the probe
-        # fallback names a file whose bytes no recorder ever bound.
-        digest = str(_eg(state, "accepted_config_digest", "") or "") if archived else ""
-        if digest:
-            accepted_config["config_digest"] = digest
         out["accepted_config"] = accepted_config
     evidence, argv_refused = project_launch_evidence(enablement.get("launch_evidence"))
     out["accepted_config_source"] = str(enablement.get("accepted_config_source") or "") or None
@@ -1663,7 +1637,6 @@ def _collect_recipe(
         enablement,
         steps=steps,
         section=out,
-        delivered_payloads=_delivered_payloads(out, steps, session_dir),
         launch_argv_refused=argv_refused,
     )
     out["replay_sufficiency"] = decision

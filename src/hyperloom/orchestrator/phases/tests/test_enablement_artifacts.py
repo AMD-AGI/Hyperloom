@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -113,15 +112,6 @@ def test_launch_config_is_copied(tmp_path):
     cfg = _launch_config(tmp_path)
     snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(cfg)))
     assert (tmp_path / "reports" / "enablement" / "abc123" / "launch_config.yaml").is_file()
-
-
-def test_each_archived_copy_carries_the_digest_of_the_bytes_that_landed(tmp_path):
-    """The recipe references the archived copy, so its identity is taken here."""
-    from hyperloom.orchestrator.phases._enablement_artifacts import role_digest
-
-    body = b"tp: 8\n"
-    written = snapshot_round(tmp_path, _res(enablement_accepted_config_path=str(_launch_config(tmp_path, body))))
-    assert role_digest(written, "launch_config") == hashlib.sha256(body).hexdigest()
 
 
 def test_recorded_config_path_is_the_archived_copy(tmp_path):

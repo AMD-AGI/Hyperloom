@@ -112,7 +112,7 @@ def collect_contributions(
 ) -> dict[str, set[str]]:
     """Group the accepted stack's bindings by the root each resolver returned."""
     contributions: dict[str, set[str]] = {}
-    for root in set((patch_roots or {}).values()) or ({framework_root} if framework_root else set()):
+    for root in set((patch_roots or {}).values()):
         contributions.setdefault(str(root), set()).add(PATCH_APPLY)
     for artifact in artifacts or ():
         if not isinstance(artifact, Mapping):

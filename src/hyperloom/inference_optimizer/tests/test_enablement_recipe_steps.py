@@ -50,9 +50,6 @@ def _linked_build_state(**kw):
     return state
 
 
-# ---- AC1: order fidelity ---------------------------------------------------
-
-
 def test_recipe_steps_order_matches_execution_order():
     steps = _steps(
         setup_commands=["pip install a", "pip install b"],
@@ -93,21 +90,12 @@ def test_recipe_steps_patch_order_follows_kept_patches():
     assert [s["path"] for s in steps] == ["/p/first.patch", "/p/second.patch"]
 
 
-# ---- AC2: field traceability ----------------------------------------------
-
-
 def test_recipe_steps_fields_trace_to_state():
     steps = _steps(setup_commands=["pip install a"], kept_patches=["/p/1.patch"], framework_root="/fr")
     setup, patch = steps
-    assert set(setup) == {"kind", "cmd", "occurrence", "credential_class", "input_identity", "unresolved_inputs"}
+    assert set(setup) == {"kind", "cmd", "occurrence", "credential_class"}
     assert set(patch) == {"kind", "path", "root", "root_id"}
     assert patch["path"] == "/p/1.patch" and patch["root"] == "/fr"
-
-
-def test_a_step_from_state_predating_the_ledger_claims_no_input_identity():
-    """No identity was ever taken, which is not the same as none being needed."""
-    setup = _steps(setup_commands=["pip install ./local.whl"])[0]
-    assert setup["input_identity"] is None and setup["unresolved_inputs"] is None
 
 
 def test_recipe_steps_patch_root_records_framework_root_verbatim():
@@ -138,9 +126,6 @@ def test_recipe_steps_reuses_build_attempt_summary():
     assert build["gpu_arch"] == summary["gpu_arch"]
     assert build["component"] == summary["component"]
     assert build["max_jobs"] == summary["max_jobs"]
-
-
-# ---- D0: populated vs null on the build step -------------------------------
 
 
 def test_recipe_steps_build_nulls_absent_component_and_max_jobs():
@@ -174,9 +159,6 @@ def test_recipe_steps_build_populates_component_when_present():
         last_specialist_task_id=SPEC_TASK,
     )
     assert steps[0]["component"] == "vllm" and steps[0]["max_jobs"] == 12
-
-
-# ---- D1: which rounds contribute -------------------------------------------
 
 
 def test_recipe_steps_includes_advanced_round():
@@ -275,9 +257,6 @@ def test_a_kept_artifact_bound_to_no_recorded_root_carries_a_null_root_id():
     assert out["kept_artifacts"][0]["root_id"] is None
 
 
-# ---- D2: whether historical build attempts appear --------------------------
-
-
 def test_recipe_steps_emits_build_when_probe_is_final_round():
     steps = _steps(**_linked_build_state())
     assert _kinds(steps) == ["build"]
@@ -333,9 +312,6 @@ def test_recipe_steps_build_step_stands_with_no_joinable_row():
     assert steps[0]["ref"] is None and steps[0]["build_inputs"] is None
 
 
-# ---- AC4: declarativeness --------------------------------------------------
-
-
 #: A template placeholder or a line break is what separates a value from an
 #: instruction; a declarative step carries neither.
 _NON_DECLARATIVE = ("{{", "${", "%(", "\n")
@@ -369,9 +345,6 @@ def test_recipe_steps_is_pure_declarative_data():
             for leaf in _leaves(value):
                 assert leaf is None or isinstance(leaf, (str, int)), key
                 assert not isinstance(leaf, str) or not any(m in leaf for m in _NON_DECLARATIVE), key
-
-
-# ---- AC5: non-regression ---------------------------------------------------
 
 
 def test_recipe_steps_absent_for_empty_enablement():
