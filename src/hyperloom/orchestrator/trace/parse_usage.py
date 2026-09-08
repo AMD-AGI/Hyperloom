@@ -19,8 +19,8 @@ Codex also emits structured failure events; :func:`parse_codex_jsonl_error`
 recovers their actionable message without serializing request/config payloads.
 
 Output shape: the token parsers (:func:`normalize_usage`,
-:func:`parse_claude_stream_json_usage`, :func:`parse_codex_jsonl_usage`,
-:func:`parse_forge_usage`) return the canonical four-key token dict, or ``None``
+:func:`parse_claude_stream_json_usage`, :func:`parse_codex_jsonl_usage`)
+return the canonical four-key token dict, or ``None``
 when nothing could be recovered:
 
     {"input_tokens", "output_tokens",
@@ -859,76 +859,6 @@ def parse_codex_jsonl_tool_calls(
     return calls
 
 
-def parse_forge_usage(stdout: str) -> dict[str, int | None] | None:
-    """Extract the run's LLM usage from a Kernel-Forge backend's stdout log.
-
-    ``forge_submit`` aggregates the per-query ``ResultMessage`` token spend and
-    prints one canonical marker line::
-
-        FORGE_LLM_USAGE {"input_tokens": ..., "output_tokens": ...,
-                         "cache_creation_input_tokens": ..., ...}
-
-    Recovers the last such marker (the authoritative run total). Returns
-    ``None`` when no marker is present. Reasoning-output tokens ride along
-    beside the canonical four (as they do for Codex) so a reasoning model's
-    hidden spend is not dropped on the way to the ledger.
-    """
-    if not stdout or "FORGE_LLM_USAGE" not in stdout:
-        return None
-    last_usage: dict[str, Any] | None = None
-    for line in stdout.splitlines():
-        marker = line.partition("FORGE_LLM_USAGE")
-        if not marker[1]:
-            continue
-        blob = marker[2].strip()
-        if not blob:
-            continue
-        try:
-            obj = json.loads(blob)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict) and obj:
-            last_usage = obj
-    canonical = normalize_usage(last_usage)
-    if canonical is None:
-        return None
-    reasoning = reasoning_output_tokens(last_usage)
-    if reasoning is not None:
-        canonical["reasoning_output_tokens"] = reasoning
-    return canonical
-
-
-def parse_forge_steps(stdout: str) -> dict[str, Any] | None:
-    """Extract the Kernel-Forge loop's key-step timeline from its stdout log.
-
-    ``forge_submit`` prints one canonical marker carrying the per-iteration step
-    timeline plus a run summary::
-
-        FORGE_STEPS {"steps": [{"iteration": 1, "decision": "KEEP", ...}, ...],
-                     "summary": {"iterations": ..., "termination_reason": ...}}
-
-    Returns the parsed ``{"steps": [...], "summary": {...}}`` dict from the last
-    marker, or ``None`` when no marker is present.
-    """
-    if not stdout or "FORGE_STEPS" not in stdout:
-        return None
-    last: dict[str, Any] | None = None
-    for line in stdout.splitlines():
-        marker = line.partition("FORGE_STEPS")
-        if not marker[1]:
-            continue
-        blob = marker[2].strip()
-        if not blob:
-            continue
-        try:
-            obj = json.loads(blob)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("steps"), list):
-            last = obj
-    return last
-
-
 __all__ = [
     "normalize_usage",
     "parse_claude_stream_json_response",
@@ -940,7 +870,5 @@ __all__ = [
     "parse_codex_jsonl_tool_calls",
     "parse_codex_jsonl_turn_usages",
     "parse_codex_jsonl_usage",
-    "parse_forge_steps",
-    "parse_forge_usage",
     "reasoning_output_tokens",
 ]
