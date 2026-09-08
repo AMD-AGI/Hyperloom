@@ -325,11 +325,12 @@ detect_gpu_label() {
   case "$gfx" in
     gfx942) echo "MI300X" ;;
     gfx950) echo "MI355X" ;;
-    *) echo "MI300X" ;;
+    "") echo "unknown" ;;
+    *) echo "$gfx" ;;
   esac
 }
 
-DETECTED_GPU="MI300X"
+DETECTED_GPU="unknown"
 
 base_preflight() {
   local rc=0
