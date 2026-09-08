@@ -249,8 +249,8 @@ class VariantResult:
         tpot_mean_ms (float | None): Mean time-per-output-token (ms).
         input_throughput (float | None): Input tokens/sec (prefill), if measured.
         tpot_p90_ms (float | None): p90 inter-token latency (ms), if measured.
-        intvty_p90 (float | None): p90 E2E normalized interactivity
-            (tok/s/user), if measured.
+        intvty_p90 (float | None): E2E normalised interactivity slow tail
+            (P10 of per-request OSL/E2EL, tok/s/user), if measured.
         workspace (str | None): Path to the located ``benchmark_*`` workspace.
         report_path (str | None): Path to ``benchmark_report.json`` if present.
         raw_result_path (str | None): Path to the raw result JSON, if salvaged.

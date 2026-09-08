@@ -11,6 +11,8 @@ least ``avg``; latency metrics also carry ``p50``/``p99``/``std``).
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.inference_optimizer.agentx.mapping import map_aiperf, pct, stat
 
 
@@ -33,7 +35,9 @@ def _sample():
         "benchmark_duration": {"unit": "s", "avg": 14.0},
         "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
-        "e2e_output_token_throughput": _metric(209.9, p50=55.0, p90=447.2, p99=2028.5),
+        # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster).
+        # The slow-tail interactivity is P10 of this metric (slowest-decile users).
+        "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
         # 1/ITL, deliberately far from the e2e figure so reading the wrong axis
         # cannot pass.
         "output_token_throughput_per_user": _metric(686.1, p50=84.1, p90=1092.6),
@@ -80,7 +84,8 @@ def test_map_latency_fields():
     # tpot mirrors inter_token_latency in the aiperf schema
     assert r["mean_tpot_ms"] == 20.0
     assert r["p90_tpot_ms"] == 34.3
-    assert r["intvty_p90_tok_s_user"] == 447.2
+    # e2e_norm_intvty_p90 is the slow-tail (P10 of the per-request rate = 22.6).
+    assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)
     assert r["mean_e2el_ms"] == 900.0
     assert r["p99_e2el_ms"] == 1500.0
 
@@ -97,14 +102,26 @@ def test_map_total_tput_fallback_from_in_plus_out():
     assert r["total_token_throughput"] == 2000.0  # 1500 in + 500 out
 
 
-def test_intvty_p90_is_zero_when_export_has_only_avg():
-    """An export where e2e_output_token_throughput carries no p90 must not
-    silently produce the mean as the graded interactivity value."""
+def test_e2e_norm_intvty_p90_reads_p10_slow_tail():
+    """e2e_norm_intvty_p90 must read P10 (slow tail), not P90 (fast tail).
+
+    P10 of per-request OSL/E2EL_s = 1/P90(E2EL/OSL) — the slow-tail definition
+    used by InferenceX (MODELS.md:78).  P90 of the per-request rate is the fastest
+    decile; using it would optimise the wrong end of the distribution.
+    """
+    import pytest
+
     s = _sample()
-    # Replace the full metric with avg-only (as a throughput metric may appear).
+    r = map_aiperf(s)
+    assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)  # p10, not p90=447.2
+
+
+def test_e2e_norm_intvty_p90_is_zero_when_export_has_no_p10():
+    """An export where e2e_output_token_throughput carries no p10 must emit 0.0."""
+    s = _sample()
     s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
     r = map_aiperf(s)
-    assert r["intvty_p90_tok_s_user"] == 0.0, f"expected 0.0 (no p90 present), got {r['intvty_p90_tok_s_user']!r}"
+    assert r["e2e_norm_intvty_p90"] == 0.0, f"expected 0.0 (no p10 present), got {r['e2e_norm_intvty_p90']!r}"
 
 
 def test_map_accepts_metrics_wrapped():
@@ -166,8 +183,10 @@ def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
     spec.loader.exec_module(mod)
 
     export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
-    assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"]) == map_aiperf(
-        export, noncanonical_reasons=["entries=50"]
+    # _corpus_shape_raw is a private key added by the package path only.
+    _public = lambda r: {k: v for k, v in r.items() if not k.startswith("_")}
+    assert _public(mod.map_aiperf(export, noncanonical_reasons=["entries=50"])) == _public(
+        map_aiperf(export, noncanonical_reasons=["entries=50"])
     )
     assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"])["submission_valid"] is False
 
@@ -188,4 +207,5 @@ def test_vendored_asset_fallback_matches_package(monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    assert mod.map_aiperf(_sample()) == map_aiperf(_sample())
+    _public = lambda r: {k: v for k, v in r.items() if not k.startswith("_")}
+    assert _public(mod.map_aiperf(_sample())) == _public(map_aiperf(_sample()))

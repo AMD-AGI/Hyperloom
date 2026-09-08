@@ -180,13 +180,15 @@ def workload_signature(
     osl: int | str | None = None,
     precision: str | None = None,
     tp: int | str | None = None,
+    benchmark_mode: str | None = None,
 ) -> str:
     """Return a stable 12-char digest of the workload contract.
 
     Stored as side metadata on each ``explore_search.tested`` entry so a
     cross-workload resume can warn when an old KEEP came from a different
-    (CONC, ISL, OSL, precision, TP). Not part of the fingerprint hash today.
-    Args default to the corresponding process env vars when omitted.
+    workload.  ``benchmark_mode`` (``agentx`` vs ``synthetic``) is included
+    so AgentX and synthetic sessions with the same CONC/TP never share a
+    signature.  Args default to the corresponding process env vars when omitted.
 
     Args:
         conc: Concurrency; defaults to ``$CONC`` when omitted.
@@ -194,11 +196,16 @@ def workload_signature(
         osl: Output sequence length; defaults to ``$OSL`` when omitted.
         precision: Precision tag; defaults to ``$PRECISION`` when omitted.
         tp: Tensor-parallel size; defaults to ``$TP`` when omitted.
+        benchmark_mode: ``"agentx"`` or ``"synthetic"``; defaults to
+            ``$HYPERLOOM_AGENTX`` being set when omitted.
 
     Returns:
         A stable 12-char SHA-1 digest of the workload contract.
     """
+    if benchmark_mode is None:
+        benchmark_mode = "agentx" if os.environ.get("HYPERLOOM_AGENTX", "").strip() else "synthetic"
     fields = {
+        "benchmark_mode": benchmark_mode.strip().lower(),
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),
         "isl": str(isl if isl is not None else os.environ.get("ISL", "")).strip(),
         "osl": str(osl if osl is not None else os.environ.get("OSL", "")).strip(),

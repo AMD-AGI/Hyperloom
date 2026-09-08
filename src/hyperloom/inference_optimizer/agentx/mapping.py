@@ -17,6 +17,33 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+# Canonical corpus constants derived from the full 393-entry, 3600s corpus
+# (semianalysis_cc_traces_weka_062126).  These are used to seed
+# SharedState.agentx_corpus_shape before the first measurement so semantic
+# consumers have something to render immediately.  Measured values from a
+# real aiperf export overwrite them after each run.
+#
+# Sources: measured from Kimi-K3 session 20260831T124523Z (825 requests,
+# 3600 s window) and MiniMax-M3 sessions (1033-1097 requests, 3600 s).
+CANONICAL_CORPUS_LOADER = "semianalysis_cc_traces_weka_062126"
+CANONICAL_CORPUS_ENTRIES = 393
+CANONICAL_CORPUS_DURATION_S = 3600
+CANONICAL_ISL = {
+    "avg": 113814,
+    "p50": 94821,
+    "p75": 119126,
+    "p90": 163328,
+    "p99": 506158,
+}
+CANONICAL_OSL = {
+    "avg": 806,
+    "p50": 333,
+    "p75": 801,
+    "p90": 1874,
+    "p99": 6386,
+}
+CANONICAL_PREFIX_CACHE_HIT = 0.975
+
 
 def stat(m: Mapping[str, Any], key: str, sub: str = "avg", default: float = 0.0) -> Any:
     """Read ``m[key][sub]`` with graceful fallbacks (avg, then ``default``)."""
@@ -102,13 +129,17 @@ def map_aiperf(
     rc = int(stat(m, "request_count") or 0)
     isl = stat(m, "input_sequence_length")
 
-    # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports at
-    # p90. ``output_token_throughput_per_user`` is 1/ITL and drops TTFT from the
-    # denominator, which on a ~114k-prompt replay is most of what a user waits
-    # for -- a candidate could double TTFT and leave that number untouched.
-    # pct() is used here (not stat()) because avg and p90 differ by >2x on
-    # this metric and grading against avg would make the veto gate meaningless.
-    intvty_p90 = pct(m, "e2e_output_token_throughput", "p90")
+    # E2E Normalized Interactivity slow tail.
+    #
+    # InferenceX defines: r_i = E2EL_i / OSL_i (seconds per output token),
+    # then interactivity_P90 = 1 / P90({r_i}).  In aiperf's export
+    # ``e2e_output_token_throughput`` = OSL / E2EL_s is LARGER_IS_BETTER, so
+    # its P10 corresponds to the slow-tail users (highest latency).  P10(rate)
+    # = 1 / P90(ratio) — mathematically identical to the upstream formula.
+    #
+    # pct() is used (not stat()) because avg and P10 differ by an order of
+    # magnitude on this corpus and grading against avg would miss latency outliers.
+    intvty_p90 = pct(m, "e2e_output_token_throughput", "p10")
 
     return {
         "request_throughput": stat(m, "request_throughput"),
@@ -128,7 +159,10 @@ def map_aiperf(
         "p90_tpot_ms": stat(m, "inter_token_latency", "p90"),
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
-        "intvty_p90_tok_s_user": intvty_p90,
+        # Renamed from intvty_p90_tok_s_user to make the slow-tail semantics
+        # unambiguous.  ``e2e_norm_intvty_p90`` matches the field name the
+        # grading layer reads from perf snapshots.
+        "e2e_norm_intvty_p90": intvty_p90,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
         "p99_itl_ms": stat(m, "inter_token_latency", "p99"),
@@ -143,4 +177,65 @@ def map_aiperf(
         # slip into the leaderboard-comparable set.
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
+        # Corpus shape from this run — used by map_corpus_shape.
+        "_corpus_shape_raw": {
+            "isl": m.get("input_sequence_length"),
+            "osl": m.get("output_sequence_length"),
+            "completed": rc,
+            "duration_s": stat(m, "benchmark_duration"),
+            "theoretical_prefix_cache_hit": stat(m, "theoretical_prefix_cache_hit"),
+            "error_request_count": stat(m, "error_request_count"),
+            "request_error_rate": stat(m, "request_error_rate"),
+        },
     }
+
+
+def map_corpus_shape(
+    result: Mapping[str, Any],
+    *,
+    corpus_loader: str = CANONICAL_CORPUS_LOADER,
+) -> dict[str, Any]:
+    """Extract a corpus-shape summary from a mapped aiperf result.
+
+    The raw distribution dicts from aiperf carry avg/p50/p75/p90/p99/p99/std;
+    we forward the subset that semantic consumers need.
+
+    Args:
+        result: The dict returned by :func:`map_aiperf`.
+        corpus_loader: Corpus loader name; defaults to the canonical full corpus.
+
+    Returns:
+        A dict suitable for ``SharedState.agentx_corpus_shape``.
+    """
+    raw = result.get("_corpus_shape_raw") or {}
+
+    def _dist(v: Any) -> dict[str, Any] | None:
+        if not isinstance(v, dict):
+            return None
+        out: dict[str, Any] = {}
+        for k in ("avg", "p50", "p75", "p90", "p99"):
+            val = v.get(k)
+            if val is not None:
+                out[k] = int(val) if isinstance(val, (int, float)) else val
+        return out or None
+
+    shape: dict[str, Any] = {"corpus_loader": corpus_loader}
+    isl_dist = _dist(raw.get("isl"))
+    if isl_dist:
+        shape["isl"] = isl_dist
+    osl_dist = _dist(raw.get("osl"))
+    if osl_dist:
+        shape["osl"] = osl_dist
+    completed = raw.get("completed")
+    if completed:
+        shape["completed_requests"] = int(completed)
+    duration = raw.get("duration_s")
+    if duration:
+        shape["duration_s"] = float(duration)
+    pch = raw.get("theoretical_prefix_cache_hit")
+    if pch is not None:
+        shape["prefix_cache_hit"] = float(pch)
+    err_rate = raw.get("request_error_rate")
+    if err_rate is not None:
+        shape["request_error_rate"] = float(err_rate)
+    return shape

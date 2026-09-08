@@ -621,6 +621,41 @@ def parse_eval_results(
 
     scriptable = framework_registry.is_scriptable(framework)
 
+    # AgentX validity check: post-hoc error-rate gate mirroring the upstream
+    # hard gate (error_rate <= 0.10 over completed requests).
+    # aiperf_client.sh already applies a live abort threshold, but the
+    # post-hoc check catches runs that squeaked under the live gate.
+    # Reads ``request_error_rate`` from the inferencex_result.json in the
+    # workspace.  A missing field is treated as valid (pass).
+    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_active as _agentx_active
+
+    if _agentx_active():
+        _err_rate: float | None = None
+        for _rf in sorted(workspace.rglob("inferencex_result.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                import json
+
+                _data = json.loads(_rf.read_text())
+                _err_rate = float(_data.get("request_error_rate") or 0.0)
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        # Upstream threshold: error_rate > 0.10 is a hard gate.
+        _AGENTX_ERROR_RATE_THRESHOLD = 0.10
+        passed = _err_rate is None or _err_rate <= _AGENTX_ERROR_RATE_THRESHOLD
+        log.info(
+            "accuracy_gate (AgentX): request_error_rate=%s passed=%s",
+            _err_rate,
+            passed,
+        )
+        return {
+            "accuracy": 1.0 if passed else 0.0,
+            "task": "agentx_error_rate",
+            "metric": "request_error_rate",
+            "error_rate": _err_rate,
+            "threshold": _AGENTX_ERROR_RATE_THRESHOLD,
+        }
+
     # Scriptable quality gate first: map passed->1.0 / fail->0.0.
     qg_out = parse_quality_gate(workspace)
     if qg_out.get("quality_gate") is not None:

@@ -66,9 +66,10 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
         rc = int(_stat(m, "request_count") or 0)
         isl = _stat(m, "input_sequence_length")
-        # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports
-        # at p90; the per-user variant is 1/ITL and omits TTFT.
-        intvty_p90 = _pct(m, "e2e_output_token_throughput", "p90")
+        # E2E Normalized Interactivity slow tail.  P10 of the per-request rate
+        # OSL/E2EL_s equals 1/P90 of the per-request ratio E2EL/OSL -- the
+        # slow-tail definition upstream uses (MODELS.md:78).
+        intvty_p90 = _pct(m, "e2e_output_token_throughput", "p10")
         return {
             "request_throughput": _stat(m, "request_throughput"),
             "output_throughput": out_tput,
@@ -87,7 +88,7 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "p90_tpot_ms": _stat(m, "inter_token_latency", "p90"),
             "p99_tpot_ms": _stat(m, "inter_token_latency", "p99"),
             "std_tpot_ms": _stat(m, "inter_token_latency", "std"),
-            "intvty_p90_tok_s_user": intvty_p90,
+            "e2e_norm_intvty_p90": intvty_p90,
             "mean_itl_ms": _stat(m, "inter_token_latency", "avg"),
             "median_itl_ms": _stat(m, "inter_token_latency", "p50"),
             "p99_itl_ms": _stat(m, "inter_token_latency", "p99"),

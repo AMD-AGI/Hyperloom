@@ -62,6 +62,13 @@ def _workload_summary(workload: dict[str, Any]) -> str:
     prec = workload.get("precision") or "?"
     tp = workload.get("tp")
     conc = workload.get("conc")
+    if workload.get("benchmark_mode") == "agentx":
+        # Corpus-level shape, not fixed ISL/OSL.
+        isl_dist = workload.get("isl_distribution") or {}
+        osl_dist = workload.get("osl_distribution") or {}
+        isl_s = f"isl(p50={isl_dist.get('p50','?')},p90={isl_dist.get('p90','?')})"
+        osl_s = f"osl(p50={osl_dist.get('p50','?')},p90={osl_dist.get('p90','?')})"
+        return f"{model} {fw} {prec} tp={tp} conc={conc} {isl_s} {osl_s} [agentx]"
     isl = workload.get("isl")
     osl = workload.get("osl")
     return f"{model} {fw} {prec} tp={tp} conc={conc} isl={isl} osl={osl}"

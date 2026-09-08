@@ -716,8 +716,11 @@ def _merge_raw_result(
         measurement["input_throughput"] = to_float(raw.get("input_throughput"))
     if measurement.get("tpot_p90_ms") is None:
         measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
-    if measurement.get("intvty_p90") is None:
-        measurement["intvty_p90"] = to_float(raw.get("intvty_p90_tok_s_user"))
+    if measurement.get("e2e_norm_intvty_p90") is None:
+        # Accept both the new canonical key and the legacy name from old exports.
+        measurement["e2e_norm_intvty_p90"] = to_float(
+            raw.get("e2e_norm_intvty_p90") or raw.get("intvty_p90_tok_s_user")
+        )
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),

@@ -124,6 +124,33 @@ def agentx_state_is_stale(state: Any) -> str:
     return ""
 
 
+def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
+    """Return a canonical corpus-shape dict for seeding AgentX sessions.
+
+    Populated from the ``semianalysis_cc_traces_weka_062126`` constants in
+    :mod:`hyperloom.inference_optimizer.agentx.mapping`.  Overwritten with
+    measured values after the first aiperf run.
+    """
+    from hyperloom.inference_optimizer.agentx.mapping import (
+        CANONICAL_CORPUS_DURATION_S,
+        CANONICAL_CORPUS_ENTRIES,
+        CANONICAL_CORPUS_LOADER,
+        CANONICAL_ISL,
+        CANONICAL_OSL,
+        CANONICAL_PREFIX_CACHE_HIT,
+    )
+
+    return {
+        "corpus_loader": CANONICAL_CORPUS_LOADER,
+        "completed_requests": CANONICAL_CORPUS_ENTRIES,
+        "duration_s": float(CANONICAL_CORPUS_DURATION_S),
+        "isl": dict(CANONICAL_ISL),
+        "osl": dict(CANONICAL_OSL),
+        "prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
+        "source": "canonical_seed",
+    }
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -325,6 +352,9 @@ def _seed_shared_state(
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
         target_summary=args.target_summary or _default_target_summary(args),
+        # AgentX corpus shape: seeded from canonical constants if AgentX is on;
+        # overwritten by the measured shape after every aiperf run.
+        agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
@@ -358,15 +388,7 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
-        # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
-        # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
-        # explicitly rejects "RUN_EVAL=false in a YAML" as an excuse and would
-        # stamp the baseline as an eval failure -- which blocks it from anchoring
-        # ``baseline_tput``, leaving every variant's gain None and stalling or
-        # stopping the session. Routing AgentX through the same channel as
-        # ``--no-eval`` is what makes the opt-out legible to that guard.
-        eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
+        eval_disabled=bool(getattr(args, "no_eval", False)),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
@@ -374,8 +396,10 @@ def _seed_shared_state(
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
         target_advisory_enabled=bool(getattr(args, "target_advisory", True)),
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
-        # SWEEP-phase concurrency sweep flags (on by default, both workloads).
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
+        # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
+        # rung is a 3600s window and the session grades at a fixed CONC.
+        # Pass --enable-conc-sweep explicitly to override.
+        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),

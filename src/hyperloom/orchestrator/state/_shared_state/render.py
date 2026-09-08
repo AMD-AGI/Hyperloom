@@ -862,6 +862,14 @@ class _RenderMixin:
         tput = entry.get("tput") or entry.get("output_throughput")
         gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
+        # Show which axis the gain was computed on so the agent knows whether
+        # it is looking at interactivity (AgentX) or output throughput (synthetic).
+        graded_obj = str(entry.get("graded_objective") or "").strip()
+        if graded_obj and graded_obj != "output_throughput":
+            # Abbreviate e2e_norm_intvty_p90 -> intvty_p90 for readability.
+            graded_obj_s = f" [{graded_obj.replace('e2e_norm_intvty_p90', 'intvty_p90')}]"
+        else:
+            graded_obj_s = ""
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
@@ -905,7 +913,7 @@ class _RenderMixin:
             anchor_s = ("  " + " ".join(anchors)) if anchors else ""
 
         suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
+        return f"{name:28s} {gain_s:>9}{graded_obj_s}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _enrich_with_tested_gain(

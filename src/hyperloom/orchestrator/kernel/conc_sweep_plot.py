@@ -14,7 +14,7 @@ rather than re-derived, because the grading rule consults the environment of
 the process that ran the sweep.
 
 Total token throughput — the pair InferenceX ranks a submission by:
-  x = intvty_p90                     (p90 interactivity, tok/s/user)
+  x = e2e_norm_intvty_p90            (p90 slow-tail interactivity, tok/s/user)
   y = total_token_throughput / tp    (tok/s per chip)
 
 Output throughput — no aiperf export, so interactivity is approximated from
@@ -54,7 +54,7 @@ def _positive(value: Any) -> float | None:
 
 def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
     """p90 interactivity against token throughput per chip."""
-    intvty = _positive(point.get("intvty_p90"))
+    intvty = _positive(point.get("e2e_norm_intvty_p90"))
     total = _positive(point.get("total_token_throughput"))
     if intvty is None or total is None:
         return None

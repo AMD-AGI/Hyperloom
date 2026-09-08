@@ -177,6 +177,35 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     return {**os.environ, "CONC": str(conc)}
 
 
+def agentx_corpus_isl_mean(shared_state: Any = None) -> int:
+    """Return the mean ISL for the active AgentX corpus (for arithmetic readers).
+
+    Reads from ``SharedState.agentx_corpus_shape`` when available; falls back to
+    the canonical constant.  Arithmetic readers (roofline, context-length cap, etc.)
+    must call this instead of reading ``state.isl`` under AgentX.
+    """
+    shape = getattr(shared_state, "agentx_corpus_shape", None) or {}
+    isl_dist = shape.get("isl") or {}
+    avg = isl_dist.get("avg") if isinstance(isl_dist, dict) else None
+    if isinstance(avg, (int, float)) and avg > 0:
+        return int(avg)
+    from hyperloom.inference_optimizer.agentx.mapping import CANONICAL_ISL
+
+    return CANONICAL_ISL["avg"]
+
+
+def agentx_corpus_osl_mean(shared_state: Any = None) -> int:
+    """Return the mean OSL for the active AgentX corpus (for arithmetic readers)."""
+    shape = getattr(shared_state, "agentx_corpus_shape", None) or {}
+    osl_dist = shape.get("osl") or {}
+    avg = osl_dist.get("avg") if isinstance(osl_dist, dict) else None
+    if isinstance(avg, (int, float)) and avg > 0:
+        return int(avg)
+    from hyperloom.inference_optimizer.agentx.mapping import CANONICAL_OSL
+
+    return CANONICAL_OSL["avg"]
+
+
 def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     """Whether an agentic measurement must stay out of the cross-session KB.
 

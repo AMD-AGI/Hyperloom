@@ -2792,12 +2792,31 @@ class WritebackCollaborator:
         graded = resolve_graded_comparison(self.shared_state, cand_source)
         if graded.degrade_reason:
             log.info(
-                "lift: total-throughput grading unavailable (%s); grading %s winner on output throughput",
+                "lift: grading unavailable (%s); grading %s winner on output throughput",
                 graded.degrade_reason,
                 task_kind,
             )
         if graded.vetoed:
-            log.info("current_best held: %s winner failed the interactivity constraint", task_kind)
+            log.info(
+                "current_best held: %s winner REVERT — both axes regressed "
+                "(intvty %.1f->%.1f, tput %.1f->%.1f)",
+                task_kind,
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
+            return False
+        if graded.verdict == "RECORDED":
+            log.info(
+                "current_best held: %s winner RECORDED — neither axis dominates "
+                "(intvty %.1f->%.1f, tput %.1f->%.1f)",
+                task_kind,
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
             return False
         if graded.reference > 0 and graded.candidate <= graded.reference:
             log.info(
@@ -3338,7 +3357,7 @@ class WritebackCollaborator:
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
-                "intvty_p90": result.get("intvty_p90"),
+                "e2e_norm_intvty_p90": result.get("e2e_norm_intvty_p90"),
                 "workspace": result.get("workspace"),
             }
             from hyperloom.common.perf_metric import perf_snapshot_from_mapping
@@ -3347,10 +3366,27 @@ class WritebackCollaborator:
             if snap:
                 self.shared_state.baseline_perf = dict(snap)
                 current_best["total_throughput"] = snap["total_throughput"]
-                current_best["intvty_p90"] = snap["intvty_p90"]
+                current_best["e2e_norm_intvty_p90"] = snap["e2e_norm_intvty_p90"]
                 for _axis in ("input_throughput", "tpot_p90_ms"):
                     if snap.get(_axis) is not None:
                         current_best[_axis] = snap[_axis]
+            # Update corpus shape from the measured aiperf result when present.
+            if result.get("_corpus_shape_raw"):
+                try:
+                    from hyperloom.inference_optimizer.agentx.mapping import (
+                        CANONICAL_CORPUS_LOADER,
+                        map_corpus_shape,
+                    )
+
+                    loader = str(
+                        (result.get("_corpus_shape_raw") or {}).get("corpus_loader")
+                        or CANONICAL_CORPUS_LOADER
+                    )
+                    measured = map_corpus_shape(result, corpus_loader=loader)
+                    measured["source"] = "measured"
+                    self.shared_state.agentx_corpus_shape = measured
+                except Exception:  # noqa: BLE001 — corpus shape is advisory
+                    log.debug("writeback: failed to update agentx_corpus_shape", exc_info=True)
             self.shared_state.current_best = current_best
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
@@ -3383,7 +3419,15 @@ class WritebackCollaborator:
             await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
         # snapshot ceiling in case the later roofline step fails.
-        if isinstance(tput, (int, float)) and tput > 0:
+        # Abstained under AgentX: state.isl/osl are 1024/1024 placeholders and
+        # the corpus is ~113k/806 — the formula would classify the workload as
+        # decode-bound when it is actually dominated by prefill and KV cache IO.
+        # conc_sweep_plot.py abstains for the same reason at line 279.
+        from hyperloom.orchestrator.actions.executors._workload_envs import (
+            agentx_active as _agentx_active,
+        )
+
+        if isinstance(tput, (int, float)) and tput > 0 and not _agentx_active(self.shared_state):
             try:
                 self.shared_state.record_baseline_roofline_ceiling()
             except Exception as exc:  # noqa: BLE001 — best-effort backup

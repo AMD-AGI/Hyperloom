@@ -305,15 +305,44 @@ def build_manifest(
     model_name = ""
     framework = os.environ.get("FRAMEWORK", "")
     gpu_type = os.environ.get("GPU_TYPE", "")
-    workload: dict[str, Any] = {
-        "isl": int(os.environ["ISL"]) if os.environ.get("ISL", "").strip().isdigit() else None,
-        "osl": int(os.environ["OSL"]) if os.environ.get("OSL", "").strip().isdigit() else None,
-        "max_model_len": int(os.environ["MAX_MODEL_LEN"])
-        if os.environ.get("MAX_MODEL_LEN", "").strip().isdigit()
-        else None,
-        "precision": os.environ.get("PRECISION", "") or None,
-        "conc": int(os.environ["CONC"]) if os.environ.get("CONC", "").strip().isdigit() else None,
-    }
+    # Under AgentX the canonical ISL/OSL are corpus distributions, not the
+    # 1024/1024 CLI placeholders.  Semantic consumers (Critic context) should
+    # see the corpus description rather than the inert env values.
+    _agentx_on = os.environ.get("HYPERLOOM_AGENTX", "").strip() in ("1", "true", "yes", "on")
+    if _agentx_on:
+        from hyperloom.inference_optimizer.agentx.mapping import (
+            CANONICAL_CORPUS_DURATION_S,
+            CANONICAL_CORPUS_ENTRIES,
+            CANONICAL_CORPUS_LOADER,
+            CANONICAL_ISL,
+            CANONICAL_OSL,
+            CANONICAL_PREFIX_CACHE_HIT,
+        )
+
+        workload: dict[str, Any] = {
+            "benchmark_mode": "agentx",
+            "corpus_loader": CANONICAL_CORPUS_LOADER,
+            "corpus_entries": CANONICAL_CORPUS_ENTRIES,
+            "corpus_duration_s": CANONICAL_CORPUS_DURATION_S,
+            "isl_distribution": dict(CANONICAL_ISL),
+            "osl_distribution": dict(CANONICAL_OSL),
+            "typical_prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
+            "precision": os.environ.get("PRECISION", "") or None,
+            "conc": int(os.environ["CONC"]) if os.environ.get("CONC", "").strip().isdigit() else None,
+            "max_model_len": int(os.environ["MAX_MODEL_LEN"])
+            if os.environ.get("MAX_MODEL_LEN", "").strip().isdigit()
+            else None,
+        }
+    else:
+        workload: dict[str, Any] = {
+            "isl": int(os.environ["ISL"]) if os.environ.get("ISL", "").strip().isdigit() else None,
+            "osl": int(os.environ["OSL"]) if os.environ.get("OSL", "").strip().isdigit() else None,
+            "max_model_len": int(os.environ["MAX_MODEL_LEN"])
+            if os.environ.get("MAX_MODEL_LEN", "").strip().isdigit()
+            else None,
+            "precision": os.environ.get("PRECISION", "") or None,
+            "conc": int(os.environ["CONC"]) if os.environ.get("CONC", "").strip().isdigit() else None,
+        }
     tp = int(os.environ["TP"]) if os.environ.get("TP", "").strip().isdigit() else None
     if args is not None:
         if getattr(args, "model", None):
@@ -325,10 +354,11 @@ def build_manifest(
             framework = str(args.framework)
         if getattr(args, "gpu_type", None):
             gpu_type = str(args.gpu_type)
-        if getattr(args, "isl", None) is not None:
-            workload["isl"] = int(args.isl)
-        if getattr(args, "osl", None) is not None:
-            workload["osl"] = int(args.osl)
+        if not _agentx_on:
+            if getattr(args, "isl", None) is not None:
+                workload["isl"] = int(args.isl)
+            if getattr(args, "osl", None) is not None:
+                workload["osl"] = int(args.osl)
         if getattr(args, "precision", None):
             workload["precision"] = str(args.precision)
     claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None

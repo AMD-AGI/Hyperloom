@@ -183,8 +183,8 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
     Returns:
         A dict of the variant's metrics keyed for the curve row.
 
-    ``intvty_p90`` and ``total_token_throughput`` are the pair an agentic run is
-    plotted on; they are null on a synthetic run, which is plotted on the
+    ``e2e_norm_intvty_p90`` and ``total_token_throughput`` are the pair an agentic
+    run is plotted on; they are null on a synthetic run, which is plotted on the
     output-throughput pair instead.
     """
     envs = v.extra_envs or {}
@@ -207,7 +207,7 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "request_throughput": v.request_throughput,
         "total_token_throughput": total,
         "input_throughput": v.input_throughput,
-        "intvty_p90": v.intvty_p90,
+        "e2e_norm_intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
@@ -262,7 +262,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "request_throughput",
         "total_token_throughput",
         "input_throughput",
-        "intvty_p90",
+        "e2e_norm_intvty_p90",
         "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
@@ -1565,7 +1565,7 @@ async def run_conc_sweep(
         "osl": osl,
         "tp": int(getattr(state, "tp", 0) or 0),
         # Names the axis pair the points are drawn on, so a reader never has to
-        # infer it from whether intvty_p90 happens to be null.
+        # infer it from whether e2e_norm_intvty_p90 happens to be null.
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "concs_requested": concs,
         "baseline": {

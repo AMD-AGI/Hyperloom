@@ -957,6 +957,12 @@ class ExplorePhase(CoordinatorCollaborator):
             params.setdefault("osl", int(state.osl))
         if int(getattr(state, "max_model_len", 0) or 0) > 0:
             params.setdefault("max_model_len", int(state.max_model_len))
+        # benchmark_mode reaches the specialist prompt builder so it can branch
+        # on AgentX vs. synthetic workload descriptions.
+        if "benchmark_mode" not in params:
+            bm = str(getattr(state, "benchmark_mode", "") or "")
+            if bm:
+                params["benchmark_mode"] = bm
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:

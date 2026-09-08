@@ -494,16 +494,32 @@ class KernelStackPhase(PhaseHandler):
                 # decision is the incremental gain over current_best rather than
                 # the total gain over the baseline. Reported ``gain_pct`` stays
                 # on the output axis the stack ledger is denominated in.
-                graded = resolve_graded_comparison(self.shared_state, bench_result)
+                graded = resolve_graded_comparison(
+                    self.shared_state, bench_result,
+                    keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
+                )
                 if graded.degrade_reason:
                     log.info("stack-validate: %s graded on output throughput (%s)", stack_id, graded.degrade_reason)
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
                 if graded.vetoed:
-                    log.info("stack-validate: %s failed the interactivity constraint", stack_id)
-                clears = incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
-                decision = "KEEP" if clears and not graded.vetoed else "REVERT"
+                    log.info(
+                        "stack-validate: %s REVERT — both axes regressed "
+                        "(intvty %.1f->%.1f, tput %.1f->%.1f)",
+                        stack_id,
+                        graded.reference,
+                        graded.candidate,
+                        graded.tput_reference,
+                        graded.tput_candidate,
+                    )
+                elif graded.verdict == "RECORDED":
+                    log.info(
+                        "stack-validate: %s RECORDED — neither axis dominates; not promoting",
+                        stack_id,
+                    )
+                clears = graded.verdict == "KEEP"
+                decision = "KEEP" if clears else "REVERT"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):

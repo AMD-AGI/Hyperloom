@@ -973,6 +973,23 @@ def run_t0_anchor(
     emit = on_status or _default_status_emitter
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
+
+    # Block KB reads under AgentX.  The recipe identity has no mode or workload
+    # dimension: a synthetic 1024/1024 warm-start recipe would pass the shape
+    # gate and be applied to a ~114k/806 agentic workload, tuning for the wrong
+    # regime.  Writes are already blocked by agentx_kb_write_blocked; this
+    # makes reads symmetric and is tracked separately so each site is explicit.
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        agentx_kb_write_blocked,
+    )
+
+    if agentx_kb_write_blocked(shared_state):
+        log.info(
+            "run_t0_anchor: skipping (AgentX); recipe KB has no mode dimension, "
+            "and a synthetic warm-start would tune for the wrong corpus shape."
+        )
+        return
+
     sd = Path(session_dir)
 
     sid = (getattr(shared_state, "recipe_kb_session_id", "") or "").strip()

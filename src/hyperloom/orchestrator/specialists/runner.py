@@ -615,6 +615,8 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
+                # benchmark_mode enables AgentX-specific prompt sections.
+                benchmark_mode=str(params.get("benchmark_mode") or ""),
                 # Runtime fingerprint to flag version-mismatched lessons.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),

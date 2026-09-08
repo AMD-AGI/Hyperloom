@@ -190,14 +190,13 @@ def test_sglang_context_non_sglang_untouched(tmp_path, monkeypatch):
 # --- eval opt-out -------------------------------------------------------------
 
 
-def test_agentx_is_a_deliberate_eval_optout(monkeypatch):
-    """``eval_disabled`` must be set by AgentX, not only by ``--no-eval``.
+def test_agentx_runs_its_own_eval_not_lmeval(monkeypatch):
+    """AgentX eval is a post-hoc error-rate gate, not an lm-eval opt-out.
 
-    ``baseline._maybe_stop_on_missing_baseline_accuracy`` rejects an incidental
-    ``RUN_EVAL=false`` as an excuse for a missing accuracy, and reads only
-    ``state.eval_disabled``. Without this wiring an AgentX baseline is stamped
-    as an eval failure, never anchors ``baseline_tput``, and every variant's
-    gain comes back None.
+    The eval gate is in ``_accuracy_gate.parse_eval_results``:
+    under AgentX it reads ``request_error_rate`` from the aiperf export and
+    maps pass (<= 0.10) -> 1.0 / fail -> 0.0 against a fixed 1.0 reference.
+    This replaces the old ``eval_disabled=... or _agentx_enabled()`` opt-out.
     """
     from hyperloom.inference_optimizer.cli import bootstrap
 
@@ -207,8 +206,8 @@ def test_agentx_is_a_deliberate_eval_optout(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     assert bootstrap._agentx_enabled() is True
 
-    # The seeding expression must OR the two opt-outs together.
+    # eval_disabled must NOT be forced on by AgentX any more.
     import inspect
 
     src = inspect.getsource(bootstrap)
-    assert 'eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),' in src
+    assert "_agentx_enabled()" not in src.split("eval_disabled=")[1].split("\n")[0]

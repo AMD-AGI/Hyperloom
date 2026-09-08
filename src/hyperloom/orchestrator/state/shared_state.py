@@ -181,15 +181,19 @@ def resolve_graded_comparison(
     measurement: Any,
     *,
     against_baseline: bool = False,
+    keep_threshold_pct: float = 0.0,
 ) -> "GradedComparison":
-    """Resolve what a KEEP decision grades: candidate and reference, one axis.
+    """Resolve what a KEEP decision grades and compute the 2-D verdict.
 
-    Under total-token-throughput grading both sides come from perf snapshots,
-    which exist only when the axis pair (total, intvty p90) is present, so a
-    lane cannot half-apply the objective. When either side cannot supply the
-    pair both read the output axis and ``degrade_reason`` names why. The
-    interactivity constraint is resolved here as ``vetoed`` because it belongs
-    to the total-throughput objective rather than sitting beside it.
+    Under AgentX grading the objective is E2E normalised interactivity P90
+    (slow tail).  A candidate KEEP when its interactivity gain clears
+    ``keep_threshold_pct`` **and** per-chip token throughput does not regress
+    beyond the noise band.  Both axes worse -> REVERT.  Neither dominates ->
+    RECORDED (measured, stored, not promoted).
+
+    When either side cannot supply the graded axes the comparison degrades to
+    output throughput and ``degrade_reason`` names why.  The degrade is never
+    silent and never one-sided.
 
     Args:
         state: The session state (``current_best`` / ``baseline_tput`` /
@@ -197,25 +201,33 @@ def resolve_graded_comparison(
         measurement: The candidate's measurement mapping.
         against_baseline: Grade against the session baseline (cumulative
             realized gain) rather than the recipe the candidate was composed on.
+        keep_threshold_pct: Minimum interactivity gain to KEEP (>= 0).
 
     Returns:
         A :class:`GradedComparison` whose ``candidate`` and ``reference`` are
         on the axis it names.
     """
+    from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
+        AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
+        GRADED_INTVTY,
         GRADED_OUTPUT,
-        GRADED_TOTAL,
         GradedComparison,
+        VERDICT_KEEP,
+        VERDICT_RECORDED,
+        VERDICT_REVERT,
+        intvty_of,
+        intvty_serving_grading_enabled,
         output_tput_of,
         passes_intvty_gate,
+        passes_tput_guard,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
         total_tput_of,
-        total_tput_serving_grading_enabled,
     )
 
     degrade_reason = ""
-    if total_tput_serving_grading_enabled(
+    if intvty_serving_grading_enabled(
         scriptable=framework_is_scriptable(getattr(state, "framework", None)),
         benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
     ):
@@ -226,21 +238,46 @@ def resolve_graded_comparison(
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
         if ref_perf and cand_perf:
+            # Apply the AgentX floor on keep_threshold.
+            effective_threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
+            intvty_gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
+            intvty_ok = passes_intvty_gate(cand_perf, ref_perf)
+            tput_ok = passes_tput_guard(cand_perf, ref_perf)
+            # 2-D domination verdict.
+            if intvty_gain is not None and intvty_gain >= effective_threshold and tput_ok:
+                verdict = VERDICT_KEEP
+            elif not intvty_ok and not tput_ok:
+                verdict = VERDICT_REVERT
+            else:
+                # Neither strictly dominates: store, do not promote.
+                verdict = VERDICT_RECORDED
             return GradedComparison(
-                objective=GRADED_TOTAL,
-                candidate=total_tput_of(cand_perf),
-                reference=total_tput_of(ref_perf),
-                vetoed=not passes_intvty_gate(cand_perf, ref_perf),
+                objective=GRADED_INTVTY,
+                candidate=intvty_of(cand_perf),
+                reference=intvty_of(ref_perf),
+                verdict=verdict,
+                tput_candidate=total_tput_of(cand_perf),
+                tput_reference=total_tput_of(ref_perf),
             )
         degrade_reason = reason or "candidate_axes_missing"
 
     reference = (
         float(getattr(state, "baseline_tput", 0.0) or 0.0) if against_baseline else resolve_grading_anchor_tput(state)
     )
+    cand_output = output_tput_of(measurement)
+    if reference > 0:
+        output_gain = gain_pct(cand_output, reference)
+        if output_gain is not None and output_gain >= keep_threshold_pct:
+            verdict = VERDICT_KEEP
+        else:
+            verdict = VERDICT_REVERT
+    else:
+        verdict = VERDICT_REVERT
     return GradedComparison(
         objective=GRADED_OUTPUT,
-        candidate=output_tput_of(measurement),
+        candidate=cand_output,
         reference=reference,
+        verdict=verdict,
         degrade_reason=degrade_reason,
     )
 
@@ -658,8 +695,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
-    # Baseline AgentX perf snapshot: total tok/s objective plus the intvty p90
-    # the veto is measured against, and the reported axes the summary renders.
+    # AgentX corpus shape: written at seed from canonical constants and
+    # overwritten with measured values after every AgentX measurement.  Used
+    # by semantic consumers (prompts, manifest, reports) instead of the inert
+    # state.isl / state.osl placeholders.  Absent on synthetic sessions.
+    agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
+    # Baseline AgentX perf snapshot: e2e_norm_intvty_p90 (slow-tail) plus
+    # total_throughput and the reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase
     # warm-decision apples-to-apples with the baseline measurement basis.
@@ -1228,6 +1270,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     #: instance-scoped read added later would let a stored value govern whether
     #: a profile is reused or re-run.
     PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
+        "benchmark_mode",
         "framework",
         "precision",
         "model_path",
@@ -1262,6 +1305,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Return the normalized workload and runtime identity for a profile trace."""
         params = overrides if isinstance(overrides, dict) else {}
         context: dict[str, Any] = {}
+        # benchmark_mode distinguishes AgentX from synthetic traces with the
+        # same CONC/TP so a synthetic trace is never reused for an AgentX session.
+        context["benchmark_mode"] = str(getattr(self, "benchmark_mode", "") or "").strip().lower()
         for name in ("framework", "precision", "model_path"):
             value = params.get(name)
             if value in (None, ""):

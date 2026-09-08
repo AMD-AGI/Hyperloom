@@ -534,15 +534,15 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     lines.append("## AgentX perf (total tok/s objective, intvty p90 gate)")
     lines.append("")
     lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
-    lines.append(f"- baseline intvty p90 : `{baseline['intvty_p90']:.1f}` tok/s/user")
+    lines.append(f"- baseline intvty P90 (slow tail) : `{baseline['e2e_norm_intvty_p90']:.1f}` tok/s/user")
     if cb_snap:
         lines.append(f"- current_best total  : `{total_tput_of(cb_snap):.1f}` tok/s")
-        lines.append(f"- current_best intvty : `{cb_snap['intvty_p90']:.1f}` tok/s/user")
+        lines.append(f"- current_best intvty : `{cb_snap['e2e_norm_intvty_p90']:.1f}` tok/s/user")
         gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if gain is not None:
             lines.append(f"- total tput gain     : `{gain:+.2f}%`")
     if total_tput_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
-        lines.append(f"- grading mode        : `composite_v1` (intvty band `{parse_intvty_noise_pct():.1f}%`)")
+        lines.append(f"- grading mode        : `intvty_v1` (noise band `{parse_intvty_noise_pct():.1f}%`)")
     else:
         lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
 

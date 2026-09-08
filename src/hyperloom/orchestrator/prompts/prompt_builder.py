@@ -115,6 +115,7 @@ def _section_session_context(
     max_minutes: int,
     framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
+    benchmark_mode: str = "",
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
@@ -130,17 +131,21 @@ def _section_session_context(
         max_minutes (int): Wall-clock budget for the run, in minutes.
         framework_source_roots (tuple[str, ...] | None): Optional framework
             source roots; a PolicyGate-default note is shown when empty.
+        benchmark_mode (str): ``"agentx"`` or ``""``/``"synthetic"``; injects
+            an AgentX workload and grading summary when set.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
         awareness.
     """
+    from hyperloom.common.perf_metric import AGENTX_KEEP_THRESHOLD_FLOOR_PCT, is_agentx_mode
+
     obj = f"{objective_kind}"
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
     roots = framework_source_roots or ()
     roots_line = ", ".join(roots) if roots else "(defaults from PolicyGate)"
-    return [
+    lines = [
         "## 2. SESSION CONTEXT",
         "",
         f"- framework        : {framework}",
@@ -149,6 +154,29 @@ def _section_session_context(
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
+    ]
+    if is_agentx_mode(benchmark_mode):
+        lines += [
+            "",
+            "**Workload: AgentX agentic trace replay** — the corpus fixes the",
+            "request shape; ISL/OSL in state are inert placeholders, not the real shape.",
+            "- corpus : semianalysis_cc_traces_weka_062126, 393 traces, 3600 s window",
+            "- input/req : p50 95k   p90 163k   p99 506k tokens",
+            "- output/req: p50 333   p90 1874   p99 6386 tokens",
+            "- prefix cache hit ~97.5%: most input tokens are cache hits, so",
+            "  prefill compute is far smaller than the token count suggests",
+            "- decode is ~94% of user-visible time (TTFT 0.55 s of a 9.15 s mean E2EL)",
+            "",
+            "**Grading: E2E normalised interactivity P90 (slow tail)**",
+            "= 1 / P90({E2EL_i / OSL_i}) = P10 of per-request OSL/E2EL_s (tok/s/user).",
+            "This is the axis InferenceX ranks a submission on (MODELS.md:78).",
+            f"KEEP: interactivity gain >= {AGENTX_KEEP_THRESHOLD_FLOOR_PCT:.0f}%",
+            "AND per-chip token throughput not worse than the noise band.",
+            "REVERT: both axes worse. RECORDED: neither dominates (stored, not promoted).",
+            "Output throughput is measured but is NOT the objective; a win that only",
+            "speeds up the fastest users does not move the graded number.",
+        ]
+    lines += [
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",
         "Shared session state, KB hints, inbox tail) is appended below the",
@@ -157,6 +185,7 @@ def _section_session_context(
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
     ]
+    return lines
 
 
 def _section_phase_semantics(
@@ -960,6 +989,7 @@ def build_orchestration_prompt(
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
     references_dir: Path | None = None,
+    benchmark_mode: str = "",
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1035,6 +1065,7 @@ def build_orchestration_prompt(
             max_minutes=max_minutes,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
             framework_source_roots=framework_source_roots,
+            benchmark_mode=benchmark_mode,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(

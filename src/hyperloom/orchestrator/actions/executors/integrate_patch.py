@@ -3315,18 +3315,38 @@ class IntegratePatchExecutor:
                 },
             )
 
-        # ``new_tput`` is reported as ``output_throughput``; the KEEP gate is
-        # graded on whichever axis this session uses, both sides from one
-        # resolver. On the output axis the drift-resolved ``base_tput`` is the
-        # reference, which is what resolve_anchor_with_drift exists for.
+        # ``new_tput`` is reported as ``output_throughput``; the AgentX KEEP gate
+        # grades on E2E normalised interactivity with per-chip throughput as a
+        # secondary guard.  The resolver applies the AgentX keep-threshold floor
+        # and returns a 2-D verdict; the output-axis fallback path uses the
+        # drift-resolved ``base_tput`` as the reference.
         new_tput = bench_result.get("output_throughput")
-        graded = resolve_graded_comparison(shared_state, bench_result)
+        graded = resolve_graded_comparison(
+            shared_state, bench_result, keep_threshold_pct=keep_threshold_pct
+        )
         if graded.degrade_reason:
             log.info("integrate_patch: grading on output throughput (%s)", graded.degrade_reason)
         if not graded.graded_on_total:
             delta_pct = gain_pct(new_tput, base_tput)
         elif graded.vetoed:
-            log.info("integrate_patch: candidate failed the interactivity constraint")
+            log.info(
+                "integrate_patch: candidate REVERT — both axes regressed "
+                "(intvty %.1f->%.1f, tput %.1f->%.1f)",
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
+            delta_pct = None
+        elif graded.verdict == "RECORDED":
+            log.info(
+                "integrate_patch: candidate RECORDED — neither axis dominates "
+                "(intvty %.1f->%.1f, tput %.1f->%.1f); not promoting to stack",
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
             delta_pct = None
         else:
             delta_pct = gain_pct(graded.candidate, graded.reference)

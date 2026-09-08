@@ -160,6 +160,51 @@ class TargetAnalysisExecutor:
                 the persisted artefacts plus the comparison status / reason.
         """
         params = dict(ctx.task.params or {})
+
+        # Under AgentX, upstream agentic rows carry null isl/osl and the
+        # strict isl/osl filter in inferencex_client.py can never match them.
+        # Rather than fetching rows that will always be empty, write a
+        # structured skip marker so the report renders an honest "not available"
+        # section.  Tracked in agentX-compareGPU.issue.md.
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state")
+        from hyperloom.orchestrator.actions.executors._workload_envs import agentx_active
+
+        if agentx_active(shared_state):
+            session_dir = self._resolve_session_dir(ctx)
+            log.info(
+                "target_analysis_executor: AgentX session — skipping external comparison "
+                "(upstream agentic rows carry null isl/osl; strict filter cannot match)"
+            )
+            if session_dir is not None:
+                # Write the skip marker so the report can render the section.
+                try:
+                    summary = analyze(
+                        session_dir=session_dir,
+                        model_path=str(params.get("model_path") or env_str("MODEL_PATH")),
+                        compare_against_gpu="",
+                        reason_override="agentx_not_supported",
+                    )
+                    return self._format_result(ctx, summary, session_dir)
+                except TypeError:
+                    # analyze() may not accept reason_override — fall through to
+                    # no-compare path which writes no_target_gpu_configured marker.
+                    summary = analyze(
+                        session_dir=session_dir,
+                        model_path=str(params.get("model_path") or env_str("MODEL_PATH")),
+                        compare_against_gpu="",
+                    )
+                    return self._format_result(ctx, summary, session_dir)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("target_analysis_executor(agentx skip): analyze raised: %s", exc)
+            return {
+                "status": "succeeded",
+                "kind": ctx.task.kind,
+                "note": "skipped: AgentX sessions cannot match upstream agentic rows",
+                "baseline_status": "skipped",
+                "reason": "agentx_not_supported",
+            }
+
         session_dir = self._resolve_session_dir(ctx)
         if session_dir is None:
             cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)
