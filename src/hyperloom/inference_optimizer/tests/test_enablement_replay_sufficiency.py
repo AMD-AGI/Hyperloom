@@ -382,6 +382,25 @@ def test_build_inputs_follow_driver_defaults(monkeypatch, component, default_pre
     assert record["max_jobs"] == (max_jobs or default_jobs)
 
 
+def test_unknown_build_component_has_no_defaults_and_is_incomplete():
+    action = TargetedBuildAction(
+        gap_id="gap",
+        framework="vllm",
+        component="unknown_component",
+        capability="build",
+        ref="v1",
+        gpu_arch="gfx950",
+    )
+    row = _attempt("bA")
+    record = build_input_record(action, installed_versions=row["installed_versions"], ambient_env={}, fs_root=NO_FS)
+    assert (record["repo_url"], record["max_jobs"]) == ("", 0)
+    row["build_inputs"] = record
+    state = _build_state([row, {"task_id": "bA", "probe_task_id": "probe"}])
+    decision = _decide(state)
+    assert "build_inputs_incomplete" in _codes(decision)
+    assert "build_attempt_unjoined" not in _codes(decision)
+
+
 def test_ambient_closure_tracks_build_effective_names_and_ignores_presentation():
     base = {"PATH": "/usr/bin", "ROCM_PATH": "/opt/rocm", "PIP_INDEX_URL": "https://a", "TERM": "xterm"}
     for changed in ("PATH", "ROCM_PATH", "PIP_INDEX_URL"):
@@ -886,6 +905,19 @@ def test_malformed_url_userinfo_is_detected_and_stripped(url, userinfo, stripped
     assert classify_credential_value(url) is not None
 
 
+@pytest.mark.parametrize(
+    ("url", "stripped"),
+    [
+        ("pkg@https://user:tok@host/x.whl", "pkg@https://host/x.whl"),
+        ("mypkg @ https://user:tok@host/x.whl", "mypkg @ https://host/x.whl"),
+    ],
+)
+def test_direct_reference_url_userinfo_is_detected_and_stripped(url, stripped):
+    assert url_userinfo(url) == "user:tok"
+    assert strip_url_userinfo(url) == stripped
+    assert classify_credential_value(url) == "opaque_credential"
+
+
 @pytest.mark.parametrize("host", ["host]", "[host", "[::1"])
 def test_malformed_credentialed_index_is_sanitized_and_blocks_replay(host):
     cmd = PINNED_INSTALL.replace("pip install", f"pip install --index-url https://user:token@{host}/simple", 1)
@@ -1103,6 +1135,39 @@ def test_a_stripped_round_names_no_target_and_raises_accepted_stack_not_launched
     decision = _decide({"kept_patches": ["/p/1.patch"], "framework_root": "/fr"}, section)
     reasons = [r for r in decision["reasons"] if r["code"] == "accepted_stack_not_launched"]
     assert reasons and reasons[0]["blocks"] == "both"
+    assert decision["status"] == "insufficient"
+
+
+@pytest.mark.parametrize("target_record", [{}, {"enablement_accepted_stack_targets": {}}])
+def test_a_later_keep_cannot_borrow_the_previous_rounds_launched_targets(target_record):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    state = SimpleNamespace(enablement=EnablementRound(framework_root="/fr", origin="eval"))
+    _rearm_on_kept(
+        state,
+        {
+            "patches_applied": ["/p/1.patch"],
+            "enablement_roots": [{**_root(), "path": "/fr"}],
+            "enablement_source_snapshots": [_snapshot()],
+            "enablement_accepted_stack_targets": {"r1": {"srt/a.py": "upsert"}},
+        },
+    )
+    first = _collect(asdict(state.enablement))
+    assert "accepted_stack_not_launched" not in _codes(first["replay_sufficiency"])
+
+    _rearm_on_kept(state, {"patches_applied": ["/p/2.patch"], **target_record})
+    assert state.enablement.kept_patches == ["/p/1.patch", "/p/2.patch"]
+    second = _collect(asdict(state.enablement))
+    decision = second["replay_sufficiency"]
+    assert {
+        "code": "accepted_stack_not_launched",
+        "scope": "accepted_stack_targets",
+        "blocks": "both",
+    } in decision["reasons"]
     assert decision["status"] == "insufficient"
 
 

@@ -110,6 +110,7 @@ class EnablementRound:
     # Persisted projection of the graded launch evidence; raw env values and
     # host-internal paths are removed before the result reaches durable state.
     launch_evidence: dict = field(default_factory=dict)
+    launch_argv_refused: bool = False
     # Version assertions observed AT the KEEP, after every mutation that reaches
     # the launched image.
     installed_versions_at_keep: dict = field(default_factory=dict)

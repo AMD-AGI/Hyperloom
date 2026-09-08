@@ -1540,6 +1540,7 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "kept_patches",
     "kept_stack_action",
     "last_specialist_task_id",
+    "launch_argv_refused",
     "launch_evidence",
     "patch_roots",
     "roots",
@@ -1637,7 +1638,7 @@ def _collect_recipe(
         enablement,
         steps=steps,
         section=out,
-        launch_argv_refused=argv_refused,
+        launch_argv_refused=argv_refused or bool(enablement.get("launch_argv_refused")),
     )
     out["replay_sufficiency"] = decision
     out["dependency_closure_status"] = _closure_status(decision, enablement)

@@ -121,7 +121,7 @@ def _build_command_identity(argv: tuple[str, ...] | list[str]) -> dict[str, Any]
     for token in tokens[1:]:
         # A ``-c`` operand is a command line in its own right, so the credential
         # inside it sits under an option no argv-level scan reaches.
-        found = classify_credential_value(token) or (classify_credential_class(token) if " " in token else None)
+        found = (classify_credential_class(token) if " " in token else None) or classify_credential_value(token)
         credential_class = credential_class or found
     return {
         "argv0": tokens[0],

@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _git_head_sha
+from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
 from hyperloom.orchestrator.enablement.recipe.keep_records import (
     accepted_stack_artifacts,
     build_root_records,
@@ -28,6 +31,7 @@ from hyperloom.orchestrator.enablement.recipe.keep_probe import (
     probe_environment_closure,
     resolve_keep_interpreter,
 )
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 BUILD_TASK = "tb-1"
 PROBE_TASK = "probe-9"
@@ -216,6 +220,46 @@ def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tm
     assert "materialized_config_path" not in durable
     assert "actual_server_log_path" not in durable
     assert "secret" not in str(durable)
+
+
+@pytest.mark.parametrize("argv_key", ["requested_server_args", "observed_server_launch_flags"])
+def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
+    repo: Path, tmp_path: Path, monkeypatch, argv_key
+):
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
+    state = SimpleNamespace(enablement=EnablementRound(attempts=1, origin="eval"))
+    for argv, refused in (("--flag 'unterminated", True), ("", False)):
+        evidence = {
+            "framework": "sglang",
+            "requested_model_digest": "sha256:model",
+            "observed_model_binding": {"model_digest": "sha256:model"},
+            "requested_server_args": "",
+            "observed_server_launch_flags": "",
+            argv_key: argv,
+        }
+        result = executor._enablement_keep_records(
+            SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=state),
+            params={},
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[],
+            applied_artifacts=[],
+            done_payload={},
+            provision_result=None,
+            bench_result={"launch_evidence": evidence},
+        )
+        if refused:
+            assert argv_key not in result["enablement_launch_evidence"]
+        _rearm_on_kept(state, result)
+        state.enablement = EnablementRound.from_dict(asdict(state.enablement))
+        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+        decision = collected["replay_sufficiency"]
+        activation_reasons = [reason for reason in decision["reasons"] if reason["code"] == "activation_incomplete"]
+        expected = {"code": "activation_incomplete", "scope": "observed_server_launch_flags", "blocks": "both"}
+        assert activation_reasons == ([expected] if refused else [])
+        if refused:
+            assert decision["status"] == "insufficient"
 
 
 def test_declared_targets_separate_upserts_from_deletions():

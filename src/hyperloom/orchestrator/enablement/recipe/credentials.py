@@ -186,9 +186,11 @@ def url_userinfo(token: str) -> str:
     try:
         parts = urlsplit(text)
     except ValueError:
-        match = _CREDENTIALED_URL_RE.search(text)
-        return match.group("userinfo") if match else ""
-    return parts.netloc.rsplit("@", 1)[0] if "@" in parts.netloc else ""
+        parts = None
+    if parts is not None and "@" in parts.netloc:
+        return parts.netloc.rsplit("@", 1)[0]
+    match = _CREDENTIALED_URL_RE.search(text)
+    return match.group("userinfo") if match else ""
 
 
 def strip_url_userinfo(url: str) -> str:
@@ -204,11 +206,11 @@ def strip_url_userinfo(url: str) -> str:
     try:
         parts = urlsplit(text)
     except ValueError:
-        return prefix + _CREDENTIALED_URL_RE.sub(r"\g<scheme>\g<location>", text)
-    if "@" not in parts.netloc:
-        return str(url or "")
-    host = parts.netloc.rsplit("@", 1)[1]
-    return prefix + urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+        parts = None
+    if parts is not None and "@" in parts.netloc:
+        host = parts.netloc.rsplit("@", 1)[1]
+        return prefix + urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+    return prefix + _CREDENTIALED_URL_RE.sub(r"\g<scheme>\g<location>", text)
 
 
 def _class_for_pair(option: str, operand: str, *, family: str) -> str:

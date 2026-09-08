@@ -25,12 +25,17 @@ log = _logging.getLogger(__name__)
 #: Identity and payload of the accepted stack, accumulated across the rounds
 #: that contributed to it: a round that contributes none leaves the standing
 #: records alone.
-_KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots", "accepted_stack_targets")
+_KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots")
 
 #: Observations of *this* KEEP. A probe that could not run observed nothing, and
 #: the previous KEEP's observation is of another launch, another image and
 #: another interpreter, so it is replaced either way.
-_KEEP_OBSERVED_FIELDS = ("launch_evidence", "environment_closure", "installed_versions_at_keep")
+_KEEP_OBSERVED_FIELDS = (
+    "accepted_stack_targets",
+    "launch_evidence",
+    "environment_closure",
+    "installed_versions_at_keep",
+)
 
 
 class EnablementLane(CoordinatorCollaborator):
@@ -408,6 +413,7 @@ def _stack_keep_recipe_records(state: Any, res: dict[str, Any]) -> None:
             setattr(state.enablement, field_name, value)
     for field_name in _KEEP_OBSERVED_FIELDS:
         setattr(state.enablement, field_name, res.get(f"enablement_{field_name}") or {})
+    state.enablement.launch_argv_refused = bool(res.get("enablement_launch_argv_refused"))
 
 
 def _mark_setup_ledger(state: Any, round_task_id: str, disposition: str, *, accepted: bool) -> None:

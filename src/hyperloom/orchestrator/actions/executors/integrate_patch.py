@@ -3483,7 +3483,7 @@ class IntegratePatchExecutor:
             specialist_task_id=specialist_task_id,
             provision_result=provision_result,
         )
-        launch_evidence = project_launch_evidence(bench_result.get("launch_evidence"))[0]
+        launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))
         return {
             "enablement_roots": records,
             "enablement_patch_roots": patch_roots,
@@ -3493,6 +3493,7 @@ class IntegratePatchExecutor:
                 str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
             },
             "enablement_launch_evidence": launch_evidence or {},
+            "enablement_launch_argv_refused": argv_refused,
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
         }
