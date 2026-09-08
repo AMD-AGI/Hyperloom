@@ -2201,7 +2201,6 @@ class TestForgeGemmHelperCoverage:
             assert json.loads(Path(captured["shapes_json"]).read_text(encoding="utf-8"))
 
 
-
 def _ensure_torch_module(monkeypatch):
     try:
         import torch

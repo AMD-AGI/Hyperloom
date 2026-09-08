@@ -386,5 +386,3 @@ def test_session_kernel_opt_outcome_rollup():
         )
         == kas.OUTCOME_FAIL
     )
-
-

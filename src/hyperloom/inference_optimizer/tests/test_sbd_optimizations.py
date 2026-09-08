@@ -15,8 +15,6 @@ from hyperloom.inference_optimizer.breakdown.collectors import (
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 
 
-
-
 def test_phase_breakdown_schema_declares_every_emitted_bucket():
     """The declared shape must cover the keys the collector actually writes.
 

@@ -217,8 +217,6 @@ class _Bus:
         return message
 
 
-
-
 class TestGemmE2eCandidates:
     """Guard rails deciding which tuning results reach the E2E validator."""
 

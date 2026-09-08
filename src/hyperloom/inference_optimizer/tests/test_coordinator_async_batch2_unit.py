@@ -161,8 +161,6 @@ async def test_resume_retains_pending_when_any_restore_fails(
     assert report["fixes"] == []
 
 
-
-
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
     return Coordinator(session_dir, backends=_build_backends())

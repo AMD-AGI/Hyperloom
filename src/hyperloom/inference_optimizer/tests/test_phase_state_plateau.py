@@ -479,8 +479,6 @@ def test_geak_terminal_skip_to_sweep_ignores_per_kernel_pending_work():
     assert reason == "kernel_no_more_leverage"
 
 
-
-
 def test_kernel_skip_to_sweep_waits_for_retryable_failed_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_opt_task_attempts = {
