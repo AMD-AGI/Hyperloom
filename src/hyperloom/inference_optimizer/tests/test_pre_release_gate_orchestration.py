@@ -146,6 +146,34 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     assert "leave_running" in body
 
 
+def test_every_leg_name_resolves_through_the_glob_helpers(dispatch_script: str, tmp_path: Path) -> None:
+    """The leg helpers parse by suffix glob, so a new name can silently resolve to nothing.
+
+    Runs the real helpers over the real leg list: a name whose duration suffix is
+    not last, or whose backend token is missing, yields an empty field and the
+    workload is dispatched with no model, no budget or no framework.
+    """
+    lines = dispatch_script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("ALL_LEGS="))
+    end = next(i for i in range(start, len(lines)) if lines[i].rstrip().endswith('"') and i > start)
+    harness = "\n".join(
+        [
+            "set -eu",
+            "MODEL_3H=/m3",
+            "MODEL_12H=/m12",
+            *lines[start : end + 1],
+            *[line for line in lines if line.startswith(("leg_model_path()", "leg_hours()", "leg_backend()"))],
+            'for leg in $ALL_LEGS; do echo "$leg|$(leg_model_path "$leg")|$(leg_hours "$leg")|$(leg_backend "$leg")"; done',
+        ]
+    )
+    script = tmp_path / "legs.sh"
+    script.write_text(harness, encoding="utf-8")
+    out = subprocess.run(["bash", str(script)], text=True, capture_output=True, check=True).stdout
+    unresolved = [line for line in out.splitlines() if "||" in line or line.endswith("|")]
+    assert unresolved == []
+    assert "docker-vllm-forge-12h|/m12|12|vllm" in out.splitlines()
+
+
 def test_dispatch_does_not_reap_before_it_needs_the_capacity(dispatch_script: str) -> None:
     """A push must not stop legs that are still running when the cluster has room.
 

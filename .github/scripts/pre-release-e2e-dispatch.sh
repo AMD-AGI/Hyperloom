@@ -12,7 +12,7 @@
 # bootstrap; PyTorchJob honors the submitted entrypoint. See
 # hyperloom-pre-release-e2e-ci-design.md §7.
 #
-# It creates 5 workloads for the 9 legs:
+# It creates 5 workloads for the 10 legs:
 #   * 4x non-privileged 1-GPU PyTorchJob  (one per baremetal leg)
 #   * 1x privileged   8-GPU PyTorchJob    (docker host; 5 nested containers, GPU 0-4)
 # and writes a dispatch map (leg -> workloadId) to $DISPATCH_MAP for the poll step.
@@ -192,11 +192,12 @@ reap_stale_workloads_once() {
   return 0
 }
 
-# All 9 legs. Fields: mode backend hours model_path -- gpu index within the docker host
+# All 10 legs. Fields: mode backend hours model_path -- gpu index within the docker host
 # Keep the duration suffix LAST: the helpers below parse by glob, so `...-12h-forge`
 # would match no duration case.
 ALL_LEGS="baremetal-vllm-3h baremetal-vllm-12h baremetal-sglang-3h baremetal-sglang-12h \
-docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h docker-sglang-forge-12h"
+docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h docker-sglang-forge-12h \
+docker-vllm-forge-12h"
 REQ_TASKS="${TASKS:-$ALL_LEGS}"
 REQ_TASKS="${REQ_TASKS//,/ }"
 
