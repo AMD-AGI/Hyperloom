@@ -1,7 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a generated tuner may be attempted at all."""
+"""Whether a generated tuner may be attempted at all.
+
+Four conditions, separate on purpose so that one misconfiguration cannot open
+the whole path: nobody turned it off, nothing else did the job, there is enough
+demand to be worth it, and the keys are describable.
+
+The second used to read ``no_tuner`` only, which sounds stricter and was in
+practice absolute -- across the fleet's 0903-0906 logs every demanded table had
+a registered owner, so no run ever produced a gap this would accept while the
+runtime went on missing millions of keys those owners never covered. "A tuner
+exists" was standing in for "the table got tuned", and only the second is what
+the runtime experiences.
+
+The decision carries its reasons rather than being a boolean, because when this
+says no the useful artefact is *why*: fix routing, widen the whitelist, or leave
+it alone.
+"""
 
 from __future__ import annotations
 
@@ -63,7 +79,8 @@ def should_generate(gaps: list[CoverageGap]) -> GateDecision:
     for gap in sorted(gaps, key=lambda g: -g.miss_count):
         if not gap.warrants_generated_tuner:
             reasons.append(
-                f"{gap.table}: {gap.kind} -- a tuner for this exists, so the fix is there and not a generated one"
+                f"{gap.table}: {gap.kind} -- a tuner for this exists and was not "
+                f"routed to, so the fix is there and not a generated one"
             )
             continue
         if allow and "*" not in allow and gap.table not in allow:

@@ -36,6 +36,11 @@ class Tier3Outcome:
     table: str = ""
     script: str = ""
     digest: str = ""
+    #: Where the verified rows are, for a caller that has to land them. Carried
+    #: rather than recomputed from the work root: the layout under it is this
+    #: module's business, and a caller rebuilding the path by convention would
+    #: deploy the wrong file the day the layout changes.
+    output_csv: str = ""
     judgements: list[Judgement] = field(default_factory=list)
     #: Whether an operator has signed this exact script off. Named for the
     #: signature and not for "trusted" because CodeQL's clear-text-storage
@@ -56,6 +61,7 @@ class Tier3Outcome:
             "table": self.table,
             "script": self.script,
             "digest": self.digest,
+            "output_csv": self.output_csv,
             "operator_signed": self.operator_signed,
             "improved_shapes": self.improved_shapes,
             "judgements": [j.to_dict() for j in self.judgements],
@@ -91,6 +97,7 @@ def attempt_generated_tuner(
     shapes = demand_shapes_for(gap)
     mandate = build_mandate(gap, shapes, gpu=gpu, framework=framework)
     mandate.output_csv = str(work_dir / "out.csv")
+    outcome.output_csv = mandate.output_csv
     mandate.candidates_json = str(work_dir / "candidates.json")
     write_mandate(mandate, work_dir / "mandate.json")
 

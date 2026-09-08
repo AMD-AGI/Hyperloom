@@ -19,6 +19,7 @@ from kernelforge.gemm_tune.tier3 import (
     validate_output_csv,
 )
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
+from kernelforge.gemm_tune.tuners.base import TuneResult
 
 
 def _demand(table="odd_tuned_gemm.csv", tuner=None, misses=40, keys=7):
@@ -52,13 +53,42 @@ class TestCoverageGaps:
         assert gap.kind == "not_selected"
         assert not gap.warrants_generated_tuner
 
-    def test_a_tuner_that_declined_for_a_reason_of_its_own_is_not_tier3_work(self):
+    def test_a_tuner_that_declined_for_no_reason_of_substance_is_tier3_work(self):
+        # "The script is missing" is not a property of the table, the hardware
+        # or the checkpoint -- it is our own capability being absent on this
+        # run, which is the same position a table with no owner is in. The
+        # reasons that really are answers are excluded before a gap is built;
+        # see test_a_skip_that_is_an_answer_is_not_a_gap.
         specs = [TunerSpec("fmoe_ck", skip_reason="the tuner script is missing")]
         (gap,) = coverage_gaps(_demand(tuner="fmoe_ck"), specs)
         assert gap.kind == "skipped"
-        assert not gap.warrants_generated_tuner
+        assert gap.warrants_generated_tuner
 
-    def test_only_a_missing_capability_reaches_the_generated_tier(self):
+    def test_an_owner_that_ran_and_landed_nothing_is_tier3_work(self):
+        # The distinction that matters is not whether a tuner exists but
+        # whether the table got tuned. Selecting an owner that then hands back
+        # nothing leaves the runtime missing every key it asked about.
+        specs = [TunerSpec("sglang_dense_bf16")]
+        demand = _demand(tuner="sglang_dense_bf16")
+        assert coverage_gaps(demand, specs, results=None) == []
+        empty = TuneResult(tuner_name="sglang_dense_bf16", status="no_improvement")
+        (gap,) = coverage_gaps(demand, specs, results=[empty])
+        assert gap.kind == "empty"
+        assert gap.warrants_generated_tuner
+        assert "produced nothing landable" in gap.reason
+
+    def test_an_owner_that_landed_something_is_not_a_gap(self):
+        specs = [TunerSpec("sglang_dense_bf16")]
+        landed = TuneResult(
+            tuner_name="sglang_dense_bf16",
+            status="ok",
+            artifact_path="/tmp/tuned.csv",
+            improved_shapes=3,
+            best_micro_speedup=1.4,
+        )
+        assert coverage_gaps(_demand(tuner="sglang_dense_bf16"), specs, results=[landed]) == []
+
+    def test_routing_is_the_one_kind_that_stays_out(self):
         report = {
             "demands": [
                 {"table": "none.csv", "tuner": None, "miss_count": 5},
@@ -68,7 +98,8 @@ class TestCoverageGaps:
         }
         specs = [TunerSpec("fmoe_ck", skip_reason="script is missing")]
         gaps = coverage_gaps(report, specs)
-        assert [g.table for g in gaps if g.warrants_generated_tuner] == ["none.csv"]
+        assert [g.table for g in gaps if not g.warrants_generated_tuner] == ["unrouted.csv"]
+        assert {g.table for g in gaps if g.warrants_generated_tuner} == {"none.csv", "declined.csv"}
 
     def test_a_covered_table_is_not_a_gap(self):
         specs = [TunerSpec("sglang_dense_bf16")]
