@@ -9,7 +9,7 @@ name: Pre-release E2E test
 # per-PR smoke test (ci-e2e.yml). See hyperloom-pre-release-e2e-ci-design.md.
 #
 # Triggers (gate BEFORE merge, on the PR -- not after merge to main):
-#   * PR targeting main that bumps pyproject.toml's `version` field   -> FULL run (all 9 legs)
+#   * PR targeting main that bumps pyproject.toml's `version` field   -> FULL run (all 10 legs)
 #   * PR targeting main that only touches this CI's scripts/prompts/  -> SCRIPTS-ONLY run
 #     workflow (version unchanged)                                       (the 4 fast 3h legs)
 #   * manual workflow_dispatch (reuse a wheel, run a leg subset; default all 9)
@@ -146,7 +146,7 @@ jobs:
             prev="$(git show "${BASE_SHA}:pyproject.toml" 2>/dev/null | read_version || true)"
             if [ "$base_version" != "$prev" ] && [ -n "$base_version" ]; then
               run=true; run_scope="full"
-              echo "version bump vs base ${BASE_REF}: '${prev}' -> '${base_version}' -> FULL run (all 9 legs)"
+              echo "version bump vs base ${BASE_REF}: '${prev}' -> '${base_version}' -> FULL run (all 10 legs)"
             else
               # Version unchanged vs base. pyproject.toml is itself a watched path -- it has
               # to be, or a PR that ONLY bumps the version would never start this workflow --
@@ -326,7 +326,7 @@ jobs:
         # The pods read all three off NFS, so anything missing is only discovered inside
         # them -- and only AFTER the pod has been scheduled, the ROCm image pulled, jq
         # apt-installed and the Claude CLI npm-installed, because the wheel check sits
-        # behind those in bootstrap's entry. All 9 legs then report the same
+        # behind those in bootstrap's entry. All 10 legs then report the same
         # "state.json missing (workload phase=Failed)", which names none of this, and SaFE
         # deletes a failed leg's pod (with its stdout) before anyone can look. `reuse`
         # skips the build job that publishes them, so it is the way to arrive here with
