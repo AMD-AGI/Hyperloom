@@ -60,6 +60,10 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-0c7ff19e3b739b2aabe9bfa070047bfa1aa6a7fd}"
+# The pin is an untagged commit, so setuptools_scm has nothing to derive from and
+# would fall back to 0.0.0.*, which the patch-set version gate refuses. Declare the
+# version the patch sets target; it moves together with SGLANG_REF.
+SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.18}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm724}"
@@ -569,6 +573,8 @@ install_sglang_from_source() {
   # ROCm editable installs only need multimodal Rust crates for VLM serving.
   export SGLANG_BUILD_RUST_EXTS="${SGLANG_BUILD_RUST_EXTS:-none}"
   log "SGLANG_BUILD_RUST_EXTS=${SGLANG_BUILD_RUST_EXTS}"
+  export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"
+  log "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG=${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG}"
   "$py" -m pip install --constraint "$constraint_file" -e "${sglang_root}/python[srt_hip]"
   rm -f "$constraint_file"
 }

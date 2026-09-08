@@ -51,6 +51,17 @@ def test_baremetal_defaults_match_compat_doc():
         "mismatch this pin exists to avoid (see docs/compatibility.rst)"
     )
     assert sglang_ref[:12] in doc, "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
+
+    # An untagged commit gives setuptools_scm nothing to derive from, so the build
+    # falls back to 0.0.0.* and the patch sets are refused on the version gate.
+    # The declared version travels with the pin and must name the patch set.
+    sglang_pretend = _default("SGLANG_PRETEND_VERSION", sh)
+    assert sglang_pretend == "0.5.18", (
+        "SGLANG_PRETEND_VERSION must name the patch set the pinned commit fits; got %s" % sglang_pretend
+    )
+    assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"' in sh, (
+        "install_baremetal.sh must export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG from SGLANG_PRETEND_VERSION"
+    )
     assert "0.5.18 (%s)" % sglang_rocm_extra in doc, (
         "docs/compatibility.rst must document SGLang '0.5.18 (%s)' to match "
         "install_baremetal.sh defaults" % sglang_rocm_extra
