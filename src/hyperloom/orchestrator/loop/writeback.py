@@ -5279,7 +5279,7 @@ class WritebackCollaborator:
                 "unset_envs": list(materialized["unset_envs"]),
                 "args_mode": materialized["args_mode"],
                 # Authoritative, COMPLETE engine flags (run-specific stripped);
-                # empty => consumer keeps its own adapter defaults (prior behavior).
+                # when unavailable, args_mode governs recipe inheritance.
                 "server_launch_flags": server_launch_flags,
             },
             "source_snapshots": source_snapshots,

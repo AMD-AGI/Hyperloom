@@ -985,8 +985,8 @@ class KernelPhase(PhaseHandler):
             log.exception("geak: build_env_spec failed; handoff is unverified")
             env_spec = {}
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
-        accepted_flags = str(spec_config.get("extra_server_args") or cb.get("extra_server_args") or "")
-        extra_envs = spec_config.get("extra_envs") or cb.get("extra_envs") or {}
+        accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
+        extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
         accepted_env = shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items())
         state_measurement = getattr(state, "current_best_measurement", None)
         measurement = (
@@ -1072,7 +1072,16 @@ class KernelPhase(PhaseHandler):
             _baseline_srv_args = read_baseline_server_args(state) or ""
         except Exception:  # noqa: BLE001 — accessor is best-effort
             _baseline_srv_args = ""
-        _current_best_server_args = str(spec_config.get("server_launch_flags") or _baseline_srv_args)
+        _current_best_server_args = str(spec_config.get("server_launch_flags") or "")
+        if not _current_best_server_args:
+            from ..actions.executors._grid_server_args import compose_server_args
+
+            _current_best_server_args = compose_server_args(
+                inherited_args=_baseline_srv_args,
+                variant_extra_args=accepted_flags,
+                remove_args=spec_config.get("remove_args"),
+                args_mode=str(spec_config.get("args_mode") or "append"),
+            )
         _serving_fidelity = _resolve_serving_fidelity(
             baseline_server_args=_current_best_server_args,
             state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
