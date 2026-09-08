@@ -124,8 +124,9 @@ def _role_haystack(candidate: dict[str, Any]) -> str:
     ``Class::method`` symbol whose class name can itself contain another
     role's marker); either way, only the trailing symbol segment is
     matched, never the whole qualified string. This repo's own convention
-    (``_task_group_contract.logical_operator_name()``) is to set ``operation``
-    to the fully-qualified name too, e.g. ``mori::EpDispatchCombineOp::combine``
+    (``_task_group_contract.logical_operator_name()``,
+    ``_bypass_report.py``'s task-group builder) is to set ``operation`` to
+    the fully-qualified name too, e.g. ``mori::EpDispatchCombineOp::combine``
     -- taking ``operation`` verbatim would silently reintroduce the exact
     dispatch/combine ambiguity this function exists to resolve the moment
     some producer starts populating that field on a candidate row (PR #1191
@@ -177,11 +178,6 @@ def match_vendor_operator_playbook(candidate: dict[str, Any]) -> dict[str, Any] 
         result["role"] = matched_role or ""
         return result
     return None
-
-
-def playbook_group_id(playbook: dict[str, Any]) -> str:
-    """Return the stable group id a playbook's sibling roles share."""
-    return str(playbook.get("id") or "")
 
 
 def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:

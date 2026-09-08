@@ -239,15 +239,6 @@ def asset_root() -> Path:
     return PACKAGE_ROOT
 
 
-def asset_actions_dir() -> Path:
-    """Return the directory of shipped action-metadata files.
-
-    Returns:
-        Path: ``<asset_root>/actions``.
-    """
-    return asset_root() / "actions"
-
-
 def asset_system_prompts_dir() -> Path:
     """Return the directory of shipped agent system prompts.
 
@@ -396,7 +387,6 @@ __all__ = [
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
-    "asset_actions_dir",
     "asset_prompt_references_dir",
     "asset_root",
     "asset_system_prompts_dir",

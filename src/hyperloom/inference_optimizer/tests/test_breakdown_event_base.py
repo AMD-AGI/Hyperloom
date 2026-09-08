@@ -383,7 +383,18 @@ def _killed_kernel_entry(session_dir: Path):
         recorder = make_kernel_recorder(macro_cycle=3, route="forge")
         assert recorder is not None
         recorder.begin(tput_before=1000.0)
-        recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+        rec.make_sink(recorder.event_id, producer="orchestrator").record(
+            "kernel_lane_run",
+            {
+                "source_kind": "kernel_rewrite",
+                "run_id": "attempt-7",
+                "kernel_id": "k001",
+                "status": "success",
+                "micro_decision": "keep",
+            },
+            row_type="lane_run",
+            natural_ids=("kernel_rewrite", "attempt-7"),
+        )
     return recorder
 
 

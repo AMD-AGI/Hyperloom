@@ -27,8 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import tracelens_analysis as tl  # noqa: E402
 import tracelens_skill_runner as tsr  # noqa: E402
-from _llm_source_context import build_context_block  # noqa: E402
-from _task_group_contract import operator_identity_key  # noqa: E402
 
 
 _HEADERS = [
@@ -42,8 +40,6 @@ _HEADERS = [
     "efficiency",
     "bound",
 ]
-
-_HEADERS_WITH_KERNEL = _HEADERS + ["kernel name"]
 
 
 def _row(kernel_path: str) -> dict | None:
@@ -65,36 +61,6 @@ def _row(kernel_path: str) -> dict | None:
         category="other",
         rank=1,
         title="MXFP8 grouped GEMM",
-        library="",
-        impact={},
-    )
-
-
-def _fallback_row(operation: str, kernel_name: str) -> dict | None:
-    """Build one candidate with Operation and the Kernel-Name cell set independently.
-
-    Models the graph-collapsed fallback ``analysis.md`` TraceLens emits: the
-    Operation column is a placeholder (``—``/empty) while Kernel Name carries the
-    raw device symbol.
-    """
-    cells = [
-        operation,
-        "",
-        "Not found",
-        "15.671",
-        "7.04",
-        "114",
-        "—",
-        "—",
-        "—",
-        kernel_name,
-    ]
-    return tsr._row_to_candidate(
-        _HEADERS_WITH_KERNEL,
-        cells,
-        category="other",
-        rank=1,
-        title="Graph-collapsed kernels",
         library="",
         impact={},
     )
@@ -134,78 +100,8 @@ def test_real_launcher_path_survives():
     assert cand["source_function"] == "_grouped_gemm_mxfp8"
 
 
-def test_materialized_runtime_args_are_sanitized_before_prompting(tmp_path):
-    """Production YAML selectors reach context without their adjacent secret."""
-    config = tmp_path / "baseline.yaml"
-    config.write_text(
-        "benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--api-key sk-secret --moe-runner-backend triton'\n",
-        encoding="utf-8",
-    )
-    raw = tl._runtime_server_args_from_config(str(config))
-    block = build_context_block(
-        server_args=raw,
-        framework="sglang",
-        precision="fp8",
-        env={},
-    )
-
-    assert "sk-secret" not in block
-    assert "api-key" not in block
-    assert "triton" in block
-    assert '"precision": "fp8"' in block
-
-
 def test_not_found_is_in_shared_placeholder_set():
     assert "not found" in tsr._LAUNCHER_PATH_PLACEHOLDERS
-
-
-# --- Guard 1b: graph-collapsed fallback substitutes the device symbol -------
-#
-# TraceLens' deterministic fallback (graph-collapsed / no-per-op-shapes trace)
-# emits rows whose Operation is a literal "—" and whose Kernel Name is the raw
-# device symbol. The reader must keep those rows, substituting the device symbol
-# as the candidate identity, rather than dropping them.
-
-
-def test_em_dash_operation_with_kernel_name_survives():
-    cand = _fallback_row("—", "_mxfp8_grouped_gemm_kernel")
-    assert cand is not None
-    assert cand["name"] == "_mxfp8_grouped_gemm_kernel"
-    assert cand["device_kernel_name"] == "_mxfp8_grouped_gemm_kernel"
-
-
-def test_em_dash_operation_without_kernel_name_still_dropped():
-    assert _fallback_row("—", "") is None
-    # A placeholder kernel-name cell parses to no device symbol -> still dropped.
-    assert _fallback_row("—", "—") is None
-
-
-def test_empty_operation_with_kernel_name_survives():
-    cand = _fallback_row("", "_norm_fwd_kernel")
-    assert cand is not None
-    assert cand["name"] == "_norm_fwd_kernel"
-    assert cand["device_kernel_name"] == "_norm_fwd_kernel"
-
-
-def test_distinct_device_symbols_do_not_collapse_into_one_identity():
-    """The critical silent-drift guard.
-
-    A half-applied relaxation that leaves a literal "—" in ``name`` collapses
-    every fallback kernel into a single dedup bucket, because the operator
-    identity keys on the operation. Two rows naming different device symbols must
-    therefore produce two distinct ``operator_identity_key`` values.
-    """
-    first = _fallback_row("—", "_mxfp8_grouped_gemm_kernel")
-    second = _fallback_row("—", "_flash_attn_fwd_kernel")
-    assert first is not None and second is not None
-    assert first["name"] != "—" and second["name"] != "—"
-
-    # Key both against the same source/function so only the operation varies --
-    # exactly how the task-group builder keys them (aggregate_by_source_function).
-    shared = {"source_kind": "native", "source_path": "/repo/kernels.cpp", "function_name": "launch"}
-    key_first = operator_identity_key(operation=first["name"], **shared)
-    key_second = operator_identity_key(operation=second["name"], **shared)
-    assert key_first != key_second
 
 
 # --- Guard 2: bare runtime-API names are not kernels ------------------------
@@ -688,9 +584,9 @@ def test_wiring_without_trace_files_falls_back_quietly(tmp_path):
 def test_finalization_never_calls_a_model(monkeypatch, tmp_path):
     """Source resolution is wholly deterministic; review is a later stage.
 
-    Nothing under ``_finalize_candidates`` may reach a provider, so the
-    deterministic route gets its no-LLM guarantee from the code rather than
-    from a flag it has to remember to pass.
+    Nothing under ``_finalize_candidates`` may reach a provider, so the no-LLM
+    guarantee comes from the code rather than from a flag a caller has to
+    remember to pass.
     """
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
     artifact = tmp_path / "kernel_source_resolution.json"

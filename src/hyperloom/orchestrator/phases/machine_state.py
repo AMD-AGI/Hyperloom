@@ -82,11 +82,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
+    # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase
+    # entry, so an LLM re-issuing them per tick would bypass the lane budget they
+    # are derived from. ``integrate`` stays -- draining the KEEP queue is still
+    # the model's job. This set is about what may be *proposed*; what counts as
+    # kernel-lane work in flight is ``KERNEL_LANE_TASK_KINDS``.
     PHASE_KERNEL_AGENT: frozenset(
         {
-            "kernel_opt",
             "integrate",
-            "gemm_tuning",
             "specialist",
             "roofline",
             "profile",
@@ -110,8 +113,36 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     ),
 }
 
+
 # Dispatched by the Coordinator or owned by the Robustness ladder.
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+
+
+# Task kinds that mean the KERNEL lane is busy, which is a wider question than
+# what a model may propose: a Coordinator-owned lane is dispatched without ever
+# being proposable, and its task occupies the phase just the same. Kept separate
+# from PHASE_ALLOWED_ACTIONS because the idle guard once shared that set and a
+# running kernel_opt went invisible the moment the action stopped being
+# model-requestable.
+KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
+    {
+        "kernel_opt",
+        "gemm_tuning",
+    }
+)
+
+
+def _action_in_phase_map(action_name: str, phase: str, mapping: dict[str, frozenset[str]]) -> bool:
+    """Return True iff stripped ``action_name`` is a member of ``mapping[phase]`` (unknown phase → deny)."""
+    actions = mapping.get((phase or "").strip().upper())
+    if actions is None:
+        return False
+    return (action_name or "").strip() in actions
+
+
+def is_action_allowed_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``action_name`` is in the phase allowlist (R1; unknown phase → deny)."""
+    return _action_in_phase_map(action_name, phase, PHASE_ALLOWED_ACTIONS)
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
@@ -168,6 +199,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "kernel_phase_budget_exhausted",
         "optimize_budget_cap",  # OPTIMIZE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
+        "kernel_controller_done",  # KERNEL_AGENT → SWEEP after the phase-level rewrite controller
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",  # SWEEP → CLOSE when the concurrency ladder settles
         "sweep_failed",  # SWEEP → CLOSE when the ladder reaches a failed terminal result
@@ -181,6 +213,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
+        # A phase after PRELUDE → SWEEP on the way in, SWEEP → CLOSE on the way out.
         "target_reached",
         "time_exhausted",
         "time_exhausted_during_prelude",
@@ -204,6 +237,13 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "no_candidates_and_discovery_exhausted",
     }
 )
+
+
+#: Named rather than inlined below because the writeback gate that sets it lives
+#: in another module, and the vocabulary is closed -- PolicyGate rejects any
+#: stop_reason outside it, so a typo on either side would silently degrade into
+#: "the run did not stop" rather than into an error anyone sees.
+AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 
 
 # stop_reason vocab
@@ -261,6 +301,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # run halts. Post-baseline accuracy failures REVERT the offending
         # change instead of stopping.
         "baseline_accuracy_failed",
+        # AgentX is on but its benchmark client (aiperf) is missing or is not
+        # the pinned build, and the runtime install could not supply it. An
+        # environment/supply gap, not a code gap: nothing downstream can author
+        # its way out of it, so the run halts on the FIRST occurrence instead of
+        # spending the budget in the enablement lane.
+        AGENTX_PREFLIGHT_STOP_REASON,
     }
 )
 
@@ -491,6 +537,18 @@ def _cumulative_gain_validated(state: Any) -> float:
         return 0.0
 
 
+def target_was_reached(state: Any) -> bool:
+    """Whether the run objective has been met.
+
+    Args:
+        state (Any): Frozen SharedState view exposing ``target_reached_at``.
+
+    Returns:
+        bool: True once the Coordinator has stamped the marker.
+    """
+    return bool(str(getattr(state, "target_reached_at", "") or "").strip())
+
+
 def should_reloop_to_explore(
     state: Any,
     *,
@@ -506,10 +564,10 @@ def should_reloop_to_explore(
     carries the *effective* no-gain streak for the cycle that just completed so
     the Coordinator can persist it on the loopback/close transition.
 
-    Loops back iff below the macro-cycle safety cap AND the run has not globally
-    converged (R7: ``no_gain_cycles`` consecutive no-gain cycles) AND no
-    roofline direction is saturated AND enough session budget remains to use a
-    fresh cycle.
+    Loops back iff the run objective is unmet AND below the macro-cycle safety
+    cap AND the run has not globally converged (R7: ``no_gain_cycles``
+    consecutive no-gain cycles) AND no roofline direction is saturated AND
+    enough session budget remains to use a fresh cycle.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -546,6 +604,10 @@ def should_reloop_to_explore(
     evidence["cycle_gain_delta"] = round(cur_gain - start_gain, 6)
     evidence["cycle_gained"] = cycle_gained
     evidence["no_gain_cycle_streak_effective"] = effective_streak
+
+    if target_was_reached(state):
+        evidence["reloop_blocked"] = "target_reached"
+        return False, evidence
 
     # Safety cap on macro-cycles.
     if (cycle + 1) >= int(max_cycles):
@@ -1714,6 +1776,36 @@ def _geak_phase_terminal(state: Any) -> bool:
     return str(result.get("status") or "").strip().lower() in GEAK_TERMINAL_STATUSES
 
 
+#: Every status the rewrite controller can end on. All of them are terminal for
+#: the phase: the controller is not re-run inside one macro cycle, so a failure
+#: is as final as a published patch.
+CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "completed",
+        "failed",
+        "no_opportunity",
+        "no_result",
+        "partial",
+    }
+)
+
+
+def _controller_phase_terminal(state: Any) -> bool:
+    """Return true when this macro cycle's rewrite controller has stopped."""
+    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "forge":
+        return False
+    result = getattr(state, "kernel_rewrite_controller_result", None) or {}
+    if not isinstance(result, dict):
+        return False
+    try:
+        result_cycle = int(result.get("macro_cycle", -1))
+        current_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    return result_cycle == current_cycle and status in CONTROLLER_TERMINAL_STATUSES
+
+
 # Ledger subfields that change when a kernel attempt actually advances. Listed
 # explicitly rather than digesting whole entries so incidental churn (a
 # re-rendered field, a refreshed timestamp) cannot masquerade as forward
@@ -1790,6 +1882,8 @@ def compute_kernel_progress_fingerprint(
         last_collective = {}
     if not isinstance(last_collective, dict):
         raise ValueError("last_collective must be a mapping")
+    controller = getattr(state, "kernel_rewrite_controller_result", None)
+    controller = controller if isinstance(controller, dict) else {}
     payload = {
         "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
@@ -1809,6 +1903,12 @@ def compute_kernel_progress_fingerprint(
                 "integration_revert_status",
                 "integration_finalize_status",
             )
+        ],
+        "rewrite_controller": [
+            str(controller.get("macro_cycle", "")),
+            str(controller.get("status", "")),
+            str(controller.get("patch_count", "")),
+            str(controller.get("finished_at", "")),
         ],
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1844,16 +1944,28 @@ def kernel_work_pending(state: Any) -> bool:
 
     Short-circuits in order: a pending collective integration keeps the phase
     open; ``collective_only_mode`` then answers False because no other lane may
-    run; a terminal GEAK phase answers on its own (True only while an ``ok``
-    result has an ``awaiting_rebench`` pending with a revalidation task, else
-    False); then the optional ``has_keep_pending_integrate`` and
-    ``untried_hot_reusable_kernels`` capability probes, whose failures are
+    run; an accepted-but-unintegrated KEEP answers next, ahead of the terminal
+    probes, so neither of them can strand one; a terminal rewrite controller
+    then answers False, because it owns operator selection and has stopped; a
+    terminal GEAK phase answers on its own (True only while an ``ok`` result has
+    an ``awaiting_rebench`` pending with a revalidation task, else False); then
+    the ``untried_hot_reusable_kernels`` capability probe, whose failure is
     treated as 'not available'; then the kernel_opt attempt ledger, filtered by
     task group, source file, integration status and rejected kernel ids.
     """
     if collective_integration_pending(state):
         return True
     if bool(getattr(state, "collective_only_mode", False)):
+        return False
+
+    try:
+        if bool(getattr(state, "has_keep_pending_integrate", False)):
+            return True
+    except Exception:
+        # Optional capability probe; treat a failure as 'not available'.
+        pass
+
+    if _controller_phase_terminal(state):
         return False
     if _geak_phase_terminal(state):
         result = getattr(state, "geak_result", None) or {}
@@ -1867,13 +1979,6 @@ def kernel_work_pending(state: Any) -> bool:
         ):
             return True
         return False
-
-    try:
-        if bool(getattr(state, "has_keep_pending_integrate", False)):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
 
     try:
         untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
@@ -2454,6 +2559,18 @@ def exit_normal_kernel(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the KERNEL
         exit, or ``None`` when KERNEL should continue.
     """
+    # ``kernel_work_pending`` answers for both outstanding integrations before it
+    # short-circuits on a terminal Controller, so asking it here keeps this exit
+    # from stepping over a pending collective or an unintegrated KEEP. The idle
+    # streak below still bounds the phase if that work can never be drained.
+    if _controller_phase_terminal(state) and not kernel_work_pending(state):
+        result = getattr(state, "kernel_rewrite_controller_result", None) or {}
+        return "kernel_controller_done", {
+            "controller_status": result.get("status"),
+            "patch_count": int(result.get("patch_count") or 0),
+            "task_count": int(result.get("task_count") or 0),
+            "reason": str(result.get("reason") or ""),
+        }
     if _pending_escalate_hint(state) == ESCALATE_HINT_SKIP_TO_SWEEP:
         if not kernel_work_pending(state):
             return "kernel_no_more_leverage", {
@@ -2510,6 +2627,15 @@ def exit_normal_kernel(
             "rejected_kernel_count": rejected_count,
         }
     return None
+
+
+#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
+#: any other reason keeps the ladder's own exit reason.
+_RELOOP_BLOCK_TERMINALS: dict[str, str] = {
+    "global_converged": "global_converged",
+    "max_cycles": "global_converged",
+    "target_reached": "target_reached",
+}
 
 
 def exit_normal_sweep(
@@ -2778,7 +2904,8 @@ def compute_next_phase(
     """Return ``(next_phase, reason, evidence)`` or ``None``.
 
     Priority (Inv-8.2): global terminal first, then the wall-clock closing
-    phase, then exit_terminal > exit_normal.
+    phase, then a met target's forward jump to SWEEP, then exit_terminal >
+    exit_normal.
 
     Args:
         state (Any): Frozen SharedState view exposing the current ``phase``.
@@ -2806,6 +2933,13 @@ def compute_next_phase(
     if closing is not None and current != PHASE_CLOSE:
         reason, evidence = closing
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
+
+    # A met target ends the optimizing phases early; SWEEP is their normal next
+    # station, and the curve then measures the configuration it was met on.
+    # PRELUDE is excluded: its own terminal guards decide whether the baseline is
+    # one the later phases can compare against at all.
+    if target_was_reached(state) and phase_index(PHASE_PRELUDE) < phase_index(current) < phase_index(PHASE_SWEEP):
+        return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
     if current == PHASE_PRELUDE:
         term = exit_terminal_prelude(state)
@@ -2897,10 +3031,11 @@ def compute_next_phase(
             # R7: if looping was blocked by global convergence or the safety cap,
             # terminate with a terminal stop_reason instead of idling in CLOSE.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
-            if blocked in ("global_converged", "max_cycles"):
+            terminal_reason = _RELOOP_BLOCK_TERMINALS.get(blocked)
+            if terminal_reason is not None:
                 return (
                     PHASE_CLOSE,
-                    "global_converged",
+                    terminal_reason,
                     {
                         **exit_evidence,
                         **reloop_ev,
@@ -3367,6 +3502,7 @@ __all__ = [
     "is_long_run",
     "resolve_keep_threshold",
     "should_reloop_to_explore",
+    "target_was_reached",
     "allowed_actions_for",
     "apply_escalate_budget_bump",
     "bank_phase_segment",

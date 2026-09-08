@@ -13,7 +13,7 @@ independently and never merged into one verdict, because a trace that analyses
 cleanly can still yield a false decode conclusion -- an under-recorded CUDA-graph
 capture produces hot kernels drawn entirely from prefill and nothing complains.
 
-Groups 1-5 reuse ``_trace_analysis_reader.analyze_trace()`` so the certificate and
+Groups 1-5 reuse ``_bypass_trace_reader.analyze_trace()`` so the certificate and
 the shipping consumer see identical numbers from identical code. Groups 6-8 --
 step structure, split forecast and the idle gate -- are new, and are the reason
 this exists: they answer "which ``--steady-state-mode`` will work" at capture
@@ -38,14 +38,11 @@ from statistics import median
 from typing import Any, Iterable, Sequence
 
 try:  # in-package import
-    from hyperloom.agents.kernel.tools._trace_reader import (
+    from hyperloom.agents.kernel.tools._bypass_trace_reader import (
+        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
         _MAX_EVENT_CHARS,
         _MAX_TRACE_PREFIX_CHARS,
         _open_trace_binary,
-        stream_events,
-    )
-    from hyperloom.agents.kernel.tools._trace_analysis_reader import (
-        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
         _rank_of,
         _select_trace_file,
         _trace_candidates,
@@ -53,17 +50,15 @@ try:  # in-package import
         analyze_trace,
         resolve_trace_file,
         select_steady_window,
+        stream_events,
     )
     from hyperloom.agents.kernel.tools._capture_shapes import is_capture_fragment
 except ImportError:  # sys.path import
-    from _trace_reader import (
+    from _bypass_trace_reader import (
+        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
         _MAX_EVENT_CHARS,
         _MAX_TRACE_PREFIX_CHARS,
         _open_trace_binary,
-        stream_events,
-    )
-    from _trace_analysis_reader import (
-        _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
         _rank_of,
         _select_trace_file,
         _trace_candidates,
@@ -71,6 +66,7 @@ except ImportError:  # sys.path import
         analyze_trace,
         resolve_trace_file,
         select_steady_window,
+        stream_events,
     )
     from _capture_shapes import is_capture_fragment
 
@@ -1127,7 +1123,8 @@ def certify_trace_dir(
             "certified_path": selected,
             "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
             "event_total": probe.get("event_total"),
-            "parse_ok": not probe_errors,
+            "parse_ok": not probe_errors and not probe.get("truncated"),
+            "truncated": bool(probe.get("truncated")),
         }
         record["trace_dir_level"]["production_pick_probe"] = production_pick
 
@@ -1142,6 +1139,10 @@ def certify_trace_dir(
     coverage_block = analysis.get("graph_coverage") or {}
     timeline = analysis.get("timeline") or {}
     stream_errors = list(analysis.get("stream_errors") or []) + pass2_errors
+    if analysis.get("truncated"):
+        stream_errors.append(
+            f"trace aggregation truncated at safety cap ({analysis.get('truncation_reason', 'unknown')})"
+        )
 
     ann = annotation_report(sp, framework=framework, min_repeats=min_repeats)
     forecast = forecast_split(sp, num_steps=num_steps, conc=conc, osl=osl, r=r)

@@ -82,8 +82,9 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
   `--conc`, `--max-model-len`, `--profile-osl`.
-- **Goal / budget:** `--target-gain`, `--max-hours`, `--target-summary`,
-  `--target-tput`, `--compare-against-gpu`.
+- **Goal / budget:** `--target-gain`, `--target-roofline`, `--max-hours`,
+  `--target-summary`, `--target-tput`, `--compare-against-gpu`. The roofline
+  target composes with the others: whichever is met first ends the run.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -220,6 +221,66 @@ fusion that already succeeded this session.
 
 ---
 
+## Rewrite nomination lane
+
+> **Not a complete feature yet.** The switch below enables the nomination
+> *contract* — Hyperloom projects its hot-kernel list into a manifest, forge picks
+> from it and hands back patches — but not the capability the contract exists for.
+> The shipped nominator is a placeholder that ranks already-resolved candidates by
+> `gpu_pct` and does not read the trace, so it adds no selection beyond the
+> standard selector. Trace-driven source resolution, per-target base commits and
+> multi-target execution are forge-side work; until they land, one target runs per
+> call regardless of what the lane budget funds. Enable it to exercise the
+> plumbing, not to gain kernel coverage.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, so forge reranks and picks among the candidate rows Hyperloom already resolved instead of the Hyperloom selector picking from them. Unset leaves that selection on the selector path and dispatches no self-nomination; it does *not* leave the KERNEL phase as a whole unchanged — see the list below. Takes effect on the `forge` backend only: with `KERNEL_OPT_BACKEND_ORDER` unset, GEAK owns the whole KERNEL phase and hands straight to SWEEP without reaching nomination. An explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
+
+### Changes that land regardless of this variable
+
+The switch above gates kernel *selection* on the rewrite lane and nothing else.
+These behaviours change with it unset, and are not controlled by any other
+variable either.
+
+Globally, on every backend including the default `geak`:
+
+- **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
+  can neither propose either action nor request `run_optimization` /
+  `run_gemm_tuning` of the kernel agent; both are refused as
+  `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
+  entry from a lane budget, the way the fusion and collective lanes already
+  worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  model's job.
+
+On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
+`geak` backend hands to SWEEP before reaching any of these):
+
+- **Fusion authors one independent sibling patch per confirmed recipe** rather
+  than a single combined patch. `fuse_all_confirmed` is now the explicit opt-in
+  for the combined shape instead of the default.
+- **The fusion lane caps its recipe count** at 3 (`--max-recipes`), funded from
+  its share of the phase. A session with no finite remaining time derives no
+  share and stays uncapped.
+- **GEMM reports carry a per-tuner `candidates[]` list**, so one tuner's table
+  can be kept while another is reverted, instead of `recommended_env` landing
+  all-or-nothing.
+- **The fp8 → bf16 dense GEMM retry runs inside the same gemm call.** The
+  follow-up subprocess Hyperloom used to launch is gone; the bf16 dense pass is
+  selected up front as a fallback tuner and executes only when no earlier tuner
+  produced a candidate, so a winning fp8 run pays nothing for it.
+- **The gemm lane caps how many routed tuners run** (`--max-tuners`), priced on
+  the router's own per-tuner estimates.
+- **The KERNEL-entry `run_optimization` call re-stamps a progress marker while
+  it waits**, so the idle guard can tell a working phase from a stuck one across
+  a subprocess that may run for an hour.
+- **A `status: partial` invocation spec is declined on the rewrite route**
+  rather than admitted because the file exists. A partial spec leaves the
+  producer on its placeholder driver, which burns the whole budget and then
+  exits non-zero.
+
+---
+
 ## Collective optimization lane
 
 The collective lane is Coordinator-owned: it is dispatched directly at KERNEL
@@ -254,10 +315,11 @@ consumers and triage read a contract rather than candidate internals.
 
 ### Candidate review
 
-One agent session may audit the finished candidate table. It is skipped on a
-`--dry-run`, which plans without spending an agent session.
+One agent session may audit the finished candidate table on the `agent`
+analysis route. The `bypass` route never runs it, and keeps its no-model
+guarantee by not reaching the stage at all.
 
-The stage is tool-enabled rather than a completion call because the resolution
+The stage is tool-enabled rather than a completion call because the deterministic
 tiers' real failure mode is not coming up empty but coming up confidently wrong,
 and a model ranking paths by keyword off a prompt assembled in advance cannot
 tell the difference — it never sees what a kernel actually *is*.

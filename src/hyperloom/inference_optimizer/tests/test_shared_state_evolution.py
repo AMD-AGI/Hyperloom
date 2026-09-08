@@ -174,32 +174,6 @@ def test_v2_kernel_keep_populates_stable_task_and_pending_patch():
     assert pending[0]["artifact_path"] == "/artifacts/operator.py"
 
 
-def test_v2_ungrouped_kernel_record_opt_accumulates():
-    state = SharedState()
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k001",
-            "source_file": "/repo/operator.py",
-            "proposal": {"decision": "PARTIAL"},
-            "verification": {"micro_speedup": 1.0},
-            "attempts": [],
-        }
-    )
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k001",
-            "source_file": "/repo/operator.py",
-            "proposal": {"decision": "PARTIAL"},
-            "verification": {"micro_speedup": 1.1},
-            "attempts": [],
-        }
-    )
-
-    assert len(state.kernel_opt_task_attempts) == 1
-
-
 # 4. --reset-state behavior
 def test_reset_state_backs_up_state_json(tmp_path):
     """``--reset-state`` renames state.json so the next load starts blank."""
@@ -421,23 +395,6 @@ def test_the_profile_identity_keys_stay_off_disk(tmp_path):
     assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
 
 
-def test_v6_prefers_the_current_spelling_when_both_are_present(tmp_path):
-    """A mid-migration state holding both keys resolves to the current one."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 5,
-                "continue_kernel_after_gemm": False,
-                "auto_kernel_opt_enabled": True,
-            }
-        )
-    )
-
-    assert SharedState.load_or_init(sd).auto_kernel_opt_enabled is True
-
-
 def test_v4_nested_enablement_roundtrips(tmp_path):
     """A v4 state.json with nested enablement dict survives save/load_or_init."""
     sd = tmp_path / "session"
@@ -508,50 +465,49 @@ def _applyback_evidence():
     }
 
 
-def _record_applyback_keep(state, **verification_overrides):
-    verification = {
-        "micro_speedup": 1.6,
-        "compile_passed": True,
-        "correctness_passed": True,
-        "correctness_source": "forge_rewrite_reference",
-        "integration_validation_status": "pending",
-        "framework_applyback": _applyback_evidence(),
-        "best_backend": "forge",
-        "best_artifact_path": "/artifacts/flydsl_kernel.py",
-        "deploy_patch_path": "/artifacts/forge.patch",
-        "deploy_repo_root": "/repo",
-        "deploy_snapshot_dir": "/artifacts/snapshot",
-    }
-    verification.update(verification_overrides)
-    state.record_kernel_opt(
-        {
-            "status": "ok",
-            "kernel_id": "k007",
-            "source_file": "/repo/fused_gemm.py",
-            "task_group_id": "tg001",
-            "task_group_key": "tg-fused-gemm",
-            "proposal": {
-                "decision": "KEEP",
-                "reasons": ["framework apply-back reference-verified; framework E2E/accuracy deferred to integrate"],
-            },
-            "verification": verification,
-        }
+def _record_applyback_keep(state, **overrides):
+    """Queue one apply-back KEEP the way its surviving producer does.
+
+    The handler whose result envelope used to carry this provenance into the
+    ledger is gone, so the attempt row is written directly and queued through
+    the helper both remaining producers share.
+    """
+    from hyperloom.orchestrator.kernel._kernel_decisions import (
+        _queue_kernel_keep,
+        _stable_kernel_task_key,
     )
+
+    entry = {
+        "current_kernel_id": "k007",
+        "task_group_key": "tg-fused-gemm",
+        "last_decision": "KEEP",
+        "last_status": "ok",
+        "last_micro_speedup": 1.6,
+        "last_source_file": "/repo/fused_gemm.py",
+        "last_correctness_source": "forge_rewrite_reference",
+        "last_integration_validation_status": "pending",
+        "last_framework_applyback": _applyback_evidence(),
+        "last_artifact_path": "/artifacts/flydsl_kernel.py",
+        "last_deploy_patch_path": "/artifacts/forge.patch",
+        "last_deploy_repo_root": "/repo",
+        "last_snapshot_dir": "/artifacts/snapshot",
+        "attempts": 1,
+    }
+    for key, value in overrides.items():
+        entry[f"last_{key}"] = value
+    task_key = _stable_kernel_task_key(
+        task_group_key="tg-fused-gemm",
+        kernel_id="k007",
+        source_file="/repo/fused_gemm.py",
+    )
+    state.kernel_opt_task_attempts[task_key] = entry
+    _queue_kernel_keep(state, task_key=task_key, kernel_id="k007", entry=entry)
 
 
 def test_reference_verified_applyback_queues_with_its_provenance():
     state = SharedState()
 
     _record_applyback_keep(state)
-
-    attempt = state.kernel_opt_attempts["k007"]
-    assert attempt["last_correctness_source"] == "forge_rewrite_reference"
-    assert attempt["last_integration_validation_status"] == "pending"
-    assert attempt["last_framework_applyback"] == _applyback_evidence()
-
-    assert state.last_kernel_opt["correctness_source"] == "forge_rewrite_reference"
-    assert state.last_kernel_opt["integration_validation_status"] == "pending"
-    assert state.last_kernel_opt["framework_applyback"]["commit_ref"] == ("refs/hyperloom/applyback/attempt-1")
 
     pending = state.pending_kernel_integration_records()
     assert len(pending) == 1

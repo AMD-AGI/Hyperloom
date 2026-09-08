@@ -17,6 +17,7 @@ import pytest
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
 )
+from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
 
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_fusion.py"
@@ -82,9 +83,22 @@ def test_build_cmd_maps_core_options(tmp_path):
     assert "--llm-model" not in cmd
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
     assert cmd[cmd.index("--max-turns") + 1] == "7"
-    assert "--fuse-all-confirmed" in cmd
+    # Multi-patch (one independent sibling per recipe) is now the default; the
+    # combine escape hatch must be requested explicitly, so the flag is absent
+    # unless a caller opts in.
+    assert "--fuse-all-confirmed" not in cmd
     assert "--tp" not in cmd
     assert "--block-size" not in cmd
+
+
+def test_build_cmd_combine_escape_hatch_is_opt_in(tmp_path):
+    """``fuse_all_confirmed=True`` still forces the single combined patch."""
+    payload = _payload(tmp_path)
+    payload["fuse_all_confirmed"] = True
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert "--fuse-all-confirmed" in cmd
 
 
 def test_build_cmd_forwards_session_serve_args(tmp_path):
@@ -484,6 +498,170 @@ def test_normalize_manifest_checks_each_artifact_it_hands_to_integrate(tmp_path,
     assert result["kept"] is False
     assert result["error_class"] == "fusion_artifact_missing"
     assert expected in result["error"]
+
+
+def _multi_patch_manifest(output_dir, *, patches: list) -> dict:
+    """A multi-patch run: a top-level ``patches[]`` list is the source of truth.
+
+    ``kept`` follows from the list being non-empty; the singular ``artifacts``
+    slot mirrors the STRONGEST sibling (patches[0]) so a singular-only reader still
+    lands the best patch.
+    """
+    strongest = patches[0] if patches else {}
+    return {
+        "schema_version": 2,
+        "verdict": "candidate" if patches else "no_improvement",
+        "fusion_loop": {
+            "kept": bool(patches),
+            "best": {"kernel_speedup": strongest.get("micro_speedup")},
+            "best_env_flag": "",
+        },
+        "patches": patches,
+        "nomination": {
+            "candidates_seen": 3,
+            "resolved": len(patches),
+            "selected": len(patches),
+        },
+        "artifacts": {
+            "patch": strongest.get("patch_path"),
+            "changes": [],
+            "repo_root": strongest.get("kernel_repo", ""),
+        },
+        # Names the top RECIPE, which on this path can differ from the strongest
+        # sibling's target file -- the normalizer realigns it.
+        "fusion": {"source_file": str(output_dir / "top_recipe.py")},
+    }
+
+
+def test_normalize_manifest_carries_every_sibling(tmp_path):
+    """A multi-patch run hands the consumer each independent sibling."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    a = Path(output_dir) / "fusion_a.patch"
+    a.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    b = Path(output_dir) / "fusion_b.patch"
+    b.write_text("diff --git a/b.py b/b.py\n", encoding="utf-8")
+    patches = [
+        {
+            "kernel_name": "fuse_a",
+            "patch_path": str(a),
+            "target_file": "/fw/a.py",
+            "kernel_repo": "/venv/site-packages",
+            "snapshot_dir": "/snap/a",
+            "base_commit": "abc",
+            "micro_speedup": 1.4,
+            "kind": "fusion",
+        },
+        {
+            "kernel_name": "fuse_b",
+            "patch_path": str(b),
+            "target_file": "/fw/b.py",
+            "kernel_repo": "/venv/site-packages",
+            "snapshot_dir": "/snap/b",
+            "base_commit": "abc",
+            "micro_speedup": 1.2,
+            "kind": "fusion",
+        },
+    ]
+    manifest = _multi_patch_manifest(output_dir, patches=patches)
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is True
+    assert result["requires_e2e_validation"] is True
+    assert [p["kernel_name"] for p in result["patches"]] == ["fuse_a", "fuse_b"]
+    assert [p["target_file"] for p in result["patches"]] == ["/fw/a.py", "/fw/b.py"]
+    assert result["nomination"]["selected"] == 2
+    # Singular fallback realigns to the strongest sibling: patch AND target agree.
+    assert result["patch"] == str(a)
+    assert result["source_file"] == "/fw/a.py"
+    assert result["kernel_repo"] == "/venv/site-packages"
+
+
+def test_normalize_manifest_empty_patches_is_a_clean_no_op(tmp_path):
+    """A multi-patch run that kept nothing is a valid no-KEEP, not a failure."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _multi_patch_manifest(output_dir, patches=[])
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is False
+    assert result["decision"] == "REVERT"
+    assert result["patches"] == []
+    # ``complete`` (not ``failed``) so the KERNEL-entry idempotency gate is satisfied
+    # -- an honest "ran, found nothing" is not a retryable outage.
+    assert result["status"] == "complete"
+    assert result["requires_e2e_validation"] is False
+
+
+def test_normalize_manifest_multi_patch_missing_strongest_patch_reverts(tmp_path):
+    """The strongest sibling's mirrored patch must exist, like the singular path."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    patches = [
+        {
+            "kernel_name": "fuse_a",
+            "patch_path": str(Path(output_dir) / "gone.patch"),  # never written
+            "target_file": "/fw/a.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.4,
+            "kind": "fusion",
+        },
+    ]
+    manifest = _multi_patch_manifest(output_dir, patches=patches)
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is False
+    assert result["error_class"] == "fusion_artifact_missing"
+
+
+def test_salvage_carries_every_sibling_the_manifest_recorded(tmp_path):
+    """A killed wrapper salvages all N nominated siblings, not one singular patch."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    a = Path(output_dir) / "fusion_0.patch"
+    a.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    b = Path(output_dir) / "fusion_1.patch"
+    b.write_text("diff --git a/b.py b/b.py\n", encoding="utf-8")
+    (output_dir / "fusion.patch").write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    patches = [
+        {
+            "kernel_name": "fuse_a",
+            "patch_path": str(a),
+            "target_file": "/fw/a.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.4,
+            "kind": "fusion",
+        },
+        {
+            "kernel_name": "fuse_b",
+            "patch_path": str(b),
+            "target_file": "/fw/b.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.2,
+            "kind": "fusion",
+        },
+    ]
+    manifest = _multi_patch_manifest(output_dir, patches=patches)
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert result["patches"] == patches
+    # The consumer routes salvage through the nomination contract, so an absent
+    # ``patches`` key would queue nothing at all.
+    outcome = parse_outcome(result)
+    assert outcome.schema_error == ""
+    assert [p.kernel_name for p in outcome.patches] == ["fuse_a", "fuse_b"]
+    # Singular slots stay as they were for callers that only read them.
+    assert result["patch"] == str(output_dir / "fusion.patch")
+    assert result["source_file"] == str(output_dir / "top_recipe.py")
+    assert result["kernel_repo"] == "/venv/site-packages"
 
 
 def _compile_pass_manifest(output_dir, *, kept: bool) -> dict:
@@ -1315,3 +1493,22 @@ def test_run_with_tree_timeout_clears_output_when_reap_times_out(monkeypatch):
         forge_fusion._run_with_tree_timeout(["echo"], timeout_sec=30)
 
     assert excinfo.value.output == ""
+
+
+def test_build_cmd_forwards_the_recipe_ceiling(tmp_path):
+    """The lane's target count reaches forge-fuse as --max-recipes."""
+    payload = _payload(tmp_path)
+    payload["max_recipes"] = 3
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert cmd[cmd.index("--max-recipes") + 1] == "3"
+
+
+def test_build_cmd_omits_the_recipe_ceiling_when_none_was_derived(tmp_path):
+    """An absent key leaves forge-fuse on every discovered recipe."""
+    cmd = forge_fusion._build_cmd(_payload(tmp_path))
+
+    assert "--max-recipes" not in cmd
+    # The rest of the brief still travels, so the omission is not a broken build.
+    assert cmd[cmd.index("--framework") + 1] == "sglang"

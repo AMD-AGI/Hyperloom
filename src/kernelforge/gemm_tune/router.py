@@ -30,6 +30,13 @@ class TunerSpec:
     # and tuning the half the other backend serves is time spent on a table
     # nothing will read. ``None`` means the run's full token coverage.
     token_hint: list[int] | None = None
+    # A fallback tuner runs only when no earlier non-fallback tuner produced a
+    # deployable candidate. It exists so the fp8-barren -> bf16-dense retry that
+    # Hyperloom used to launch as a second subprocess happens inside this one
+    # call instead: the bf16 dense pass is selected up front but executed only if
+    # the fp8 tuning came back empty, so a run whose fp8 tuning won never spends
+    # budget tuning a bf16 table it may not even dispatch.
+    fallback: bool = False
 
     @property
     def should_run(self) -> bool:
@@ -581,6 +588,23 @@ def _select_sglang_tuners(
                 "sglang_dense_bf16",
                 priority=20,
                 estimated_minutes=10,
+            )
+        )
+    elif precision == "fp8" and not any(t.name == "sglang_dense_bf16" for t in tuners):
+        # fp8 -> bf16 dense retry, pushed down from Hyperloom's old second
+        # subprocess. When the model config gives no positive signal that bf16
+        # dense GEMMs are dispatched (fully-quantized checkpoint, or lm_head-only
+        # exclusion), the fp8 dense tuner may still come back empty -- and on
+        # such a run the excluded projections do run in bf16. Rather than launch
+        # a fresh gemm session for that case, select the bf16 dense pass now as a
+        # fallback: it runs in this same call only if every fp8 tuner produced
+        # no candidate, so the "fp8 won" path pays nothing for it.
+        tuners.append(
+            TunerSpec(
+                "sglang_dense_bf16",
+                priority=30,
+                estimated_minutes=10,
+                fallback=True,
             )
         )
 

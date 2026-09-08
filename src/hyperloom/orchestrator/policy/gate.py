@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
+    is_rocm_hip_writable_path,
     resolve_session_framework_root,
     resolve_source_file_allowlist,
     resolved_within,
@@ -21,6 +22,7 @@ from ..bus.gpu_pool import (
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
 )
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -138,8 +140,10 @@ SPECIALIST_ACTION_NAME: str = "specialist"
 # Orchestrator-side patch integration step (gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
-# Merged explore action.
-EXPLORE_ACTION_NAME: str = "explore"
+# GEMM tuning action; the hook that guards it is called for every action, so it
+# needs its own name to answer only for itself.
+GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
+
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
@@ -161,7 +165,7 @@ def detect_gpu_count() -> int:
             ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
             count parsed from ``rocm-smi``; 0 when nothing can be probed.
     """
-    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
         raw = os.environ.get(env_name)
         if raw is None:
             continue
@@ -435,6 +439,9 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 # scopes outside the session directory. Real-path containment prevents escapes.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
 
+# Payload fields that name files modified by patch/install actions.
+ROCM_WRITE_PATH_FIELDS: frozenset[str] = frozenset({"patch_path", "target_file", "resolved_patch_targets"})
+
 # Coordinator-owned warm replay may deploy a KB patch into the active framework
 # checkout.  The exception is intentionally narrower than SOURCE_LIKE_FIELDS:
 # only target_file values paired with a patch downloaded into this session's
@@ -614,6 +621,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "plateau_overrides",
         # CLOSE-phase sequencer flag; LLM must not toggle it.
         "close_sequence_done",
+        # Objective-met marker; the Coordinator is its only writer.
+        "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
@@ -641,7 +650,6 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "specialist_patch_verdicts",
         "last_trace_analyze",
         "last_kernel_opt",
-        "last_kernel_opt_dispatch_skip",
         "kernel_opt_task_attempts",
         "pending_kernel_integrations",
         "last_collective",
@@ -1091,9 +1099,10 @@ class PolicyGate:
                 f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable",
                 rule="request_kind",
                 hint=(
-                    "the lane runs at KERNEL entry once its own gate passes and "
-                    "reports as run_collective_done / run_fusion_done; request "
-                    "run_optimization for a source-level kernel instead."
+                    "the lane runs at KERNEL entry once its own gate passes, "
+                    "targeted from the nomination and bounded by the lane budget; "
+                    "its outcome arrives as <kind>_done. Wait for that event and "
+                    "`integrate` the KEEPs it queues."
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")
@@ -1205,12 +1214,13 @@ class PolicyGate:
         *,
         intent_kind: str,
     ) -> None:
-        """Do not pre-filter GEMM tuning applicability in Hyperloom.
+        """Refuse a model-proposed GEMM tuning run; the Coordinator owns the lane.
 
-        Current GEAK owns its optimization loop and decides internally whether
-        GEMM tuning applies to the workload.  Hyperloom keeps this hook as a
-        named policy boundary but deliberately does not reject by precision,
-        framework, or GEMM type.
+        Applicability is still not pre-filtered here -- the producer decides
+        internally whether tuning applies to the workload. What this now refuses
+        is the *channel*: the lane is dispatched once at phase entry from a lane
+        budget, so a per-tick re-issue would spend time the allocation never
+        granted. Mirrors how the fusion and collective lanes are already closed.
 
         Args:
             action_name (str): the action name being checked.
@@ -1218,9 +1228,21 @@ class PolicyGate:
                 error hint.
 
         Raises:
-            PolicyDenied: This hook does not currently raise.
+            PolicyDenied: When ``action_name`` is the GEMM tuning action.
         """
-        return
+        # Called unconditionally for every action, so it must answer only for
+        # its own; it used to never raise, which hid that.
+        if action_name != GEMM_TUNING_ACTION_NAME:
+            return
+        raise PolicyDenied(
+            f"{action_name!r} is a Coordinator-owned kernel lane and not model-requestable ({intent_kind})",
+            rule="phase_incompatible",
+            hint=(
+                "GEMM tuning is dispatched by the Coordinator at KERNEL entry once its "
+                "deterministic gate passes; it draws on a lane budget rather than a "
+                "per-request one, so it cannot be re-issued per tick."
+            ),
+        )
 
     # R5 — tool_whitelist_role
     def _validate_tool_whitelist_collision(
@@ -1991,6 +2013,13 @@ class PolicyGate:
                 )
             if key not in PATH_LIKE_FIELDS:
                 return
+            if key in ROCM_WRITE_PATH_FIELDS and not is_rocm_hip_writable_path(node):
+                raise PolicyDenied(
+                    f"role={role.name!r} {intent_type.value} payload field "
+                    f"{key!r}={node!r} is a ROCm runtime path, not HIP source",
+                    rule="rocm_runtime_write_denied",
+                    hint="ROCm writes are limited to source, header, and CMake files",
+                )
             if not self._path_under_session(node):
                 if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
                     try:
@@ -2247,6 +2276,7 @@ __all__ = [
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
+    "ROCM_WRITE_PATH_FIELDS",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",

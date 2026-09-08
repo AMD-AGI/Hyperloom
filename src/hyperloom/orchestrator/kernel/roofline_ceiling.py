@@ -1262,21 +1262,6 @@ def compute_compute_bound_ceiling_tok_per_sec(
     return peak_flops_total / flops_per_token
 
 
-def _read_baseline_yaml_conc(state: Any) -> int:
-    """Read ``benchmark.envs.CONC`` from the materialized baseline yaml (ground-truth concurrency; ``0`` when unreadable).
-
-    Args:
-        state: Shared run state carrying ``last_baseline`` provenance.
-
-    Returns:
-        The baseline concurrency, or ``0`` when unreadable.
-    """
-    return _env_int(
-        _benchmark_envs(_read_baseline_yaml_benchmark(state)),
-        "CONC",
-    )
-
-
 @dataclass(frozen=True)
 class RooflineBreakdown:
     """Decode roofline ceiling plus memory/compute side projections (PerfModel peak sums per-op max(t_mem,t_cmp), may differ from min(T_mem,T_cmp)). ``bound_kind`` ∈ {memory, compute, unknown} (unknown ⇒ peak 0)."""

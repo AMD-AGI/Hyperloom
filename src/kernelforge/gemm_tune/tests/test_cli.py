@@ -152,3 +152,91 @@ def test_cli_auto_detection_failure_aborts_before_model_or_tuning(tmp_path, monk
     assert result.exit_code != 0
     assert "--gpu-type" in result.output
     assert not (output / "plan.json").exists()
+
+
+def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list[str], extra: list[str]) -> list[str]:
+    """Invoke ``gemm-tune run`` over a fixed routed set and report what executed."""
+    _stub_preflight(monkeypatch)
+    model = _model_dir(tmp_path)
+    executed: list[str] = []
+
+    class _Tuner:
+        def __init__(self, name):
+            self.name = name
+
+        def execute(self):
+            executed.append(self.name)
+            return TuneResult(tuner_name=self.name, status="no_improvement")
+
+    from kernelforge.gemm_tune import router as router_mod
+    from kernelforge.gemm_tune.router import TunerSpec
+
+    monkeypatch.setattr(cli_mod, "_create_tuner", lambda name, ctx: _Tuner(name))
+    # The CLI imports select_tuners inside the command body, so the patch has to
+    # land on the router module it reads from.
+    monkeypatch.setattr(
+        router_mod,
+        "select_tuners",
+        lambda *_a, **_k: [
+            TunerSpec(name, priority=10 * (index + 1), estimated_minutes=20) for index, name in enumerate(routed)
+        ],
+    )
+    result = CliRunner().invoke(
+        gemm_tune,
+        [
+            "run",
+            "--model-path",
+            str(model),
+            "--framework",
+            "vllm",
+            "--precision",
+            "fp8",
+            "--gpu-type",
+            "mi300x",
+            "--skip-gpu-check",
+            "--output-dir",
+            str(tmp_path / "output"),
+            *extra,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return executed
+
+
+def test_the_tuner_ceiling_keeps_the_highest_priority_ones(tmp_path, monkeypatch):
+    """A share paying for two of three tuners must not start the third.
+
+    Only a single ``--tuner`` name could be forced before, so any ceiling above
+    one capped nothing and the extra tuners ran bounded only by the wall clock.
+    """
+    executed = _run_with_ceiling(
+        tmp_path,
+        monkeypatch,
+        routed=["fmoe_ck", "a8w8", "dense_bf16"],
+        extra=["--max-tuners", "2"],
+    )
+
+    assert executed == ["fmoe_ck", "a8w8"]
+
+
+def test_no_tuner_ceiling_runs_every_routed_tuner(tmp_path, monkeypatch):
+    """Zero means no ceiling was derived, never "run nothing"."""
+    executed = _run_with_ceiling(
+        tmp_path,
+        monkeypatch,
+        routed=["fmoe_ck", "a8w8", "dense_bf16"],
+        extra=["--max-tuners", "0"],
+    )
+
+    assert executed == ["fmoe_ck", "a8w8", "dense_bf16"]
+
+
+def test_a_ceiling_wider_than_the_routed_set_drops_nothing(tmp_path, monkeypatch):
+    executed = _run_with_ceiling(
+        tmp_path,
+        monkeypatch,
+        routed=["fmoe_ck", "a8w8"],
+        extra=["--max-tuners", "5"],
+    )
+
+    assert executed == ["fmoe_ck", "a8w8"]

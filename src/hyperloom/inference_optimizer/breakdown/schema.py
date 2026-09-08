@@ -121,13 +121,16 @@ class WorkloadObjective(TypedDict, total=False):
 
     Attributes:
         kind (str): Objective type (``gain_pct`` / ``tput`` / ``baseline`` /
-            ``time_only``).
+            ``roofline_pct`` / ``time_only``).
         value (Any): Goal value — a float target, a string (e.g.
             ``target_baseline_dir``), or None when not applicable.
+        objectives (list): Every target the run carried, present only when it
+            carried more than one; ``kind`` / ``value`` name the first.
     """
 
-    kind: str  # gain_pct / tput / baseline / time_only
+    kind: str  # gain_pct / tput / baseline / roofline_pct / time_only
     value: Any  # float or str (target_baseline_dir) or None
+    objectives: list[dict[str, Any]]
 
 
 class Workload(TypedDict, total=False):
@@ -2038,13 +2041,9 @@ class KernelOptimizationSummary(TypedDict, total=False):
     session_id: str  # global id ``{model}_{ts}_{short_uuid}``
     model_name: str
     cumulative_gain_validated_pct: float
-    totals: dict[str, int]  # {top_candidates, attempted, integrated, keep_pending, rejected, in_flight, unattempted}
+    totals: dict[str, int]  # {attempted, integrated, keep_pending, rejected, in_flight}
     rejection_breakdown: dict[str, int]
-    unattempted_reason_breakdown: dict[str, int]
     failure_reason_breakdown: dict[str, int]
-    dispatch_skip_reason: dict[
-        str, Any
-    ]  # {} or {reason, kernels_considered, message, ts} when a dispatch found no eligible kernels
     field_glossary: dict[str, str]  # {field_name: explanation} for tooltips
     top_takeaways: list[str]  # 2-4 deterministic (non-LLM) sentences
     by_kernel: list[dict[str, Any]]  # one row per top kernel, sorted gpu_pct desc
@@ -3263,15 +3262,14 @@ class V6KernelAnalysisArtifacts(TypedDict, total=False):
 class V6KernelAnalysisDetail(TypedDict, total=False):
     """Trace-analysis metadata shared by the roofline and kernel events.
 
-    ``route`` and ``tool`` are separate axes: the route is the analysis pipeline,
-    the tool is the analyzer that ran. A single TraceLens route runs today, so
-    both are ``tracelens``. They stay distinct in the envelope so exported events
-    keep their shape. Oversized sub-blocks are replaced by an omission marker
-    rather than dropped, so a consumer can tell a bounded block from a missing one.
+    ``route`` records the routing policy and ``tool`` records the implementation
+    that served it. Oversized sub-blocks are replaced by an omission marker
+    rather than dropped, so a consumer can tell a bounded block from a missing
+    one.
 
     Attributes:
-        route (str): ``tracelens``.
-        tool (str): ``tracelens``.
+        route (str): ``agent`` / ``bypass``.
+        tool (str): ``tracelens`` / ``bypass``.
         tool_run_id (str): The analysis tool's own run id.
         steady_state (dict[str, Any]): Steady-state window selection.
         preflight (dict[str, Any]): Preflight checks.

@@ -517,11 +517,6 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     assert coord._gemm_tuning_required_before_kernel_opt() is False
 
 
-def test_kernel_opt_work_remains(coord: Coordinator) -> None:
-    coord.shared_state.auto_kernel_opt_enabled = False
-    assert coord._kernel_opt_work_remains() is False
-
-
 # -- canonical id helpers --------------------------------------------------
 def test_workload_canonical_id_and_anchor(coord: Coordinator) -> None:
     ss = coord.shared_state

@@ -1141,8 +1141,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     framework = tmp_path / "framework"
     for path in (workspace, worktree, framework):
         path.mkdir(parents=True, exist_ok=True)
-    user_prompt = workspace / "prompt.md"
-    user_prompt.write_text("user-prompt", encoding="utf-8")
     system_prompt_file = workspace / "system_prompt.md"
 
     cfg = SpecialistSubprocessConfig(
@@ -1155,7 +1153,6 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     cmd = SpecialistSubprocessDispatcher(cfg)._build_claude_cmd(
         system_prompt_file=system_prompt_file,
         system_prompt="SYSTEM",
-        user_prompt_file=user_prompt,
         workspace=workspace,
         worktree=worktree,
         disallowed_tools=frozenset({"KillShell", "SlashCommand"}),

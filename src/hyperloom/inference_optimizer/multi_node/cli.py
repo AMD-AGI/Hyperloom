@@ -281,31 +281,6 @@ def _require_state(*keys: str) -> dict[str, Any]:
     return state
 
 
-def _parse_kv_list(values: list[str] | None) -> dict[str, str]:
-    """Convert ['K=V', 'K2=V2', ...] into a dict; ignore malformed entries.
-
-    Args:
-        values (list[str] | None): The raw ``K=V`` tokens, or ``None``.
-
-    Returns:
-        dict[str, str]: The parsed key/value mapping; malformed or
-        empty-key tokens are skipped.
-    """
-    out: dict[str, str] = {}
-    if not values:
-        return out
-    for raw in values:
-        if "=" not in raw:
-            warn(f"ignoring malformed K=V token: {raw!r}")
-            continue
-        k, _, v = raw.partition("=")
-        k = k.strip()
-        if not k:
-            continue
-        out[k] = v
-    return out
-
-
 def _ray_dashboard_client(state: dict[str, Any] | None = None) -> ray_dashboard.RayDashboardClient:
     """Open a Ray Dashboard client using ``head_pod_ip`` and optional token from state.
 

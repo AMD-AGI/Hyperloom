@@ -58,6 +58,32 @@ def _is_fused_module_name(name: str) -> bool:
     return any(stem == p or stem.startswith(p + "_") for p in _FUSED_MODULE_PREFIXES)
 
 
+def _fused_module_candidates(source_file: str, fused_module: str = "") -> list[Path]:
+    """The fused modules an export may ship, beside ``source_file``.
+
+    With ``fused_module`` given, the answer is exactly that one file: the caller
+    knows which module THIS recipe authored (:func:`campaign.fused_module_path`
+    derives it up front), so nothing else in the directory belongs in the patch.
+    That scoping is load-bearing for sibling nomination -- the fusion loop keeps
+    running after a keeper, so by the time the second recipe exports, the FIRST
+    recipe's module is still sitting in the shared tree. A directory glob would
+    sweep it into sibling #2's patch, and the applier then refuses the patch
+    outright ("snapshot missing content"), because sibling #2's pristine snapshot
+    predates a file it never created.
+
+    Without it (salvage / compile-pass / single-recipe callers, which have no
+    recipe in hand) fall back to discovering by name, since an author-created
+    module is otherwise unknowable.
+    """
+    if fused_module:
+        f = Path(fused_module)
+        return [f] if f.is_file() else []
+    model_dir = Path(source_file).parent if source_file else None
+    if not (model_dir and model_dir.is_dir()):
+        return []
+    return [f for f in sorted(model_dir.glob("*.py")) if _is_fused_module_name(f.name)]
+
+
 def _git_tracks(repo_root: str, source_file: str) -> bool:
     """True only when ``source_file`` is a git-TRACKED file under ``repo_root``.
 
@@ -78,26 +104,39 @@ def _git_tracks(repo_root: str, source_file: str) -> bool:
     return False
 
 
-def _unified_file_diff(rel: str, old_text: str, new_text: str) -> str:
-    """git-apply-compatible unified diff for one file (empty when unchanged)."""
+def _unified_file_diff(rel: str, old_text: str, new_text: str, *, created: bool) -> str:
+    """git-apply-compatible unified diff for one file (empty when unchanged).
+
+    ``created`` says the file is absent from the base, which an empty ``old_text``
+    does not: an existing empty file declared as a creation fails to apply.
+    """
     if old_text == new_text:
         return ""
     body = "".join(
         difflib.unified_diff(
             old_text.splitlines(keepends=True),
             new_text.splitlines(keepends=True),
-            fromfile=f"a/{rel}",
+            fromfile="/dev/null" if created else f"a/{rel}",
             tofile=f"b/{rel}",
         )
     )
     if not body:
         return ""
-    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`.
-    return f"diff --git a/{rel} b/{rel}\n{body}"
+    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`;
+    # `new file mode` + `--- /dev/null` is how a creation is declared.
+    new_file = "new file mode 100644\n" if created else ""
+    return f"diff --git a/{rel} b/{rel}\n{new_file}{body}"
 
 
-def _export_nongit(repo_root: str, source_file: str, out: Path, pristine_dir: Path) -> FusionArtifacts:
-    """Export ``fusion.patch`` without git, using a pre-authoring pristine snapshot.
+def _export_nongit(
+    repo_root: str,
+    source_file: str,
+    out: Path,
+    pristine_dir: Path,
+    patch_name: str = "fusion.patch",
+    fused_module: str = "",
+) -> FusionArtifacts:
+    """Export ``patch_name`` without git, using a pre-authoring pristine snapshot.
 
     Needed when the framework is a plain pip install (not a git checkout), where
     ``git diff`` yields nothing so the KEPT fusion would otherwise ship
@@ -124,9 +163,10 @@ def _export_nongit(repo_root: str, source_file: str, out: Path, pristine_dir: Pa
     if source_file and Path(source_file).is_file():
         rel = _rel(Path(source_file))
         snap = pristine_dir / rel
-        old_text = snap.read_text(encoding="utf-8", errors="replace") if snap.is_file() else ""
+        created = not snap.is_file()
+        old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
         new_text = Path(source_file).read_text(encoding="utf-8", errors="replace")
-        d = _unified_file_diff(rel, old_text, new_text)
+        d = _unified_file_diff(rel, old_text, new_text, created=created)
         if d:
             parts.append(d)
             names.append(rel)
@@ -137,26 +177,22 @@ def _export_nongit(repo_root: str, source_file: str, out: Path, pristine_dir: Pa
     #    the "new file" add. This avoids emitting/deleting unrelated framework files
     #    that merely match the *_fused*/*fusion* glob.
     src_resolved = Path(source_file).resolve() if source_file else None
-    model_dir = Path(source_file).parent if source_file else None
-    if model_dir and model_dir.is_dir():
-        for f in sorted(model_dir.glob("*.py")):
-            name = f.name
-            if not _is_fused_module_name(name):
-                continue
-            if src_resolved is not None and f.resolve() == src_resolved:
-                continue  # the edited source is handled by (1)
-            rel = _rel(f)
-            snap = pristine_dir / rel
-            old_text = snap.read_text(encoding="utf-8", errors="replace") if snap.is_file() else ""
-            new_text = f.read_text(encoding="utf-8", errors="replace")
-            d = _unified_file_diff(rel, old_text, new_text)
-            if d:
-                parts.append(d)
-                names.append(rel)
+    for f in _fused_module_candidates(source_file, fused_module):
+        if src_resolved is not None and f.resolve() == src_resolved:
+            continue  # the edited source is handled by (1)
+        rel = _rel(f)
+        snap = pristine_dir / rel
+        created = not snap.is_file()
+        old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
+        new_text = f.read_text(encoding="utf-8", errors="replace")
+        d = _unified_file_diff(rel, old_text, new_text, created=created)
+        if d:
+            parts.append(d)
+            names.append(rel)
 
     diff = "\n".join(p.rstrip("\n") for p in parts if p)
     if diff:
-        patch_path = out / "fusion.patch"
+        patch_path = out / patch_name
         patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
         arts.patch = str(patch_path)
     arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
@@ -186,13 +222,17 @@ def _classify(rel_path: str, source_file: str) -> str:
     return "framework_wiring_edit"
 
 
-def _fusion_scoped_paths(repo_root: str, source_file: str) -> list[str]:
+def _fusion_scoped_paths(repo_root: str, source_file: str, fused_module: str = "") -> list[str]:
     """Repo-relative paths that belong to THIS fusion (not the whole dirty tree).
 
     Scopes the exported patch to: the edited model source file, plus any untracked
     new module in the SAME directory whose name marks it a fused kernel
     (``*_fused*`` / ``*fusion*``). This avoids the earlier whole-repo ``git diff``
     that swept in dozens of unrelated pre-existing dirty files.
+
+    ``fused_module`` narrows that second set to the one module THIS recipe
+    authored -- see :func:`_fused_module_candidates` for why a sibling's leftover
+    module must not ride along.
     """
     root = Path(repo_root).resolve()
     paths: list[str] = []
@@ -203,11 +243,15 @@ def _fusion_scoped_paths(repo_root: str, source_file: str) -> list[str]:
             paths.append(Path(source_file).resolve().relative_to(root).as_posix())
     # Untracked fused-kernel modules next to the source file.
     model_dir = Path(source_file).parent if source_file else root
+    scoped = {Path(fused_module).resolve()} if fused_module else None
     others = _git(repo_root, "ls-files", "--others", "--exclude-standard").stdout.split()
     for rel in others:
         name = Path(rel).name
-        if _is_fused_module_name(name) and (root / rel).parent == model_dir.resolve():
-            paths.append(rel)
+        if not (_is_fused_module_name(name) and (root / rel).parent == model_dir.resolve()):
+            continue
+        if scoped is not None and (root / rel).resolve() not in scoped:
+            continue
+        paths.append(rel)
     # De-dupe, keep order.
     seen: set[str] = set()
     return [p for p in paths if not (p in seen or seen.add(p))]
@@ -219,8 +263,10 @@ def export_artifacts(
     out_dir: str | Path,
     pristine_dir: str | Path | None = None,
     snapshot_diff_only: bool = False,
+    patch_name: str = "fusion.patch",
+    fused_module: str = "",
 ) -> FusionArtifacts:
-    """Export ``fusion.patch`` + a classified change list, scoped to the fusion.
+    """Export ``patch_name`` + a classified change list, scoped to the fusion.
 
     Best-effort: returns an empty ``FusionArtifacts`` when the repo is unavailable
     or there are no fusion-scoped changes. Only the fusion files (the edited model
@@ -235,6 +281,17 @@ def export_artifacts(
     git route diffs against HEAD, so on a checkout carrying unrelated uncommitted
     edits it would sweep them into the patch; callers that must ship exactly the
     change THIS run made (the compile-pass flip) require the snapshot baseline.
+
+    ``patch_name`` is the file the diff is written to under ``out_dir``. It
+    defaults to the legacy ``fusion.patch`` so single-patch (combine) callers and
+    the salvage/timeout paths that read that literal name are unchanged; the
+    multi-patch caller passes a distinct name per sibling (``fusion_0.patch`` ...)
+    so N keepers do not overwrite each other.
+
+    ``fused_module`` is the module THIS recipe authored. Passing it confines the
+    patch to that one new file; omitting it falls back to discovering fused
+    modules by name in the source directory. Sibling nomination MUST pass it --
+    see :func:`_fused_module_candidates`.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -242,7 +299,9 @@ def export_artifacts(
 
     def _nongit() -> FusionArtifacts | None:
         if pristine_dir and source_file:
-            return _export_nongit(repo_root, source_file, out, Path(pristine_dir))
+            return _export_nongit(
+                repo_root, source_file, out, Path(pristine_dir), patch_name, fused_module=fused_module
+            )
         return None
 
     # Take the git path ONLY when the source file is actually git-TRACKED. A pip
@@ -255,7 +314,7 @@ def export_artifacts(
         return arts
 
     try:
-        rel_paths = _fusion_scoped_paths(repo_root, source_file)
+        rel_paths = _fusion_scoped_paths(repo_root, source_file, fused_module)
         if not rel_paths:
             return arts
         tracked = _tracked_paths(repo_root, rel_paths)
@@ -282,7 +341,7 @@ def export_artifacts(
         # ignores): try the pristine snapshot before giving up on the patch.
         return _nongit() or arts
 
-    patch_path = out / "fusion.patch"
+    patch_path = out / patch_name
     patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
     arts.patch = str(patch_path)
     arts.repo_root = str(Path(repo_root).resolve())

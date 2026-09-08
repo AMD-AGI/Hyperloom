@@ -51,6 +51,11 @@ from ..loop.coordinator_helpers import (
     geak_spec_is_env,
     _resolve_roofline_watermark_ratio,
     _accepted_config_as_variant,
+    _coerce_tp,
+    _resolve_gpu_pin,
+    _resolve_handoff_gpu_ids,
+    _resolve_handoff_gpu_ids_space,
+    _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
 from .base import PhaseHandler
@@ -77,16 +82,9 @@ _GEAK_RESIDUAL_MIN_RATIO = 1.001
 # a transient cause plus the original attempt.
 MAX_FUSION_INFRA_RETRIES = 2
 
-# Why KERNEL entry dispatched no kernel_opt at all, recorded on
-# ``last_kernel_opt_dispatch_skip`` and surfaced by the summary as
-# ``dispatch_skip_reason``. A wholesale skip is invisible in the summary's
-# unattempted buckets, which only ever count kernels the candidate table
-# listed: an absent table leaves every bucket at zero, which reads as "this
-# workload had nothing worth optimising" rather than "nothing was ever asked".
-KERNEL_OPT_SKIP_DISABLED = "auto_kernel_opt_disabled"
-KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE = "no_candidate_table"
-KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS = "no_untried_hot_kernels"
-KERNEL_OPT_SKIP_NO_CANDIDATES_PATH = "no_candidates_path"
+# One lane ceiling covers both fusion pipelines, so a round can leave targets
+# unfunded. Retrying re-runs discovery, so the re-arming it grants is capped.
+MAX_FUSION_WITHHELD_RETRIES = 2
 
 
 def _as_int(value: object) -> int:
@@ -95,6 +93,29 @@ def _as_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _withheld_targets(result: object) -> int:
+    """How many discovered targets a fusion round's lane ceiling never funded.
+
+    Absent on the combine path and on every pre-contract record, which read as
+    fully funded rather than as unfunded.
+    """
+    if not isinstance(result, dict):
+        return 0
+    nomination = result.get("nomination")
+    if not isinstance(nomination, dict):
+        return 0
+    withheld = nomination.get("withheld")
+    return max(0, withheld) if isinstance(withheld, int) and not isinstance(withheld, bool) else 0
+
+
+def _as_float(value: object, default: float) -> float:
+    """Read a measurement that round-tripped through JSON, defaulting on junk."""
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
 
 
 # Which table each aiter config env var is resolved under at serving time. Two
@@ -642,20 +663,18 @@ class KernelPhase(PhaseHandler):
         try:
             from ..kernel.request_handlers import run_gemm_tuning_handler
 
-            if self._bf16_dense_gemm_fallback_pending():
-                log.info(
-                    "KERNEL entry: resuming pending bf16 dense GEMM fallback after prior forge fp8 no-candidate result"
-                )
-                result = await self._run_bf16_dense_gemm_fallback(run_gemm_tuning_handler)
-            else:
-                result = await run_gemm_tuning_handler(
-                    {
-                        "task_id": "kernel_entry_gemm_tuning",
-                        "reason": "kernel_entry_auto",
-                        "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                    },
-                    session_dir=self.session_dir,
-                )
+            # The fp8 -> bf16 dense retry now lives inside the tuner router: an
+            # fp8 run whose tuning comes back empty runs the bf16 dense pass in
+            # the same call (router selects it as a fallback). There is no longer
+            # a second subprocess to resume or launch here.
+            result = await run_gemm_tuning_handler(
+                {
+                    "task_id": "kernel_entry_gemm_tuning",
+                    "reason": "kernel_entry_auto",
+                    "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                },
+                session_dir=self.session_dir,
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
@@ -665,15 +684,6 @@ class KernelPhase(PhaseHandler):
                 "error": repr(exc),
             }
         await self._handle_gemm_tuning_result(result)
-
-        if (
-            run_gemm_tuning_handler is not None
-            and self._should_run_bf16_dense_gemm_fallback(result)
-            and str(result.get("decision") or "").strip().upper() != "KEEP"
-        ):
-            log.info("KERNEL entry: forge fp8 GEMM tuning found no candidate; trying bf16 dense fallback")
-            result = await self._run_bf16_dense_gemm_fallback(run_gemm_tuning_handler)
-            await self._handle_gemm_tuning_result(result)
 
         status = str(result.get("status") or "unknown")
         await self.bus.append_and_seq(
@@ -702,132 +712,43 @@ class KernelPhase(PhaseHandler):
         # Capture explore + GEMM-tuning gains before the entry batch.
         await self._finish_kernel_entry()
 
-    async def _run_bf16_dense_gemm_fallback(
-        self,
-        run_gemm_tuning_handler: Callable[..., Any],
-    ) -> dict[str, Any]:
-        """Run the single bf16 dense fallback and stamp retry provenance."""
-        payload = {
-            "task_id": "kernel_entry_gemm_tuning_bf16_fallback",
-            "reason": "fp8_no_improvement_bf16_fallback",
-            "macro_cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-            "precision": "bf16",
-            "tuner": "sglang_dense_bf16",
-        }
-        try:
-            result = await run_gemm_tuning_handler(
-                payload,
-                session_dir=self.session_dir,
-            )
-            if not isinstance(result, dict):
-                result = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error": "non-dict bf16 fallback result",
-                }
-        except Exception as exc:  # noqa: BLE001
-            log.exception("KERNEL entry GEMM bf16 fallback failed")
-            result = {
-                "status": "failed",
-                "decision": "REVERT",
-                "error_class": exc.__class__.__name__,
-                "error": repr(exc),
-            }
-        result.setdefault("task_id", payload["task_id"])
-        result.setdefault("reason", payload["reason"])
-        result.setdefault("source", payload["reason"])
-        result.setdefault("backend", "forge")
-        result.setdefault("precision", "bf16")
-        result.setdefault("framework", getattr(self.shared_state, "framework", ""))
-        return result
-
-    def _should_run_bf16_dense_gemm_fallback(self, result: dict[str, Any]) -> bool:
-        """Return True when a forge fp8 run should try bf16 dense GEMM tuning.
-
-        Makes the ``sglang_dense_bf16`` fallback deterministic when the fp8 tuner
-        produced no E2E-validatable candidate.
-        """
-        if not isinstance(result, dict):
-            return False
-        if str(result.get("backend") or "").strip().lower() != "forge":
-            return False
-        if str(result.get("precision") or "").strip().lower() != "fp8":
-            return False
-        framework = str(result.get("framework") or getattr(self.shared_state, "framework", "") or "").strip().lower()
-        if framework != "sglang":
-            return False
-        if str(result.get("micro_decision") or "").strip().lower() != "no_improvement":
-            return False
-        if result.get("recommended_env") or result.get("extra_envs"):
-            return False
-        for tuner in result.get("tuners_run") or []:
-            if not isinstance(tuner, dict):
-                continue
-            if str(tuner.get("status") or "").strip().lower() != "ok":
-                continue
-            try:
-                improved = int(tuner.get("improved_shapes") or 0)
-            except (TypeError, ValueError):
-                improved = 0
-            if improved > 0 and str(tuner.get("env_var") or "").strip() and str(tuner.get("env_value") or "").strip():
-                return False
-        return True
-
-    def _bf16_dense_gemm_fallback_pending(self) -> bool:
-        """Return True when a recorded fp8 no-op still needs its bf16 retry."""
-        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
-        return self._should_run_bf16_dense_gemm_fallback(last) and not self._bf16_dense_gemm_fallback_attempted()
-
-    def _bf16_dense_gemm_fallback_attempted(self) -> bool:
-        """Detect whether the bf16 dense fallback has already been attempted."""
-        attempts: list[Any] = []
-        last = getattr(self.shared_state, "last_gemm_tuning", {}) or {}
-        if isinstance(last, dict):
-            attempts.append(last)
-        attempts.extend(getattr(self.shared_state, "gemm_tuning_attempts", None) or [])
-        return any(self._is_bf16_dense_gemm_fallback_attempt(entry) for entry in attempts if isinstance(entry, dict))
-
     @staticmethod
-    def _is_bf16_dense_gemm_fallback_attempt(entry: dict[str, Any]) -> bool:
-        """Identify the fallback attempt across old and newly stamped records."""
-        markers = {
-            "kernel_entry_gemm_tuning_bf16_fallback",
-            "fp8_no_improvement_bf16_fallback",
-        }
-        for key in ("task_id", "reason", "source"):
-            if str(entry.get(key) or "").strip() in markers:
-                return True
-        if "kernel_entry_gemm_tuning_bf16_fallback" in str(entry.get("workspace") or ""):
-            return True
-        if str(entry.get("precision") or "").strip().lower() != "bf16":
-            return False
-        if str(entry.get("tuner") or "").strip() == "sglang_dense_bf16":
-            return True
-        for tuner in entry.get("tuners_run") or []:
-            if not isinstance(tuner, dict):
-                continue
-            if str(tuner.get("tuner") or "").strip() == "sglang_dense_bf16":
-                return True
-        return False
+    def _read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
+        """Read the materialized baseline recipe's ``benchmark.envs``. Never raises.
 
-    @staticmethod
-    def _resolve_bench_protocol(recipe_path: str) -> dict[str, Any]:
-        """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
+        Args:
+            recipe_path: Path to the baseline recipe YAML (may be empty/missing).
 
-        Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
-        to the process env) and returns only the keys that resolve, so absent
-        values leave GEAK on its standalone defaults. Never raises.
+        Returns:
+            The ``benchmark.envs`` mapping, or ``{}`` when the recipe is absent
+            or unreadable.
         """
-        envs: dict[str, Any] = {}
         try:
             import yaml
 
             if recipe_path and Path(recipe_path).is_file():
                 cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
                 envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
+                return dict(envs) if isinstance(envs, dict) else {}
         except Exception:  # noqa: BLE001
-            log.warning("bench_protocol: could not read recipe %r", recipe_path, exc_info=True)
-            envs = {}
+            log.warning("geak handoff: could not read recipe %r", recipe_path, exc_info=True)
+        return {}
+
+    @classmethod
+    def _resolve_bench_protocol(cls, recipe_path: str, *, envs: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
+
+        Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
+        to the process env) and returns only the keys that resolve, so absent
+        values leave GEAK on its standalone defaults. Never raises.
+
+        Args:
+            recipe_path: Path to the baseline recipe YAML.
+            envs: An already-parsed ``benchmark.envs`` for that path. Pass it
+                when the caller needs the envs too, so the YAML is read once and
+                both consumers see the same snapshot.
+        """
+        envs = cls._read_recipe_bench_envs(recipe_path) if envs is None else envs
 
         def _pick(key: str, cast: Callable[[str], Any]) -> Any:
             raw = envs.get(key)
@@ -894,6 +815,37 @@ class KernelPhase(PhaseHandler):
         kill_timeout = int(max(0.0, kill_budget))
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
+
+    def _kernel_rewrite_controller_timeouts(self) -> tuple[int, int]:
+        """Return the Controller soft budget and Hyperloom hard timeout."""
+        candidates: list[float] = []
+        session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
+        if session_remaining is not None:
+            candidates.append(
+                max(
+                    0.0,
+                    float(session_remaining) - self.shared_state.closing_reserve_sec(),
+                )
+            )
+        phase_remaining = _phase_state.phase_budget_remaining_seconds(
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
+        )
+        if phase_remaining is not None:
+            candidates.append(max(0.0, float(phase_remaining)))
+        phase_cap = _phase_state.phase_cap_seconds(
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
+        )
+        if phase_cap is not None:
+            candidates.append(
+                max(
+                    0.0,
+                    float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state),
+                )
+            )
+        hard_timeout = int(min(candidates)) if candidates else 90 * 60
+        return max(0, hard_timeout - 30), max(0, hard_timeout)
 
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run).
@@ -982,7 +934,40 @@ class KernelPhase(PhaseHandler):
         # Forward the SAME bench knobs Hyperloom benched with so GEAK's internal
         # e2e measures identically; source = the baseline recipe's benchmark.envs
         # (process-env fallback). Only resolved keys are sent.
-        bench_protocol = self._resolve_bench_protocol(str(getattr(state, "baseline_config_path", "") or ""))
+        _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
+        # One read, two consumers: the recipe is parsed once so bench_protocol,
+        # the GPU pin and tp below all see the same snapshot.
+        _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
+        bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
+        # The run's ACTUAL GPU pin (issue #1312). GEAK launches full servers
+        # out-of-process and writes its own visible-devices mask for each one;
+        # with no pin in the handoff it defaults to physical GPU 0 and collides
+        # with whatever else holds that card. Process mask first, recipe as the
+        # fallback; {} means "whole machine", not "card 0".
+        gpu_pin = _resolve_gpu_pin(recipe_envs=_recipe_envs)
+        # tp must come from the SAME place as gpu_ids or the two can disagree.
+        # The materializer clamps TP to the visible GPU count, so a stale
+        # $TP=8 on a 4-card pod would otherwise ship `tp: 8` alongside four
+        # gpu_ids and GEAK would launch sglang with --tp 8 and fail to load.
+        # Recipe TP first, process env as the fallback; both guarded, so a
+        # non-numeric $TP cannot raise out of the fallback itself.
+        _tp = _coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
+        # gpu_ids is capped at the pin's mask width; tp follows it down so the
+        # two can never disagree (e.g. ROCR=6 with TP=2 ships tp=1, not tp=2).
+        _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
+        _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
+        _gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
+        if _gpu_ids_space == "none":
+            # Set-but-empty mask: the run has no visible devices, so no id list
+            # in this handoff can be truthful. The payload says so via
+            # gpu_ids_space, but say it in the log too — a GEAK run that dies
+            # on "invalid device ordinal" is otherwise unexplainable.
+            log.error(
+                "geak handoff: %s is set but empty; the run has no visible GPUs. "
+                "gpu_ids=%s is a placeholder (gpu_ids_space=none), not a device set.",
+                gpu_pin.get("var"),
+                _gpu_ids,
+            )
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
         # the baseline served with so GEAK launches the identical engine and its
         # baseline matches raw_baseline_tput. Resolver parses these from the raw
@@ -1002,11 +987,14 @@ class KernelPhase(PhaseHandler):
         handoff = {
             # v2 adds ``baseline_env_spec`` (the full layered env of current_best);
             # v1-only consumers ignore it and degrade to the flags/env-only baseline.
-            "schema_version": 2,
+            # v3 adds ``gpu_pin`` (the run's actual visible-devices mask) and
+            # ``gpu_ids_space``; older consumers ignore both and keep reading
+            # ``gpu_ids`` exactly as before.
+            "schema_version": 3,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
             "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
             "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
-            "tp": int(os.environ.get("TP", "1") or 1),
+            "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
@@ -1045,13 +1033,23 @@ class KernelPhase(PhaseHandler):
             "bench_client": "auto",
             "e2e_metric": "output",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
-            # Pin the serving GPU set: explicit visibility mask, else 0..tp-1.
-            "gpu_ids": (
-                os.environ.get("HIP_VISIBLE_DEVICES")
-                or os.environ.get("CUDA_VISIBLE_DEVICES")
-                or ",".join(str(i) for i in range(int(os.environ.get("TP", "1") or 1)))
-            ),
+            # The serving/optimization device set, as HIP-level ids (what the
+            # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
+            # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
+            "gpu_ids": _gpu_ids,
+            # Which coordinate system ``gpu_ids`` is in: "logical" (positions
+            # inside the ROCR mask the child inherits), "absolute" (whole-
+            # machine device ids), or "none" (the mask is set but empty — the
+            # ids are placeholders and must not be launched on). Exporting them
+            # as HIP_VISIBLE_DEVICES is correct in the first two; a consumer
+            # that instead writes ROCR itself needs to know which it holds.
+            "gpu_ids_space": _gpu_ids_space,
         }
+        if gpu_pin:
+            # ABSOLUTE ids + the var they came from, so a consumer that writes
+            # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of
+            # resetting the child to card 0.
+            handoff["gpu_pin"] = gpu_pin
         if bench_protocol:
             handoff["bench_protocol"] = bench_protocol
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.
@@ -3403,6 +3401,54 @@ class KernelPhase(PhaseHandler):
         self.shared_state.last_gemm_tuning = entry
         self._writeback_gemm_result_json(entry)
 
+    @staticmethod
+    def _gemm_canonical_candidates(result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Read the per-tuner candidates the producer already decided on.
+
+        The producer promotes a tuner on either a real micro improvement or an
+        explicitly forced ``candidate``; split-K earns the second rule, because
+        its benefit is e2e-only and it reports ``no_improvement`` at micro. The
+        rebuild from raw tuner rows gates on status first and so can never see
+        such a row, which is why its verdict is not derived a second time here.
+
+        Args:
+            result (dict[str, Any]): The GEMM tuning handler result.
+
+        Returns:
+            list[dict[str, Any]]: Candidates in the producer's priority order,
+                each with ``tuner`` / ``env_var`` / ``env_value`` / ``envs`` /
+                ``micro_speedup``. Empty when the envelope names none.
+        """
+        rows = result.get("candidates")
+        if not isinstance(rows, list):
+            return []
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_env = row.get("env")
+            envs = (
+                {str(key): str(value) for key, value in raw_env.items() if str(key).strip() and str(value).strip()}
+                if isinstance(raw_env, dict)
+                else {}
+            )
+            if not envs:
+                # Nothing to apply, so nothing an e2e run could validate.
+                continue
+            # The singular pair is what the CK-switch dedup and the promote path
+            # read; it is only unambiguous for a single-variable candidate.
+            env_var, env_value = next(iter(envs.items())) if len(envs) == 1 else ("", "")
+            candidates.append(
+                {
+                    "tuner": str(row.get("tuner") or "unknown"),
+                    "env_var": env_var,
+                    "env_value": env_value,
+                    "envs": envs,
+                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
+                }
+            )
+        return candidates
+
     def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Reduce a GEMM tuning result to the env sets worth E2E-validating.
 
@@ -3417,9 +3463,11 @@ class KernelPhase(PhaseHandler):
             list[dict[str, Any]]: Candidates with ``tuner`` / ``env_var`` /
                 ``env_value`` / ``envs`` / ``micro_speedup``.
         """
-        candidates: list[dict[str, Any]] = []
+        candidates = self._gemm_canonical_candidates(result)
+        # The rebuild's status gate cannot see a forced candidate, so it runs only
+        # when the producer named none: the pre-``candidates[]`` envelope and GEAK.
         # The list is already priority-sorted by forge CLI (fmoe_ck first).
-        for t in result.get("tuners_run") or []:
+        for t in [] if candidates else (result.get("tuners_run") or []):
             if not isinstance(t, dict):
                 continue
             # partial_output is a real artifact: the tuner wrote fewer rows than
@@ -3521,12 +3569,8 @@ class KernelPhase(PhaseHandler):
             result["decision"] = "REVERT"
             result["requires_e2e_validation"] = False
             result["e2e_validated"] = False
-            # Only when the tuners left no verdict of their own. An existing
-            # ``micro_decision`` is load-bearing downstream --
-            # ``_should_run_bf16_dense_gemm_fallback`` keys the sglang bf16
-            # retry on ``no_improvement`` -- so overwriting it here cancels the
-            # fallback for exactly the runs that need it. Same trap as adding a
-            # new ``status``: the value is a routing key, not a label.
+            # Only when the tuners left no verdict of their own: ``micro_decision``
+            # is a routing key downstream, not a label, so an existing one stands.
             if not str(result.get("micro_decision") or "").strip():
                 result["micro_decision"] = "no_e2e_candidates"
             # ``recommended_env``/``extra_envs`` stay as the tuners left them:
@@ -3954,160 +3998,146 @@ class KernelPhase(PhaseHandler):
         self._replace_latest_gemm_tuning_attempt(result)
 
     async def _finish_kernel_entry(self) -> None:
-        """Close out KERNEL entry on either route: re-profile, run the
-        independently gated stages, then dispatch whatever kernel_opt work the
-        candidate table already justifies.
+        """Run the gated kernel lanes, write the handoff, and delegate rewrite control.
 
-        The dispatch used to sit on the GEMM route alone, so skipping GEMM
-        tuning silently removed the phase's own kernel_opt as well. The two
-        settings are unrelated -- one tunes GEMM shape tables, the other
-        rewrites source-level kernels -- and nothing in the log connected them,
-        so a run could hold eight routable candidates, clear the dispatch floor,
-        and still reach SWEEP having optimized nothing, waiting on an
-        orchestration request that never came.
-
-        What the dispatch needs is untried routable candidates. That is what it
-        asks for, on both routes.
+        Each lane owns its own gate and its own end-to-end validation, so the
+        order here is sequencing, not dependency: skipping one does not disable
+        the next. The rewrite controller runs last and unconditionally -- no
+        trace, candidate count or source-resolution verdict gates it, because
+        choosing operators is now its job rather than Hyperloom's.
         """
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
         await self._maybe_run_collective_before_kernel_opt()
-        if self._kernel_opt_work_remains():
-            await self._run_kernel_opt_entry_batch()
-        else:
-            self._record_kernel_opt_dispatch_skip(self._kernel_opt_dispatch_skip_reason())
-
-    def _kernel_opt_dispatch_skip_reason(self) -> str:
-        """Name why the phase is declining to dispatch kernel_opt itself.
-
-        Separates the three states :meth:`_kernel_opt_work_remains` collapses
-        into one ``False``: the feature is off, no candidate table was ever
-        produced, or the table's hot kernels have all been tried.
-
-        Reads the same field the gate reads. ``last_trace_analyze`` being a
-        non-empty dict does not mean it carries a table -- a trace_analyze that
-        ran and failed leaves ``{"status": "failed", ...}`` behind -- and
-        calling that "the kernels were all tried" states the very conclusion
-        this breadcrumb exists to prevent.
-
-        Returns:
-            str: One of ``auto_kernel_opt_disabled`` /
-                ``no_candidate_table`` / ``no_untried_hot_kernels``.
-        """
-        state = self.shared_state
-        if not bool(getattr(state, "auto_kernel_opt_enabled", True)):
-            return KERNEL_OPT_SKIP_DISABLED
-        cached = getattr(state, "last_trace_analyze", None)
-        cached = cached if isinstance(cached, dict) else {}
-        hot = cached.get("hot_kernels_top15") or cached.get("hot_kernels") or []
-        if not isinstance(hot, list) or not hot:
-            return KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE
-        return KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS
-
-    def _record_kernel_opt_dispatch_skip(self, reason: str) -> None:
-        """Record why KERNEL entry skipped the whole kernel_opt batch.
-
-        The summary's unattempted buckets each mean "the candidate table listed
-        this kernel and nobody tried it", so a run whose table never
-        materialised counts zero in every bucket and reads as "nothing here was
-        worth optimising". Both skip paths return before ``run_optimization``
-        is called, so ``record_kernel_opt`` -- this field's other writer --
-        never runs to say otherwise.
-
-        The evidence fields carry the state the decision was made on, so the
-        report answers "why was the table empty" without a state.json dig.
-
-        Args:
-            reason: One of the ``KERNEL_OPT_SKIP_*`` reason codes.
-        """
-        state = self.shared_state
-        cached = getattr(state, "last_trace_analyze", None)
-        cached = cached if isinstance(cached, dict) else {}
-        try:
-            streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
-        except (TypeError, ValueError):
-            streak = 0
-        state.last_kernel_opt_dispatch_skip = {
-            "reason": reason,
-            "candidates_path": str(cached.get("candidates_path") or ""),
-            "trace_analyze_empty": not cached,
-            "profile_trace": str(getattr(state, "last_profile_trace", "") or ""),
-            "profile_status": str(getattr(state, "last_profile_status", "") or ""),
-            "roofline_failure_streak": streak,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        log.info(
-            "KERNEL entry: no kernel_opt dispatch (reason=%s, trace_analyze_empty=%s, roofline_failure_streak=%d)",
-            reason,
-            not cached,
-            streak,
+        from hyperloom.inference_optimizer.session.session_paths import (
+            next_forge_attempt_dir,
         )
-        # Persisted here rather than left to whichever later turn happens to
-        # save: the run this breadcrumb is for is the one that spends hours in
-        # the phase and is then killed or wedged, which is exactly when an
-        # unsaved breadcrumb is lost and the report falls back to reading as
-        # "nothing worth optimising".
-        try:
-            state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — a breadcrumb must never fail the phase
-            log.debug("KERNEL entry: saving the dispatch-skip breadcrumb failed", exc_info=True)
 
-    def _kernel_opt_work_remains(self) -> bool:
-        """Whether KERNEL entry should dispatch source-level kernel_opt itself.
-
-        The switch scopes to this dispatch alone. ``kernel_opt`` stays in the
-        phase's allowed actions either way, so orchestration can still request
-        it; opting out only means the phase stops asking on its own.
-
-        Returns:
-            bool: ``True`` when the ``auto_kernel_opt_enabled`` flag is set and
-                there are untried hot reusable kernels remaining.
-        """
-        if not bool(getattr(self.shared_state, "auto_kernel_opt_enabled", True)):
-            return False
-        return bool(self.shared_state.untried_hot_reusable_kernels())
-
-    async def _run_kernel_opt_entry_batch(self) -> None:
-        """Dispatch the source-level kernel optimization batch at KERNEL entry.
-
-        No ``kernel_id`` is named, so the handler's own filter decides the set:
-        every candidate that clears the dispatch floor and has retries left goes
-        in one batch. Naming one here would put the phase back in the business
-        of picking, which is the part that stalls when nobody picks.
-        """
-        cached = self.shared_state.last_trace_analyze or {}
-        candidates_path = str(cached.get("candidates_path") or "")
-        if not candidates_path:
-            log.info("KERNEL entry: skip kernel_opt; no candidates_path")
-            self._record_kernel_opt_dispatch_skip(KERNEL_OPT_SKIP_NO_CANDIDATES_PATH)
-            return
-        log.info(
-            "KERNEL entry: dispatching the source-level kernel_opt batch",
+        # One fresh directory per entry rather than per macro cycle: the
+        # controller refuses an output root it has already initialized, and the
+        # handoff rides inside it so each attempt keeps the evidence it was given.
+        attempt_dir = next_forge_attempt_dir(
+            self.session_dir,
+            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         )
-        # A dispatch retires any earlier skip breadcrumb. ``record_kernel_opt``
-        # clears it too, but only for a result naming a ``kernel_id``, and this
-        # batch names none by design -- so an earlier "never dispatched" would
-        # outlive the dispatch and the report would assert it as fact for a
-        # round whose candidates were merely filtered by the handler's floor.
-        self.shared_state.last_kernel_opt_dispatch_skip = {}
+        handoff_dir = attempt_dir / "handoff"
         try:
-            from ..kernel.request_handlers import run_optimization_handler
+            from ..kernel.forge_handoff import write_forge_handoff
 
-            result = await run_optimization_handler(
-                {
-                    "candidates_path": candidates_path,
-                    "session_id": self.session_dir.name,
-                },
-                session_dir=self.session_dir,
-                record_partial=self._record_kernel_opt_partial,
+            try:
+                env_spec = self.build_env_spec()
+            except Exception:  # noqa: BLE001
+                log.exception("KERNEL entry: could not build Forge serving environment")
+                env_spec = {}
+            handoff_dir = write_forge_handoff(
+                self.session_dir,
+                self.shared_state,
+                env_spec=env_spec,
+                handoff_dir=handoff_dir,
             )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("KERNEL entry run_optimization after GEMM failed")
+            log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("KERNEL entry: Forge handoff generation failed")
+        await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir)
+
+    async def _run_kernel_rewrite_controller(self, handoff_dir: Path, output_dir: Path) -> None:
+        """Run one Controller attempt without preselecting operators."""
+        from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
+
+        from ..kernel.controller_submit import (
+            record_controller_llm_usage,
+            run_controller_subprocess,
+        )
+
+        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
+
+        def _stamp(when: float) -> None:
+            self.shared_state.kernel_inline_step_seen_unix = when
+
+        def _clear() -> None:
+            self.shared_state.kernel_inline_step_seen_unix = 0.0
+
+        # The heartbeat spans patch integration as well as the subprocess.
+        # Integration restarts the server and runs a full serving benchmark per
+        # patch, and until its outcome reaches SharedState this phase carries no
+        # task row and no terminal controller status -- so the busiest part of the
+        # phase is exactly what the idle guard would otherwise read as a stall.
+        async with inline_step_heartbeat(
+            stamp=_stamp,
+            interval_sec=_phase_state.KERNEL_HEARTBEAT_SEC,
+            clear=_clear,
+        ):
+            if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+                result = {
+                    "status": "no_result",
+                    "reason": "no KERNEL phase budget remains for the rewrite controller",
+                    "patch_count": 0,
+                    "task_count": 0,
+                    "output_dir": str(output_dir),
+                }
+            else:
+                try:
+                    result = await asyncio.to_thread(
+                        run_controller_subprocess,
+                        handoff_dir=handoff_dir,
+                        output_dir=output_dir,
+                        budget_minutes=controller_budget_sec / 60.0,
+                        hard_timeout_sec=hard_timeout_sec,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    log.exception("KERNEL entry: kernel rewrite controller failed")
+                    result = {
+                        "status": "failed",
+                        "reason": f"controller invocation failed: {error}",
+                        "patch_count": 0,
+                        "task_count": 0,
+                        "output_dir": str(output_dir),
+                    }
+
             result = {
-                "status": "failed",
-                "error_class": exc.__class__.__name__,
-                "error": repr(exc),
+                **result,
+                "macro_cycle": cycle,
+                "handoff_dir": str(handoff_dir),
+                "budget_minutes": controller_budget_sec / 60.0,
+                "hard_timeout_sec": hard_timeout_sec,
             }
+            # The Controller cannot reach this ledger from its own process, so its
+            # forge-loops' spend is filed here now that the child has exited.
+            record_controller_llm_usage(result=result, session_dir=self.session_dir)
+            if int(result.get("patch_count") or 0) > 0:
+                try:
+                    from ..kernel.controller_patch_integration import (
+                        integrate_controller_patches,
+                    )
+
+                    integration = await integrate_controller_patches(
+                        patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
+                        session_dir=self.session_dir,
+                        shared_state=self.shared_state,
+                    )
+                    result["integration"] = integration.to_dict()
+                except Exception as error:  # noqa: BLE001
+                    log.exception("KERNEL entry: Controller patch integration failed")
+                    result["integration"] = {
+                        "status": "failed",
+                        "reason": str(error),
+                        "kept_count": 0,
+                    }
+            else:
+                result["integration"] = {
+                    "status": "not_run",
+                    "reason": "Controller published no patches",
+                    "kept_count": 0,
+                    "reverted_count": 0,
+                    "skipped_count": 0,
+                }
+        self.shared_state.kernel_optimizer = "forge"
+        self.shared_state.kernel_rewrite_controller_result = result
+        self.shared_state.set_pending_escalate_hint(
+            _phase_state.ESCALATE_HINT_SKIP_TO_SWEEP,
+        )
+        self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
@@ -4115,17 +4145,14 @@ class KernelPhase(PhaseHandler):
                 "response",
                 {
                     "in_reply_to": "",
-                    "kind": "run_optimization_done",
-                    "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
+                    "kind": "kernel_rewrite_controller_done",
+                    "status": result.get("status", "failed"),
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
                 priority=1,
             )
         )
-        if isinstance(result, dict) and not result.get("batch_mode"):
-            self.shared_state.record_kernel_opt(result)
-        self.shared_state.save(self.session_dir)
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry.
@@ -4148,6 +4175,10 @@ class KernelPhase(PhaseHandler):
             return False
         last = getattr(self.shared_state, "last_fusion", None)
         if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
+            # A round that kept nothing and left targets unfunded answers only for
+            # the ones it ran, so it re-arms fusion until the retry cap is spent.
+            if not last.get("kept") and _withheld_targets(last) > 0:
+                return _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0)) < MAX_FUSION_WITHHELD_RETRIES
             return False
         if isinstance(last, dict) and last.get("infrastructure_abort"):
             # An abort judged nothing, so it must stay retryable -- but not
@@ -4811,6 +4842,18 @@ class KernelPhase(PhaseHandler):
         verdict. Readers must treat the two as one run only when the ids match.
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
+            from ..kernel.nomination_result import parse_outcome
+
+            skew = parse_outcome(result).schema_error
+            if skew:
+                # A KEEP whose envelope the contract cannot read judged nothing, so
+                # it is reported as infrastructure rather than latching the lane.
+                result["status"] = "failed"
+                result["error_class"] = "nomination_envelope_skew"
+                result["error"] = skew
+                result["infrastructure_abort"] = True
+                status = "failed"
         if isinstance(result, dict) and result.get("infrastructure_abort"):
             # Counted on the session, not on the record: ``last_fusion`` is
             # replaced by every run, so a timeout or a handler crash landing
@@ -4819,6 +4862,13 @@ class KernelPhase(PhaseHandler):
             spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
             try:
                 self.shared_state.fusion_infra_aborts = spent + 1
+            except Exception:  # noqa: BLE001 - state shape tolerant, as below
+                pass
+        if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
+            # Counted on the session for the same reason as the aborts above.
+            withheld_spent = _as_int(getattr(self.shared_state, "fusion_withheld_retries", 0))
+            try:
+                self.shared_state.fusion_withheld_retries = withheld_spent + 1
             except Exception:  # noqa: BLE001 - state shape tolerant, as below
                 pass
         try:
@@ -4852,157 +4902,70 @@ class KernelPhase(PhaseHandler):
             await self._integrate_fusion(result)
 
     async def _integrate_fusion(self, result: dict) -> None:
-        """Hand a KEPT forge-fusion (source patch + env flags) to integrate for e2e adopt.
+        """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane.
 
-        forge-fusion is NOT env-only (``source='forge_fusion'``), so integrate runs the
-        patch-apply path: it applies the fused-kernel source patch, sets the fusion env
-        flags on the re-baseline server, and KEEPs only when measured e2e throughput
-        clears the threshold. ``base_tput`` is filled from state by integrate_handler.
+        Each self-nominated recipe is one independent sibling patch. Rather than
+        integrate inline here (one patch, one blocking cold-boot re-baseline), we
+        write each sibling as a ``status="pending"`` record and let the SWEEP-entry
+        drain (``_drain_pending_keep_integrates``) run them through the same lane
+        the rewrite/gemm lanes use -- so same-file collapse, cross-file
+        independence, and the patch budget all apply for free.
+
+        forge-fusion is env-gated: the fused path is inert until its env flag is
+        set, so ``enqueue_nominated_patch`` stamps the flag onto the record and the
+        drain's resolver merges it into the re-baseline server's envs. The
+        fusion-specific keep bar (``HYPERLOOM_FUSION_KEEP_PCT``, default 3.0) and
+        the ``action="fusion"`` promotion label ride on the record too.
+
+        An empty ``patches`` array (a run that kept nothing) is a valid no-op.
         """
-        from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
+        import os
 
-        patch = str(result.get("patch") or "").strip()
-        target_file = str(result.get("source_file") or result.get("target_file") or "").strip()
-        kernel_repo = str(result.get("kernel_repo") or "").strip()
-        env_flags = result.get("env_flags") or {}
-        current_envs = {}
-        if isinstance(self.shared_state.current_best, dict):
-            current_envs = dict(self.shared_state.current_best.get("extra_envs") or {})
-        merged_envs = {**current_envs, **{str(k): str(v) for k, v in env_flags.items()}}
-        if not patch or not target_file:
-            log.info("KERNEL entry: fusion KEPT but missing patch/target_file; skip integrate")
-            return
-        integ = None
-        snapshot_dir = str(result.get("snapshot_dir") or "").strip()
-        if not snapshot_dir and patch.endswith(".patch") and kernel_repo:
-            try:
-                snapshot_dir = await asyncio.to_thread(
-                    materialize_unified_patch_snapshot,
-                    patch_path=patch,
-                    repo_root=kernel_repo,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("KERNEL entry fusion snapshot materialization failed")
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                }
-        if integ is None:
-            try:
-                integ = await integrate_handler(
-                    {
-                        "task_id": "fusion_e2e",
-                        "kernel_id": "forge_fusion",
-                        "source": "forge_fusion",
-                        "patch_path": patch,
-                        "target_file": target_file,
-                        "kernel_repo": kernel_repo,
-                        "snapshot_dir": snapshot_dir,
-                        "extra_envs": merged_envs,
-                        "keep_threshold_pct": 3.0,
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("KERNEL entry fusion integrate failed")
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                }
-        decision = str(integ.get("decision") or "").strip().upper() if isinstance(integ, dict) else "REVERT"
-        gain = integ.get("gain_pct") if isinstance(integ, dict) else None
-        log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
-        self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
-        try:
-            if isinstance(integ, dict):
-                # The fusion run this verdict adjudicates. Both fields are
-                # last-write-wins singletons, and this one is written only when
-                # integration runs, so the id is what tells a reader whether
-                # the verdict belongs to the fusion sitting in ``last_fusion``.
-                integ = {**integ, "fusion_run_id": str(result.get("fusion_run_id") or "")}
-            self.shared_state.last_fusion_integrate = integ
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "kernel_agent",
-                    "orchestration",
-                    "response",
-                    {
-                        "in_reply_to": "",
-                        "kind": "fusion_integrate_done",
-                        "status": integ.get("status", "failed") if isinstance(integ, dict) else "failed",
-                        "decision": decision,
-                        "gain_pct": gain,
-                        "result": integ,
-                        "source": "kernel_entry_auto",
-                    },
-                    priority=1,
-                )
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("failed to post fusion_integrate_done bus message")
+        from ..kernel._kernel_decisions import enqueue_nominated_patch
+        from ..kernel.nomination_result import parse_outcome
 
-    def _promote_fusion_integrate_keep(
-        self,
-        fusion_result: dict,
-        integrate_result: dict,
-        *,
-        extra_envs: dict[str, str] | None = None,
-    ) -> None:
-        """Promote a forge-fusion e2e KEEP into the main optimization stack."""
-        if not isinstance(fusion_result, dict) or not isinstance(integrate_result, dict):
-            return
-        if str(integrate_result.get("decision") or "").strip().upper() != "KEEP":
+        from ..kernel.request_handlers import _summarize_dropped_patches
+
+        outcome = parse_outcome(result)
+        # Counted before the empty check: an all-refused envelope and a run that
+        # kept nothing are the same ``queued`` figure and differ only in reasons.
+        refused = _summarize_dropped_patches(outcome.dropped)
+        if outcome.is_empty:
+            if outcome.schema_error:
+                log.warning(
+                    "KERNEL entry: fusion KEPT but its nomination envelope was unreadable (%s); refused=%s",
+                    outcome.schema_error,
+                    refused or "none",
+                )
+            else:
+                log.info(
+                    "KERNEL entry: fusion KEPT but nominated no usable sibling; nothing to queue (refused=%s)",
+                    refused or "none",
+                )
             return
         try:
-            new_tput = float(integrate_result.get("new_tput") or 0.0)
-            incremental_gain = float(integrate_result.get("gain_pct") or 0.0)
+            keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0"))
         except (TypeError, ValueError):
-            return
-        if new_tput <= 0:
-            return
-
-        patch = str(fusion_result.get("patch") or integrate_result.get("patch_path") or "")
-        envs = dict(extra_envs or integrate_result.get("extra_envs") or fusion_result.get("env_flags") or {})
-        extra_args = str(integrate_result.get("extra_server_args") or "")
-        lifted = self._lift_to_current_best(
-            "fusion",
-            new_tput,
-            {
-                # The patch is the identity; the engine that produced it is not.
-                "name": f"forge_fusion:{Path(patch).name}" if patch else "forge_fusion",
-                "candidate_extra_server_args": extra_args,
-                "extra_envs": envs,
-                "source_phase": "KERNEL_AGENT",
-                "provenance": "forge_fusion",
-                **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
-                "workspace": integrate_result.get("workspace"),
-            },
-            entry_extra={
-                "backend": "forge",
-                "engine": "forge_fusion",
-                "source": "kernel_entry_auto",
-                # integrate's increment is against the active stack, not the
-                # session baseline the headline uses.
-                "gain_pct": incremental_gain,
-                "patch_path": patch,
-            },
-        )
-        if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:
-            self._update_cumulative_gain_validated(
-                new_tput,
-                integrate_result,
-                source="fusion_promote",
+            keep_pct = 3.0
+        queued = 0
+        for patch in outcome.patches:
+            record = enqueue_nominated_patch(
+                self.shared_state,
+                patch=patch,
+                keep_threshold_pct=keep_pct,
             )
+            if record is not None:
+                queued += 1
+        log.info(
+            "KERNEL entry: queued %d/%d fusion sibling(s) for SWEEP-entry integrate (refused=%s)",
+            queued,
+            len(outcome.patches),
+            refused or "none",
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 - best-effort persist; drain reloads state
+            pass
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

@@ -372,6 +372,49 @@ def test_discovery_run_carries_duration(tmp_path: Path) -> None:
     assert out["kernel_journey"]["discovery_runs"][0]["duration_sec"] == 4.2
 
 
+def test_discovery_decouples_source_from_version_tool(tmp_path: Path) -> None:
+    # The kernel phase records a GEAK run under the "bypass" route label the
+    # dashboard groups by, while version provenance follows "geak" -- the
+    # toolchain that actually ran. Only an explicit tool= separates the two.
+    instrument.record_kernel_discovery(
+        tmp_path,
+        source="bypass",
+        tool="geak",
+        status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 12.0}],
+        scan={"analysis_route": "bypass", "candidates_path": str(tmp_path / "c.json")},
+        duration_sec=1.5,
+    )
+    out = assemble_parts(tmp_path)
+    runs = out["kernel_journey"]["discovery_runs"]
+    assert len(runs) == 1
+    assert runs[0]["source"] == "bypass"
+    assert runs[0]["hot_kernel_count"] == 1
+    assert runs[0]["scan"]["analysis_route"] == "bypass"
+    # Version provenance follows the underlying tool, not the route alias.
+    versions = out["versions"]
+    assert "geak" in versions
+    assert "bypass" not in versions
+
+
+def test_bypass_discovery_mints_a_versioned_bypass_entry(tmp_path: Path) -> None:
+    # The trace-analyze handler passes no tool=, so a bypass run keys its own
+    # versions entry. The reader ships inside this distribution, so that entry
+    # must carry Hyperloom's version rather than the all-empty shell it wrote
+    # while "bypass" was missing from the provenance registry.
+    instrument.record_kernel_discovery(
+        tmp_path,
+        source="bypass",
+        status="success",
+        hot_kernels=[{"kernel_id": "k1", "name": "moe", "gpu_pct": 12.0}],
+        scan={"analysis_route": "bypass", "candidates_path": str(tmp_path / "c.json")},
+    )
+    out = assemble_parts(tmp_path)
+    entry = out["versions"]["bypass"]
+    assert entry["tool"] == "bypass"
+    assert entry["version"] == _distribution_version()
+
+
 def test_discovery_tool_defaults_to_source(tmp_path: Path) -> None:
     # Callers that omit ``tool`` keep version provenance keyed by ``source``.
     instrument.record_kernel_discovery(

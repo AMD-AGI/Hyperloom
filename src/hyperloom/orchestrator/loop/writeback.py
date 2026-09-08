@@ -46,6 +46,8 @@ from ..state.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
+from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
@@ -629,22 +631,6 @@ class WritebackCollaborator:
         self.shared_state.optimization_stack = stack
         self.shared_state.save(self.session_dir)
 
-    def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate mid-batch.
-
-        Args:
-            result: One sub-attempt's per-kernel result dict.
-        """
-        try:
-            self.shared_state.record_kernel_opt(result)
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            # Never let a per-sub-attempt hiccup poison the gather.
-            log.exception(
-                "_record_kernel_opt_partial failed for kernel_id=%s",
-                (result or {}).get("kernel_id") if isinstance(result, dict) else None,
-            )
-
     def _update_cumulative_gain_validated(
         self,
         new_tput: float,
@@ -730,20 +716,32 @@ class WritebackCollaborator:
             new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
+        # A fusion sibling drained through the shared integrate lane must still
+        # land on the stack as ``action="fusion"``: the idempotency short-circuit
+        # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
+        # (``build_kernel_fusion_value``) both key on that label, and the latter
+        # also gates on ``last_fusion_integrate`` being a KEEP. The generic path
+        # is otherwise unchanged.
+        is_fusion = str(result.get("source") or "") == "forge_fusion"
+        action_label = str(result.get("action_label") or "").strip() if is_fusion else ""
+        lift_kind = action_label or "integrate"
+        variant: dict[str, Any] = {
+            "name": result.get("kernel_id"),
+            "candidate_extra_server_args": result.get("extra_server_args"),
+            "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
+            "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
+            "ttft_mean_ms": result.get("ttft_mean_ms"),
+            "e2el_mean_ms": result.get("e2el_mean_ms"),
+            "tpot_mean_ms": result.get("tpot_mean_ms"),
+            **graded_axes_of(result),
+            "workspace": result.get("workspace"),
+        }
+        if is_fusion:
+            variant["provenance"] = "forge_fusion"
         lifted = self._lift_to_current_best(
-            "integrate",
+            lift_kind,
             float(new_tput),
-            {
-                "name": result.get("kernel_id"),
-                "candidate_extra_server_args": result.get("extra_server_args"),
-                "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
-                "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-                "ttft_mean_ms": result.get("ttft_mean_ms"),
-                "e2el_mean_ms": result.get("e2el_mean_ms"),
-                "tpot_mean_ms": result.get("tpot_mean_ms"),
-                **graded_axes_of(result),
-                "workspace": result.get("workspace"),
-            },
+            variant,
             gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
             entry_extra={
                 "integration_id": result.get("integration_id"),
@@ -754,8 +752,22 @@ class WritebackCollaborator:
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
                 "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
+                # Provenance for a fusion sibling; readers key the stack row on
+                # ``action == "fusion"`` above, this just records the producer.
+                **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
             },
         )
+        if is_fusion:
+            # ``build_kernel_fusion_value`` gates the remote-recipe fusion export
+            # on this being a KEEP; the old inline path set it and the generic
+            # drain does not, so restore it here for the fusion-origin case.
+            try:
+                self.shared_state.last_fusion_integrate = {
+                    **result,
+                    "decision": "KEEP",
+                }
+            except Exception:  # noqa: BLE001 - state shape tolerant, matches inline path
+                pass
         if lifted and self.shared_state.baseline_tput > 0:
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
             self._update_cumulative_gain_validated(new_tput, result.get("bench_result") or result)
@@ -1176,6 +1188,28 @@ class WritebackCollaborator:
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
+            elif err_class == AGENTX_PREFLIGHT_ERROR_CLASS:
+                # AgentX declares aiperf for itself, this repository owns its
+                # install, and the runtime already tried it (agentx.repair) --
+                # so reaching here means the environment cannot supply a
+                # dependency no amount of authoring can invent. Stop on the
+                # FIRST occurrence and name the fix.
+                #
+                # Measured: routed as an ordinary launch failure, this opened an
+                # enablement round instead. The specialist could not tell a
+                # supply gap from a framework bug, re-derived the install from
+                # scratch, had its commands rejected by the setup allowlist, and
+                # the PolicyGate's enablement_round_in_flight rule then blocked
+                # the baseline for the rest of the run -- 24h of budget spent
+                # retrying a problem one operator action fixes.
+                log.error(
+                    "baseline %s failed the AgentX preflight and the automatic install did not "
+                    "resolve it; stopping the run. This is an environment gap, not something a "
+                    "framework patch can close: %s",
+                    task.task_id,
+                    result_payload.get("error") or err_class,
+                )
+                self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
             else:
                 self.shared_state.baseline_failure_streak += 1
                 self.shared_state.baseline_arg_error_streak = 0
@@ -1205,8 +1239,11 @@ class WritebackCollaborator:
                     "disable-cuda-graph fallback for the next baseline retry",
                     task.task_id,
                 )
-            # Stash the launch/traceback text for the FRAMEWORK pump (fast arg errors excluded).
-            if err_class != "fast_exit_arg_error":
+            # Stash the launch/traceback text for the FRAMEWORK pump. Excluded:
+            # fast arg errors, and an AgentX preflight abort -- the pump treats a
+            # non-blank log as "there is something here to author against", and
+            # for a missing pinned dependency there is not.
+            if err_class not in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS):
                 launch_log = _extract_enablement_launch_log(result_payload)
                 if launch_log:
                     self.shared_state.enablement.launch_log = launch_log

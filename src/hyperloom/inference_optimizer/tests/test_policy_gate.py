@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import (
+    LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
+)
 from hyperloom.orchestrator.policy import gate as pol
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
@@ -157,6 +160,40 @@ def test_path_in_trace_allowlist(monkeypatch) -> None:
     assert g._path_in_trace_allowlist("/shared/profileX/run.json.gz") is False
 
 
+def test_rocm_runtime_write_denied(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
+    g = PolicyGate(
+        role_registry=default_role_registry(),
+        session_dir=tmp_path,
+        strict_paths=True,
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        g._validate_payload_paths(
+            SimpleNamespace(name="kernel"),
+            IntentType.DELEGATE,
+            {"target_file": "/opt/rocm/lib/libhip_hcc.so"},
+        )
+    assert exc.value.rule == "rocm_runtime_write_denied"
+
+
+def test_rocm_runtime_filter_does_not_apply_to_read_path_fields(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
+    g = PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path, strict_paths=True)
+    monkeypatch.setattr(g, "_path_under_session", lambda _path: True)
+
+    g._validate_payload_paths(
+        SimpleNamespace(name="kernel"),
+        IntentType.DELEGATE,
+        {"trace_input": "/opt/rocm/lib/runtime.trace.json"},
+    )
+
+
 # -- _check_freeform_task_description -------------------------------------
 def test_freeform_description_empty() -> None:
     with pytest.raises(PolicyDenied) as exc:
@@ -238,7 +275,7 @@ def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     assert excinfo.value.rule == "request_kind"
 
 
-@pytest.mark.parametrize("kind", ["trace_analyze", "run_optimization", "integrate", "apply_patch"])
+@pytest.mark.parametrize("kind", sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS))
 def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
     from hyperloom.inference_optimizer.protocol.intent import IntentType
 

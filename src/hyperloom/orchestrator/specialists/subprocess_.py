@@ -47,6 +47,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
+    redact_file_in_place,
     scrub_child_process_env,
     valid_env_key,
 )
@@ -928,7 +929,6 @@ class SpecialistSubprocessDispatcher:
                 prompt_file.write_text(user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
                 cmd, launch_env_additions = self._build_codex_launch(
-                    prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     system_prompt=system_prompt,
@@ -942,7 +942,6 @@ class SpecialistSubprocessDispatcher:
                 cmd = self._build_claude_cmd(
                     system_prompt_file=prompt_file.parent / "system_prompt.md",
                     system_prompt=system_prompt,
-                    user_prompt_file=prompt_file,
                     workspace=workspace,
                     worktree=worktree,
                     disallowed_tools=frozenset(disallowed_tools),
@@ -1055,6 +1054,12 @@ class SpecialistSubprocessDispatcher:
         else:
             proc_started = time.monotonic()
             log_fh = process_log.open("w", encoding="utf-8")
+            try:
+                process_log.chmod(0o600)
+            except OSError:
+                # Tightening the mode is advisory; the run continues on filesystems
+                # that reject chmod.
+                pass
             stdin_fh: Any = None
             try:
                 stdin_fh = prompt_file.open("rb")
@@ -1106,7 +1111,10 @@ class SpecialistSubprocessDispatcher:
         finally:
             if log_fh is not None:
                 log_fh.close()
-            clear_wall_budget_extension(task_id)
+            try:
+                await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
+            finally:
+                clear_wall_budget_extension(task_id)
 
         # Patches: harvest from the worktree via git diff first; fall back to disk scan.
         patches, collected_patch_roots = self._collect_patches(worktree, workspace, worktree_base)
@@ -1215,29 +1223,9 @@ class SpecialistSubprocessDispatcher:
                 dirs.append(root)
         return dirs
 
-    def _build_codex_cmd(
-        self,
-        *,
-        prompt_file: Path,
-        workspace: Path,
-        worktree: Path | None,
-        system_prompt: str = "",
-    ) -> list[str]:
-        """Assemble a test/introspection Codex argv without running the probe."""
-        cmd, _env_additions = self._build_codex_launch(
-            prompt_file=prompt_file,
-            workspace=workspace,
-            worktree=worktree,
-            system_prompt=system_prompt,
-            base_env=_build_specialist_env(),
-            probe_sandbox=False,
-        )
-        return cmd
-
     def _build_codex_launch(
         self,
         *,
-        prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         system_prompt: str,
@@ -1338,7 +1326,6 @@ class SpecialistSubprocessDispatcher:
         *,
         system_prompt_file: Path,
         system_prompt: str,
-        user_prompt_file: Path,
         workspace: Path,
         worktree: Path | None,
         disallowed_tools: frozenset[str] = frozenset(),
@@ -1352,7 +1339,6 @@ class SpecialistSubprocessDispatcher:
             system_prompt_file (Path): Destination for the written system prompt;
                 passed to ``--system-prompt-file``.
             system_prompt (str): The system prompt text to write.
-            user_prompt_file (Path): Pre-written user prompt file fed to stdin.
             workspace (Path): Task workspace surfaced as an ``--add-dir``.
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.

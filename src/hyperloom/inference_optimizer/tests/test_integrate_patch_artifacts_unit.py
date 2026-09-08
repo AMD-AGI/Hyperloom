@@ -244,6 +244,25 @@ def test_resolve_artifact_target_absolute_outside_allowlist_rejected(tmp_path, m
     assert ip._resolve_artifact_target("/etc/passwd") is None
 
 
+def test_resolve_artifact_target_rejects_rocm_runtime_object(tmp_path, monkeypatch):
+    rocm = tmp_path / "opt" / "rocm"
+    (rocm / "lib").mkdir(parents=True)
+    (rocm / "include").mkdir()
+    so_path = rocm / "lib" / "libhip_hcc.so"
+    hdr_path = rocm / "include" / "hip_runtime.h"
+    so_path.write_bytes(b"x")
+    hdr_path.write_text("typedef int hipError_t;\n", encoding="utf-8")
+    monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(rocm)])
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.framework.paths._ROCM_HIP_SOURCE_ROOTS",
+        (str(rocm) + "/",),
+    )
+    assert ip._resolve_artifact_target(str(so_path)) is None
+    out = ip._resolve_artifact_target(str(hdr_path))
+    assert out is not None
+    assert out[0] == hdr_path.resolve()
+
+
 def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
     """Relative targets keep resolving under an allowlisted root."""
     fw = tmp_path / "aiter"

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
@@ -55,11 +56,9 @@ CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 # the very round it is meant to stop.
 _SERVING_ACTOR_CONCURRENCY: int = 2
 
-_VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = (
-    "ROCR_VISIBLE_DEVICES",
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-)
+#: The masks Ray owns for its serving children. Single definition lives in
+#: ``hyperloom.common.visible_devices``.
+_VISIBLE_DEVICE_ENV_KEYS: tuple[str, ...] = COUNTING_VISIBLE_DEVICE_VARS
 
 
 class RayInfeasibleError(RuntimeError):
@@ -114,7 +113,6 @@ class ManagedServerProcess:
     """
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
-    _cmd: list[str] = field(default_factory=list, init=False, repr=False)
 
     def start(
         self,
@@ -144,7 +142,6 @@ class ManagedServerProcess:
         """
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
-        self._cmd = list(cmd)
         stdin: Any = subprocess.DEVNULL
         stdout: Any = subprocess.DEVNULL
         stdin_fh: Any = None
@@ -787,11 +784,8 @@ class GpuSpecialistLease:
         self._actor: Any = None
         self._pid: int | None = None
         # §3.3 non-blocking start: the pending ObjectRef for the actor's
-        # ``start`` remote call, and the monotonic clock at submit time so the
-        # caller can measure Ray *pending* time separately from the subprocess's
-        # *running* wall budget.
+        # ``start`` remote call.
         self._start_ref: Any = None
-        self._pending_started_monotonic: float | None = None
 
     def start_async(
         self,
@@ -831,7 +825,6 @@ class GpuSpecialistLease:
             env_mode=env_mode,
             stdin_path=stdin_path,
         )
-        self._pending_started_monotonic = time.monotonic()
 
     def poll_started(self) -> int | None:
         """Non-blocking poll for the launched pid.

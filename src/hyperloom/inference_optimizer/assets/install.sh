@@ -232,6 +232,12 @@ MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${M
 AIPERF_REPO="${AIPERF_REPO:-https://github.com/SemiAnalysisAI/aiperf.git}"
 AIPERF_REF="${AIPERF_REF:-754356e9a39acc6cc6afb242d123bb57c3fb6f75}"
 AIPERF_PACKAGE_SPEC="${AIPERF_PACKAGE_SPEC:-aiperf @ git+${AIPERF_REPO}@${AIPERF_REF}}"
+# The AgentX client + mapper this build ships. Its presence is what makes the
+# aiperf install unconditional below: a build that carries the client is a build
+# whose boxes may be asked to run AgentX, and that is knowable at install time —
+# unlike the runtime mode flag, which is not. Resolved from this script rather
+# than $REPO_ROOT so a wheel install reads the assets it actually shipped with.
+AGENTX_ASSET_DIR="${AGENTX_ASSET_DIR:-${_script_dir}/agentx}"
 # MAGPIE_PATH points install.sh AND the Python optimizer (cli.py /
 # _grid_runner.py / manifest.py) at Magpie's import root. When unset by the
 # operator, ensure_magpie resolves it from the pip-installed package; explicit
@@ -256,6 +262,16 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
+# `--only-aiperf`: run ensure_aiperf and nothing else. The runtime repair path
+# (src/hyperloom/inference_optimizer/agentx/repair.py) needs the pinned aiperf
+# install without re-cloning Magpie/InferenceX or chaining the kernel-agent
+# installer, which is what a full run would do mid-session.
+ONLY_AIPERF=0
+# 1 when the caller explicitly asked for AgentX, which makes a failed aiperf
+# install fatal instead of fail-soft. Set by the opt-in gate and by
+# --only-aiperf; never on a default install, so the synthetic path still grows
+# no AgentX-only dependency it can be blocked by.
+AIPERF_REQUIRED=0
 
 usage() {
   cat <<'EOF'
@@ -277,6 +293,11 @@ Options:
   --check-only           Verify only, do not install
   --dry-run              Print actions without running them
   --skip-kernel-agent    Skip the chained kernel-agent installer
+  --only-aiperf          Install ONLY the pinned aiperf (AgentX client) and
+                         exit. Treats a failed install as fatal. Used by the
+                         runtime AgentX preflight to supply a dependency the
+                         mode declares for itself; also usable by hand to add
+                         AgentX support to a box provisioned without it.
   -h, --help             Show this help
 
 Env overrides:
@@ -306,6 +327,7 @@ while [ "$#" -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
+    --only-aiperf) ONLY_AIPERF=1; AIPERF_REQUIRED=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -490,6 +512,18 @@ EOF
 }
 
 preflight_validate_credentials() {
+  # --only-aiperf installs one pinned pip package. It needs no LLM provider, and
+  # the runtime repair that invokes it is handed the BENCHMARK child env, which
+  # has had ANTHROPIC_API_KEY and every sibling scrubbed by
+  # scrub_benchmark_process_env. Gating the aiperf install on credentials that
+  # were deliberately removed would fail the repair on every deployment that
+  # supplies them by env var rather than $REPO_ROOT/.env.
+  # Defaulted, not bare: test_setup_cli.py runs these preflights by slicing the
+  # function out of this file into a standalone script under `set -u`, where a
+  # variable assigned at the top of install.sh does not exist.
+  if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
+    return 0
+  fi
   preflight_load_dotenv
   normalize_legacy_deepseek_env
   local missing=()
@@ -623,6 +657,13 @@ export PATH
 #      -- the chained RAG-index step auto-detects device=cuda and crashes
 #      at torch._C._cuda_init() with "Found no NVIDIA driver".
 ensure_torch_compatible_with_gpu() {
+  # Same reasoning as the credential preflight: aiperf is a benchmark client
+  # that imports no torch, so a targeted install must not die on a $PYTHON whose
+  # torch is missing or CUDA-built. A full install still gates on it.
+  # Defaulted for the same reason as there.
+  if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
+    return 0
+  fi
   if ! command -v rocm-smi >/dev/null 2>&1; then
     return 0
   fi
@@ -1150,12 +1191,27 @@ PY
   fi
 }
 
-# --- 2a. aiperf (AgentX benchmark client) — fail-soft, AgentX-only ---
-# Installs the pinned aiperf for HYPERLOOM_AGENTX; only reached when the caller
-# opts in (see the INSTALL_AIPERF / HYPERLOOM_AGENTX gate at the call site). A
-# failure here is NON-fatal: it only warns and leaves aiperf absent, so the
-# default synthetic path is never blocked by an AgentX-only dependency. Skipped
-# when the operator points AIPERF_BIN at their own build.
+# --- 2a. aiperf (AgentX benchmark client) ---
+# Installs the pinned aiperf. Reached from the gate at the call site on either
+# branch -- a default provision pre-warms it when this build ships the AgentX
+# client, and an explicit INSTALL_AIPERF / HYPERLOOM_AGENTX / --only-aiperf
+# demands it. Skipped when the operator points AIPERF_BIN at their own build.
+#
+# Failure handling is asymmetric by design, keyed on $AIPERF_REQUIRED:
+#   * pre-warm (nobody asked)  -> WARN. The install is speculative: nothing has
+#     said this box will run AgentX, so an interpreter below the pin's floor or
+#     an unreachable index must not fail a provision that was never going to use
+#     it. The runtime preflight repairs and, failing that, stops the run.
+#   * explicit request         -> FATAL. A dependency the caller asked for by
+#     name, with a pin this repository owns, must not end up absent with only a
+#     warning in a log nobody reads. Measured: the fail-soft warn let a
+#     provisioning run report success while leaving the box unable to run AgentX
+#     at all, and the gap surfaced hours later as a benchmark failure that was
+#     then handed to an enablement specialist as if it were a framework bug.
+#
+# So the synthetic path can still be provisioned on a box that cannot host
+# aiperf -- what it no longer does is skip the install merely because nobody
+# happened to export a runtime mode flag while provisioning.
 ensure_aiperf() {
   if [ -n "${AIPERF_BIN:-}" ]; then
     log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"
@@ -1183,6 +1239,16 @@ ensure_aiperf() {
       log "aiperf on PATH is the pinned ref ${AIPERF_REF:0:8}; skipping install"
       return 0
     fi
+    if [ "$AIPERF_REQUIRED" -ne 1 ]; then
+      # Pre-warm, and something is already on PATH. --force-reinstall below
+      # rebuilds aiperf's whole dependency tree (deliberately NOT --no-deps),
+      # which on a shared venv can move packages this box actually runs on --
+      # and nothing has said this box will run AgentX at all. Leave it: the
+      # runtime preflight sees the stale ref, and its repair asks for the
+      # upgrade by name, which does reach the branch below.
+      log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); leaving it alone on a pre-warm -- the runtime repair upgrades it if AgentX is actually used"
+      return 0
+    fi
     log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); reinstalling"
     # Deliberately NOT --no-deps: a newer aiperf may need dependencies the old
     # one did not, and installing the package without them is a worse failure
@@ -1197,6 +1263,8 @@ ensure_aiperf() {
     # state dir costs a redundant reinstall, never a wrong skip.
     mkdir -p "$(dirname "$stamp")" 2>/dev/null && printf '%s\n' "$AIPERF_REF" > "$stamp" 2>/dev/null || \
       warn "could not record the installed aiperf ref at ${stamp}; the next run will reinstall"
+  elif [ "$AIPERF_REQUIRED" -eq 1 ]; then
+    die "aiperf install failed (${AIPERF_PACKAGE_SPEC}). AgentX was explicitly requested (INSTALL_AIPERF / HYPERLOOM_AGENTX / --only-aiperf), and aiperf is the AgentX benchmark client -- there is no usable AgentX install without it. Fix the failure above, or point AIPERF_BIN at an existing pinned build."
   else
     warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
   fi
@@ -1657,6 +1725,24 @@ chain_kernel_agent() {
   bash "$script" "${args[@]}"
 }
 
+# --- targeted entry point: aiperf only -------------------------------------
+# Placed after every function definition (so ensure_aiperf exists) and before
+# the first heavy step. Everything ensure_aiperf reads is resolved by here:
+# $PYTHON (resolve_python), $PIP_EXTRA, $AIPERF_PACKAGE_SPEC, $AIPERF_REQUIRED
+# and the state dir. Other top-level statements do run between those and this
+# line -- directory setup, dependency-list arrays -- but ensure_aiperf reads
+# none of them, so the short-circuit drops nothing it depends on.
+#
+# The lock is taken for the same reason a full install takes it: two sessions on
+# one node must not pip into the same interpreter concurrently.
+if [ "$ONLY_AIPERF" -eq 1 ]; then
+  log "--only-aiperf: installing just the pinned AgentX client"
+  acquire_install_lock
+  ensure_aiperf
+  log "--only-aiperf: done"
+  exit 0
+fi
+
 ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
@@ -1690,12 +1776,27 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   ensure_magpie_atomic_scripts_patch
 fi
 
-# aiperf (AgentX client) is an OPT-IN Magpie-path add-on: installed only when the
-# operator explicitly asks (INSTALL_AIPERF or HYPERLOOM_AGENTX truthy), so a
-# default install grows no extra network/build dependency. If AgentX is turned on
-# at runtime without aiperf present, the runtime preflight fails loud with
-# guidance (install it, or point AIPERF_BIN at an existing build). Fail-soft
-# inside ensure_aiperf. Never for the bypass backend.
+# aiperf (AgentX client) installs whenever this build ships the AgentX assets.
+#
+# It used to be gated on INSTALL_AIPERF / HYPERLOOM_AGENTX being truthy HERE, in
+# the installer's process -- but those answer "is THIS RUN using AgentX", and the
+# question at provisioning time is "will this box ever be asked to". Nobody knows
+# that yet: the mode is chosen later, per session, by whoever dispatches the run.
+# Measured on the incident cluster: 11 of 13 provisioning runs logged
+# "aiperf (AgentX) skipped" and left a box that could not run AgentX at all.
+#
+# The presence of assets/agentx/ is the honest install-time signal -- a build
+# that ships the AgentX client is a build whose boxes may be asked to run it.
+#
+# Failure handling stays asymmetric, and deliberately so:
+#   * nobody asked  -> attempt it, but a failure only warns. This is a
+#     pre-warm, and an interpreter or network that cannot supply aiperf must not
+#     block a provision that was never going to use it.
+#   * asked by name -> AIPERF_REQUIRED=1, and a failure is FATAL (see
+#     ensure_aiperf). The caller named the dependency; leaving it absent with a
+#     warning in a log nobody reads is what produced the incident.
+# Either way the runtime preflight repairs a still-missing client and stops the
+# run if it cannot. Never for the bypass backend.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   # Strip surrounding whitespace then lowercase, so the installer
   # parses these flags identically to the Python runtime's agentx_enabled()
@@ -1704,9 +1805,24 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   _agx_sw="$(printf '%s' "${HYPERLOOM_AGENTX:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
   case "${_agx_want}:${_agx_sw}" in
     1:*|true:*|yes:*|on:*|*:1|*:true|*:yes|*:on)
+      # Asked for by name => a failed install is fatal, not a warning.
+      AIPERF_REQUIRED=1
       ensure_aiperf ;;
+    0:*|false:*|no:*|off:*|*:0|*:false|*:no|*:off)
+      # Declined by name. Before the pre-warm existed, a falsy INSTALL_AIPERF
+      # landed in the skip branch simply because nothing matched the truthy
+      # patterns; with the pre-warm as the default it would have started
+      # installing instead, taking away the only way to say no.
+      log "aiperf (AgentX) skipped: declined by INSTALL_AIPERF / HYPERLOOM_AGENTX." ;;
     *)
-      log "aiperf (AgentX) skipped: set INSTALL_AIPERF=1 or HYPERLOOM_AGENTX=1 to install it (or point AIPERF_BIN at an existing build)." ;;
+      # Nobody asked either way. Install when this build carries the client, so
+      # the box is ready for a mode that gets chosen after provisioning ends.
+      if [ -d "${AGENTX_ASSET_DIR}" ]; then
+        log "aiperf (AgentX): pre-warming the pinned client because this build ships ${AGENTX_ASSET_DIR}; a failure here only warns"
+        ensure_aiperf
+      else
+        log "aiperf (AgentX) skipped: this build ships no ${AGENTX_ASSET_DIR}; set INSTALL_AIPERF=1 to install it anyway (or point AIPERF_BIN at an existing build)."
+      fi ;;
   esac
 fi
 ensure_bench_serving_deps

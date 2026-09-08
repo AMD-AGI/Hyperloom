@@ -400,7 +400,7 @@ def _source_entry_hint(candidate: Mapping[str, Any] | None) -> str:
     return str(symbol).strip() if isinstance(symbol, str) else ""
 
 
-def _rewritable_source(language: str, kind: str, accepted: "Container[str]") -> str:
+def _rewritable_source(language: str, kind: str, accepted: Container[str]) -> str:
     """Resolve which rewrite source a candidate is, kind first then language.
 
     A traced Triton kernel reports its *language* as ``python`` and records that
@@ -588,12 +588,19 @@ def evaluate_rewrite_route(
             capabilities=capabilities,
         )
     # Preparation needs the invocation evidence; without it the producer keeps the
-    # placeholder driver, which exits 1 after burning the whole budget.
-    if not (invocation_spec_file and Path(invocation_spec_file).is_file()):
+    # placeholder driver, which exits 1 after burning the whole budget. A spec the
+    # builder marked `partial` is just as unusable, so it is declined here too
+    # rather than admitted on the strength of the file merely existing.
+    from hyperloom.common.invocation_spec_readiness import (  # noqa: PLC0415 - keep module import-light
+        evaluate_spec_readiness,
+    )
+
+    readiness = evaluate_spec_readiness(invocation_spec_file)
+    if not readiness.ready:
         return RewriteDecision(
             False,
-            "invocation_spec_missing",
-            f"no invocation spec at {invocation_spec_file or '<unset>'}",
+            readiness.reason,
+            readiness.detail,
             capabilities=capabilities,
         )
 

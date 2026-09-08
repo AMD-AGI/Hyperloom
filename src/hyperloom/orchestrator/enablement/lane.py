@@ -8,13 +8,14 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from ..actions.executors._grid_server_args import merge_server_args
 from ..collaborator import CoordinatorCollaborator
 from ..loop.coordinator import _ENABLEMENT_MAX_STALL
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
-from ..phases._enablement_artifacts import snapshot_round, write_setting_script
+from ..phases._enablement_artifacts import role_path, snapshot_round, write_setting_script
 
 import logging as _logging
 
@@ -397,8 +398,9 @@ class EnablementLane(CoordinatorCollaborator):
         res_fw_root = str(res.get("framework_root") or "").strip()
         if res_fw_root:
             state.enablement.framework_root = res_fw_root
+        archived: list[dict[str, str]] = []
         try:
-            snapshot_round(self.session_dir, res)
+            archived = snapshot_round(self.session_dir, res)
             if status in ("kept", "advanced"):
                 write_setting_script(
                     self.session_dir,
@@ -411,6 +413,12 @@ class EnablementLane(CoordinatorCollaborator):
                 )
         except Exception:  # noqa: BLE001 — archiving must not break the rearm
             log.warning("enablement: artifact write failed", exc_info=True)
+        # Absolute and not the session-relative path just recorded: the
+        # revalidation baseline opens this file directly, and the breakdown
+        # collector relativizes it on the way into SBD.
+        archived_config = role_path(archived, "launch_config")
+        if status == "kept" and archived_config:
+            state.enablement.accepted_config_path = str(Path(self.session_dir) / archived_config)
         # A rearm always ends the round.
         state.enablement.inflight_task_id = ""
         try:

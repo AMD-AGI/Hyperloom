@@ -583,37 +583,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "--framework-version=0.4.5 to pin a specific tag for the run."
         ),
     )
-    # ``None`` rather than True: the deprecated alias below has to be able to
-    # tell "not passed" from an explicit value, or it could never be honoured
-    # without also overriding this flag. bootstrap applies the real default.
-    opt.add_argument(
-        "--auto-kernel-opt",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "At KERNEL entry, dispatch the source-level kernel_opt batch "
-            "without waiting for an orchestration request — every untried "
-            "candidate above the dispatch floor goes in one batch. Runs on "
-            "both entry routes (with and without FP8 GEMM tuning), since "
-            "tuning GEMM shape tables and rewriting kernel source are "
-            "unrelated. --no-auto-kernel-opt leaves source-level kernel_opt "
-            "to explicit orchestration requests; it does not disable the "
-            "forge-fusion or collective lanes, which have their own gates. "
-            "Default: enabled."
-        ),
-    )
-    # Deprecated spelling of --auto-kernel-opt, still honoured so a launcher
-    # template that passes it keeps its opt-out instead of silently getting the
-    # default back. ``None`` default distinguishes "not passed" from an explicit
-    # value; bootstrap resolves the precedence and warns. Unlike the retired
-    # no-ops below, this one still feeds the same dest.
-    opt.add_argument(
-        "--continue-kernel-after-gemm",
-        dest="continue_kernel_after_gemm",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
     grp = opt.add_mutually_exclusive_group()
     grp.add_argument(
         "--target-gain",
@@ -629,6 +598,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"
+    )
+    # Outside the group: it measures a different axis, so it ORs with whichever
+    # of the three above is set rather than competing with them.
+    opt.add_argument(
+        "--target-roofline",
+        type=float,
+        default=None,
+        help=(
+            "Stop when the latest roofline snapshot reaches N%% of its modelled "
+            "ceiling. Inert until a roofline has been measured, and satisfied "
+            "independently of --target-gain / --target-tput / --target-baseline-dir."
+        ),
     )
     opt.add_argument(
         "--resume-from",

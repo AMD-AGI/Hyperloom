@@ -472,7 +472,6 @@ def _bootstrap_knowledge_plane(
     if session_dir is not None:
         try:
             from ..session.session_paths import pr_monitor_status_json
-            from ..session.paths import asset_actions_dir  # noqa: F401 (unused import warning suppress)
 
             marker = pr_monitor_status_json(session_dir)
             marker.parent.mkdir(parents=True, exist_ok=True)

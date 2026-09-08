@@ -1005,13 +1005,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             "diversification_cycle_completed": (self.run_state.diversification_cycle_completed),
         }
 
-    def _restore_search_control_snapshot(self, payload: dict) -> None:
-        """Restore planning state from a verified pending KEEP journal."""
-        control = payload.get("search_control")
-        if not isinstance(control, dict):
-            return
-        self.run_state.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
-
     def _apply_iteration_planning_state(
         self,
         *,

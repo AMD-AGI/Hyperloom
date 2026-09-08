@@ -19,6 +19,7 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 
 import tracelens_analysis as tla  # noqa: E402
+import _bypass_report as bypass_report  # noqa: E402
 import _idle_gate as idle_gate  # noqa: E402
 import _task_group_contract as task_group_contract  # noqa: E402
 import tracelens_skill_runner as tlr  # noqa: E402
@@ -51,12 +52,12 @@ def test_default_top_k_invalid_falls_back(monkeypatch):
     assert tla._default_top_k() == tla._DEFAULT_KERNEL_CANDIDATES_TOP_K
 
 
-def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
+def test_dry_run_writes_the_source_resolution_artifact(
     monkeypatch,
     tmp_path,
     capsys,
 ):
-    """Dry-run must not read a route variable initialized only in live mode."""
+    """A dry run still publishes the source-resolution artifact for inspection."""
     import json as _json
 
     trace = tmp_path / "trace.json"
@@ -102,65 +103,6 @@ def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
     resolution_path = Path(result["artifact_paths"]["kernel_source_resolution"])
     assert resolution_path.is_file()
     assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
-
-
-def test_agent_dry_run_does_not_spend_a_candidate_review_session(monkeypatch, tmp_path, capsys):
-    """A dry run plans the analysis; it must not run the review agent.
-
-    The stage costs an agent session, waits out a 900-second bound when the
-    stream stalls, and reads the framework tree -- all to audit a table a dry
-    run publishes for inspection and never dispatches from.
-    """
-    import json as _json
-
-    trace = tmp_path / "trace.json"
-    trace.write_text('{"traceEvents": []}', encoding="utf-8")
-    source = tmp_path / "kernel.py"
-    source.write_text("def kernel():\n    pass\n", encoding="utf-8")
-    monkeypatch.setattr(
-        tla,
-        "analyze_trace_files",
-        lambda *_args, **_kwargs: [
-            {
-                "kernel_id": "k001",
-                "name": "kernel",
-                "gpu_pct": 100.0,
-                "duration_us": 1.0,
-                "source_file": str(source),
-                "source_type": "python",
-                "source_resolution_method": "name_grep",
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        tla,
-        "write_reports",
-        lambda *_a, **_kw: {"trace_report_path": str(tmp_path / "trace_report.json")},
-    )
-
-    ran: list[str] = []
-    monkeypatch.setattr(
-        tla,
-        "run_candidate_review_stage",
-        lambda *_a, **_kw: ran.append("called") or {},
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "tracelens_analysis.py",
-            "--trace-input",
-            str(trace),
-            "--workspace-path",
-            str(tmp_path / "workspace"),
-            "--dry-run",
-        ],
-    )
-
-    assert tla.main() == 0
-    assert ran == []
-    result = _json.loads(capsys.readouterr().out)
-    assert "kernel_candidates_raw" not in result["artifact_paths"]
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -2417,6 +2359,53 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
     assert traces[0] == real
 
 
+def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
+    """The promotion must hold on the route xDiT actually takes.
+
+    Scriptable (xDiT/diffusion) workloads are dispatched with ``--skip-split``
+    (see ``request_handlers``), which bypasses the splitter entirely and feeds
+    the analysis path straight to the TraceLens skill. The other promotion tests
+    assert on splitter argv, so they cover the branch these sessions never
+    enter -- which is to say the regression this change exists to prevent was
+    untested on the one path that produced it.
+    """
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
+    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
+
+    # The skill runs in-process, so the analysed trace never reaches a
+    # subprocess argv the way the splitter's does -- the skill's own arguments
+    # are the only place the promotion is observable. ``seen`` is filled before
+    # the sentinel is raised, so the assertions below read state captured while
+    # the run was still healthy and do not depend on how main unwinds. Raising
+    # only avoids standing up the analysis.md fixtures the remainder of the run
+    # would demand, which this test asserts nothing about; main records the
+    # sentinel as an orchestrator failure and refuses the retired CSV parsers.
+    class _StopAfterSkillDispatch(Exception):
+        """Ends the run once the skill's input trace has been recorded."""
+
+    seen: list[Path] = []
+
+    async def fake_skill(*, trace_path, **_kw):
+        seen.append(trace_path)
+        raise _StopAfterSkillDispatch(trace_path.name)
+
+    with patch.object(tla, "run_tracelens_skill", fake_skill):
+        captured = _drive_main_over_capture_dir(
+            tmp_path,
+            trace_dir,
+            extra_argv=["--skip-split", "--use-llm-orchestrator"],
+        )
+
+    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
+    assert seen, "the TraceLens skill was never reached"
+    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
+    assert empty not in seen
+
+
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
     """An ancestor directory name must not flatten the whole ranking.
 
@@ -3344,6 +3333,11 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
     assert func is None
 
 
+def test_parse_launcher_path_swallows_deep_dict_repr():
+    payload = "{'entry_point': " + "(" * 9000 + "'a.py(1): f'" + ")" * 9000 + "}"
+    assert tlr._parse_launcher_path(payload) == ("", None, None)
+
+
 # ---------------------------------------------------------------------------
 # _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
 # Pins the three resolution paths (importlib spec, env override, hardcoded fallback) plus no-op cases.
@@ -3643,6 +3637,88 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
     assert first_key == second_key
 
 
+def test_trace_routes_generate_compatible_operator_identities(tmp_path):
+    src = tmp_path / "operator.py"
+    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
+    operation = "fused_operator<float>"
+    bypass_group = bypass_report._build_task_groups(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "device_kernel_name": "fused_operator_kernel",
+                "source_file": str(src),
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+            }
+        ]
+    )[0]
+    skill_group = tlr.aggregate_by_source_function(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+                "tracelens_launcher_path": f"{src}(1): forward",
+            }
+        ]
+    )[0]
+
+    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
+    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
+    assert bypass_group["task_group_key"].startswith('{"function":')
+
+
+def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
+    src = tmp_path / "operator.cu"
+    src.write_text("// native kernel\n", encoding="utf-8")
+    operation = "aiter::fused_operator<float>"
+    bypass_group = bypass_report._build_task_groups(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "device_kernel_name": "_ZN5aiter14fused_operatorIfEEv",
+                "source_file": str(src),
+                "reusable_native_kernel": True,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+            }
+        ]
+    )[0]
+    skill_group = tlr.aggregate_by_source_function(
+        [
+            {
+                "kernel_id": "k001",
+                "name": operation,
+                "duration_us": 100.0,
+                "call_count": 1,
+                "gpu_pct": 10.0,
+                "tracelens_launcher_path": f"{src}(1): fused_operator",
+            }
+        ]
+    )[0]
+
+    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
+    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
+    legacy_skill_key = json.dumps(
+        (
+            "native",
+            "aiter::fused_operator",
+            str(src.resolve()),
+            "fused_operator",
+        ),
+        separators=(",", ":"),
+    )
+    assert legacy_skill_key in bypass_group["legacy_task_group_keys"]
+    assert legacy_skill_key in skill_group["legacy_task_group_keys"]
+
+
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
     """Q1 invariant: distinct operations sharing one Python wrapper stay in separate task_groups (operation is part of the key)."""
     src = tmp_path / "gpt_oss.py"
@@ -3860,38 +3936,6 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert "(640,2880) bf16" in g["rows"][1]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][0]["shapes"]
     assert "(640,2880) bf16" not in g["rows"][2]["shapes"]
-
-    # Now render the benchmark cases block from the primary candidate
-    # carrying the task_group — this is what the kernel_optimization
-    # subprocess sees in build_prompt.
-    import importlib
-
-    ko = importlib.import_module("kernel_optimization")
-    primary = dict(g["rows"][0])
-    primary["task_group"] = g
-    block = ko._build_benchmark_cases_block(primary)
-    assert "## Benchmark cases" in block
-    # Every row produces a distinct ``Case N:`` line, in
-    # aggregate-time-descending order.
-    assert "Case 1: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 2: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 3: operation=vllm::rocm_unquantized_gemm" in block
-    assert "Case 4: operation=vllm::rocm_unquantized_gemm" in block
-    # Each row's distinct Args appear in its own Case line. The
-    # ``(640,2880) bf16`` shape only exists in k002's row, so it must
-    # appear in exactly one Case (the second, since k002 is the
-    # second-heaviest at 10992 us).
-    assert block.count("(640,2880) bf16") == 1
-    case2_segment = block.split("Case 2:")[1].split("Case 3:")[0]
-    assert "(640,2880) bf16" in case2_segment, (
-        "k002's unique shape must land in Case 2 — confirms shape preservation per-row, not cross-row merging"
-    )
-    # Same for k003's unique ``(2880,512)`` shape → Case 3.
-    case3_segment = block.split("Case 3:")[1].split("Case 4:")[0]
-    assert "(2880,512) bf16" in case3_segment
-    # And k004's unique ``(2048,2880)`` shape → Case 4.
-    case4_segment = block.split("Case 4:")[1]
-    assert "(2048,2880) bf16" in case4_segment
 
 
 def test_aggregate_drops_empty_prose_entries(tmp_path):
@@ -4508,6 +4552,7 @@ def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
     assert func == "forward"
 
 
+# The wrapper that merely *launches* the kernel — must never be the source.
 # ---------------------------------------------------------------------------
 # _extract_total_time_us_from_gpu_timeline
 # ---------------------------------------------------------------------------
@@ -4529,7 +4574,7 @@ def test_extract_total_time_us_returns_none_when_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Low-compute gate: gpu_timeline readers + gate evaluation
+# gpu_timeline cell reads + low-compute gate evaluation
 # ---------------------------------------------------------------------------
 
 
@@ -4539,10 +4584,39 @@ def _write_gpu_timeline(tmp_path, body: str):
     (csv_dir / "gpu_timeline.csv").write_text(body, encoding="utf-8")
 
 
-def test_total_time_is_none_when_its_cell_is_unreadable(tmp_path):
-    """Same fail-open contract for the window total the gpu_pct basis needs."""
-    _write_gpu_timeline(tmp_path, "type,time ms,percent\ntotal_time,,100.0\n")
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Duration column renamed beyond the known aliases: the row is found,
+        # the number is not. Column drift is not hypothetical -- the row
+        # *labels* already needed multi-spelling tolerance.
+        "type,duration,percent\ntotal_time,18186.6,100.0\n",
+        # Row truncated: DictReader yields None for the missing cell, and
+        # float(None) raises TypeError rather than ValueError.
+        "type,time ms,percent\ntotal_time\n",
+        # Present but blank.
+        "type,time ms,percent\ntotal_time,,100.0\n",
+        # Present but not a number.
+        "type,time ms,percent\ntotal_time,n/a,100.0\n",
+    ],
+)
+def test_unreadable_total_time_cell_is_none_not_zero(tmp_path, body):
+    """An unreadable window total must fail open, never read as ``0 ms``.
+
+    The total is the ``gpu_pct`` denominator, so defaulting a missing or
+    unparseable cell to 0 would skew every reported share, silently and with
+    ``status`` still ``ok``, instead of letting the caller fall back to summing
+    the candidates.
+    """
+    _write_gpu_timeline(tmp_path, body)
     assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) is None
+
+
+@pytest.mark.parametrize("column", ["time ms", "time (ms)", "time_ms", "ms"])
+def test_known_duration_column_spellings_are_read(tmp_path, column):
+    """Known alias spellings are read rather than discarded as unknown."""
+    _write_gpu_timeline(tmp_path, f"type,{column},percent\ntotal_time,18186.6,100.0\n")
+    assert tla._extract_total_time_us_from_gpu_timeline(tmp_path) == 18186600.0
 
 
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
@@ -4572,26 +4646,6 @@ def test_low_compute_gate_skipped_when_pct_unknown(monkeypatch, tmp_path):
     monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
     _, warning = tla._evaluate_low_compute_gate(None, None, tmp_path / "analysis.md")
     assert warning is None
-
-
-def test_high_idle_gate_skips_when_idle_pct_unknown(monkeypatch, tmp_path):
-    """A fallback report has no Idle % row, so ``extract_idle_pct_from_analysis_md``
-    returns None; the gate must then return no warning (the skip path that the
-    deleted raw-trace guard used to defend). Candidates are NOT blanked."""
-    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
-    threshold, warning = tla._evaluate_high_idle_gate(None, tmp_path / "analysis.md")
-    assert threshold == 80.0
-    assert warning is None
-
-
-def test_high_idle_gate_fires_above_threshold(monkeypatch, tmp_path):
-    """A healthy report with a high Idle % still suppresses: B1 did not disarm
-    the gate on the case it is actually for."""
-    monkeypatch.delenv(idle_gate.HIGH_IDLE_PCT_THRESHOLD_ENV, raising=False)
-    threshold, warning = tla._evaluate_high_idle_gate(95.0, tmp_path / "analysis.md")
-    assert threshold == 80.0
-    assert warning is not None
-    assert warning["code"] == "high_gpu_idle_pct"
 
 
 def test_extract_compute_and_comm_pct_from_analysis_md(tmp_path):
@@ -4659,6 +4713,58 @@ def test_candidate_keywords_recovers_graph_captured_symbols():
     # Clean profiler symbol still resolves to the same keyword as before.
     kws = tla._candidate_keywords("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
     assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
+
+
+# --- idle gate must honor cuda/HIP-graph under-recording (regression) ---
+# A graph-mode capture under-records replays (profiler activity-buffer overflow),
+# so idle% is inflated. The bypass route already skips its idle gate in that
+# case; the TraceLens route must do the same instead of suppressing every hot
+# kernel on a workload that is actually compute-bound.
+
+
+def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
+    monkeypatch.setattr(
+        tla,
+        "_graph_coverage_from_raw_trace",
+        lambda _tp: {"graph_under_recorded": True, "graph_launch_count": 8},
+    )
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        95.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert high_idle is None  # NOT suppressed
+    assert graph_warn is not None
+    assert graph_warn["code"] == "bypass_graph_under_recorded"
+    assert graph_warn["graph_launch_count"] == 8
+
+
+def test_idle_gate_graph_guard_applies_gate_when_not_under_recorded(monkeypatch):
+    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", lambda _tp: {})
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        95.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert threshold == 80.0
+    assert graph_warn is None
+    assert high_idle is not None  # genuinely idle -> suppress
+    assert high_idle["code"] == "high_gpu_idle_pct"
+
+
+def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
+    # Below the threshold the guard must not even probe the trace.
+    def _boom(_tp):  # pragma: no cover - must not be called
+        raise AssertionError("graph coverage probed below threshold")
+
+    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", _boom)
+    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+        10.0, Path("analysis.md"), "raw.trace.json"
+    )
+    assert (high_idle, graph_warn) == (None, None)
+
+
+def test_graph_coverage_from_raw_trace_never_raises():
+    # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
+    assert tla._graph_coverage_from_raw_trace(None) == {}
+    assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
 
 
 # --- pretrim_startup_transient (#profiler-start transient) -------------------
