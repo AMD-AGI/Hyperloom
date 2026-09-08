@@ -230,3 +230,50 @@ def test_main_writes_the_file(reports: Path, tmp_path: Path, capsys):
 def test_main_refuses_a_directory_with_no_ledger(tmp_path: Path, capsys):
     assert R.main(["--reports-dir", str(tmp_path)]) == 2
     assert R.CALLS_FILENAME in capsys.readouterr().err
+
+
+def test_performance_ladder_ranks_measured_gains_only(reports: Path):
+    """Share is a stage's own tok/s gain over the summed measured gains."""
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), R.load_outcome(reports / R.OUTCOME_FILENAME))
+    ladder = R.performance_ladder(joined, R.load_outcome(reports / R.OUTCOME_FILENAME))
+    kinds = [s["kind"] for s in ladder["steps"]]
+    assert kinds == ["reference", "delta"]
+    delta = ladder["steps"][1]
+    assert delta["abs_gain"] == pytest.approx(50.0)
+    assert delta["share"] == pytest.approx(1.0)
+    assert delta["usd"] == pytest.approx(0.3)
+    assert [p["phase"] for p in ladder["kernels"]] == ["P8 HeadKernel h0"]
+
+
+def test_performance_ladder_without_an_outcome_is_empty(reports: Path):
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), None)
+    assert R.performance_ladder(joined, None) == {}
+
+
+def test_performance_section_says_unmeasured_rather_than_zero():
+    html = R._performance_section({})
+    assert "not the same as zero" in html
+    assert "0.00%" not in html
+
+
+def test_performance_section_renders_the_ladder(reports: Path):
+    rows = R.load_calls(reports / R.CALLS_FILENAME)
+    outcome = R.load_outcome(reports / R.OUTCOME_FILENAME)
+    joined = R.join_outcome(R.phase_records(rows, R.agent_records(rows)), outcome)
+    html = R._performance_section(R.performance_ladder(joined, outcome))
+    assert "+50.00%" in html
+    assert "baseline" in html
+    assert "no measured end-to-end throughput" in html
+
+
+def test_rendered_document_is_pure_ascii(reports: Path):
+    """A mis-decoded em dash is unreadable and gives the reader no clue why."""
+    doc = R.render(reports / R.CALLS_FILENAME, reports / R.OUTCOME_FILENAME)
+    assert doc.isascii()
+
+
+def test_esc_folds_non_ascii_to_entities():
+    assert R._esc("a—b") == "a&#8212;b"
+    assert R._esc("<b>") == "&lt;b&gt;"

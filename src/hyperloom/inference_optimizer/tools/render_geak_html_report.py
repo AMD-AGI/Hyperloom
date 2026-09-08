@@ -382,7 +382,18 @@ def join_outcome(phases: list[dict[str, Any]], outcome: dict[str, Any] | None) -
 
 
 def _esc(value: Any) -> str:
-    return html.escape("" if value is None else str(value), quote=True)
+    """HTML-escape, and fold every non-ASCII character to a numeric entity.
+
+    The page is written UTF-8 and declares it, but it gets opened from shared
+    storage, out of archives and through viewers that ignore the declaration --
+    and a mis-decoded em dash renders as mojibake with no clue as to why. Pure
+    ASCII bytes cannot be mis-decoded, so the document is kept pure ASCII and
+    anything outside it travels as an entity the browser resolves itself.
+    """
+    text = html.escape(str(value), quote=True)
+    if text.isascii():
+        return text
+    return "".join(ch if ord(ch) < 128 else f"&#{ord(ch)};" for ch in text)
 
 
 def _usd(value: Any) -> str:
@@ -461,6 +472,7 @@ tbody tr:hover{background:color-mix(in srgb,var(--accent) 7%,transparent)}
 overflow:hidden;vertical-align:middle;margin-left:7px}
 .bar i{display:block;height:100%;background:var(--spend)}
 .bar.time i{background:var(--time)}
+tr.ref td{background:var(--card)}
 .good{color:var(--good)}.bad{color:var(--bad)}.none{color:var(--mut);font-style:italic}
 .mut{color:var(--mut)}
 .spark{display:block;margin-top:4px}
@@ -554,7 +566,7 @@ def _coverage_section(cov: dict[str, Any], outcome: dict[str, Any] | None) -> st
     )
     items = "".join(f"<li>{_esc(c)}</li>" for c in caveats)
     return (
-        '<div class="note"><b>Coverage &mdash; read this before quoting a number</b>'
+        '<div class="note"><b>Coverage - read this before quoting a number</b>'
         f"<div>{cov['calls']:,} API calls across {cov['agents']} agents and {cov['phases']} phases, "
         f"model{'s' if len(cov['models']) != 1 else ''} {_esc(', '.join(cov['models']) or 'not recorded')}."
         f"</div><ul>{items}</ul></div>"
@@ -567,15 +579,26 @@ def _headline_cards(cov: dict[str, Any], outcome: dict[str, Any] | None) -> str:
     per_pct = None
     if observed and _num(observed) > 0:
         per_pct = cov["usd"] / _num(observed)
-    cards = [
+    base = summary.get("reference_baseline_tok_s")
+    final = summary.get("last_measured_after_tok_s")
+    cards = []
+    if observed is not None:
+        cards.append(("Throughput gained", _pct(observed), "measured, first stage to last"))
+    if base and final:
+        cards.append(
+            (
+                "Throughput",
+                f"{_int(base)} -&gt; {_int(final)}",
+                "tok/s, baseline to last measured stage",
+            )
+        )
+    cards += [
         ("Total spend", _usd(cov["usd"]), f"{cov['calls']:,} API calls"),
         ("Input tokens", _int(cov["isl"]), f"{cov['isl'] / max(1, cov['isl'] + cov['osl']) * 100:.1f}% of all tokens"),
         ("Output tokens", _int(cov["osl"]), "what the model actually wrote"),
         ("Recorded wall time", _hms(cov["wall_seconds"]), "sum of per-call durations"),
         ("Tool calls", _int(cov["tool_calls"]), "shell, file and monitor actions"),
     ]
-    if observed is not None:
-        cards.append(("Throughput gained", _pct(observed), "measured, first to last stage"))
     if per_pct is not None:
         cards.append(("Cost per +1%", _usd(per_pct), "whole-run average"))
     body = "".join(
@@ -615,7 +638,7 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
             gate = out.get("gate")
             bought = (
                 f'<span class="{tone}">{_pct(out["gain_pct"])}</span> '
-                f'<span class="mut">({_int(out["before_tok_s"])} &rarr; {_int(out["after_tok_s"])} tok/s'
+                f'<span class="mut">({_int(out["before_tok_s"])} -&gt; {_int(out["after_tok_s"])} tok/s'
                 + (f", gate {_esc(gate)}" if gate else "")
                 + ")</span>"
             )
@@ -635,8 +658,7 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
             )
             tone = "good" if ceiling > 0 else "bad"
             bought = (
-                f'<span class="{tone}">{ceiling:+.2f}%</span> '
-                f'<span class="mut">end-to-end ceiling &mdash; {detail}</span>'
+                f'<span class="{tone}">{ceiling:+.2f}%</span> <span class="mut">end-to-end ceiling - {detail}</span>'
             )
             efficiency = '<span class="none">n/a</span>' if ceiling <= 0 else _usd(phase["usd"] / ceiling)
         rows.append(
@@ -672,6 +694,137 @@ def _outcome_section(joined: list[dict[str, Any]], total_usd: float, outcome: di
         '<div class="scroll"><table><thead><tr><th>Phase</th><th>Cost</th><th>Share</th>'
         "<th>Measured result</th><th>Cost per +1%</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>{estimate_note}"
+    )
+
+
+def performance_ladder(joined: list[dict[str, Any]], outcome: dict[str, Any] | None) -> dict[str, Any]:
+    """Order the measured stages the way the run walked them, and rank the gains.
+
+    Every figure here is a throughput the run measured and wrote down. A stage's
+    share is its own tok/s gain over the summed tok/s gains of the stages that
+    measured one -- arithmetic on recorded numbers, not an attribution model, and
+    it deliberately does not equal the end-to-end figure, because the handoff
+    seams between stages lose some of it. Kernel stages carry an Amdahl ceiling
+    instead of a throughput, and a stage that measured nothing stays empty.
+    """
+    if outcome is None:
+        return {}
+    steps: list[dict[str, Any]] = []
+    for stage in outcome.get("stages") or []:
+        kind = stage.get("kind")
+        if kind == "reference":
+            steps.append(
+                {
+                    "kind": "reference",
+                    "phase": str(stage.get("phase", "")),
+                    "after": _num(stage.get("after_tok_s")),
+                    "mode": stage.get("measurement_mode"),
+                }
+            )
+        elif kind == "delta":
+            before, after = _num(stage.get("before_tok_s")), _num(stage.get("after_tok_s"))
+            steps.append(
+                {
+                    "kind": "delta",
+                    "phase": str(stage.get("phase", "")),
+                    "before": before,
+                    "after": after,
+                    "abs_gain": after - before,
+                    "pct": _num(stage.get("delta_pct")),
+                    "gate": stage.get("gate"),
+                    "mode": stage.get("measurement_mode"),
+                }
+            )
+    total_gain = sum(s["abs_gain"] for s in steps if s["kind"] == "delta" and s["abs_gain"] > 0)
+    for step in steps:
+        if step["kind"] == "delta":
+            step["share"] = step["abs_gain"] / total_gain if total_gain else None
+    costed = {p["phase"]: p["usd"] for p in joined}
+    for step in steps:
+        step["usd"] = costed.get(step["phase"])
+    kernel_only = [p for p in joined if p["outcome"] and p["outcome"]["kind"] == "kernel"]
+    silent = [p["phase"] for p in joined if p["outcome"] is None]
+    return {
+        "steps": steps,
+        "total_gain": total_gain,
+        "kernels": kernel_only,
+        "silent": silent,
+        "summary": outcome.get("summary") or {},
+    }
+
+
+def _performance_section(ladder: dict[str, Any]) -> str:
+    """Which phase made the run faster, and by how much."""
+    if not ladder:
+        return (
+            '<h2 id="perf">What each phase contributed to throughput</h2>'
+            f'<p class="lede">Not available: no <code>{OUTCOME_FILENAME}</code> beside the ledger. '
+            "Every phase's contribution is unmeasured, which is not the same as zero, so none is "
+            "shown.</p>"
+        )
+    summary = ladder["summary"]
+    rows = []
+    for step in ladder["steps"]:
+        cost = _usd(step["usd"]) if step["usd"] is not None else '<span class="none">not billed</span>'
+        if step["kind"] == "reference":
+            rows.append(
+                f'<tr class="ref"><td><b>{_esc(step["phase"])}</b></td>'
+                f'<td colspan="2"><span class="mut">baseline</span></td>'
+                f"<td><b>{_int(step['after'])}</b> tok/s</td>"
+                f'<td colspan="2"><span class="mut">the number every later gain is measured '
+                f"against{' (' + _esc(step['mode']) + ')' if step.get('mode') else ''}</span></td>"
+                f"<td>{cost}</td></tr>"
+            )
+            continue
+        tone = "good" if step["pct"] > 0 else "bad" if step["pct"] < 0 else "mut"
+        share = step.get("share")
+        share_cell = f"{share * 100:.1f}%{_bar(share)}" if share is not None else '<span class="none">n/a</span>'
+        gate = f' <span class="mut">gate {_esc(step["gate"])}</span>' if step.get("gate") else ""
+        rows.append(
+            f"<tr><td><b>{_esc(step['phase'])}</b>{gate}</td>"
+            f"<td>{_int(step['before'])}</td><td>{_int(step['after'])}</td>"
+            f'<td class="{tone}"><b>{step["pct"]:+.2f}%</b></td>'
+            f"<td>+{_int(step['abs_gain'])} tok/s</td>"
+            f"<td>{share_cell}</td><td>{cost}</td></tr>"
+        )
+    notes = []
+    if ladder["kernels"]:
+        detail = "; ".join(
+            f"{_esc(p['phase'])} {_num(max((_num(t['amdahl_ceiling_e2e_pct']) for t in (p['outcome'].get('tasks') or []) if t['present']), default=0.0)):+.2f}%"
+            for p in ladder["kernels"]
+        )
+        notes.append(
+            f"<b>The kernel phases contributed no measured end-to-end throughput.</b> Their "
+            f"best kernels came out at 1.0000x against the reference, so the Amdahl ceiling on "
+            f"an end-to-end gain is {detail}. That is a measured result, not a missing one: the "
+            f"work ran, was benchmarked, and did not beat what was already there."
+        )
+    if ladder["silent"]:
+        notes.append(
+            "<b>Phases with no throughput measurement of their own:</b> "
+            + ", ".join(f"<code>{_esc(p)}</code>" for p in ladder["silent"])
+            + ". They profile, strategise or hand off rather than ending on a benchmark, so "
+            "nothing here is attributed to them either way."
+        )
+    if summary.get("compounded_is_estimate"):
+        notes.append(
+            "<b>The shares do not add up to the end-to-end figure, and should not.</b> "
+            f"Measured end to end: {_pct(summary.get('observed_delta_pct_first_to_last'))} "
+            f"({_num(summary.get('observed_speedup_first_to_last')):.4f}x, "
+            f"{_int(summary.get('reference_baseline_tok_s'))} -&gt; "
+            f"{_int(summary.get('last_measured_after_tok_s'))} tok/s). Multiplying the per-phase "
+            f"gains would give {_num(summary.get('compounded_speedup')):.4f}x. The gap is the "
+            "handoff seams: a phase does not always start from where the previous one finished."
+        )
+    note_html = "".join(f'<p class="lede">{n}</p>' for n in notes)
+    return (
+        '<h2 id="perf">What each phase contributed to throughput</h2>'
+        '<p class="lede">Read in run order. Every tok/s here was measured by the run at a phase '
+        "boundary and written to its own artifacts; share is a phase's tok/s gain over the summed "
+        "gains of the phases that measured one.</p>"
+        '<div class="scroll"><table><thead><tr><th>Phase</th><th>From</th><th>To</th>'
+        "<th>Gain</th><th>Absolute</th><th>Share of measured gain</th><th>Cost</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>{note_html}"
     )
 
 
@@ -809,10 +962,10 @@ def _deepdive_section(joined: list[dict[str, Any]], total_usd: float) -> str:
         blocks.append(
             f"<details{' open' if rank < 2 else ''}>"
             f"<summary><span>{_esc(phase['phase'])}</span>"
-            f'<span class="r">{_usd(phase["usd"])} &middot; {share:.1f}% of spend &middot; '
-            f"{phase['agents']} agents &middot; {phase['calls']:,} calls &middot; "
+            f'<span class="r">{_usd(phase["usd"])} | {share:.1f}% of spend | '
+            f"{phase['agents']} agents | {phase['calls']:,} calls | "
             f"{_int(phase['isl'])} in / {_int(phase['osl'])} out"
-            + (f" &middot; {window}" if window else "")
+            + (f" | {window}" if window else "")
             + "</span></summary>"
             f'<div class="body">{_anatomy(phase)}<h3>Agents, most expensive first</h3>{_roster(phase)}</div>'
             "</details>"
@@ -893,7 +1046,7 @@ def _phase_table(joined: list[dict[str, Any]], total_usd: float, total_isl: floa
     return (
         '<h2 id="phases">Spend by phase</h2>'
         '<p class="lede">Ranked by cost. Input tokens carry almost all of it: every call re-sends the '
-        "conversation, so a phase’s bill tracks how long its agents talked, not how much they wrote.</p>"
+        "conversation, so a phase's bill tracks how long its agents talked, not how much they wrote.</p>"
         '<div class="scroll"><table><thead><tr><th>Phase</th><th>Agents</th><th>Calls</th><th>Cost</th>'
         "<th>Share</th><th>Input</th><th>Input share</th><th>Output</th><th>Recorded time</th>"
         f"<th>Tools</th><th>$/call</th></tr></thead><tbody>{rows}</tbody></table></div>"
@@ -909,9 +1062,10 @@ def render(calls_path: Path, outcome_path: Path, title: str | None = None) -> st
     joined = join_outcome(phases, outcome)
     cov = coverage(rows, agents)
     signals = delegation_signals(agents)
+    ladder = performance_ladder(joined, outcome)
 
     run_id = (outcome or {}).get("run_id") or calls_path.parent.parent.name
-    heading = title or "GEAK run — where the time and the money went"
+    heading = title or "GEAK run - where the time and the money went"
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     return f"""<!doctype html>
@@ -920,13 +1074,14 @@ def render(calls_path: Path, outcome_path: Path, title: str | None = None) -> st
 <title>{_esc(heading)}</title><style>{CSS}</style></head>
 <body><div class="wrap">
 <h1>{_esc(heading)}</h1>
-<p class="sub">Run <code>{_esc(run_id)}</code> &middot; generated {generated} from
+<p class="sub">Run <code>{_esc(run_id)}</code> | generated {generated} from
 <code>{_esc(calls_path.name)}</code>
 {"and <code>" + _esc(outcome_path.name) + "</code>" if outcome else ""}</p>
-<nav><a href="#bought">What it bought</a><a href="#phases">Spend by phase</a>
+<nav><a href="#perf">Throughput</a><a href="#bought">Cost vs result</a><a href="#phases">Spend by phase</a>
 <a href="#deep">Inside each phase</a><a href="#delegate">Delegation signals</a></nav>
 {_headline_cards(cov, outcome)}
 {_coverage_section(cov, outcome)}
+{_performance_section(ladder)}
 {_outcome_section(joined, cov["usd"], outcome)}
 {_phase_table(joined, cov["usd"], cov["isl"])}
 {_deepdive_section(joined, cov["usd"])}

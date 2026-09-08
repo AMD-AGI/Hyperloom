@@ -76,9 +76,10 @@ ledger and none needs to.
 
    | Section | Answers |
    | --- | --- |
-   | Headline cards | total spend, calls, agents, wall-clock, USD per +1% throughput |
+   | Headline cards | throughput gained, baseline -> final tok/s, total spend, calls, wall-clock, USD per +1% |
+   | What each phase contributed to throughput | the ladder in run order: from/to tok/s, gain, and each phase's share of the summed measured gain |
    | Coverage | what the ledger does **not** contain — read this before quoting anything |
-   | What each phase bought | gain beside cost, and USD per +1%, per phase |
+   | What each phase bought | the same gains put beside what they cost, and USD per +1% |
    | Spend by phase | share of the bill, with the concentration curve |
    | Inside each phase | the deep dive: cost by position in the conversation, ISL growth, per-call cost percentiles, tool mix, and the agent roster |
    | Delegation signals | which phases look mechanical enough to hand to a cheaper model |
@@ -90,6 +91,12 @@ ledger and none needs to.
    climbs through a conversation and the later deciles cost more. Agents with
    fewer than 10 calls cannot be bucketed and are excluded; the count of those
    is printed so the exclusion is visible.
+
+   **Share of measured gain is arithmetic, not attribution.** It is a phase's own
+   tok/s gain over the summed tok/s gains of the phases that measured one. It
+   deliberately does not reconcile with the end-to-end figure -- a phase does not
+   always start from where the previous one finished, and the page names the
+   handoff seam that accounts for the gap.
 
    **The delegation table is signals, not a verdict.** A high tool-call rate and
    a flat per-call cost say a phase is a mechanical loop; they do not say a
