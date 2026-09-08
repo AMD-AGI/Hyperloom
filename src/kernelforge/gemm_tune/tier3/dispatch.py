@@ -73,6 +73,7 @@ class _Bf16DenseAdapter:
         self._operands: dict[tuple[int, ...], tuple[Any, Any]] = {}
         self._in_play: dict[str, dict[str, Any]] = {}
         self._hipb_ready = False
+        self._hipb_sols: dict[tuple[int, ...], set[int]] = {}
 
     # -- torch is imported lazily so this module stays importable off-GPU --
     @staticmethod
@@ -145,15 +146,39 @@ class _Bf16DenseAdapter:
         return self._torch().cuda.synchronize
 
     # ------------------------------------------------------------ internals --
-    def _hipb_once(self, a, bt) -> None:
-        """hipb_mm on a handle nobody created aborts from C++, uncatchably."""
-        if self._hipb_ready:
-            return
+    def _hipb_solutions(self, key: tuple[int, int, int], a, bt) -> set[int]:
+        """The solution indices hipBLASLt will accept for this shape.
+
+        Everything here is about not being killed. Two ways to die, both
+        confirmed on an MI355X and neither of them catchable from Python,
+        because the C++ error handler ends the process rather than returning:
+
+        * ``hipb_mm`` on a handle nobody created is a SIGSEGV. The extension
+          has to be created explicitly; this used to warm up by calling
+          ``hipb_findallsols`` instead, which wants the very same handle and so
+          died at ``hipbsolgemm.cu:248`` with ``NOT_INITIALIZED`` before it
+          could protect anything.
+        * ``hipb_mm`` with a solution index that is not real exits at
+          ``hipbsolgemm.cu:945`` with ``INVALID_VALUE``. A generated tuner
+          proposes ``solidx`` as a free integer, so this is not a remote
+          possibility -- it is the expected case for a first draft.
+
+        The referee runs in-process at the tail of a tuning session, after
+        every other tuner has finished, so either death costs the whole run its
+        report. Hence the set: ``findallsols`` is the authoritative answer for
+        these exact operands, and a candidate naming anything outside it is
+        refused as undispatchable, which is an ordinary recorded result.
+        """
         import aiter
 
         torch = self._torch()
-        aiter.hipb_findallsols(a, bt, None, torch.bfloat16, None, None, None, False, False)
-        self._hipb_ready = True
+        if not self._hipb_ready:
+            aiter.hipb_create_extension()
+            self._hipb_ready = True
+        if key not in self._hipb_sols:
+            sols = aiter.hipb_findallsols(a, bt, None, torch.bfloat16, None, None, None, False, False)
+            self._hipb_sols[key] = {int(s) for s in (sols or [])}
+        return self._hipb_sols[key]
 
     def _build(self, key: tuple[int, int, int], cand: dict[str, Any]) -> Callable[[], Any] | None:
         """One candidate as a callable, or None when we cannot dispatch it."""
@@ -174,7 +199,10 @@ class _Bf16DenseAdapter:
                 if sol is None:
                     return None
                 bt = b.t()
-                self._hipb_once(a, bt)
+                sol = int(sol)
+                if sol not in self._hipb_solutions(key, a, bt):
+                    log.info("hipblaslt solidx %s is not a solution for %s; not dispatching", sol, key)
+                    return None
                 return lambda: aiter.hipb_mm(a, bt, sol, None, torch.bfloat16, None, None, None, False, False)
 
             if backend == "aiter_asm":

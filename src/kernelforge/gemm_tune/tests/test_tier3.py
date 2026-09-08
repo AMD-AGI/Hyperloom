@@ -425,3 +425,132 @@ def test_shape_key_parses_the_well_formed_case() -> None:
     from kernelforge.gemm_tune.tier3.dispatch import shape_key
 
     assert shape_key("16x1536x7168") == (16, 1536, 7168)
+
+
+class TestAWinHasToClearTheNoise:
+    """The baseline used to beat itself, so "faster" needed a floor.
+
+    Measured on an MI355X: ``time_paired`` run 25 times per shape with the same
+    callable on both sides, over four fleet-demanded shapes. 43 of the 100
+    trials were refused as unstable; of the 57 that produced a number, 28 read
+    above 1.0 and the largest was 1.00925x. None reached 1.01x.
+    """
+
+    def test_the_floor_sits_above_every_null_reading_we_measured(self):
+        from kernelforge.gemm_tune.tier3 import referee
+
+        assert referee.MIN_SPEEDUP > 1.00925
+
+    def test_a_speedup_inside_the_noise_is_not_an_improvement(self, clock):
+        # 1.0076x is verbatim what torch measured against itself on hardware.
+        j = judge_candidates(
+            "8192x3456x1152",
+            [{"backend": "torch", "config": ""}],
+            baseline=clock.call(1.0076e-6),
+            dispatch=lambda c: clock.call(1e-6),
+        )
+        assert j.best_timing.usable
+        assert j.best_timing.speedup == pytest.approx(1.0076)
+        assert not j.improved, "the unmodified path is not an improvement over itself"
+
+    def test_a_win_that_clears_the_floor_still_counts(self, clock):
+        from kernelforge.gemm_tune.tier3 import referee
+
+        clearly_over = (referee.MIN_SPEEDUP + 0.01) * 1e-6
+        j = judge_candidates(
+            "s",
+            [{"n": "a"}],
+            baseline=clock.call(clearly_over),
+            dispatch=lambda c: clock.call(1e-6),
+        )
+        assert j.improved
+
+    def test_the_timing_is_still_reported_when_it_falls_short(self, clock):
+        """Refusing to call it a win is not the same as hiding the number."""
+        j = judge_candidates(
+            "s",
+            [{"n": "a"}],
+            baseline=clock.call(1.002e-6),
+            dispatch=lambda c: clock.call(1e-6),
+        )
+        assert not j.improved
+        assert j.to_dict()["best_timing"]["speedup"] == pytest.approx(1.002)
+
+
+class TestHipblasltCannotTakeTheRunDownWithIt:
+    """Two ways to die on this backend, both confirmed on an MI355X.
+
+    Neither is catchable: the C++ error handler ends the process. Since the
+    referee runs in-process at the tail of a tuning session, after every other
+    tuner has finished, either one costs the whole run its report.
+
+    * ``hipb_mm`` with no extension created -> SIGSEGV (rc=-11).
+    * ``hipb_mm`` with an invented ``solidx`` -> ``INVALID_VALUE`` at
+      ``hipbsolgemm.cu:945``, rc=1. A generated tuner writes ``solidx`` as a
+      free integer, so this is the expected case for a first draft.
+    """
+
+    @pytest.fixture
+    def aiter(self, monkeypatch):
+        import sys
+        import types
+
+        mod = types.ModuleType("aiter")
+        mod.calls = []
+        mod.created = False
+        mod.sols = [17, 42, 99]
+
+        def create_extension():
+            mod.created = True
+
+        def findallsols(*a, **k):
+            # The real one dies here when the extension was never created.
+            assert mod.created, "hipb_findallsols before hipb_create_extension"
+            mod.calls.append("findallsols")
+            return list(mod.sols)
+
+        def hipb_mm(a, bt, sol, *rest, **k):
+            assert mod.created, "hipb_mm before hipb_create_extension"
+            assert sol in mod.sols, f"invented solidx {sol} would abort the process"
+            return "out"
+
+        mod.hipb_create_extension = create_extension
+        mod.hipb_findallsols = findallsols
+        mod.hipb_mm = hipb_mm
+        monkeypatch.setitem(sys.modules, "aiter", mod)
+        return mod
+
+    @pytest.fixture
+    def adapter(self, monkeypatch):
+        import types
+
+        from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
+
+        a = _Bf16DenseAdapter()
+        operand = types.SimpleNamespace(t=lambda: "bt")
+        monkeypatch.setattr(a, "_ops", lambda key: (operand, operand))
+        monkeypatch.setattr(a, "_torch", lambda: types.SimpleNamespace(bfloat16="bf16"))
+        return a
+
+    def test_the_extension_is_created_before_anything_touches_the_handle(self, adapter, aiter):
+        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=42"})
+        assert aiter.created, "the guard used to warm up with findallsols, which needs the same handle"
+        assert call is not None and call() == "out"
+
+    def test_a_solidx_hipblaslt_never_offered_is_refused_not_run(self, adapter, aiter):
+        call = adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=999999999"})
+        assert call is None, "dispatching this would end the process, not raise"
+
+    def test_a_solidx_that_is_not_even_a_number_is_refused(self, adapter, aiter):
+        assert adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=fastest"}) is None
+
+    def test_the_solution_set_is_fetched_once_per_shape(self, adapter, aiter):
+        for cfg in ("solidx=17", "solidx=42", "solidx=99"):
+            assert adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": cfg}) is not None
+        assert aiter.calls == ["findallsols"]
+
+    def test_a_different_shape_asks_again(self, adapter, aiter):
+        """Solutions are per-operand; reusing one shape's set would invent indices."""
+        adapter._build((512, 512, 512), {"backend": "hipblaslt", "config": "solidx=17"})
+        adapter._build((1024, 512, 512), {"backend": "hipblaslt", "config": "solidx=17"})
+        assert aiter.calls == ["findallsols", "findallsols"]
