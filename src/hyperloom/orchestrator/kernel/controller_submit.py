@@ -139,6 +139,7 @@ def record_controller_llm_usage(*, result: dict[str, Any], session_dir: Path) ->
         if not isinstance(row, dict):
             continue
         try:
+            from hyperloom.orchestrator.trace.call_detail import append_turn_call_details
             from hyperloom.orchestrator.trace.llm_trace import (
                 LLMCallRecord,
                 append_llm_call,
@@ -156,6 +157,15 @@ def record_controller_llm_usage(*, result: dict[str, Any], session_dir: Path) ->
                     cache_creation_input_tokens=row.get("cache_creation_input_tokens"),
                     cache_read_input_tokens=row.get("cache_read_input_tokens"),
                 ),
+            )
+            # The child reports one total per forge-loop, not per request, so
+            # the sidecar row covers the loop and carries no call index.
+            append_turn_call_details(
+                session_dir=Path(session_dir),
+                session_id=Path(session_dir).name,
+                component="forge",
+                metadata=row,
+                task_id=str(row.get("operator_id") or "") or None,
             )
         except Exception:  # noqa: BLE001 - accounting must not fail the phase
             continue

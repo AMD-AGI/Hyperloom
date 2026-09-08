@@ -91,11 +91,28 @@ def _coerce_token(value: Any) -> int:
         return 0
 
 
-def _empty_token_bucket() -> dict[str, int]:
+#: ``cost_source`` value meaning the call could not be priced at all; such a
+#: call is left out of every USD total rather than counted as free.
+_COST_SOURCE_UNAVAILABLE = "unavailable"
+
+#: ``(bucket key, row key)`` for each USD column carried through the rollup.
+#: ``total`` is the whole and the other four are its parts, so the four sum to
+#: it and adding ``total`` to them double-counts the call.
+_COST_KEYS: tuple[tuple[str, str], ...] = (
+    ("total_cost_usd", "cost_usd"),
+    ("total_cost_input_usd", "cost_input_usd"),
+    ("total_cost_output_usd", "cost_output_usd"),
+    ("total_cost_thinking_usd", "cost_thinking_usd"),
+    ("total_cost_cache_usd", "cost_cache_usd"),
+)
+
+
+def _empty_token_bucket() -> dict[str, Any]:
     """Return a fresh, zeroed token-rollup bucket.
 
     Returns:
-        A dict with zeroed input/output/cache token totals and call count.
+        A dict with zeroed input/output/cache token totals, call count, and the
+        USD figures those tokens were priced at.
     """
     return {
         "total_in": 0,
@@ -104,11 +121,77 @@ def _empty_token_bucket() -> dict[str, int]:
         "total_cache_read": 0,
         "total_reasoning_out": 0,
         "calls": 0,
+        "total_cost_usd": 0.0,
+        "total_cost_input_usd": 0.0,
+        "total_cost_output_usd": 0.0,
+        "total_cost_thinking_usd": 0.0,
+        "total_cost_cache_usd": 0.0,
+        "cost_calls_priced": 0,
+        "cost_sources": {},
     }
 
 
-def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None:
-    """Add one call's token counts into a rollup bucket in place.
+def _coerce_usd(value: Any) -> float:
+    """Read a USD figure off a bucket, treating a missing one as zero.
+
+    Args:
+        value: Bucket entry, possibly absent or of an unexpected type.
+
+    Returns:
+        The value as a float, or ``0.0``.
+    """
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _subtract_source_counts(total: Any, *parts: Any) -> dict[str, int]:
+    """Subtract per-source call counts, so the remainder keeps its own mix.
+
+    A single subtracted total would say how many calls were priced but not by
+    what, which is the part that decides whether the figure is a bill or an
+    estimate.
+
+    Args:
+        total: The ``cost_sources`` map to subtract from.
+        *parts: Maps to subtract, in any order.
+
+    Returns:
+        A fresh map holding only the non-zero remainders.
+    """
+    out = {str(k): int(v) for k, v in (total or {}).items() if isinstance(v, int)}
+    for part in parts:
+        for k, v in (part or {}).items():
+            if isinstance(v, int):
+                out[str(k)] = out.get(str(k), 0) - v
+    return {k: v for k, v in out.items() if v}
+
+
+def _fold_cost_into_bucket(bucket: dict[str, Any], call: dict[str, Any]) -> None:
+    """Add one call's USD into a rollup bucket in place, if it carries any.
+
+    An unpriced call contributes nothing and is simply absent from
+    ``cost_calls_priced``, so a reader can see how much of the bucket's spend
+    the total actually covers. ``cost_sources`` counts calls per source
+    because a provider figure and a rate-card derivation are different kinds of
+    number; a total spanning both is an estimate, and the mix says how much.
+
+    Args:
+        bucket: Token bucket to accumulate into (mutated).
+        call: Per-call record carrying the cost columns.
+    """
+    source = str(call.get("cost_source") or "").strip().lower()
+    if not source or source == _COST_SOURCE_UNAVAILABLE:
+        return
+    for bucket_key, call_key in _COST_KEYS:
+        value = call.get(call_key)
+        if isinstance(value, (int, float)):
+            bucket[bucket_key] = round(float(bucket.get(bucket_key, 0.0)) + float(value), 10)
+    bucket["cost_calls_priced"] += 1
+    sources = bucket.setdefault("cost_sources", {})
+    sources[source] = int(sources.get(source, 0)) + 1
+
+
+def _fold_call_into_bucket(bucket: dict[str, Any], call: dict[str, Any]) -> None:
+    """Add one call's token counts and cost into a rollup bucket in place.
 
     Args:
         bucket: Token bucket to accumulate into (mutated).
@@ -120,6 +203,7 @@ def _fold_call_into_bucket(bucket: dict[str, int], call: dict[str, Any]) -> None
     bucket["total_cache_read"] += _coerce_token(call.get(_TOKEN_CACHE_READ_KEY))
     bucket["total_reasoning_out"] += _coerce_token(call.get(_TOKEN_REASONING_KEY))
     bucket["calls"] += 1
+    _fold_cost_into_bucket(bucket, call)
 
 
 def _load_llm_calls(
@@ -130,8 +214,10 @@ def _load_llm_calls(
 
     Merges ``reports/trace/llm_calls.jsonl`` with every
     ``reports/trace/ext/*.jsonl`` shard written by out-of-process children.
-    Best-effort: missing files / dirs yield ``[]``; malformed lines are
-    skipped by :func:`_load_jsonl_safe`.
+    A child's ``*.detail.jsonl`` shard is skipped: it holds the per-API-call
+    expansion of rows already counted here, so reading it would count the same
+    spend twice. Best-effort: missing files / dirs yield ``[]``; malformed
+    lines are skipped by :func:`_load_jsonl_safe`.
 
     Rows whose ``status`` is not ``ok`` are dropped: they describe a call that
     never returned, so counting them would inflate ``calls`` and skew the
@@ -153,7 +239,7 @@ def _load_llm_calls(
     ext_dir = trace_root / "ext"
     if ext_dir.is_dir():
         try:
-            shards = sorted(ext_dir.glob("*.jsonl"))
+            shards = sorted(p for p in ext_dir.glob("*.jsonl") if not p.name.endswith(".detail.jsonl"))
         except OSError as exc:
             warnings.append(f"decision_trace: failed to scan {ext_dir}: {exc!r}")
             shards = []
@@ -434,10 +520,20 @@ def collect_token_usage(
 
     # attributed = session_total - unattributed - overhead, field by field.
     attributed = _empty_token_bucket()
-    for k in attributed:
-        attributed[k] = (
-            int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0) - int(overhead.get(k, 0) or 0)
-        )
+    for k, zero in _empty_token_bucket().items():
+        if isinstance(zero, dict):
+            attributed[k] = _subtract_source_counts(
+                session_total.get(k), unattributed.get(k), overhead.get(k)
+            )
+        elif isinstance(zero, float):
+            attributed[k] = round(
+                _coerce_usd(session_total.get(k)) - _coerce_usd(unattributed.get(k)) - _coerce_usd(overhead.get(k)),
+                10,
+            )
+        else:
+            attributed[k] = (
+                int(session_total.get(k, 0) or 0) - int(unattributed.get(k, 0) or 0) - int(overhead.get(k, 0) or 0)
+            )
     total_calls = int(session_total.get("calls", 0) or 0)
     attr_calls = int(attributed.get("calls", 0) or 0)
     overhead_calls = int(overhead.get("calls", 0) or 0)
@@ -793,7 +889,7 @@ def collect_decision_trace(
     unattributed = _empty_token_bucket()
     overhead = _empty_token_bucket()
 
-    def _route_unjoined(call: dict[str, Any]) -> dict[str, int]:
+    def _route_unjoined(call: dict[str, Any]) -> dict[str, Any]:
         comp = str(call.get("component") or "")
         return overhead if comp in _OVERHEAD_COMPONENTS else unattributed
 

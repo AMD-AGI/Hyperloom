@@ -2171,6 +2171,15 @@ class TokenUsageBucket(TypedDict, total=False):
             mean).
         grand_total (int): ``total_in + total_out`` + all cache tokens
             (creation + read) + ``total_reasoning_out`` — the all-in figure.
+        total_cost_usd (float): What those tokens were billed at. Only calls
+            that were actually priced contribute, so this is a total over
+            ``cost_calls_priced`` calls, not over ``calls``.
+        cost_calls_priced (int): How many of ``calls`` carried a usable cost.
+            Equal to ``calls`` when every call was priced; anything less means
+            the USD figures cover part of the bucket.
+        cost_sources (dict[str, int]): Calls per ``cost_source`` — a provider's
+            own figure and a rate-card derivation are different kinds of
+            number, and this says how the total is mixed.
     """
 
     total_in: int
@@ -2184,6 +2193,14 @@ class TokenUsageBucket(TypedDict, total=False):
     grand_total: int
     # cache_read / (cache_creation + cache_read); 0.0 when no split cache data.
     cache_hit_rate: float
+    # total_cost_usd is the whole; the four below are its parts and sum to it.
+    total_cost_usd: float
+    total_cost_input_usd: float
+    total_cost_output_usd: float
+    total_cost_thinking_usd: float
+    total_cost_cache_usd: float
+    cost_calls_priced: int
+    cost_sources: dict[str, int]
 
 
 class TokenUsageAttribution(TypedDict, total=False):

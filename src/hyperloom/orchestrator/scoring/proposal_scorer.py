@@ -37,6 +37,8 @@ from hyperloom.common.llm_config import (
 from ..roles.base import parse_call_timeout_env
 from ..loop.coordinator_helpers import format_exc_brief
 from ..trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.common.llm_attribution import task_scope
+from ..trace.call_detail import append_turn_call_details
 from ..trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
 from ..trace.parse_usage import reasoning_output_tokens
 
@@ -444,24 +446,51 @@ class ProposalScorer:
                 ct = getattr(usage, "completion_tokens", None)
                 input_tokens = int(pt) if pt is not None else None
                 output_tokens = int(ct) if ct is not None else None
-            record = LLMCallRecord(
-                session_id=self.session_dir.name,
-                component="proposal_scorer",
-                role="proposal_scorer",  # must match the conversation row's role
-                call_id=call_id,
-                model=str(model),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                # A scoring model with a reasoning split bills it separately;
-                # reading it here keeps the ledger consistent with the backends
-                # that report it on their turn metadata.
-                reasoning_output_tokens=reasoning_output_tokens(usage),
-                latency_ms=latency_ms,
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
+            # Scoring hangs off the action that requested it; the segment
+            # gives it its own branch of that action's tree.
+            with task_scope("proposal_scorer"):
+                record = LLMCallRecord(
+                    session_id=self.session_dir.name,
+                    component="proposal_scorer",
+                    role="proposal_scorer",  # must match the conversation row's role
+                    call_id=call_id,
+                    model=str(model),
+                    task_id=task_id,
+                    tick=tick,
+                    phase=phase,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    # A scoring model with a reasoning split bills it separately;
+                    # reading it here keeps the ledger consistent with the backends
+                    # that report it on their turn metadata.
+                    reasoning_output_tokens=reasoning_output_tokens(usage),
+                    latency_ms=latency_ms,
+                )
+                append_llm_call(session_dir=self.session_dir, record=record)
+                # Scoring is one request, so this turn's row and its single
+                # per-call row describe the same call; the index says so.
+                append_turn_call_details(
+                    session_dir=self.session_dir,
+                    session_id=self.session_dir.name,
+                    component="proposal_scorer",
+                    metadata={
+                        "call_id": call_id,
+                        "api_call_details": [
+                            {
+                                "api_call_index": 0,
+                                "model": str(model),
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
+                                "reasoning_output_tokens": reasoning_output_tokens(usage),
+                                "latency_ms": latency_ms,
+                            }
+                        ],
+                    },
+                    role="proposal_scorer",
+                    task_id=task_id,
+                    tick=tick,
+                    phase=phase,
+                )
         except Exception:  # noqa: BLE001 — trace must never break scoring
             log.debug(
                 "full-trace: proposal_scorer llm_call append failed for model=%s",

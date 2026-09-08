@@ -1435,6 +1435,7 @@ class KernelPhase(PhaseHandler):
                 )
             return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
+        geak_started_at = time.time()
         try:
             proc = await asyncio.to_thread(_run)
             stderr_tail = (proc.stderr or "")[-2000:]
@@ -1475,6 +1476,11 @@ class KernelPhase(PhaseHandler):
             log.exception("GEAK runner crashed")
             _finish_skip({"status": "error", "error_class": "runner_crashed", "error": repr(exc)})
             return
+        finally:
+            # Every exit above returns, so the harvest is attached here to cover
+            # the timed-out and crashed runs too: those are the ones whose spend
+            # would otherwise vanish, and they are the expensive ones.
+            self._harvest_geak_spend(str(out_dir), since=geak_started_at)
 
         result: dict[str, Any] = _read_geak_result(result_path)
         if not result:
@@ -1580,6 +1586,39 @@ class KernelPhase(PhaseHandler):
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
         state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
         state.save(self.session_dir)
+
+    def _harvest_geak_spend(self, exp_root: str, *, since: float) -> None:
+        """Fold the GEAK subprocess's model spend into this session's ledger.
+
+        GEAK drives its own Claude SDK client and never touches the in-process
+        ledger, so its calls are read back off the Claude Code transcripts it
+        left behind and written to the session's ``ext`` trace shard. It is the
+        majority of a session's bill; without this the ledger's total is a
+        minority of the truth while looking complete.
+
+        Args:
+            exp_root: This run's GEAK experiment root, which is the marker that
+                separates its transcripts from a neighbouring run sharing the
+                same GEAK checkout.
+            since: Epoch seconds the subprocess started, used to skip
+                transcripts that cannot belong to it.
+        """
+        try:
+            from ..trace.geak_harvest import harvest_geak_calls
+
+            runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
+            workflow_dir = str(Path(runner).parent.parent / "e2e_workflow") if runner else None
+            harvest_geak_calls(
+                session_dir=self.session_dir,
+                session_id=self.session_dir.name,
+                exp_root=exp_root,
+                workflow_dir=workflow_dir,
+                phase="KERNEL_AGENT",
+                tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                not_before=since,
+            )
+        except Exception:  # noqa: BLE001 — accounting cannot change kernel behavior
+            log.debug("geak: transcript harvest failed", exc_info=True)
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state.

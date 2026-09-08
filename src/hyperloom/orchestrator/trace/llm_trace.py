@@ -19,6 +19,13 @@ Design contract:
   collector can tell "no cache concept" from "zero cache hits";
   ``reasoning_output_tokens`` is the same story for reasoning models, and is
   kept out of ``output_tokens`` because that counts the visible reply only.
+* **Granularity**: one row is one agentic *turn*, which is what the
+  breakdown rollup and the Langfuse mirror count. A turn can span several
+  real API calls; ``api_calls`` says how many, and the per-call rows live in
+  the ``llm_calls_detail`` sidecar (:mod:`call_detail`) joined on ``call_id``.
+* **Cost**: ``cost_source`` records where the USD came from -- a provider
+  figure, a rate-card derivation, or nothing at all. A report must not sum
+  across sources silently; see :mod:`pricing`.
 * **Pairing**: ``call_id`` is the join key against the conversation ledger's
   row for the same call. Both halves carry it when the producing backend
   stamped one; otherwise the emitter falls back to its identity+second key.
@@ -44,9 +51,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.llm_attribution import TASK_PATH_SEPARATOR, current_task_path_str
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
+from .pricing import CostBreakdown, resolve_cost
 from ._row_utils import (
+    coerce_optional_float as _coerce_optional_float,
     coerce_optional_int as _coerce_optional_int,
     coerce_optional_str as _coerce_optional_str,
     validate_closed_row,
@@ -112,6 +122,20 @@ _ROW_FIELDS: frozenset[str] = frozenset(
         "cache_read_input_tokens",
         "reasoning_output_tokens",
         "latency_ms",
+        "ttft_ms",
+        "thinking_ms",
+        "output_ms",
+        "task_path",
+        "task_depth",
+        "api_calls",
+        "tool_call_count",
+        "stop_reason",
+        "cost_usd",
+        "cost_input_usd",
+        "cost_output_usd",
+        "cost_thinking_usd",
+        "cost_cache_usd",
+        "cost_source",
         "reviewed_msg_ids",
         "status",
         "error_type",
@@ -135,6 +159,21 @@ def new_call_id() -> str:
         A fresh hex id.
     """
     return uuid.uuid4().hex
+
+
+def resolve_task_path(task_path: str | None) -> str:
+    """Return the task path for a row, defaulting to the ambient scope.
+
+    Args:
+        task_path: An explicit path from the call site, or ``None``.
+
+    Returns:
+        The path, or ``""`` when neither the caller nor the ambient scope has
+        one.
+    """
+    if task_path is not None:
+        return str(task_path).strip(TASK_PATH_SEPARATOR)
+    return current_task_path_str()
 
 
 # Canonical timestamp helper; kept importable for callers.
@@ -203,6 +242,33 @@ class LLMCallRecord:
     # (None = not measured); the Langfuse generation is placed at
     # ``[ts - latency_ms, ts]``.
     latency_ms: int | None = None
+    # Time to the turn's first content block, and how the rest of the latency
+    # split between hidden reasoning and visible output. ``None`` for a backend
+    # that does not stream, which cannot observe either boundary.
+    ttft_ms: int | None = None
+    thinking_ms: int | None = None
+    output_ms: int | None = None
+    # Where this call sits in the phase -> task -> subtask tree, as the
+    # separator-joined path published by ``llm_attribution.task_scope``.
+    # ``task_depth`` is its segment count, carried so a rollup can group by
+    # level without re-splitting every row.
+    task_path: str | None = None
+    task_depth: int | None = None
+    # One ledger row covers one agentic turn, which may span several real API
+    # calls; ``api_calls`` says how many, and the per-call rows live in the
+    # ``llm_calls_detail`` sidecar keyed on the same ``call_id``.
+    api_calls: int | None = None
+    tool_call_count: int | None = None
+    stop_reason: str | None = None
+    # USD for the turn. ``cost_source`` says where the figure came from
+    # (:mod:`pricing`): a provider figure and a derived one are never summed
+    # into the same total, so a rollup can report each separately.
+    cost_usd: float | None = None
+    cost_input_usd: float | None = None
+    cost_output_usd: float | None = None
+    cost_thinking_usd: float | None = None
+    cost_cache_usd: float | None = None
+    cost_source: str | None = None
     # Proposal ``msg_id``s this call reviewed (critic only), so the call can be
     # attributed to the decision it served. ``None`` for non-critic producers.
     reviewed_msg_ids: list[str] | None = None
@@ -211,6 +277,32 @@ class LLMCallRecord:
     status: str = LLM_STATUS_OK
     error_type: str | None = None
     error_message: str | None = None
+
+    def _cost_breakdown(self) -> CostBreakdown:
+        """This row's USD figures, keeping any the call site already resolved.
+
+        Returns:
+            The resolved :class:`~.pricing.CostBreakdown`.
+        """
+        if self.cost_source is not None:
+            return CostBreakdown(
+                total_usd=_coerce_optional_float(self.cost_usd),
+                input_usd=_coerce_optional_float(self.cost_input_usd),
+                output_usd=_coerce_optional_float(self.cost_output_usd),
+                thinking_usd=_coerce_optional_float(self.cost_thinking_usd),
+                cache_usd=_coerce_optional_float(self.cost_cache_usd),
+                source=self.cost_source,
+            )
+        return resolve_cost(
+            model=self.model,
+            tokens={
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cache_creation_input_tokens": self.cache_creation_input_tokens,
+                "cache_read_input_tokens": self.cache_read_input_tokens,
+                "reasoning_output_tokens": self.reasoning_output_tokens,
+            },
+        )
 
     def to_row(self) -> dict[str, Any]:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs).
@@ -222,6 +314,14 @@ class LLMCallRecord:
         Returns:
             The on-disk LLM-call row dict.
         """
+        # A record built field-by-field (the critic, the scorer, the forge
+        # backfill) carries no path of its own; it inherits the scope it is
+        # written from, the same way ``from_metadata`` does.
+        path = resolve_task_path(self.task_path)
+        # Same for cost: ``from_metadata`` resolves it (and can prefer the
+        # provider's own figure), but a hand-built record would otherwise carry
+        # tokens with no price. Deriving it here keeps every row comparable.
+        cost = self._cost_breakdown()
         return {
             "session_id": str(self.session_id),
             "ts": _now_iso(),
@@ -240,6 +340,20 @@ class LLMCallRecord:
             "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
             "reasoning_output_tokens": _coerce_optional_int(self.reasoning_output_tokens),
             "latency_ms": _coerce_optional_int(self.latency_ms),
+            "ttft_ms": _coerce_optional_int(self.ttft_ms),
+            "thinking_ms": _coerce_optional_int(self.thinking_ms),
+            "output_ms": _coerce_optional_int(self.output_ms),
+            "task_path": path or None,
+            "task_depth": path.count(TASK_PATH_SEPARATOR) + 1 if path else None,
+            "api_calls": _coerce_optional_int(self.api_calls),
+            "tool_call_count": _coerce_optional_int(self.tool_call_count),
+            "stop_reason": _coerce_optional_str(self.stop_reason),
+            "cost_usd": cost.total_usd,
+            "cost_input_usd": cost.input_usd,
+            "cost_output_usd": cost.output_usd,
+            "cost_thinking_usd": cost.thinking_usd,
+            "cost_cache_usd": cost.cache_usd,
+            "cost_source": cost.source,
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
             "status": str(self.status),
             "error_type": _coerce_optional_str(self.error_type),
@@ -260,6 +374,7 @@ class LLMCallRecord:
         phase: str | None = None,
         turn: int | None = None,
         latency_ms: int | None = None,
+        task_path: str | None = None,
     ) -> "LLMCallRecord":
         """Build a record from a ``BackendTurnResult.metadata`` dict.
 
@@ -280,11 +395,26 @@ class LLMCallRecord:
             turn: Multi-turn sub-agent sequence index, when known.
             latency_ms: Measured call latency in ms; overrides
                 ``metadata["latency_ms"]`` when not ``None``.
+            task_path: Task-tree path for the call; ``None`` takes the path
+                published by :func:`llm_attribution.task_scope`.
 
         Returns:
             A populated :class:`LLMCallRecord`.
         """
         md = metadata or {}
+        tokens = {
+            "input_tokens": md.get("input_tokens"),
+            "output_tokens": md.get("output_tokens"),
+            "cache_creation_input_tokens": md.get("cache_creation_input_tokens"),
+            "cache_read_input_tokens": md.get("cache_read_input_tokens"),
+            "reasoning_output_tokens": md.get("reasoning_output_tokens"),
+        }
+        cost = resolve_cost(
+            model=md.get("model"),
+            tokens=tokens,
+            provider_usd=md.get("total_cost_usd"),
+        )
+        path = resolve_task_path(task_path)
         return cls(
             session_id=session_id,
             component=component,
@@ -304,6 +434,20 @@ class LLMCallRecord:
             cache_read_input_tokens=md.get("cache_read_input_tokens"),
             reasoning_output_tokens=md.get("reasoning_output_tokens"),
             latency_ms=latency_ms if latency_ms is not None else md.get("latency_ms"),
+            ttft_ms=md.get("ttft_ms"),
+            thinking_ms=md.get("thinking_ms"),
+            output_ms=md.get("output_ms"),
+            task_path=path or None,
+            task_depth=path.count(TASK_PATH_SEPARATOR) + 1 if path else None,
+            api_calls=md.get("api_calls"),
+            tool_call_count=md.get("tool_call_count", md.get("tool_blocks")),
+            stop_reason=md.get("stop_reason"),
+            cost_usd=cost.total_usd,
+            cost_input_usd=cost.input_usd,
+            cost_output_usd=cost.output_usd,
+            cost_thinking_usd=cost.thinking_usd,
+            cost_cache_usd=cost.cache_usd,
+            cost_source=cost.source,
         )
 
     @classmethod
@@ -322,6 +466,7 @@ class LLMCallRecord:
         phase: str | None = None,
         turn: int | None = None,
         latency_ms: int | None = None,
+        task_path: str | None = None,
     ) -> "LLMCallRecord":
         """Build an ``error`` record for a call that produced no usable response.
 
@@ -343,10 +488,13 @@ class LLMCallRecord:
             phase: Phase name, when known.
             turn: Multi-turn sub-agent sequence index, when known.
             latency_ms: Time spent before failing, when measured.
+            task_path: Task-tree path for the call; ``None`` takes the path
+                published by :func:`llm_attribution.task_scope`.
 
         Returns:
             A populated :class:`LLMCallRecord` with ``status="error"``.
         """
+        path = resolve_task_path(task_path)
         return cls(
             session_id=session_id,
             component=component,
@@ -359,6 +507,8 @@ class LLMCallRecord:
             turn=turn,
             model=model,
             latency_ms=latency_ms,
+            task_path=path or None,
+            task_depth=path.count(TASK_PATH_SEPARATOR) + 1 if path else None,
             status=LLM_STATUS_ERROR,
             error_type=type(error).__name__ if isinstance(error, BaseException) else None,
             error_message=str(error)[:_ERROR_MESSAGE_MAX],
@@ -389,6 +539,7 @@ def append_llm_call(
     *,
     session_dir: Path,
     record: LLMCallRecord,
+    dest: Path | None = None,
 ) -> None:
     """Append one validated LLM-call row to the trace ledger.
 
@@ -408,6 +559,9 @@ def append_llm_call(
     Args:
         session_dir: Session directory used to resolve the ledger path.
         record: The LLM-call record to serialize and append.
+        dest: Write here instead of the session ledger -- used by producers
+            that own an ``ext/`` shard, since appending into the shared file is
+            not atomic across processes.
 
     Raises:
         LLMTraceRowError: If the serialized row violates the closed schema.
@@ -423,7 +577,7 @@ def append_llm_call(
     status = row.get("status")
     if status not in VALID_STATUSES:
         raise LLMTraceRowError(f"llm_calls row 'status'={status!r} is not one of {sorted(VALID_STATUSES)!r}")
-    dest = llm_calls_path(session_dir)
+    dest = dest or llm_calls_path(session_dir)
     try:
         append_jsonl(dest, row, make_parents=True, sort_keys=True)
     except OSError as exc:
@@ -460,4 +614,5 @@ __all__ = [
     "VALID_STATUSES",
     "append_llm_call",
     "new_call_id",
+    "resolve_task_path",
 ]

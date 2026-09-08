@@ -67,6 +67,7 @@ __all__ = [
     "CLAW_SESSION_ID_ENV",
     "DEFAULT_APPLICATION",
     "PRESETS",
+    "TASK_PATH_SEPARATOR",
     "attribution_context",
     "call_headers",
     "current_action",
@@ -75,7 +76,10 @@ __all__ = [
     "current_phase",
     "inject_env",
     "sdk_env_overlay",
+    "current_task_path",
+    "current_task_path_str",
     "set_current_phase",
+    "task_scope",
 ]
 
 # Publishing the phase here rather than threading it through every signature is
@@ -147,6 +151,63 @@ def current_action() -> str:
     return _current_action.get()
 
 
+# The task path is nested where the action is flat: one action fans out into
+# sub-agents, specialists and per-kernel attempts, and a report has to be able
+# to attribute a call to the leaf that made it. A context variable gives that
+# for free -- a child task sees its parent's path, pushes its own segment onto
+# it, and its siblings never observe the push.
+_current_task_path: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "hyperloom_llm_attribution_task_path",
+    default=(),
+)
+
+TASK_PATH_SEPARATOR = "/"
+
+
+@contextlib.contextmanager
+def task_scope(segment: str) -> Iterator[None]:
+    """Push one segment onto the task path for the duration of a block.
+
+    Pushes rather than replaces, so nesting composes: a phase scope wrapping an
+    action scope wrapping a per-kernel scope yields
+    ``KERNEL_AGENT/kernel_opt/gemm_fp8``. An empty or all-separator segment is
+    dropped rather than producing a blank level.
+
+    Args:
+        segment: The label for this level of the tree.
+
+    Yields:
+        ``None``, with the segment appended for the duration of the block.
+    """
+    clean = _sanitize(segment).strip(TASK_PATH_SEPARATOR)
+    if not clean:
+        yield
+        return
+    token = _current_task_path.set(_current_task_path.get() + (clean,))
+    try:
+        yield
+    finally:
+        _current_task_path.reset(token)
+
+
+def current_task_path() -> tuple[str, ...]:
+    """Return the task-path segments this code is running inside.
+
+    Returns:
+        The segments outermost-first, empty outside any :func:`task_scope`.
+    """
+    return _current_task_path.get()
+
+
+def current_task_path_str() -> str:
+    """Return the current task path rendered as a single separated string.
+
+    Returns:
+        The joined path, or ``""`` outside any :func:`task_scope`.
+    """
+    return TASK_PATH_SEPARATOR.join(current_task_path())
+
+
 def _sanitize(value: object) -> str:
     """Strip anything that would corrupt an encoding the value passes through.
 
@@ -209,6 +270,7 @@ def attribution_context(
         "phase": current_phase() if phase is None else phase,
         "type": current_action(),
         "operation": operation,
+        "task_path": current_task_path_str(),
         **extra,
     }
     return {key: text for key, value in fields.items() if (text := _sanitize(value))}
@@ -283,20 +345,21 @@ _PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
 
 #: Fields a child may take from the tag its parent wrote. They describe *where*
 #: a call happens rather than what makes it: ``session`` identifies the run, and
-#: ``phase`` and ``type`` are ambient state that lives in one process only --
-#: :data:`_current_phase` is a module global and :data:`_current_action` a
-#: context variable, so a spawned child starts with both empty and could not
-#: restate them if it wanted to. ``application`` is absent because this module
+#: ``phase``, ``type`` and ``task_path`` are ambient state that lives in one
+#: process only -- :data:`_current_phase` is a module global and
+#: :data:`_current_action` and :data:`_current_task_path` are context variables,
+#: so a spawned child starts with all three empty and could not restate them if
+#: it wanted to. ``application`` is absent because this module
 #: always supplies it, so an inherited copy could never be reached. ``component``
 #: and ``operation`` are absent by intent: a call site that names itself is
 #: declaring a new producer, and inheriting the parent's purpose would label its
 #: calls with work they are not doing.
-_INHERITED_FIELDS = ("session", "phase", "type")
+_INHERITED_FIELDS = ("session", "phase", "type", "task_path")
 
 #: The inherited fields describing the *running process* rather than the run's
 #: identity. Only a genuinely different process may take these; see
 #: :func:`inject_env` for why re-reading them into their own writer is unsound.
-_AMBIENT_FIELDS = ("phase", "type")
+_AMBIENT_FIELDS = ("phase", "type", "task_path")
 
 
 @dataclass(frozen=True)
@@ -328,6 +391,11 @@ PRESETS: dict[str, tuple[AttributionHeader, ...]] = {
         # Sets the spend log's session_id column and propagates to nested MCP and
         # A2A calls, so it is the column a per-session reconciliation joins on.
         AttributionHeader("x-litellm-trace-id", "raw", ("session",)),
+        # The task path is deliberately *not* a tag: it carries kernel ids and
+        # attempt numbers, and spreading that cardinality across the rollup tag
+        # is what would stop it rolling up. It rides its own header, in the
+        # self-describing shape so a spawned child can inherit it back.
+        AttributionHeader("x-hyperloom-task-path", "combined", ("task_path",)),
     ),
 }
 

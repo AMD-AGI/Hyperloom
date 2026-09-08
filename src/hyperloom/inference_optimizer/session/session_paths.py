@@ -404,6 +404,47 @@ def trace_ext_dir(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "ext"
 
 
+def llm_call_detail_path(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/llm_calls_detail.jsonl`` — one row per *API call*.
+
+    The sidecar to :func:`llm_calls_path`, which stays one row per agentic
+    turn. The two join on ``call_id``; a turn that made several requests has
+    one row here per request, carrying its own ISL/OSL, timing split, tool
+    calls and cost.
+
+    Args:
+        session_dir: The session root directory.
+
+    Returns:
+        ``<session_dir>/reports/trace/llm_calls_detail.jsonl``.
+    """
+    return trace_dir(session_dir) / "llm_calls_detail.jsonl"
+
+
+def trace_ext_shard_path(session_dir: Path, component: str, pid: int, *, detail: bool = False) -> Path:
+    """``<sd>/reports/trace/ext/<component>-<pid>[.detail].jsonl``.
+
+    The shard an out-of-process producer owns outright. One writer per file is
+    the whole point: appending into the shared ledger is not atomic across
+    processes, and the session tree lives on a network filesystem.
+
+    Args:
+        session_dir: The session root directory.
+        component: Producer label, from the closed trace vocabulary.
+        pid: The writing process id, which makes the filename unique.
+        detail: Select the per-API-call sidecar shard rather than the turn one.
+
+    Returns:
+        The shard path.
+
+    Raises:
+        ValueError: If ``component`` is not a safe single path component.
+    """
+    name = _validate_id_component(component, field="trace_ext_shard_path.component")
+    suffix = ".detail.jsonl" if detail else ".jsonl"
+    return trace_ext_dir(session_dir) / f"{name}-{int(pid)}{suffix}"
+
+
 def decision_trace_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining
     every decision to its LLM token spend along the phase→tick timeline.
@@ -953,6 +994,7 @@ __all__ = [
     "gemm_tuning_steps_path",
     "kernel_agent_runs_dir",
     "kernel_agent_runs_root",
+    "llm_call_detail_path",
     "llm_calls_path",
     "manifest_path",
     "patches_dir",
@@ -976,4 +1018,5 @@ __all__ = [
     "target_analysis_report_md",
     "target_baseline_json",
     "trace_dir",
+    "trace_ext_shard_path",
 ]

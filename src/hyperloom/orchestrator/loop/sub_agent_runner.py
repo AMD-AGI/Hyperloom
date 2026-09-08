@@ -22,6 +22,7 @@ from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, r
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
+from hyperloom.common.llm_attribution import task_scope
 from ..trace.task_progress import ProgressReporter, progress_scope
 
 if TYPE_CHECKING:
@@ -308,7 +309,7 @@ class SubAgentRunner:
                 if extra_context:
                     extra.update(dict(extra_context))
                 ctx = RunnerContext(task=task, lease=lease, extra=extra)
-                with progress_scope(self._progress_reporter(task.task_id)):
+                with progress_scope(self._progress_reporter(task.task_id)), task_scope(task.task_id):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
                 # Stopped from outside -- shutdown, or a wall-clock budget that

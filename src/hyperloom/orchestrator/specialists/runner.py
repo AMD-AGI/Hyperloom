@@ -30,6 +30,8 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir, specialist_intel_path
 from ..roles.base import BackendError, LLMCallFailed
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.common.llm_attribution import task_scope
+from ..trace.call_detail import append_turn_call_details
 from ..trace.conversation_trace import ConversationRecord, append_conversation
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from .domains import (
@@ -709,7 +711,9 @@ class SpecialistRunner:
         if self.session_dir is None:
             return
         try:
-            md = metadata or {}
+            # Copied, not aliased: the single-turn caller passes the backend's
+            # own usage dict and must not see the join key added below.
+            md = dict(metadata or {})
             has_tokens = any(
                 md.get(k) is not None
                 for k in (
@@ -721,17 +725,41 @@ class SpecialistRunner:
             )
             if not has_tokens:
                 return
-            record = LLMCallRecord.from_metadata(
-                session_id=self.session_dir.name,
-                component="specialist",
-                task_id=task_id,
-                turn=turn,
-                metadata=md,
-                latency_ms=latency_ms,
-                tick=tick,
-                phase=phase,
-            )
-            append_llm_call(session_dir=self.session_dir, record=record)
+            # The turn row and its per-API-call detail rows are joined on
+            # ``call_id``. A backend that stamps one (Claude, via the response's
+            # ``message.id``) supplies the real identity; one that does not
+            # (Codex, or a log naming no message ids) would otherwise emit
+            # detail rows that join to nothing and drop out of every rollup, so
+            # a synthetic key is derived from the pair that is already unique
+            # within the session.
+            if not md.get("call_id"):
+                md["call_id"] = f"{task_id}:turn-{turn}"
+            # The turn is a level of the task tree, and the ledger rows are
+            # written after it has ended, so the segment is opened here rather
+            # than around the turn itself.
+            with task_scope(f"turn-{turn}"):
+                record = LLMCallRecord.from_metadata(
+                    session_id=self.session_dir.name,
+                    component="specialist",
+                    task_id=task_id,
+                    turn=turn,
+                    metadata=md,
+                    latency_ms=latency_ms,
+                    tick=tick,
+                    phase=phase,
+                )
+                append_llm_call(session_dir=self.session_dir, record=record)
+                append_turn_call_details(
+                    session_dir=self.session_dir,
+                    session_id=self.session_dir.name,
+                    component="specialist",
+                    metadata=md,
+                    task_id=task_id,
+                    turn=turn,
+                    tick=tick,
+                    phase=phase,
+                    turn_latency_ms=latency_ms,
+                )
         except Exception:  # noqa: BLE001 — trace must never break the run
             log.debug(
                 "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
