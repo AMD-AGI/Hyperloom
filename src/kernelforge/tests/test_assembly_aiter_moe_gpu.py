@@ -40,17 +40,26 @@ def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path
     tile_m, tile_n, tile_k = 32, 256, 256
     stream = torch.cuda.Stream()
 
-    def make_case(tokens, seed):
+    def make_case(tokens, seed, *, random_scales=False, routing="random"):
         generator = torch.Generator(device="cuda").manual_seed(seed)
         random_options = {"device": "cuda", "generator": generator}
         activations = (torch.randn(tokens, model_dim, **random_options) / model_dim**0.5).bfloat16()
         quantized = torch.randint(-8, 8, (experts, 2 * inter_dim, model_dim), dtype=torch.int8, **random_options)
-        # Powers of two make dequantization exact, independently of BF16 rounding policy.
-        scales = (2.0 ** torch.randint(-5, -2, (experts, model_dim // 32, 2 * inter_dim), **random_options)).bfloat16()
+        scale_shape = (experts, model_dim // 32, 2 * inter_dim)
+        if random_scales:
+            scales = (0.025 + 0.10 * torch.rand(scale_shape, **random_options)).bfloat16()
+        else:
+            scales = (2.0 ** torch.randint(-5, -2, scale_shape, **random_options)).bfloat16()
         packed = pack_int8_to_packed_int4(shuffle_weight(quantized, (16, 16)))
         packed = packed.view(experts, 2 * inter_dim, model_dim // 2)
         shuffled_scales = shuffle_scale_for_int4(scales).flatten()
-        routes = torch.rand(tokens, experts, **random_options).topk(topk, dim=-1).indices.int()
+        if routing == "balanced":
+            routes = (torch.arange(tokens, device="cuda")[:, None] + torch.arange(topk, device="cuda")) % experts
+            routes = routes.int()
+        elif routing == "skewed":
+            routes = torch.arange(topk, device="cuda", dtype=torch.int32).expand(tokens, topk).contiguous()
+        else:
+            routes = torch.rand(tokens, experts, **random_options).topk(topk, dim=-1).indices.int()
         weights = torch.rand(tokens, topk, **random_options).softmax(-1)
         ids, sorted_weights, expert_ids, valid_ids, _ = moe_sorting(
             routes, weights, experts, model_dim, torch.bfloat16, block_size=tile_m
@@ -59,7 +68,8 @@ def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path
         for expert in range(experts):
             token_ids, slots = torch.where(routes == expert)
             dequantized = quantized[expert].float() * scales[expert].T.repeat_interleave(32, dim=-1).float()
-            gate_up = activations[token_ids].float() @ dequantized.T
+            # The kernel rounds dequantized weights to BF16 before its matrix multiply.
+            gate_up = activations[token_ids].float() @ dequantized.bfloat16().float().T
             gate, up = gate_up.chunk(2, dim=-1)
             expected[token_ids, slots] = (
                 torch.nn.functional.silu(gate) * up * weights[token_ids, slots, None]
@@ -74,6 +84,7 @@ def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path
     def check(function, case, exact=None):
         tensors, args, expected = case
         out = tensors[0]
+        preserved = tuple(tensor.clone() for tensor in tensors[1:])
         out.fill_(float("nan"))
         stream.wait_stream(torch.cuda.current_stream())
         function(*args)
@@ -81,6 +92,8 @@ def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path
         torch.testing.assert_close(out, expected, rtol=0.02, atol=0.003)
         if exact is not None:
             torch.testing.assert_close(out, exact, rtol=0, atol=0)
+        for tensor, original in zip(tensors[1:], preserved):
+            torch.testing.assert_close(tensor, original, rtol=0, atol=0, equal_nan=True)
         return out.clone()
 
     case = make_case(37, 671)
@@ -115,8 +128,14 @@ def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path
     restored = with_assembly(reference, source, **options)
     check(restored, case, exact=baseline)
 
-    for tokens, seed in ((1, 91), (65, 92), (257, 93)):
-        changed = make_case(tokens, seed)
+    for tokens, seed, random_scales, routing in (
+        (1, 91, False, "random"),
+        (65, 92, False, "balanced"),
+        (257, 93, False, "skewed"),
+        (65, 94, True, "random"),
+        (129, 95, True, "balanced"),
+    ):
+        changed = make_case(tokens, seed, random_scales=random_scales, routing=routing)
         expected = check(reference, changed)
         check(candidate, changed, exact=expected)
         check(restored, changed, exact=expected)
