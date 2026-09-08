@@ -35,6 +35,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -144,6 +145,17 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "pr_evidence",
     "source_evidence",
 )
+
+
+def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
+    """Whether Magpie lm_eval is opted out for this explore run.
+
+    ``--no-eval`` persists on ``SharedState.eval_disabled``. Task param
+    ``disable_run_eval`` is the same opt-out for internally queued explores.
+    """
+    if is_truthy(params.get("disable_run_eval")):
+        return True
+    return bool(getattr(shared_state, "eval_disabled", False))
 
 
 def _carry_variant_metadata(src: Any, dst: Any) -> Any:
@@ -732,6 +744,7 @@ class ExploreExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
+        eval_disabled = _explore_eval_disabled(shared_state, params)
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
@@ -766,6 +779,7 @@ class ExploreExecutor:
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
+                extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
             )
         except FrameworkScriptMismatchError as exc:
@@ -1253,6 +1267,8 @@ class ExploreExecutor:
                 run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
                 run_extra_envs = dict(stack_extra_envs)
                 run_extra_envs.update(gv.extra_envs)
+                if eval_disabled:
+                    run_extra_envs["RUN_EVAL"] = "false"
                 run_gv = GridVariant(
                     name=gv.name,
                     extra_server_args=gv.extra_server_args,
