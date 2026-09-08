@@ -75,17 +75,17 @@ def with_assembly(
     correctness driver before treating it as a candidate.
 
     This adapter uses FlyDSL's CompiledFunction/CompiledArtifact interface as
-    shipped in 0.2.4. It never patches the compiler or changes a JIT cache entry.
+    shipped in 0.2.0 and 0.2.4. It never patches the compiler or changes a JIT cache entry.
     Every call assembles the current source and creates a separate execution
     engine, so both the reference and earlier variants remain usable.
     """
     try:
         from flydsl._mlir import ir
-        from flydsl.compiler.jit_executor import CallState, CompiledArtifact
-        from flydsl.compiler.jit_function import CompiledFunction, _create_mlir_context
+        from flydsl.compiler.jit_executor import CompiledArtifact
+        from flydsl.compiler.jit_function import CallState, CompiledFunction, _create_mlir_context
     except ImportError as exc:
         raise AssemblyError(
-            "FlyDSL with the CompiledFunction/CompiledArtifact API is required (tested with 0.2.4)"
+            "FlyDSL with the CompiledFunction/CompiledArtifact API is required (tested with 0.2.0 and 0.2.4)"
         ) from exc
 
     if not isinstance(compiled, CompiledFunction):
@@ -99,7 +99,7 @@ def with_assembly(
         has_dependencies = reference._link_libs or reference._post_load_processors or reference._uses_explicit_module
     except AttributeError as exc:
         raise AssemblyError(
-            f"Unsupported FlyDSL CompiledFunction/CompiledArtifact API (tested with 0.2.4): {exc}"
+            f"Unsupported FlyDSL CompiledFunction/CompiledArtifact API (tested with 0.2.0 and 0.2.4): {exc}"
         ) from exc
     if has_dependencies:
         raise AssemblyError(

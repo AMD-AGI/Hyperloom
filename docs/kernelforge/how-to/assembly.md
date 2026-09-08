@@ -35,7 +35,7 @@ reproducible candidate.
 
 1. Compile one concrete specialization in a fresh process with
    `FLYDSL_DUMP_IR=1`, an attempt-local `FLYDSL_DUMP_DIR`, and a fresh
-   `FLYDSL_RUNTIME_CACHE_DIR`. FlyDSL 0.2.4's embedded compiler writes
+   `FLYDSL_RUNTIME_CACHE_DIR`. The embedded compiler in FlyDSL 0.2.0 and 0.2.4 writes
    `*_final_isa.s` under the device-symbol directory. External LLVM mode can
    skip this dump. Match the dump to its shape, dtype, target, and options.
 2. Copy that complete file into the candidate workspace. It must include
@@ -59,7 +59,7 @@ reproducible candidate.
    Use the actual target ID, including any `xnack`/`sramecc` features. The
    adapter preserves the original host module and argument packing, including
    the caller's stream. It accepts the compiled-function interface shipped in
-   FlyDSL 0.2.4 and self-contained, single-target GPU objects. Extern-linked
+   FlyDSL 0.2.0 and 0.2.4 and self-contained, single-target GPU objects. Extern-linked
    kernels are rejected. Use `binary_name` to select among multiple modules.
 4. Establish correctness and timing parity with the unedited assembly, then
    optimize one hypothesis at a time. Build/load outside timing and graph
@@ -78,6 +78,21 @@ python -m kernelforge.assembly assemble \
 This invokes `llvm-mc` and `ld.lld` from the selected toolchain. It does not
 infer kernel arguments or launch the output. Build failures raise an error;
 callers must not load a previous output after failure.
+
+The optional GPU regressions can be run from the repository root:
+
+```bash
+pytest -q src/kernelforge/tests/test_assembly_flydsl_gpu.py \
+  src/kernelforge/tests/test_assembly_aiter_moe_gpu.py
+```
+
+The MoE test uses the installed AITER `moe_gemm_2stage.py` stage1 on gfx950
+with BF16 activations, signed INT4 weights, and group size 32. It exercises
+AITER packing and routing, an independent PyTorch oracle, unedited assembly
+parity, an incorrect SiLU candidate, runtime argument rebinding, and graph
+replay. It requires AITER's W4A16 helpers (validated with
+`amd-aiter 0.1.16.post2` and FlyDSL 0.2.0). This is a synthetic single-kernel regression;
+it does not validate a full MoE layer or a model-serving speedup.
 
 ## Moving between languages
 

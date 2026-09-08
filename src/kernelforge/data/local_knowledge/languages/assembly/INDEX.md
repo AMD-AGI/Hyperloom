@@ -38,6 +38,14 @@ Kimi-K3 shape and author-reported timings do not establish performance on
 other shapes, GPUs, MoE kernels, or Forge's FlyDSL adapter. The cards distinguish
 source observations, reported results, and experiments still to run.
 
+## Case knowledge: verified FlyDSL roundtrip
+
+For AITER's INT4/BF16 MoE, read the
+[W4A16 stage1 case](cases/aiter_w4a16_roundtrip_gfx950.md). It covers the actual
+FlyDSL launcher adapter, weight/scale layouts, negative controls, and a packed
+multiply experiment that passed correctness but produced no useful speedup.
+This is Forge validation evidence, separate from the Evolve source cases.
+
 ## Source and toolchain
 
 An editable AMDHSA assembly file contains `.amdgcn_target`, device symbols,
@@ -45,7 +53,7 @@ An editable AMDHSA assembly file contains `.amdgcn_target`, device symbols,
 file. `llvm-objdump -d` is useful for inspection but its instruction listing
 alone is not a reassemblable source or a launch ABI description.
 
-FlyDSL 0.2.4's embedded compiler can emit this file with `FLYDSL_DUMP_IR=1` and
+The embedded compiler in FlyDSL 0.2.0 and 0.2.4 can emit this file with `FLYDSL_DUMP_IR=1` and
 `FLYDSL_DUMP_DIR=/path/to/attempt/dumps`. Run the original kernel in a fresh
 process with a private `FLYDSL_RUNTIME_CACHE_DIR` so an old disk cache does not
 bypass compilation. Find the matching `*_final_isa.s` under the device-symbol
@@ -71,7 +79,7 @@ Propagate errors; a previous output at the same path is not a new candidate.
 ## FlyDSL launcher adapter
 
 The first adapter supports self-contained FlyDSL kernels using the
-`CompiledFunction`/`CompiledArtifact` interfaces shipped in 0.2.4. It clones the
+`CompiledFunction`/`CompiledArtifact` interfaces shipped in 0.2.0 and 0.2.4. It clones the
 compiled host module and replaces one GPU code object while retaining the
 original argument packing, device symbol, grid, block, shared-memory setup,
 and stream. It rejects extern-linked kernels and multi-target objects. For

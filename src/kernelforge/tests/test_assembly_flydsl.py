@@ -37,8 +37,8 @@ def _module(*binaries):
     )
 
 
-@pytest.fixture()
-def flydsl_api(monkeypatch):
+@pytest.fixture(params=["0.2.0", "0.2.4"])
+def flydsl_api(monkeypatch, request):
     modules = {}
     for name in (
         "flydsl",
@@ -105,7 +105,9 @@ def flydsl_api(monkeypatch):
         def __call__(self, *args):
             return self._call_state.executor(*args)
 
-    modules["flydsl.compiler.jit_executor"].CallState = CallState
+    if request.param == "0.2.4":
+        modules["flydsl.compiler.jit_executor"].CallState = CallState
+    modules["flydsl.compiler.jit_function"].CallState = CallState
     modules["flydsl.compiler.jit_executor"].CompiledArtifact = CompiledArtifact
     modules["flydsl.compiler.jit_function"].CompiledFunction = CompiledFunction
     modules["flydsl.compiler.jit_function"]._create_mlir_context = nullcontext
