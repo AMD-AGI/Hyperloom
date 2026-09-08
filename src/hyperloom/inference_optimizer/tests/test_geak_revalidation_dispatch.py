@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import shlex
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -415,6 +416,202 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
 
 @pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "accepted", "expected_flags", "expected_env"),
+    [
+        (
+            {
+                "extra_server_args": "--mem-fraction-static 0.9",
+                "extra_envs": {},
+                "args_mode": "replace",
+                "remove_args": ["--disable-radix-cache"],
+                "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            },
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
+            "--mem-fraction-static 0.9",
+            None,
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024 --mem-fraction-static 0.8"},
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
+            "--disable-radix-cache --mem-fraction-static 0.9 --chunked-prefill-size 1024",
+            "1",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}, "args_mode": "replace"},
+            "--mem-fraction-static 0.9",
+            "1",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024"},
+            {"flags": "", "env_map": {}, "args_mode": "replace"},
+            "",
+            "1",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024", "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "2"}},
+            {"remove_args": ["--disable-radix-cache"], "unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+            "--mem-fraction-static 0.7 --chunked-prefill-size 1024",
+            None,
+        ),
+        (
+            {
+                "extra_server_args": "--mem-fraction-static 0.8",
+                "args_mode": "replace",
+                "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            },
+            {"flags": "--mem-fraction-static 0.9", "env_map": {"SGLANG_AITER_MLA_PERSIST": "3"}},
+            "--mem-fraction-static 0.9",
+            "3",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024", "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "2"}},
+            {"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+            "--disable-radix-cache --mem-fraction-static 0.7 --chunked-prefill-size 1024",
+            None,
+        ),
+        (
+            {
+                "extra_server_args": "--mem-fraction-static 0.8",
+                "args_mode": "replace",
+                "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "3"},
+                "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            },
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
+            "--mem-fraction-static 0.9",
+            "3",
+        ),
+    ],
+    ids=[
+        "legacy_retains_removals",
+        "legacy_delta",
+        "complete_flags",
+        "empty_replacement",
+        "removal_only",
+        "readd_env",
+        "unset_only",
+        "retained_env_override",
+    ],
+)
+async def test_geak_launch_controls_reach_materialized_rebench(
+    coordinator, tmp_path, monkeypatch, current, accepted, expected_flags, expected_env
+) -> None:
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import ExploreExecutor, explore
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/models/test",
+                    "run_mode": "local",
+                    "benchmark_script": "sglang_custom.sh",
+                    "envs": {
+                        "TP": "1",
+                        "CONC": "8",
+                        "ISL": "256",
+                        "OSL": "256",
+                        "EXTRA_SGLANG_ARGS": "--disable-radix-cache --mem-fraction-static 0.7",
+                        "SGLANG_AITER_MLA_PERSIST": "1",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.baseline_double_run = False
+    state.current_best = {"tput": 110.0, **current}
+    state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="launch_controls_regression")
+    task = await coordinator.tasks.get(str(enqueued["task_id"]))
+    calls = []
+    fingerprints = []
+    original_fingerprint = explore.effective_fingerprint
+
+    def observe_fingerprint(*args, **kwargs):
+        fingerprint = original_fingerprint(*args, **kwargs)
+        fingerprints.append(fingerprint)
+        return fingerprint
+
+    async def capture_grid(**kwargs):
+        output = tmp_path / f"materialized_{len(calls)}"
+        output.mkdir()
+        path = _build_variant_yaml(
+            kwargs["base_yaml_path"],
+            kwargs["base_extra_args"],
+            kwargs["grid"][0],
+            output_subdir=output,
+            model_path=kwargs["model_path"],
+            gpu_type=kwargs["gpu_type"],
+            benchmark_script=kwargs["benchmark_script"],
+            base_args_mode=kwargs["base_args_mode"],
+        )
+        calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
+        if len(calls) > 1:
+            return []
+        return [
+            VariantResult(
+                name="geak_revalidate",
+                extra_server_args=kwargs["grid"][0].extra_server_args,
+                extra_envs=dict(kwargs["grid"][0].extra_envs),
+                status="succeeded",
+                output_throughput=120.0,
+            )
+        ]
+
+    monkeypatch.setattr(explore, "run_grid", capture_grid)
+    monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
+    monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
+    monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._grid_variant_filter._probe_server_help_text", lambda _framework: ""
+    )
+    result = await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+        SimpleNamespace(task=task, extra={"shared_state": state})
+    )
+
+    assert len(calls) == 1
+    assert fingerprints == [task.params["expected_cfg_hash"]]
+    envs = calls[0]
+    flags = shlex.split(envs.get("EXTRA_SGLANG_ARGS", ""))
+    if "--watchdog-timeout" in flags:
+        position = flags.index("--watchdog-timeout")
+        del flags[position : position + 2]
+    assert flags == shlex.split(expected_flags)
+    assert envs.get("SGLANG_AITER_MLA_PERSIST") == expected_env
+    if current.get("extra_envs", {}).get("SGLANG_USE_AITER"):
+        assert envs["SGLANG_USE_AITER"] == "1"
+    assert len(result["winners"]) == 1
+    assert coordinator._promote_geak_from_candidate(
+        state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
+    )
+    state.geak_result = {}
+    state.save(coordinator.session_dir)
+    coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
+    resumed = await coordinator._enqueue_internal_stack_rebench(reason="launch_controls_resume")
+    resume_task = await coordinator.tasks.get(str(resumed["task_id"]))
+    await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+        SimpleNamespace(task=resume_task, extra={"shared_state": coordinator.shared_state})
+    )
+    assert len(calls) == 2
+    resume_flags = shlex.split(calls[1].get("EXTRA_SGLANG_ARGS", ""))
+    if "--watchdog-timeout" in resume_flags:
+        position = resume_flags.index("--watchdog-timeout")
+        del resume_flags[position : position + 2]
+    assert resume_flags == flags
+    assert calls[1].get("SGLANG_AITER_MLA_PERSIST") == expected_env
+
+
+@pytest.mark.asyncio
 async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     coordinator, with_removal_controls: bool
 ) -> None:
@@ -552,6 +749,35 @@ def test_material_check_ignores_untrusted_env_names() -> None:
         echoed,
         prev_best_flags="--fp8-gemm-backend triton",
         prev_best_envs={"SGLANG_USE_AITER": "1"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("accepted", "previous", "expected"),
+    [
+        ({"flags": "", "args_mode": "replace"}, {"flags": "--disable-radix-cache"}, True),
+        ({"flags": "", "args_mode": "replace"}, {"flags": "", "args_mode": "replace"}, False),
+        (
+            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            False,
+        ),
+        ({"flags": "--mem-fraction-static 0.9"}, {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"}, False),
+        ({"flags": "", "env_map": {}}, {"flags": "--disable-radix-cache", "args_mode": "replace"}, False),
+        ({"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]}, {"env_map": {"SGLANG_AITER_MLA_PERSIST": "1"}}, True),
+    ],
+)
+def test_material_check_distinguishes_explicit_controls_from_empty_legacy(accepted, previous, expected):
+    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+
+    assert (
+        _geak_result_has_material(
+            {"status": "ok", "accepted_config": accepted},
+            prev_best_flags=previous.get("flags", ""),
+            prev_best_envs=previous.get("env_map", {}),
+            prev_best_controls=previous,
+        )
+        is expected
     )
 
 

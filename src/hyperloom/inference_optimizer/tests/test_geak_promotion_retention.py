@@ -198,3 +198,97 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
     assert not state.geak_pending and not state.resume_pending_revalidation
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["final_validation"]["decision"] == "REJECTED"
+
+
+@pytest.mark.parametrize("effective_flags", ["--mem-fraction-static 0.9", ""])
+def test_geak_promotion_retains_fresh_launch_controls(promotion, effective_flags):
+    coord, result, _ = promotion
+    state = coord.shared_state
+    state.current_best.update(
+        extra_server_args="--disable-radix-cache --mem-fraction-static 0.7",
+        extra_envs={"SGLANG_AITER_MLA_PERSIST": "1", "SGLANG_USE_AITER": "1"},
+    )
+    measurement = {
+        "extra_server_args": effective_flags,
+        "effective_extra_server_args": effective_flags,
+        "extra_envs": {"SGLANG_USE_AITER": "1"},
+        "candidate_extra_server_args": "",
+        "candidate_extra_envs": {},
+        "args_mode": "replace",
+        "remove_args": ["--disable-radix-cache"],
+        "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+        "fingerprint": "fresh-config",
+        "recipe_delta": {
+            "extra_server_args": "",
+            "extra_envs": {},
+            "remove_args": [],
+            "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            "args_mode": "append",
+        },
+    }
+
+    assert coord._promote_geak_from_candidate(
+        result, measured_tput=120.0, measurement_provenance=measurement, overlay_loaded=False
+    )
+    state.save(coord.session_dir)
+    restored = SharedState.load_or_init(coord.session_dir)
+    best = restored.current_best
+    assert best["extra_server_args"] == effective_flags
+    assert best["extra_envs"] == {"SGLANG_USE_AITER": "1"}
+    assert best["args_mode"] == "replace"
+    assert best["remove_args"] == ["--disable-radix-cache"]
+    assert best["unset_envs"] == ["SGLANG_AITER_MLA_PERSIST"]
+    entry = restored.optimization_stack[-1]
+    assert entry["fingerprint"] == "fresh-config"
+    assert entry["recipe_delta"] == measurement["recipe_delta"]
+
+
+def test_geak_complete_config_survives_direct_promotion(promotion):
+    coord, result, _ = promotion
+    coord.shared_state.current_best["extra_server_args"] = "--disable-radix-cache"
+    result["accepted_config"] = {"flags": "", "env_map": {}, "args_mode": "replace"}
+    coord._record_geak_candidate({**result, "final_throughput_tok_s": 120.0})
+    assert coord.shared_state.geak_pending["args_mode"] == "replace"
+    assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.shared_state.current_best["extra_server_args"] == ""
+    assert coord.shared_state.current_best["args_mode"] == "replace"
+
+
+@pytest.mark.parametrize("accepted_mode", ["append", "replace"])
+def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, accepted_mode):
+    coord, result, _ = promotion
+    state = coord.shared_state
+    state.current_best.update(
+        extra_server_args="--chunked-prefill-size 1024 --mem-fraction-static 0.9",
+        extra_envs={"SGLANG_AITER_MLA_PERSIST": "3"},
+        args_mode="replace",
+        remove_args=["--disable-radix-cache"],
+        unset_envs=["SGLANG_AITER_MLA_PERSIST"],
+    )
+    result["accepted_config"] = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": accepted_mode}
+    assert coord._promote_geak_from_candidate(
+        result, measured_tput=120.0, measurement_provenance={"accuracy": 0.9}, overlay_loaded=False
+    )
+    best = state.current_best
+    expected = (
+        "--mem-fraction-static 0.95"
+        if accepted_mode == "replace"
+        else "--chunked-prefill-size 1024 --mem-fraction-static 0.95"
+    )
+    assert best["extra_server_args"] == expected
+    assert best["args_mode"] == "replace"
+    assert best["unset_envs"] == ["SGLANG_AITER_MLA_PERSIST"]
+    assert best["extra_envs"] == {"SGLANG_AITER_MLA_PERSIST": "3"}
+
+
+def test_geak_replay_removal_retains_other_inherited_flags(promotion):
+    coord, result, _ = promotion
+    recipe = coord.session_dir / "baseline.yaml"
+    recipe.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: --disable-radix-cache --mem-fraction-static 0.7\n")
+    coord.shared_state.baseline_config_path = str(recipe)
+    coord.shared_state.current_best["extra_server_args"] = "--chunked-prefill-size 1024"
+    result["accepted_config"] = {"remove_args": ["--disable-radix-cache"]}
+    assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    best = coord.shared_state.current_best
+    assert best["extra_server_args"] == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
+    assert best["args_mode"] == "replace"

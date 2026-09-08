@@ -52,6 +52,7 @@ from ..loop.coordinator_helpers import (
     geak_spec_is_env,
     _resolve_roofline_watermark_ratio,
     _accepted_config_as_variant,
+    _accepted_config_controls,
     _coerce_tp,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
@@ -1779,8 +1780,10 @@ class KernelPhase(PhaseHandler):
             # Reproducible config the rebench launches from.
             "accepted_flags": accepted_flags,
             "accepted_envs": dict(parsed_envs),
-            # Carry the kernels and the basis they were judged on into the pending record, so a later promotion can
-            # name what it adopted without re-reading result.json.
+            **_accepted_config_controls(result.get("accepted_config")),
+            # Carry the kernels and the basis they were judged on into the
+            # pending record, so a later promotion can name what it adopted
+            # without re-reading result.json.
             "accepted_kernels": result.get("accepted_kernels") or [],
             "geak_status": str(result.get("status") or ""),
             "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
@@ -1966,7 +1969,9 @@ class KernelPhase(PhaseHandler):
         promotion_measurement = {
             "name": "geak_e2e",
             "candidate_extra_server_args": accepted_flags,
+            "extra_server_args": accepted_flags,
             "extra_envs": dict(parsed_envs),
+            **_accepted_config_controls(result.get("accepted_config")),
             "final_overlay": result.get("final_overlay") or "",
             "source_phase": "KERNEL_AGENT",
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
@@ -1976,6 +1981,20 @@ class KernelPhase(PhaseHandler):
             "workspace": result.get("eval_dir"),
         }
         if isinstance(measurement_provenance, Mapping):
+            for key in (
+                "extra_server_args",
+                "effective_extra_server_args",
+                "extra_envs",
+                "candidate_extra_server_args",
+                "candidate_extra_envs",
+                "recipe_delta",
+                "remove_args",
+                "unset_envs",
+                "args_mode",
+                "fingerprint",
+            ):
+                if key in measurement_provenance:
+                    promotion_measurement[key] = measurement_provenance[key]
             for key in (
                 "accuracy",
                 "launch_evidence",
@@ -1987,6 +2006,44 @@ class KernelPhase(PhaseHandler):
                 value = measurement_provenance.get(key)
                 if value not in (None, "", {}):
                     promotion_measurement[key] = value
+        if not isinstance(measurement_provenance, Mapping) or "extra_server_args" not in measurement_provenance:
+            from hyperloom.common.coerce import to_str_list
+            from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+
+            from ..actions.executors._grid_server_args import compose_server_args
+
+            accepted_controls = _accepted_config_controls(result.get("accepted_config"))
+            prior_controls = _accepted_config_controls(cb_now)
+            launch_controls = {**prior_controls, **accepted_controls}
+            for key in ("remove_args", "unset_envs"):
+                values = list(
+                    dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key)))
+                )
+                if values:
+                    launch_controls[key] = values
+            if launch_controls:
+                complete = accepted_controls.get("args_mode") == "replace"
+                prior_complete = prior_controls.get("args_mode") == "replace"
+                inherited_args = ""
+                if not complete and not prior_complete:
+                    recipe_envs = self._read_recipe_bench_envs(str(self.shared_state.baseline_config_path or ""))
+                    inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
+                promotion_measurement["extra_server_args"] = compose_server_args(
+                    inherited_args=inherited_args,
+                    base_extra_args="" if complete else cb_now.get("extra_server_args"),
+                    variant_extra_args=accepted_flags,
+                    remove_args=accepted_controls.get("remove_args")
+                    if complete or prior_complete
+                    else launch_controls.get("remove_args"),
+                    args_mode="replace" if complete else "append",
+                )
+                launch_envs = dict(cb_now.get("extra_envs") or {})
+                for key in accepted_controls.get("unset_envs", []):
+                    launch_envs.pop(key, None)
+                launch_envs.update(parsed_envs)
+                promotion_measurement["extra_envs"] = launch_envs
+                promotion_measurement.update(launch_controls)
+                promotion_measurement["args_mode"] = "replace"
         lifted = self._lift_to_current_best(
             "geak_e2e",
             measured,

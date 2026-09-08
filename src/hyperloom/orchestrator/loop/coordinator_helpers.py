@@ -683,6 +683,17 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
     return flags, envs
 
 
+def _accepted_config_controls(cfg: Any) -> dict[str, Any]:
+    """Normalize explicit GEAK launch controls; unmarked flags remain a delta.
+
+    ``args_mode=replace`` attests that ``flags`` is complete. Neither a result
+    schema version nor an empty environment mapping carries that meaning.
+    """
+    from ..actions.executors._proposal_identity import controls_of, normalize_proposal
+
+    return controls_of(normalize_proposal(cfg if isinstance(cfg, dict) else {}))
+
+
 def _geak_revalidation_decision(
     *,
     measured: Any,
@@ -711,6 +722,7 @@ def _geak_result_has_material(
     *,
     prev_best_flags: str = "",
     prev_best_envs: Any = None,
+    prev_best_controls: Any = None,
 ) -> bool:
     """Decide whether a GEAK result carries a material optimization product."""
     from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
@@ -734,9 +746,11 @@ def _geak_result_has_material(
     if str(result.get("final_patch") or "").strip():
         return True
     accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
-    # A missing / all-empty accepted_config carries no config optimization; a bare fingerprint mismatch against a
-    # non-empty current_best is NOT material (promoting it would wipe the existing config to empty).
-    if not accepted_flags and not parsed_envs:
+    controls = _accepted_config_controls(result.get("accepted_config"))
+    # A missing / all-empty accepted_config carries no config optimization; a
+    # bare fingerprint mismatch against a non-empty current_best is NOT material
+    # (promoting it would wipe the existing config to empty).
+    if not accepted_flags and not parsed_envs and not controls:
         return False
     # Both sides go through the same guard: a resume can hand current_best the raw accepted_config, and an untrusted
     # key on one side only reads as a diff.
@@ -744,8 +758,10 @@ def _geak_result_has_material(
         dict(prev_best_envs or {}),
         allow_predicate=is_allowed_variant_env_key,
     )
-    got_fp = canonical_fingerprint(accepted_flags, parsed_envs)
-    prev_fp = canonical_fingerprint(str(prev_best_flags or ""), prev_envs)
+    got_fp = canonical_fingerprint(accepted_flags, parsed_envs, **controls)
+    prev_fp = canonical_fingerprint(
+        str(prev_best_flags or ""), prev_envs, **(_accepted_config_controls(prev_best_controls) if controls else {})
+    )
     return got_fp != prev_fp
 
 

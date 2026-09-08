@@ -51,12 +51,13 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
-from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
+from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _accepted_config_as_variant,
+    _accepted_config_controls,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
@@ -4299,6 +4300,7 @@ class WritebackCollaborator:
                             ps,
                             prev_best_flags=str(cb_now.get("extra_server_args") or ""),
                             prev_best_envs=cb_now.get("extra_envs") or {},
+                            prev_best_controls=cb_now,
                         ):
                             decision = "no_material"
                 pending = getattr(self.shared_state, "geak_pending", None) or {}
@@ -5945,16 +5947,11 @@ class WritebackCollaborator:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
         benchmark_script = baseline_benchmark_script(self.shared_state.last_baseline)
-        # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
-        # revalidation config from result.json (the SINGLE source of truth), NOT
-        # from stack materialization. This guarantees the same-harness rebench
-        # launches byte-for-byte the config GEAK optimized (flags + parsed env +
-        # authored overlay), independent of whether the optimization is a MoE
-        # tuned-config / kernel / flag winner — no case-by-case markers. The
-        # consumer (_promote_to_shared_state) asserts config identity + effect
-        # before stamping validated, and falls back to 2a (GEAK harness) on miss.
+        # GEAK's explicit launch controls distinguish complete flags from legacy
+        # deltas. Both retain the current stack's environment removal controls.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
+        ps_controls = _accepted_config_controls(ps_cfg)
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
         # a result carrying an accepted, positive-delta kernel is revalidated
@@ -5962,7 +5959,12 @@ class WritebackCollaborator:
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
         ps_has_material = ps_admissible and _geak_result_has_material(ps)
         if ps_admissible and (
-            ps_cfg.get("flags") or ps_cfg.get("env") or "env_map" in ps_cfg or ps_overlay or ps_has_material
+            ps_cfg.get("flags")
+            or ps_cfg.get("env")
+            or "env_map" in ps_cfg
+            or ps_controls
+            or ps_overlay
+            or ps_has_material
         ):
             from ..actions.executors._proposal_identity import effective_fingerprint
 
@@ -5980,7 +5982,7 @@ class WritebackCollaborator:
                     ps_overlay,
                 )
                 ps_overlay = ""
-            if not (ps_flags or ps_envs or ps_overlay):
+            if not (ps_flags or ps_envs or ps_controls or ps_overlay):
                 if not ps_has_material:
                     return {"skipped": True, "reason": "geak_no_material"}
                 # A dead overlay or a source-patch-only result cannot be
@@ -5990,17 +5992,22 @@ class WritebackCollaborator:
                     "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
                     "fallback": "geak_harness",
                 }
-            if ps_flags or ps_envs or ps_overlay:
-                launch = self._current_best_launch_config()
-                base_controls: dict[str, Any] = {}
-                if launch["remove_args"]:
-                    base_controls["base_remove_args"] = launch["remove_args"]
-                if launch["unset_envs"]:
-                    base_controls["base_unset_envs"] = launch["unset_envs"]
-                if launch["args_mode"] == "replace":
-                    base_controls["base_args_mode"] = "replace"
-                # Explore folds the frozen base controls into its variant identity.
-                expected_cfg_hash = effective_fingerprint(ps_flags, ps_envs, **base_controls)
+            if ps_flags or ps_envs or ps_controls or ps_overlay:
+                cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                base_params = stack_base_params({**cb_now, **self._current_best_launch_config()})
+                if ps_controls.get("args_mode") == "replace":
+                    base_params["base_extra_args"] = ""
+                    base_params["base_args_mode"] = "replace"
+                # This is Explore's stack-relative proposal identity. The
+                # materialized launch and its evidence carry inherited values.
+                expected_cfg_hash = effective_fingerprint(
+                    ps_flags,
+                    ps_envs,
+                    controls=ps_controls,
+                    base_remove_args=base_params.get("base_remove_args"),
+                    base_unset_envs=base_params.get("base_unset_envs"),
+                    base_args_mode=base_params.get("base_args_mode"),
+                )
                 # ``expected_cfg_hash`` cannot see the overlay, so carry the
                 # overlay's own identity beside it. The consumer re-checks both
                 # after the run: a dropped or altered overlay then reads as
@@ -6022,6 +6029,7 @@ class WritebackCollaborator:
                             "name": "geak_revalidate",
                             "extra_args": ps_flags,
                             "extra_envs": dict(ps_envs),
+                            **ps_controls,
                             "overlay_pythonpath": ps_overlay,
                             "provenance": "geak_revalidate",
                             # Only claim kernels when an overlay is actually
@@ -6033,6 +6041,7 @@ class WritebackCollaborator:
                     # Revalidation reproduces the whole stack, so its gain is
                     # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                    **base_params,
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
