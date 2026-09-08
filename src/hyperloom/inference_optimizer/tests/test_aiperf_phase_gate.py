@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import os
@@ -46,6 +47,107 @@ class _ProgressHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         return
+
+
+@pytest.mark.parametrize(
+    "framework,body,expected",
+    [
+        ("sglang", '{"num_steps":8}', True),
+        ("vllm", '{"num_steps":8}', False),
+        ("", '{"num_steps":8}', False),
+        ("sglang", '{"num_steps":true}', False),
+        ("sglang", '{"num_steps":8.0}', False),
+        ("sglang", '{"num_steps":"8"}', False),
+        ("sglang", '{"num_steps":0}', False),
+        ("sglang", '{"num_steps":-1}', False),
+        ("sglang", '{"num_steps":8,"other":NaN}', False),
+        ("sglang", "{}", False),
+        ("sglang", "[]", False),
+        ("sglang", "not JSON", False),
+    ],
+)
+def test_auto_bounded_requires_native_positive_integer_steps(framework, body, expected):
+    assert phase_gate.is_auto_bounded(framework, body) is expected
+
+
+def _write_trace(path, *, rank=None, gpu=True):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"traceEvents": [{"cat": "kernel" if gpu else "cpu_op", "ph": "X", "ts": 1, "dur": 2}]}
+    if rank is not None:
+        payload["distributedInfo"] = {"rank": rank}
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "wt", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    return path
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "177-TP-0-DECODE.trace.json.gz",
+        "worker-rank-0.pt.trace.json.gz",
+        "worker-rank0.pt.trace.json.gz",
+        "dp0_pp0_tp0_dcp0_ep0_rank0.1787293265778058798.pt.trace.json.gz",
+        "rank_0/trace.pt.trace.json.gz",
+        "r0.trace.json",
+    ],
+)
+def test_current_trace_proof_supports_framework_rank_names(tmp_path, name):
+    dirs = [str(tmp_path)]
+    snapshot = phase_gate.snapshot_traces(dirs)
+    _write_trace(tmp_path / name)
+    assert phase_gate.traces_complete(dirs, snapshot, 1)
+
+
+def test_current_trace_proof_accepts_rank_metadata_without_rank_filename(tmp_path):
+    dirs = [str(tmp_path)]
+    snapshot = phase_gate.snapshot_traces(dirs)
+    _write_trace(tmp_path / "worker-a.pt.trace.json.gz", rank=0)
+    _write_trace(tmp_path / "worker-b.pt.trace.json.gz", rank=1)
+    assert phase_gate.traces_complete(dirs, snapshot, 2)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["empty", "stale", "old_mtime", "partial_ranks", "duplicate_rank", "unknown_rank", "bad_gzip", "bad_json", "cpu_only", "rank_conflict", "bool_rank", "graph_capture"],
+)
+def test_current_trace_proof_rejects_incomplete_or_ambiguous_evidence(tmp_path, case):
+    dirs = [str(tmp_path)]
+    if case == "stale":
+        _write_trace(tmp_path / "r0.trace.json.gz")
+        _write_trace(tmp_path / "r1.trace.json.gz")
+    snapshot = phase_gate.snapshot_traces(dirs)
+    if case not in {"empty", "stale"}:
+        first = _write_trace(tmp_path / "r0.trace.json.gz")
+        second = tmp_path / "r1.trace.json.gz"
+        if case == "duplicate_rank":
+            second = tmp_path / "worker-rank-0.trace.json.gz"
+        elif case == "unknown_rank":
+            second = tmp_path / "worker.trace.json.gz"
+        elif case == "graph_capture":
+            second = tmp_path / "capture_traces" / "graph_capture_rank1.pt.trace.json.gz"
+        if case != "partial_ranks":
+            _write_trace(second, gpu=case != "cpu_only")
+        if case == "old_mtime":
+            os.utime(first, ns=(snapshot["started_ns"] - 1, snapshot["started_ns"] - 1))
+        elif case == "bad_gzip":
+            second.write_bytes(second.read_bytes()[:-8])
+        elif case == "bad_json":
+            with gzip.open(second, "wt", encoding="utf-8") as handle:
+                handle.write('{"traceEvents":[{"cat":"kernel","ph":"X","ts":1,"dur":2}]')
+        elif case in {"rank_conflict", "bool_rank"}:
+            _write_trace(second, rank=0 if case == "rank_conflict" else True)
+    assert not phase_gate.traces_complete(dirs, snapshot, 2)
+
+
+def test_current_trace_proof_accepts_rewritten_path_but_requires_known_tp(tmp_path):
+    dirs = [str(tmp_path)]
+    path = _write_trace(tmp_path / "r0.trace.json")
+    snapshot = phase_gate.snapshot_traces(dirs)
+    _write_trace(path)
+    os.utime(path, ns=(snapshot["started_ns"] + 1, snapshot["started_ns"] + 1))
+    assert phase_gate.traces_complete(dirs, snapshot, 1)
+    assert not phase_gate.traces_complete(dirs, snapshot, 0)
 
 
 def test_pick_loopback_port_returns_available_port():

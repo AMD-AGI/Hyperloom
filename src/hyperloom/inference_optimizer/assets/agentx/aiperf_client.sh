@@ -570,10 +570,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # all fail ``gzip -t``. That is the same corruption seen on a Kimi-K3 capture
   # and blamed at the time on copying the files too early; it was this.
   #
-  # So wait for the set to be COMPLETE (one file per rank) and STABLE (total
-  # size unchanged across consecutive samples) before returning and letting the
-  # teardown run. Bounded, and loud on timeout -- a truncated trace that is
-  # reported as a trace is worse than no trace, because TraceLens will read it.
+  # Stability only schedules the integrity check: success requires fresh,
+  # fully readable GPU traces for every expected rank, not just a file count.
   _trace_dirs() {
     _seen="|"
     # Configured profiler paths are valid before the server creates them; the
@@ -589,17 +587,20 @@ if [ "${PROFILE:-0}" = "1" ]; then
       case "$_seen" in *"|${d}|"*) ;; *) printf '%s\n' "$d" ;; esac
     fi
   }
-  _trace_stat() {  # -> "<count> <total bytes>"
-    _tc=0; _tb=0
-    for _d in $(_trace_dirs); do
-      for _f in "$_d"/*trace*; do
-        [ -f "$_f" ] || continue
-        _tc=$((_tc + 1))
-        _sz=$(wc -c < "$_f" 2>/dev/null || echo 0)
-        _tb=$((_tb + _sz))
-      done
-    done
-    printf '%s %s' "$_tc" "$_tb"
+  _trace_command() {
+    local -a _dirs=()
+    local _dir
+    while IFS= read -r _dir; do
+      [ -n "$_dir" ] && _dirs+=(--trace-dir "$_dir")
+    done < <(_trace_dirs)
+    python3 "$PHASE_GATE" "$@" "${_dirs[@]}"
+  }
+  _trace_stat() {  # -> "<current count> <total bytes>"
+    _trace_command trace-stat --snapshot "$TRACE_SNAPSHOT"
+  }
+  _trace_complete() {
+    [ -n "$TRACE_SNAPSHOT" ] && \
+      _trace_command traces-complete --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}"
   }
   _wait_for_trace_flush() {
     # Nothing was ever pointed at a directory, so there is nothing to flush.
@@ -626,7 +627,8 @@ if [ "${PROFILE:-0}" = "1" ]; then
     _t0=$(date +%s); _prev=""; _stable=0
     while :; do
       sleep 10
-      _now=$(_trace_stat); _cnt="${_now%% *}"; _el=$(( $(date +%s) - _t0 ))
+      _now=$(_trace_stat) || return 4
+      _cnt="${_now%% *}"; _el=$(( $(date +%s) - _t0 ))
       if [ "$_cnt" -gt 0 ] && [ "$_now" = "$_prev" ]; then
         _stable=$((_stable + 1))
       else
@@ -639,7 +641,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
       # Three identical samples AND, when TP is known, one file per rank. The
       # count check matters: ranks appear one at a time, so a set that is merely
       # "not growing right now" can still be missing half its ranks.
-      if [ "$_stable" -ge 3 ] && { [ "$_want" -eq 0 ] || [ "$_cnt" -ge "$_want" ]; }; then
+      if [ "$_stable" -ge 3 ] && [ "$_want" -gt 0 ] && [ "$_cnt" -ge "$_want" ] && _trace_complete; then
         log "trace flush complete after ${_el}s: ${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB"
         return 0
       fi
@@ -668,12 +670,17 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # until the cgroup OOM-killer takes it out mid-run. Forward the body when
     # there is one; vLLM ignores it (its bounds ride on --profiler-config.*).
     _pbody="${PROFILE_EXTRA_BODY:-}"
+    AUTO_BOUNDED=0
     if [ -n "$_pbody" ] && [ "$_pbody" != "{}" ]; then
       _pstart=(-H "Content-Type: application/json" -d "$_pbody")
       log "start_profile: forwarding capture bounds ${_pbody}"
+      if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" --body "$_pbody"; then
+        AUTO_BOUNDED=1
+      fi
     else
       _pstart=()
     fi
+    TRACE_SNAPSHOT="$(_trace_command snapshot-traces)" || TRACE_SNAPSHOT=""
     if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
          "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
@@ -690,14 +697,21 @@ if [ "${PROFILE:-0}" = "1" ]; then
         log "WARN capture stop gate failed; stopping the profiler immediately"
       fi
       STOP_OK=0
-      if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
-        STOP_OK=1
-        log "stop_profile OK"
-      else
-        log "WARN stop_profile failed"
-      fi
       FLUSH_RC=0
-      _wait_for_trace_flush || FLUSH_RC=$?
+      # Native num_steps may already have stopped SGLang. Never POST a redundant
+      # stop unless current complete traces cannot prove that auto-stop finished.
+      if [ "$AUTO_BOUNDED" -eq 1 ] && _trace_complete; then
+        STOP_OK=1
+        log "profile auto-completed: current GPU traces cover all expected ranks; skipping stop_profile"
+      else
+        if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
+          STOP_OK=1
+          log "stop_profile OK"
+        else
+          log "WARN stop_profile failed"
+        fi
+        _wait_for_trace_flush || FLUSH_RC=$?
+      fi
       if [ "$STOP_OK" -eq 1 ] && [ "$FLUSH_RC" -eq 0 ]; then
         _write_profile_capture_status "succeeded" "capture_complete" "$PHASE_START_NS" "$CAPTURE_RESULT"
       elif [ "$STOP_OK" -ne 1 ]; then

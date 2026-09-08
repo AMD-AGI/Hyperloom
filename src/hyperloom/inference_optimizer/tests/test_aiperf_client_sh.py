@@ -11,6 +11,7 @@ from FRAMEWORK / AGENTX_SERVER_SCRIPT. POSIX-only (skipped elsewhere).
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import shlex
@@ -82,6 +83,10 @@ for a in "$@"; do
     *start_profile*)
       printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}"
       printf '%s\n' start_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      if [ -n "${FAKE_TRACE_SOURCE:-}" ]; then
+        mkdir -p "$FAKE_TRACE_DEST"
+        cp "$FAKE_TRACE_SOURCE"/* "$FAKE_TRACE_DEST/"
+      fi
       exit "${FAKE_START_PROFILE_RC:-0}";;
     *stop_profile*)
       printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}"
@@ -96,7 +101,11 @@ _FAKE_PHASE_GATE = r"""#!/usr/bin/env python3
 import os
 import sys
 import json
+import runpy
+from pathlib import Path
 
+if sys.argv[1] in {"is-auto-bounded", "snapshot-traces", "trace-stat", "traces-complete"}:
+    runpy.run_path(str(Path(__file__).with_name("real_phase_gate.py")), run_name="__main__")
 if sys.argv[1] == "pick-port":
     print("19090")
     raise SystemExit(0)
@@ -197,6 +206,7 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
     res.mkdir()
     shutil.copy2(agentx_asset_dir() / "aiperf_client.sh", bench / "aiperf_client.sh")
     shutil.copy2(agentx_asset_dir() / "map_aiperf.py", bench / "map_aiperf.py")
+    shutil.copy2(agentx_asset_dir() / "aiperf_phase_gate.py", bench / "real_phase_gate.py")
     (bench / "aiperf_phase_gate.py").write_text(_FAKE_PHASE_GATE, encoding="utf-8")
     if make_builtin:
         _write_exec(bench / "vllm_mi300x.sh", _fake_builtin(write_pid))
@@ -748,6 +758,62 @@ def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, st
         assert capture["decision"]["stop_reason"] == "phase_complete"
 
 
+@pytest.mark.parametrize(
+    "framework,body,case,stop_rc,reason,stop_called",
+    [
+        ("sglang", '{"num_steps":8}', "complete", "22", "capture_complete", False),
+        ("sglang", '{"num_steps":8}', "stale", "0", "trace_files_missing", True),
+        ("sglang", '{"num_steps":8}', "partial_ranks", "0", "trace_flush_timeout", True),
+        ("sglang", '{"num_steps":8}', "bad_gzip", "0", "trace_flush_timeout", True),
+        ("sglang", '{"num_steps":8}', "empty", "22", "stop_profile_failed", True),
+        ("vllm", '{"num_steps":8}', "complete", "22", "stop_profile_failed", True),
+        ("sglang", '{"num_steps":true}', "complete", "22", "stop_profile_failed", True),
+    ],
+)
+def test_stop_is_skipped_only_for_proven_current_native_completion(
+    tmp_path, framework, body, case, stop_rc, reason, stop_called
+):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    if case != "empty":
+        for rank in range(1 if case == "partial_ranks" else 2):
+            path = source / f"177-TP-{rank}-DECODE.trace.json.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+            if case == "bad_gzip":
+                path.write_bytes(path.read_bytes()[:-8])
+            if case == "stale":
+                shutil.copy2(path, trace / path.name)
+    stop_marker = tmp_path / "stop.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        FRAMEWORK=framework,
+        PROFILE_EXTRA_BODY=body,
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_STOP_PROFILE_RC=stop_rc,
+        FAKE_TRACE_SOURCE=str(source) if case not in {"empty", "stale"} else "",
+        FAKE_TRACE_DEST=str(trace),
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="0",
+        **_client_only_env(bind, tmp_path),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert stop_marker.exists() is stop_called
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == reason
+    assert capture["status"] == ("succeeded" if reason == "capture_complete" else "failed")
+    argv = (tmp_path / "curl.txt").read_text().splitlines()
+    assert argv[argv.index("-d") + 1] == body
+    assert capture["requested_window_seconds"] == 0
+    _assert_external_server_untouched(tmp_path)
+
+
 def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
     """SGLang takes its capture bounds in the POST body, not on the serve line.
 
@@ -1282,9 +1348,12 @@ def test_the_client_waits_for_the_trace_to_stop_growing(tmp_path):
     trace = res / "torch_trace"
     trace.mkdir()
     grower = tmp_path / "grow.sh"
+    trace_file = shlex.quote(str(trace / "r0.trace.json"))
     grower.write_text(
         "#!/usr/bin/env bash\n"
-        f"for i in 1 2 3 4 5 6; do printf 'x%.0s' $(seq 1 2000) >> '{trace}/r0.trace.json'; sleep 2; done\n",
+        f"printf '%s' '{{\"traceEvents\":[' > {trace_file}\n"
+        f"for i in 1 2 3 4 5 6; do printf '%s' '{{\"cat\":\"kernel\",\"ph\":\"X\",\"ts\":1,\"dur\":2}},' >> {trace_file}; sleep 2; done\n"
+        f"printf '%s' '{{\"cat\":\"kernel\",\"ph\":\"X\",\"ts\":1,\"dur\":2}}]}}' >> {trace_file}\n",
         encoding="utf-8",
     )
     grower.chmod(0o755)
@@ -1308,10 +1377,15 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     trace = res / "torch_trace"
     trace.mkdir()
-    # Two ranks expected, only one ever appears -> the count gate never passes.
-    (trace / "r0.trace.json").write_text("partial", encoding="utf-8")
+    # A fresh but incomplete JSON trace cannot pass the integrity gate.
+    source = tmp_path / "trace-source"
+    source.mkdir()
+    (source / "r0.trace.json").write_text("partial", encoding="utf-8")
 
-    r = _run_profile(bench, bind, res, tmp_path, TP="2", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    r = _run_profile(
+        bench, bind, res, tmp_path, TP="2", AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
+        FAKE_TRACE_SOURCE=str(source), FAKE_TRACE_DEST=str(trace),
+    )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "trace flush did not settle" in out, out[-1500:]
@@ -1330,9 +1404,16 @@ def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     trace = res / "torch_trace"
     trace.mkdir()
-    (trace / "r0.trace.json").write_text("done", encoding="utf-8")
+    source = tmp_path / "trace-source"
+    source.mkdir()
+    (source / "r0.trace.json").write_text(
+        '{"traceEvents":[{"cat":"kernel","ph":"X","ts":1,"dur":2}]}', encoding="utf-8"
+    )
 
-    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    r = _run_profile(
+        bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
+        FAKE_TRACE_SOURCE=str(source), FAKE_TRACE_DEST=str(trace),
+    )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "trace flush did not settle" in out, out[-1500:]

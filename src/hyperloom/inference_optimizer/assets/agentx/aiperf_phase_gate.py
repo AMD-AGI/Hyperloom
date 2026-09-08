@@ -7,17 +7,111 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import http.client
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Any
+
+
+# Keep the standalone asset aligned with tools/_trace_rank.py's framework names.
+_TRACE_RANK_PATTERNS = (
+    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[-_.])tp[-_](\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"^r(\d+)(?=[-.])", re.IGNORECASE),
+)
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def is_auto_bounded(framework: str, body: str) -> bool:
+    """Only SGLang's forwarded positive integer num_steps implies auto-stop."""
+    try:
+        payload = json.loads(body, parse_constant=_reject_json_constant)
+    except ValueError:
+        return False
+    steps = payload.get("num_steps") if isinstance(payload, dict) else None
+    return framework == "sglang" and type(steps) is int and steps > 0
+
+
+def _trace_files(directories: list[str]) -> dict[str, list[int]]:
+    files = {}
+    for directory in directories:
+        for path in Path(directory).resolve().rglob("*.trace.json*"):
+            if path.name.startswith(("graph_capture_", "merged-")) or {"capture_traces", "trace_split"}.intersection(path.parts):
+                continue
+            if path.is_file() and path.name.endswith((".trace.json", ".trace.json.gz")):
+                stat = path.stat()
+                files[str(path)] = [stat.st_mtime_ns, stat.st_size]
+    return files
+
+
+def snapshot_traces(directories: list[str]) -> dict[str, Any]:
+    """Record the trace baseline immediately before start_profile is sent."""
+    return {"started_ns": time.time_ns(), "files": _trace_files(directories)}
+
+
+def current_traces(directories: list[str], snapshot: dict[str, Any]) -> dict[str, list[int]]:
+    """Exclude unchanged paths and files older than the capture boundary."""
+    return {
+        path: stat
+        for path, stat in _trace_files(directories).items()
+        if stat[0] >= snapshot["started_ns"] and stat != snapshot["files"].get(path)
+    }
+
+
+def traces_complete(directories: list[str], snapshot: dict[str, Any], tp: int) -> bool:
+    """Require complete current GPU traces for every distinct expected rank."""
+    if tp <= 0:
+        return False
+    ranks = set()
+    try:
+        files = current_traces(directories, snapshot)
+        if len(files) < tp:
+            return False
+        for name, before in files.items():
+            path = Path(name)
+            opener = gzip.open if path.suffix == ".gz" else open
+            with opener(path, "rt", encoding="utf-8") as handle:
+                payload = json.load(handle, parse_constant=_reject_json_constant)
+            stat = path.stat()
+            if [stat.st_mtime_ns, stat.st_size] != before or not isinstance(payload, dict):
+                return False
+            rank = None
+            for token, fullmatch in ((path.name, False), (path.parent.name, True)):
+                for pattern in _TRACE_RANK_PATTERNS:
+                    match = pattern.fullmatch(token) if fullmatch else pattern.search(token)
+                    if match:
+                        rank = int(match.group(1))
+                        break
+                if rank is not None:
+                    break
+            metadata = payload.get("distributedInfo", {})
+            if isinstance(metadata, dict) and "rank" in metadata:
+                header_rank = metadata["rank"]
+                if type(header_rank) is not int or (rank is not None and rank != header_rank):
+                    return False
+                rank = header_rank
+            events = payload.get("traceEvents")
+            if rank is None or rank not in range(tp) or rank in ranks or not isinstance(events, list):
+                return False
+            if not any(isinstance(event, dict) and event.get("cat") == "kernel" and event.get("ph") == "X" for event in events):
+                return False
+            ranks.add(rank)
+        return ranks == set(range(tp)) and files == current_traces(directories, snapshot)
+    except (OSError, EOFError, ValueError, zlib.error):
+        return False
 
 
 def pick_loopback_port() -> int:
@@ -196,6 +290,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("pick-port", help="print an unused loopback TCP port")
+    auto_parser = subparsers.add_parser("is-auto-bounded", help="check the forwarded native capture bound")
+    auto_parser.add_argument("--framework", required=True)
+    auto_parser.add_argument("--body", required=True)
+    for command in ("snapshot-traces", "trace-stat", "traces-complete"):
+        trace_parser = subparsers.add_parser(command)
+        trace_parser.add_argument("--trace-dir", action="append", default=[])
+        if command != "snapshot-traces":
+            trace_parser.add_argument("--snapshot", required=True)
+        if command == "traces-complete":
+            trace_parser.add_argument("--tp", required=True, type=int)
 
     wait_parser = subparsers.add_parser("wait-phase", help="wait for an AIPerf phase")
     wait_parser.add_argument("--api-url", required=True)
@@ -231,6 +335,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the requested phase-gate command."""
     args = build_parser().parse_args(argv)
+    if args.command == "is-auto-bounded":
+        return 0 if is_auto_bounded(args.framework, args.body) else 1
+    if args.command in {"snapshot-traces", "trace-stat", "traces-complete"}:
+        try:
+            if args.command == "snapshot-traces":
+                print(json.dumps(snapshot_traces(args.trace_dir)))
+                return 0
+            snapshot = json.loads(args.snapshot)
+            if args.command == "traces-complete":
+                return 0 if traces_complete(args.trace_dir, snapshot, args.tp) else 1
+            files = current_traces(args.trace_dir, snapshot)
+            print(len(files), sum(stat[1] for stat in files.values()))
+            return 0
+        except (OSError, ValueError) as exc:
+            print(f"aiperf trace check failed: {exc}", file=sys.stderr)
+            return 1
     if args.command == "pick-port":
         print(pick_loopback_port())
         return 0
