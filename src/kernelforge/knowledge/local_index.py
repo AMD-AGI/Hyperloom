@@ -205,6 +205,37 @@ def _render_level(root: Path, rel: str) -> str:
     return f"{header}\n\n{listing}"
 
 
+def _render_pointer(root: Path, rel: str) -> str:
+    """Render one knowledge level as a one-line pointer instead of its whole map.
+
+    For the SECOND language a backend carries. Triton and Gluon carry each
+    other so a campaign knows that switching is an available move rather than a
+    different project -- but knowing the move exists needs the map's location,
+    not its 2.7k-token body inlined ahead of every turn of every session. The
+    pointer keeps the affordance and defers the map to a ``Read`` the agent
+    makes only if it actually crosses over.
+    """
+    folder = root / rel
+    if not folder.is_dir():
+        return ""
+    index = folder / "INDEX.md"
+    if not index.is_file():
+        # No map to defer; a flat listing is already short, so inline it.
+        return _render_level(root, rel)
+    title = ""
+    try:
+        body = _strip_frontmatter(index.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        body = ""
+    for line in body.split("\n"):
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
+    header = f"## {rel}/  —  base: {folder}"
+    what = f" — {title}" if title else ""
+    return f"{header}\n\nMap not inlined{what}. `Read` `{index}` if this task crosses into `{rel}`."
+
+
 def build_forge_knowledge(
     root: str | Path | None = None,
     *,
@@ -223,10 +254,18 @@ def build_forge_knowledge(
     if include_mori:
         rels.append("framework/mori")
     languages = [language] if isinstance(language, str) else list(language or ())
-    for name in dict.fromkeys(item for item in languages if item):
-        rels.append(f"languages/{name}")
+    deferred: set[str] = set()
+    for position, name in enumerate(dict.fromkeys(item for item in languages if item)):
+        rel = f"languages/{name}"
+        rels.append(rel)
+        # The primary language is inlined whole; every language after it is the
+        # one the backend merely carries, and is deferred to a pointer.
+        if position:
+            deferred.add(rel)
 
-    sections = [s for s in (_render_level(root_path, rel) for rel in rels) if s]
+    sections = [
+        s for s in ((_render_pointer if rel in deferred else _render_level)(root_path, rel) for rel in rels) if s
+    ]
     if not sections:
         return ""
 
