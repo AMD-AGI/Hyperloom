@@ -1525,7 +1525,6 @@ class AnalysisAgentService:
                         cwd=str(work_root),
                         writable=True,
                         timeout_sec=timeout_sec,
-                        reasoning_effort="high",
                         additional_directories=[
                             context.workspace,
                             str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),

@@ -168,7 +168,6 @@ def _create_agent_backend(
         provider,
         model=model,
         timeout_sec=_agent_timeout_sec(),
-        reasoning_effort="high",
         sandbox_mode=sandbox_mode,
         fallback_provider="",
     )

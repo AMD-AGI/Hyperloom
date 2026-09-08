@@ -119,6 +119,7 @@ def make_agent_fn(
             executable=config.agent_cli,
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,
+            context_window=config.agent_context_window,
             sandbox_mode=config.agent_sandbox_mode,
             precheck=config.agent_precheck,
             fallback_provider=config.agent_fallback_provider,
@@ -577,7 +578,6 @@ Make your change(s) now.
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
-            reasoning_effort="max",
             tool_policy=AgentToolPolicy(
                 read=True,
                 search=True,
@@ -841,7 +841,6 @@ def _make_session_summarizer(
         allow_untracked=True,
         read_only_resume=True,
         protected_globs=["*"],
-        reasoning_effort="high",
         # Preserve the implementer's progress log as a stable fallback record.
         progress_log=None,
         tool_policy=AgentToolPolicy(

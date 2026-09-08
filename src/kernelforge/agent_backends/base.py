@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from kernelforge.agent_backends.model_context import with_context_window
+
 
 #: Environment overlay applied to every session started inside the current
 #: context. Held in a ``ContextVar`` rather than in ``os.environ`` because
@@ -80,6 +82,10 @@ class AgentRuntimeConfig:
     executable: str = ""
     timeout_sec: int = 1800
     reasoning_effort: str = "high"
+    #: Context window to name in the model id, empty when the gateway
+    #: publishes none. Settled once in :func:`resolve_agent_runtime` so
+    #: ``model`` already carries it; see :mod:`kernelforge.agent_backends.model_context`.
+    context_window: str = ""
     sandbox_mode: str = "bypass"
     precheck: bool = True
     fallback_provider: str = ""
@@ -200,12 +206,29 @@ class AgentRunSpec:
     ignored_untracked_globs: list[str] = field(default_factory=list)
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
-        """Fill omitted per-run values from the runtime and the session scope."""
+        """Settle this session's model, context window, effort and environment.
+
+        The runtime's reasoning effort wins over the spec's, which is the
+        reverse of how these two used to rank. Under the old order every call
+        site that wrote an effort of its own -- most of them -- was immune to
+        ``FORGE_AGENT_REASONING_EFFORT``, so an operator who set it watched two
+        thirds of the sessions ignore them and then read the campaign as
+        evidence about a setting it never ran under. An effort written in code
+        is this repository's opinion; one written in the environment is the
+        operator's decision about the run in front of them, and the operator has
+        to win or the variable is decorative. The spec's own value survives only
+        for a runtime that names none, which no provider in this repository
+        builds.
+
+        The context window is not negotiated at a call site either: every Claude
+        session gets whichever one the deployment named, and none when it named
+        none. See :mod:`kernelforge.agent_backends.model_context`.
+        """
         return replace(
             self,
-            model=self.model.strip() or runtime.model,
+            model=with_context_window(self.model.strip() or runtime.model, runtime.context_window),
             timeout_sec=(self.timeout_sec if self.timeout_sec is not None else runtime.timeout_sec),
-            reasoning_effort=(self.reasoning_effort.strip() or runtime.reasoning_effort),
+            reasoning_effort=(runtime.reasoning_effort.strip() or self.reasoning_effort.strip()),
             env={**_session_environment.get(), **self.env},
         )
 

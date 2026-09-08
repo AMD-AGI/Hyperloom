@@ -206,6 +206,33 @@ for the user-facing summary.
 
 ### Changed
 
+- **An agent session's reasoning effort is now the operator's decision, not the
+  call site's.** `AgentRunSpec.resolved()` used to let a spec's own
+  `reasoning_effort` outrank the runtime's, and two thirds of the sessions in
+  this repository wrote one -- so an operator who set
+  `FORGE_AGENT_REASONING_EFFORT` watched most of the campaign ignore it and
+  then read the result as evidence about a setting it never ran under. The
+  ranking is inverted and every call-site literal is deleted rather than left
+  in place looking live; the spec's value survives only for a runtime that
+  names no effort, which no provider here builds. Nine sessions that hardcoded
+  `max` now run at the campaign effort (`high` by default), which is also the
+  cheaper direction.<br/>
+  **Context window.** `agent_backends/model_context.py` names the window a
+  Claude session runs on, applied once where the runtime is built. It is
+  **empty by default and has to stay that way**: measured against the gateway
+  Hyperloom points Forge at (`.../api/v1/llm-proxy`), `claude-opus-5` answers
+  200 while `claude-opus-5[1m]` -- and every other bracketed form -- answers
+  `400 Invalid model name`, and `/v1/models` publishes 23 ids of which none is
+  windowed. Applying a suffix unconditionally would fail every
+  Hyperloom-launched session at the startup probe. Set
+  `FORGE_CLAUDE_CONTEXT_WINDOW` (or `CLAUDE_CONTEXT_WINDOW`) on a deployment
+  whose gateway does publish windowed ids. A cross-provider or cross-backend
+  fallback rebuilds the runtime, and carries the window across with it.<br/>
+  **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
+  so it answered "some configuration works" rather than "this one does"; it now
+  asks under the configuration the campaign will run. `[` terminates the model
+  family regex, so `claude-opus-5[1m]` is recognised as the model it is.
+
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
   dependency and `install.sh` already owned that install, but it was gated on a

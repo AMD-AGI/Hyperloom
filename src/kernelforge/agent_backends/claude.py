@@ -27,6 +27,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
+from kernelforge.agent_backends.model_context import with_context_window
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 from kernelforge.llm import (
     format_custom_headers,
@@ -90,7 +91,10 @@ def _supports_adaptive_thinking(model: str) -> bool:
     if not normalized:
         return False
     family = re.search(
-        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._]|$)",
+        # ``[`` terminates the family too: ``claude-opus-5[1m]`` is the same
+        # model as ``claude-opus-5``, and reading the window as part of the
+        # version would drop it out of the family it belongs to.
+        r"claude-(?:opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[-._\[]|$)",
         normalized,
     )
     if family:
@@ -313,7 +317,7 @@ class ClaudeBackend:
         """Make one tool-free request to verify URL/key/model compatibility."""
         del usage  # Availability probes are not part of campaign accounting.
         self.preflight()
-        selected_model = model.strip() or self.runtime.model
+        selected_model = with_context_window(model.strip() or self.runtime.model, self.runtime.context_window)
         timeout = timeout_sec or min(60, self.runtime.timeout_sec)
         command = [
             resolve_claude_cli(self.runtime.executable),
@@ -324,7 +328,11 @@ class ClaudeBackend:
             "--model",
             selected_model,
             "--effort",
-            reasoning_effort.strip() or "low",
+            # The probe answers "will the campaign's configuration work", so it
+            # has to ask under that configuration: pinning ``low`` here made the
+            # probe pass on deployments where the configured effort is the thing
+            # the gateway rejects.
+            reasoning_effort.strip() or self.runtime.reasoning_effort.strip() or "low",
             "--permission-mode",
             "dontAsk",
             "--tools",

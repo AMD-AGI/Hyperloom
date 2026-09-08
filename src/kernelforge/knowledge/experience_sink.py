@@ -366,7 +366,6 @@ async def _query_llm(config, workspace: str, prompt: str, usage=None) -> str:
             cwd=workspace,
             writable=False,
             timeout_sec=_LLM_TIMEOUT_SEC,
-            reasoning_effort="high",
             tool_policy=AgentToolPolicy(
                 read=False,
                 search=False,

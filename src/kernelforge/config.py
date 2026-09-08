@@ -68,6 +68,11 @@ class Config:
     agent_cli: str = ""
     agent_timeout_sec: int = 1800
     agent_reasoning_effort: str = "high"
+    # Context window to name in the Claude model id, e.g. "1m" -> the session
+    # runs as ``claude-opus-5[1m]``. Empty by default and it has to stay that
+    # way: a gateway that does not publish a windowed id rejects the whole
+    # session with "Invalid model name", so this is opt-in per deployment.
+    agent_context_window: str = ""
     agent_sandbox_mode: str = "bypass"
     agent_precheck: bool = True
     agent_fallback_provider: str = "claude"
@@ -128,6 +133,7 @@ class Config:
         if self.agent_backend != "auto":
             get_agent_provider(self.agent_backend)
         self.agent_reasoning_effort = (self.agent_reasoning_effort or "high").strip()
+        self.agent_context_window = (self.agent_context_window or "").strip()
         self.agent_sandbox_mode = (self.agent_sandbox_mode or "bypass").strip().lower()
         self.agent_fallback_provider = (self.agent_fallback_provider or "").strip().lower()
         if self.agent_fallback_provider:
@@ -183,6 +189,7 @@ class Config:
             executable=self.agent_cli,
             timeout_sec=self.agent_timeout_sec,
             reasoning_effort=self.agent_reasoning_effort,
+            context_window=self.agent_context_window,
             sandbox_mode=self.agent_sandbox_mode,
             precheck=self.agent_precheck,
             fallback_provider=self.agent_fallback_provider,
@@ -225,6 +232,10 @@ class Config:
             agent_reasoning_effort=overrides.get(
                 "agent_reasoning_effort",
                 os.getenv("FORGE_AGENT_REASONING_EFFORT", "high"),
+            ),
+            agent_context_window=overrides.get(
+                "agent_context_window",
+                os.getenv("FORGE_CLAUDE_CONTEXT_WINDOW", "").strip() or os.getenv("CLAUDE_CONTEXT_WINDOW", "").strip(),
             ),
             agent_sandbox_mode=overrides.get(
                 "agent_sandbox_mode",

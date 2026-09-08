@@ -829,7 +829,8 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
 
     assert captured["spec"].model == "gpt-codex-test"
     assert captured["spec"].provider_options == {}
-    assert captured["spec"].reasoning_effort == "max"
+    # The runtime effort outranks anything the dispatch would have written.
+    assert captured["spec"].reasoning_effort == "high"
     assert config.max_turns == 500
     assert captured["spec"].tool_policy.max_turns == config.max_turns
     assert "ONE self-correcting session" in captured["spec"].system_prompt
