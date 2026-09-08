@@ -1033,7 +1033,6 @@ def test_build_params_notes_prior_patches_for_mandate(monkeypatch):
     ]
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
-    assert "enablement_base_patches" not in params
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "001_qk_rope.patch" in params["notes"]
 
@@ -1424,10 +1423,8 @@ async def test_rearm_advanced_merges_args_by_flag_not_substring():
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_artifacts(monkeypatch):
-    """Artifacts applied in an advanced round must be recorded in kept_artifacts
-    so that _replay_base_artifacts re-installs them at the start of the next round.
-    Before the fix, the advanced result had no 'artifacts_applied' key, so
-    _stack_kept_artifacts() always saw an empty list."""
+    """Artifacts applied in an advanced round must be recorded in kept_artifacts,
+    which feeds the next round's mandate note and the replay script."""
     fake = _enqueue_self()
     art = {
         "target": "/sgl-workspace/sglang/srt/server_args.py",

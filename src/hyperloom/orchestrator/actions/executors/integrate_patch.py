@@ -1306,6 +1306,28 @@ class _ArtifactSpec:
     description: str = ""
 
 
+def _artifact_candidates(root: Path, rel: str) -> list[Path]:
+    """The joins a root admits for a framework-relative artifact target.
+
+    A pip-installed root is the package directory itself, so a target that
+    repeats the package name (``vllm/model_executor/...``) belongs under the
+    root's parent; a checkout holds the package one level down and joins
+    directly. Both are offered and the caller picks by which parent exists,
+    the same rule ``_resolve_focus_dir`` applies to prompt focus directories.
+
+    Args:
+        root: A framework search root.
+        rel: The framework-relative target.
+
+    Returns:
+        Candidate absolute paths, direct join first.
+    """
+    candidates = [(root / rel).resolve()]
+    if (root / "__init__.py").is_file():
+        candidates.append((root.parent / rel).resolve())
+    return candidates
+
+
 def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     """Resolve an artifact target (framework-relative, or absolute) to a path.
 
@@ -1653,8 +1675,8 @@ class IntegratePatchExecutor:
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self._apply_attempted: bool = False
-        # This round's deliverable, digests frozen where the work was validated.
-        # Held so the revert can read the apply's backup ledger back.
+        # Re-derived per round by _stage_apply so the revert reads this round's
+        # backup ledger and never a prior round's.
         self._nogit_backup_root: Path | None = None
         # Blocked env names this round was granted, each bound to one value.
 
@@ -2782,6 +2804,11 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Enablement gate: runnability + minimal-correctness.
 
+        A round is accepted when the boot runs or reaches a deeper wall, and its
+        writes then stay in the tree for the next round to build on; ``kept`` and
+        ``advanced`` differ only in whether the lane is finished. Anything short
+        of that reverts to the state the previous round left.
+
         The verdict depends on the trigger origin, because the two origins have
         different evidence available:
 
@@ -2892,85 +2919,8 @@ class IntegratePatchExecutor:
             correctness_ok=correctness_ok,
             boot_timed_out=boot_timed_out,
         )
-        if not runs:
-            advanced = not booted and round_advanced(before_loaded.observation, after_loaded.observation)
-            if advanced:
-                wall = after_loaded.observation.stage_failed if after_loaded.observation is not None else None
-                new_log = str(bench_result.get("error") or "")
-                commit_failure, _ = self._commit_accepted_work(
-                    framework_root=framework_root,
-                    applied=applied,
-                    applied_artifacts=applied_artifacts,
-                    message=f"hyperloom advanced {specialist_task_id}",
-                )
-                if commit_failure:
-                    log.error(
-                        "integrate_patch: commit-on-advanced failed (%s); reverting",
-                        commit_failure,
-                    )
-                    artifacts_reverted = self._revert_artifacts(applied_artifacts)
-                    reverted = self._revert_patches(framework_root, applied)
-                    return _with_stash_restore(
-                        framework_root,
-                        stash_state,
-                        stash_note,
-                        {
-                            "status": "reverted",
-                            "error_class": "keep_commit_failed",
-                            "error": commit_failure,
-                            "specialist_task_id": specialist_task_id,
-                            "patches_applied": [],
-                            "patches_reverted": [str(p) for p in reverted],
-                            "artifacts_reverted": artifacts_reverted,
-                            "enablement": True,
-                            "framework_root": str(framework_root or ""),
-                            "reason": f"enablement advanced but commit failed: {commit_failure}",
-                            "workspace": str(output_root),
-                        },
-                    )
-                await self._maybe_write_framework_kb_record(
-                    params=params,
-                    done_payload=done_payload,
-                    outcome="integrated",
-                    tps_delta_pct=0.0,
-                    extra=extra,
-                )
-                return _with_stash_restore(
-                    framework_root,
-                    stash_state,
-                    stash_note,
-                    {
-                        "status": "advanced",
-                        "specialist_task_id": specialist_task_id,
-                        "patches_applied": [str(p) for p in applied],
-                        "patches_reverted": [],
-                        "artifacts_applied": applied_artifacts,
-                        "extra_envs_applied": extra_envs_applied,
-                        "extra_server_args_applied": extra_server_args_applied,
-                        "framework_root": str(framework_root or ""),
-                        "output_throughput": new_tput,
-                        "enablement": True,
-                        "advanced": True,
-                        "runnable": False,
-                        "correctness_verified": False,
-                        "reason": _with_skipped_setup_reason(
-                            f"enablement progressed: {run_reason}; boot advanced "
-                            f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
-                            setup_result,
-                        ),
-                        "after_signature": after_signature.to_dict() if after_signature is not None else {},
-                        "enablement_launch_log": new_log,
-                        # The wall this round advanced to, for the next round's
-                        # before half.
-                        "enablement_observation_path": after_loaded.path,
-                        **bringup_evidence,
-                        "setup_commands_applied": list(setup_result.get("applied") or []),
-                        "setup_commands_skipped": list(setup_result.get("skipped") or []),
-                        "bench_result": bench_result,
-                        "workspace": str(output_root),
-                        **eval_provenance,
-                    },
-                )
+        advanced = not runs and not booted and round_advanced(before_loaded.observation, after_loaded.observation)
+        if not runs and not advanced:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             _gc_on_revert()
@@ -3010,15 +2960,18 @@ class IntegratePatchExecutor:
                 },
             )
 
+        # Accepted: the boot either runs or reached a deeper wall. Both keep the
+        # work in the tree and differ only in whether the lane is finished.
         commit_failure, _ = self._commit_accepted_work(
             framework_root=framework_root,
             applied=applied,
             applied_artifacts=applied_artifacts,
-            message=f"hyperloom enablement kept {specialist_task_id}",
+            message=f"hyperloom enablement {'advanced' if advanced else 'kept'} {specialist_task_id}",
         )
         if commit_failure:
             log.error(
-                "integrate_patch: commit-on-enablement-kept failed (%s); reverting",
+                "integrate_patch: commit-on-accept failed (%s); reverting rather than "
+                "reporting progress the next round would erase",
                 commit_failure,
             )
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
@@ -3038,10 +2991,57 @@ class IntegratePatchExecutor:
                     "artifacts_reverted": artifacts_reverted,
                     "enablement": True,
                     "framework_root": str(framework_root or ""),
-                    "reason": f"enablement kept but commit failed: {commit_failure}",
+                    "reason": f"enablement progress could not be committed: {commit_failure}",
                     "workspace": str(output_root),
                 },
             )
+
+        if advanced:
+            wall = after_loaded.observation.stage_failed if after_loaded.observation is not None else None
+            await self._maybe_write_framework_kb_record(
+                params=params,
+                done_payload=done_payload,
+                outcome="integrated",
+                tps_delta_pct=0.0,
+                extra=extra,
+            )
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "advanced",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [str(p) for p in applied],
+                    "patches_reverted": [],
+                    "artifacts_applied": applied_artifacts,
+                    "extra_envs_applied": extra_envs_applied,
+                    "extra_server_args_applied": extra_server_args_applied,
+                    "framework_root": str(framework_root or ""),
+                    "output_throughput": new_tput,
+                    "enablement": True,
+                    "advanced": True,
+                    "runnable": False,
+                    "correctness_verified": False,
+                    "reason": _with_skipped_setup_reason(
+                        f"enablement progressed: {run_reason}; boot advanced "
+                        f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
+                        setup_result,
+                    ),
+                    "after_signature": after_signature.to_dict() if after_signature is not None else {},
+                    "enablement_launch_log": str(bench_result.get("error") or ""),
+                    # The wall this round advanced to, for the next round's
+                    # before half.
+                    "enablement_observation_path": after_loaded.path,
+                    **bringup_evidence,
+                    "setup_commands_applied": list(setup_result.get("applied") or []),
+                    "setup_commands_skipped": list(setup_result.get("skipped") or []),
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                    **eval_provenance,
+                },
+            )
+
         provisional = correctness_ok is None
         reason = f"enablement runnable: {run_reason}"
         if provisional:
@@ -3106,38 +3106,34 @@ class IntegratePatchExecutor:
         applied_artifacts: list[dict[str, Any]],
         message: str,
     ) -> tuple[str, bool]:
-        """Commit accepted patch and artifact changes to a git root for cross-round durability.
+        """Commit this round's patch and artifact writes so they survive a later revert.
 
-        On a non-git root the call is a no-op: the changes are already resident
-        in the filesystem and nothing reverts them between rounds.
+        A non-git root needs no commit: nothing there resets the tree between
+        rounds, so the writes are already durable.
 
         Returns:
-            ``(failure_note, head_advanced)`` where ``failure_note`` is empty on
-            success and ``head_advanced`` is ``True`` only when a real commit
-            landed (signals the realized-diff harvest may proceed).
+            ``(failure_note, head_advanced)``. ``failure_note`` is empty on
+            success. ``head_advanced`` is ``True`` only when a real commit
+            landed, which is what makes ``HEAD^..HEAD`` this round's diff.
         """
         if framework_root is None or not _is_git_tree(framework_root):
-            log.info(
-                "integrate_patch: non-git framework root %s; skipping commit-on-accept",
-                framework_root,
-            )
             return "", False
+        root_resolved = framework_root.resolve()
         try:
             touched = _patch_touched_paths(framework_root, applied)
+            # An artifact installed into a sibling root is not addressable by a
+            # rel path under this one, so it belongs to no commit here.
             artifact_rels = [
                 str(a["rel_target"])
-                for a in (applied_artifacts or [])
-                if isinstance(a, dict) and a.get("rel_target")
-                and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
+                for a in applied_artifacts
+                if a.get("rel_target") and Path(str(a["root"])).resolve() == root_resolved
             ]
-            all_paths = list(dict.fromkeys(touched + artifact_rels))
-            ok, note = _git_commit_kept(framework_root, message, all_paths)
-            if not ok:
-                return note or "git commit failed", False
-            return "", note == ""
-        except Exception as exc:  # noqa: BLE001
-            log.exception("integrate_patch: commit-on-accept raised")
+            ok, note = _git_commit_kept(framework_root, message, list(dict.fromkeys(touched + artifact_rels)))
+        except (OSError, RuntimeError) as exc:
             return f"commit raised: {exc!r}", False
+        if not ok:
+            return note or "git commit failed", False
+        return "", note == ""
 
     def _finalize_localization_keep(
         self,
@@ -4150,8 +4146,7 @@ class IntegratePatchExecutor:
 
         ``applied`` does not decide whether a restore is owed. On non-git trees
         the backup ledger does; on git trees a patch set that fails part-way
-        through its first patch, or a round whose only write was the
-        base-artifact replay, has mutated the tree while ``applied`` is empty.
+        through its first patch has mutated the tree while ``applied`` is empty.
 
         Args:
             framework_root: The source root to revert in, or ``None`` (no-op).

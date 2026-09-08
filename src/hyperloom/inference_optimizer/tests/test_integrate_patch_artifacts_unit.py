@@ -9,16 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
-
-from .conftest import patch_integrate_patch_allowlist
 
 
 def _make_workspace(tmp_path: Path) -> Path:
@@ -327,5 +323,3 @@ def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_
     assert len(specs) == 1
     assert specs[0].target == (fw / "configs" / "model_configs" / "tuned.csv").resolve()
     assert specs[0].rel_target == "configs/model_configs/tuned.csv"
-
-

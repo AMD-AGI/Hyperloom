@@ -196,8 +196,8 @@ class EnablementParams(CoordinatorCollaborator):
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
-        base_artifacts = list(state.enablement.kept_artifacts or [])
+        prior_patches = [str(p) for p in (state.enablement.kept_patches or [])]
+        prior_artifacts = list(state.enablement.kept_artifacts or [])
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
         # command is ever auto-seeded here: an unpinned upgrade of the shared
@@ -213,13 +213,13 @@ class EnablementParams(CoordinatorCollaborator):
         spanned_roots = bool(state.enablement.patches_span_multiple_roots)
         acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
         acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
-        if base_patches or base_setup or base_artifacts or acc_envs or acc_args:
+        if prior_patches or base_setup or prior_artifacts or acc_envs or acc_args:
             progress_bits = []
-            if base_patches:
-                progress_bits.append(f"{len(base_patches)} prior patch(es) already in the tree: {base_patches}")
-            if base_artifacts:
-                art_targets = [a["target"] for a in base_artifacts[:4]]
-                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) already in the tree: {art_targets}")
+            if prior_patches:
+                progress_bits.append(f"{len(prior_patches)} prior patch(es) already in the tree: {prior_patches}")
+            if prior_artifacts:
+                art_targets = [a["target"] for a in prior_artifacts[:4]]
+                progress_bits.append(f"{len(prior_artifacts)} prior artifact(s) already in the tree: {art_targets}")
             if base_setup:
                 progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
             if acc_envs or acc_args:
@@ -233,8 +233,7 @@ class EnablementParams(CoordinatorCollaborator):
                 "PRIOR ENABLEMENT PROGRESS: the following already cleared earlier "
                 "boot crashes. Patches and artifacts are permanently in the tree; "
                 "setup commands and config are re-run on every launch. Do NOT redo "
-                "them; fix only the CURRENT (deeper) failure, composing on top. "
-                + "; ".join(progress_bits)
+                "them; fix only the CURRENT (deeper) failure, composing on top. " + "; ".join(progress_bits)
             )
         # Composed rather than an ``elif``: a stalled round that already banked
         # progress needs both halves, and the stacked note alone reads as "all

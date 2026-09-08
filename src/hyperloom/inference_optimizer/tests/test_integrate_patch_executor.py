@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from .conftest import git_commit_all, init_git_repo, patch_integrate_patch_roots
+from .conftest import init_git_repo, patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -1105,13 +1105,11 @@ async def test_enablement_advanced_commits_to_git_root(tmp_path: Path, monkeypat
         ["git", "-C", str(repo), "log", "--oneline", "-2"],
         text=True,
     )
-    assert "hyperloom advanced" in log
+    assert "hyperloom enablement advanced" in log
 
 
 @pytest.mark.asyncio
-async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(
-    tmp_path: Path, monkeypatch
-):
+async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(tmp_path: Path, monkeypatch):
     """An env-only round that reverts must not touch files from a prior accepted round.
 
     On a non-git tree the per-round backup root must be isolated so _revert_patches
@@ -1174,9 +1172,7 @@ async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(
         "framework_source_root": str(framework_root),
         "enablement": True,
         "extra_envs": {"MY_FLAG": "1"},
-        "enablement_before_observation_path": _persist_observation(
-            session_dir, "before2", new_gap
-        ),
+        "enablement_before_observation_path": _persist_observation(session_dir, "before2", new_gap),
     }
     result2 = await executor(_make_ctx("t-int-env", params2))
     assert result2["status"] == "reverted"
