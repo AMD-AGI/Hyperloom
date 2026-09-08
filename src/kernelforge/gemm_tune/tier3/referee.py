@@ -1,7 +1,25 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Re-time a generated tuner's candidates with our own clock."""
+"""Re-time a generated tuner's candidates with our own clock.
+
+This is what makes a generated tuner safe to run at all: it may propose
+configurations, and nothing it reports about their speed is used.
+
+Each rule below replaced something that gave a wrong answer on this fleet first.
+Warm the clocks, because the GPU idles at 94MHz and whatever is measured first
+pays the ramp. Interleave baseline and candidate rather than timing them in
+blocks, which put one default at 1269us against 517us the day before -- a 2.5x
+swing owed to a neighbour. Take the minimum across repeats, not the median:
+interference only ever adds time, and median-based runs rejected 9 of 16
+measurements as unstable on spreads of 40-170%. Refuse a result whose best case
+and typical case disagree about which side is faster, since the two sides were
+then not measured under one machine state. And require a win to clear the noise
+rather than merely be positive.
+
+Dispatch is the caller's business: a candidate is only meaningful against the
+backend it names, so this takes callables and never interprets a config.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +35,24 @@ log = logging.getLogger(__name__)
 WARMUP_CALLS = 20
 CALLS_PER_SAMPLE = 30
 REPEATS = 9
+
+#: How much faster a candidate has to read before we call it faster.
+#:
+#: Measured, not chosen. On an MI355X, ``time_paired`` was run 25 times per
+#: shape with *the same* callable on both sides, over four shapes demanded by
+#: the fleet (8192x3456x1152, 4096x4096x4096, 1024x1536x7168, 128x2048x2048).
+#: The pairing rules above did most of the work -- 43 of the 100 trials were
+#: refused outright as unstable -- but of the 57 that produced a number, 28
+#: came out above 1.0. The unmodified path was judged an improvement over
+#: itself roughly half the time it was judged at all, the largest such reading
+#: being 1.00925x. Not one trial reached 1.01x.
+#:
+#: So this sits just above the whole observed null distribution rather than at
+#: its edge, and the rule it implements is "beat the noise", not "be positive".
+#: Without it a generated tuner that proposes the baseline backend verbatim is
+#: verified as an improvement and deployed, which is the one outcome the
+#: referee exists to make impossible.
+MIN_SPEEDUP = 1.01
 
 
 @dataclass(frozen=True)
@@ -54,7 +90,8 @@ class Judgement:
 
     @property
     def improved(self) -> bool:
-        return bool(self.best_timing and self.best_timing.usable and (self.best_timing.speedup or 0) > 1.0)
+        """Faster than the baseline by more than the baseline beats itself."""
+        return bool(self.best_timing and self.best_timing.usable and (self.best_timing.speedup or 0) >= MIN_SPEEDUP)
 
     def to_dict(self) -> dict[str, Any]:
         return {
