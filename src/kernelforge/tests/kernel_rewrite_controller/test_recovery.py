@@ -357,7 +357,7 @@ def test_publish_failure_logs_identity_without_exception_details(tmp_path: Path,
     assert recovered.published is False
     assert "could not publish forge result sidecar" in caplog.text
     assert recovered.operator_id in caplog.text
-    assert best_commit in caplog.text
+    assert best_commit not in caplog.text
     assert "RuntimeError" in caplog.text
     assert secret not in caplog.text
     assert secret not in recovered.reason
