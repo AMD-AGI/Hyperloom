@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
+from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.phases import geak_rebench as gr
 from hyperloom.orchestrator.phases import machine_state as ps
@@ -217,9 +218,64 @@ async def test_enqueue_internal_stack_rebench_uses_macro_cycle_idempotency_key(
     assert row1.task_id != row0.task_id
 
 
+@pytest.mark.parametrize(
+    ("remove_args", "unset_envs", "args_mode"),
+    [
+        (["--speculative-algorithm"], ["SGLANG_ENABLE_SPECULATIVE"], "replace"),
+        ("--speculative-algorithm", "SGLANG_ENABLE_SPECULATIVE", " REPLACE "),
+        ([], [], "replace"),
+        (None, None, None),
+    ],
+    ids=["lists", "scalars", "replace_only", "absent"],
+)
+@pytest.mark.asyncio
+async def test_geak_rebench_preserves_native_base_removal_controls(
+    coordinator, remove_args, unset_envs, args_mode
+) -> None:
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {
+        "action": "explore",
+        "tput": 110.0,
+        "extra_server_args": "--incumbent",
+        "extra_envs": {"SGLANG_USE_AITER": "0"},
+    }
+    if args_mode is not None:
+        st.current_best.update(remove_args=remove_args, unset_envs=unset_envs, args_mode=args_mode)
+    st.geak_result = {}
+    native = await c._enqueue_internal_stack_rebench(reason="resume")
+    native_row = await c.tasks.get(str(native["task_id"]))
+    base_keys = {"base_remove_args", "base_unset_envs", "base_args_mode"}
+    native_controls = {key: value for key, value in native_row.params.items() if key in base_keys}
+    expected = {"base_args_mode": "replace"} if args_mode is not None else {}
+    if remove_args:
+        expected.update(
+            base_remove_args=["--speculative-algorithm"],
+            base_unset_envs=["SGLANG_ENABLE_SPECULATIVE"],
+        )
+    assert native_controls == expected
+
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--fp8-gemm-backend aiter",
+            "env": "SGLANG_USE_AITER=1",
+        },
+    }
+    enqueued = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    row = await c.tasks.get(str(enqueued["task_id"]))
+
+    assert enqueued["mode"] == "geak_2b"
+    assert row.params["grid"][0]["extra_args"] == "--fp8-gemm-backend aiter"
+    assert row.params["grid"][0]["extra_envs"] == {"SGLANG_USE_AITER": "1"}
+    assert {key: value for key, value in row.params.items() if key in base_keys} == native_controls
+
+
+@pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
 async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
-    coordinator,
+    coordinator, with_removal_controls: bool
 ) -> None:
     """The pinned hash must describe the config the grid executor actually runs.
 
@@ -240,6 +296,16 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
             "env": "PATH=/opt/venv/bin:/usr/bin SGLANG_USE_AITER=1 TP=1",
         },
     }
+    controls = (
+        {
+            "remove_args": ["--speculative-algorithm"],
+            "unset_envs": ["SGLANG_ENABLE_SPECULATIVE"],
+            "args_mode": "replace",
+        }
+        if with_removal_controls
+        else {}
+    )
+    st.current_best = {"extra_server_args": "--incumbent", **controls}
 
     enqueued = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
     row = await c.tasks.get(str(enqueued["task_id"]))
@@ -252,7 +318,13 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
 
     assert "PATH" not in ran.extra_envs
     assert ran.extra_envs == {"SGLANG_USE_AITER": "1", "TP": "1"}
-    assert row.params["expected_cfg_hash"] == ran.fingerprint
+    assert row.params["expected_cfg_hash"] == effective_fingerprint(
+        ran.extra_server_args,
+        ran.extra_envs,
+        base_remove_args=controls.get("remove_args"),
+        base_unset_envs=controls.get("unset_envs"),
+        base_args_mode=controls.get("args_mode"),
+    )
 
 
 def test_material_check_ignores_untrusted_env_names() -> None:

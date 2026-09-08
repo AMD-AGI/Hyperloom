@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+
+import pytest
 
 from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -77,6 +80,163 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
     assert "cumulative_gain_val : `36.15%`" in md
     assert "ts=<missing>" in md
     assert "never validated" not in md
+
+
+@pytest.fixture
+def report_performance_state(monkeypatch):
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
+    monkeypatch.setattr(rp, "_platform_fingerprint", lambda *_: {"status": "not_recorded"})
+    state = SharedState()
+    state.framework = "vllm"
+    state.benchmark_mode = "agentx"
+    state.baseline_tput = 100.0
+    state.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "intvty_p90": 100.0}
+    state.current_best = {
+        "action": "integrate",
+        "tput": 150.0,
+        "output_throughput": 150.0,
+        "total_throughput": 1200.0,
+        "intvty_p90": 100.0,
+        "extra_envs": {"RECIPE": "measured"},
+    }
+    state.optimization_stack = [{"action": "integrate"}]
+    state.cumulative_gain_validated = 50.0
+    state.cumulative_gain_validated_ts = "2026-06-23T00:00:00+00:00"
+    state.cumulative_gain_validated_stack_len = 1
+    return state
+
+
+@pytest.mark.parametrize(
+    "mode,missing_side,missing_axis",
+    [
+        pytest.param("composite_v1", None, None, id="actual-total"),
+        pytest.param("output_throughput", None, None, id="explicit-output"),
+        pytest.param("composite_v1", "baseline_perf", "total_throughput", id="reference-total-missing"),
+        pytest.param("composite_v1", "baseline_perf", "intvty_p90", id="reference-intvty-missing"),
+        pytest.param("composite_v1", "current_best", "total_throughput", id="candidate-total-missing"),
+        pytest.param("composite_v1", "current_best", "intvty_p90", id="candidate-intvty-missing"),
+    ],
+)
+def test_report_performance_comparison_snapshots_effective_axes(
+    report_performance_state, monkeypatch, mode, missing_side, missing_axis
+):
+    state = report_performance_state
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", mode)
+    if missing_side:
+        getattr(state, missing_side).pop(missing_axis)
+    total = mode == "composite_v1" and missing_side is None
+    reason = {"baseline_perf": "baseline_axes_missing", "current_best": "candidate_axes_missing"}.get(missing_side, "")
+
+    summary = rp._build_summary_dict(state, {}, [])
+    record = summary["performance_comparison"]
+
+    expected = {
+        "objective": "total_throughput" if total else "output_throughput",
+        "reference": 1000.0 if total else 100.0,
+        "candidate": 1200.0 if total else 150.0,
+        "gain_pct": pytest.approx(20.0 if total else 50.0),
+        "comparable": missing_side is None,
+        "degrade_reason": reason,
+        "vetoed": False,
+    }
+    assert {key: record[key] for key in expected} == expected
+    assert summary["cumulative_gain_validated"] == 50.0
+    assert summary["cumulative_gain_validated_ts"] == state.cumulative_gain_validated_ts
+    assert summary["cumulative_gain_validated_stack_len"] == 1
+
+
+@pytest.mark.parametrize("mode", ["composite_v1", "output_throughput"])
+def test_report_performance_render_survives_json_reload_and_environment_change(
+    report_performance_state, monkeypatch, mode
+):
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", mode)
+    summary = json.loads(json.dumps(rp._build_summary_dict(report_performance_state, {}, [])))
+    rendered = rp._format_md(summary)
+
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput" if mode == "composite_v1" else "composite_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "99")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+
+    assert rp._format_md(summary) == rendered
+
+
+@pytest.mark.parametrize("missing_axis", ["total_throughput", "intvty_p90"])
+def test_report_performance_missing_candidate_axes_does_not_claim_composite_grading(
+    report_performance_state, missing_axis
+):
+    report_performance_state.current_best.pop(missing_axis)
+    rendered = rp._format_md(rp._build_summary_dict(report_performance_state, {}, []))
+
+    assert "grading mode        : `composite_v1`" not in rendered
+    assert "output_throughput" in rendered
+    assert "candidate_axes_missing" in rendered
+
+
+@pytest.mark.parametrize(
+    "stack_len,stored_gain,status",
+    [
+        pytest.param(1, 20.0, "current", id="current"),
+        pytest.param(2, 50.0, "stale", id="stale"),
+        pytest.param(1, 50.0, "inconsistent", id="inconsistent"),
+    ],
+)
+def test_report_performance_diagnostic_gain_does_not_overwrite_validation_stamp(
+    report_performance_state, stack_len, stored_gain, status
+):
+    state = report_performance_state
+    state.optimization_stack = [{"action": "integrate"}] * stack_len
+    state.cumulative_gain_validated = stored_gain
+    summary = rp._build_summary_dict(state, {}, [])
+    rendered = rp._format_md(summary)
+
+    assert summary["performance_comparison"]["gain_pct"] == pytest.approx(20.0)
+    assert summary["cumulative_gain_validated"] == stored_gain
+    assert summary["cumulative_validation_status"] == status
+    assert f"cumulative_gain_val : `{stored_gain:.2f}%`" in rendered
+    assert "+20.00%" in rendered
+    assert ("stack changed since validation" in rendered) is (stack_len > 1)
+    if status == "inconsistent":
+        assert "inconsistent" in rendered.lower()
+    assert state.cumulative_gain_validated == stored_gain
+
+
+def test_report_performance_without_validation_stamp_is_diagnostic_only(report_performance_state):
+    state = report_performance_state
+    state.cumulative_gain_validated = 0.0
+    state.cumulative_gain_validated_ts = ""
+    state.cumulative_gain_validated_stack_len = 0
+    summary = rp._build_summary_dict(state, {}, [])
+
+    assert summary["performance_comparison"]["gain_pct"] == pytest.approx(20.0)
+    assert summary["cumulative_validation_status"] == "unavailable"
+    assert summary["cumulative_gain_validated"] == 0.0
+    assert "never validated" in rp._format_md(summary)
+
+
+@pytest.mark.parametrize("intvty,vetoed", [(100.0, False), (90.0, True)])
+def test_report_performance_comparison_records_interactivity_veto(report_performance_state, intvty, vetoed):
+    report_performance_state.current_best["intvty_p90"] = intvty
+    record = rp._build_summary_dict(report_performance_state, {}, [])["performance_comparison"]
+
+    assert record["comparable"] is True
+    assert record["vetoed"] is vetoed
+    assert record["gain_pct"] == pytest.approx(20.0)
+
+
+def test_report_performance_summary_does_not_alias_live_measurements(report_performance_state):
+    state = report_performance_state
+    summary = rp._build_summary_dict(state, {}, [])
+    snapshot = deepcopy(summary)
+
+    state.current_best["total_throughput"] = 9999.0
+    state.current_best["extra_envs"]["RECIPE"] = "unmeasured"
+    state.baseline_perf["total_throughput"] = 8888.0
+
+    assert summary == snapshot
 
 
 # ---- _extract_executive_summary ----

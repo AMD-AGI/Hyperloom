@@ -1108,7 +1108,8 @@ class ExploreExecutor:
         _anchor_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_total else (None, "")
         if grade_on_total and _anchor_reason:
             log.info(
-                "explore: total-throughput grading unavailable (%s); grading this round on output throughput",
+                "explore: total-throughput grading unavailable (%s); "
+                "variants cannot KEEP without the required anchor axes",
                 _anchor_reason,
             )
         running_base_perf = _anchor_perf
@@ -1562,15 +1563,15 @@ class ExploreExecutor:
                             outcome = "REVERT"
                             reason = "intvty_regression"
                     else:
-                        if grade_on_total and running_base_perf:
-                            log.info(
-                                "explore: variant %r missing graded axes (intvty_p90=%s total=%s); "
-                                "grading on output throughput",
-                                gv.name,
-                                r.intvty_p90,
-                                r.total_token_throughput,
-                            )
                         gain = gain_pct(r.output_throughput, running_base_tput)
+                        if grade_on_total and r.status == "succeeded":
+                            outcome = "REVERT"
+                            reason = _anchor_reason or "candidate_axes_missing"
+                            log.info(
+                                "explore: variant %r cannot KEEP (%s); output gain is diagnostic only",
+                                gv.name,
+                                reason,
+                            )
                     if not reason:
                         if r.status != "succeeded" or gain is None:
                             reason = (r.error or "")[-1200:] or "no_measurement"
@@ -1752,13 +1753,6 @@ class ExploreExecutor:
                             running_base_tput = decision_tput
                         if grade_on_total and cand_snap and _graded_on_total:
                             running_base_perf = cand_snap
-                        elif grade_on_total and not _graded_on_total:
-                            log.info(
-                                "explore: KEEP %r graded on output throughput; clearing the total anchor "
-                                "so the rest of this round grades on output too",
-                                gv.name,
-                            )
-                            running_base_perf = None
 
                         winners.append(keep_entry)
                         winners_history_update.append(

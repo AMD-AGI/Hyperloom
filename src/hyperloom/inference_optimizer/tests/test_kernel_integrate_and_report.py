@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -132,7 +134,755 @@ def _write_patch_pair(
     return target, patch_file
 
 
+@pytest.fixture
+def graded_integrate_case(session_dir, tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "1")
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "sglang"
+    state.benchmark_mode = "agentx"
+    state.baseline_tput = 100.0
+    state.baseline_accuracy = 0.80
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "intvty_p90": 100.0,
+    }
+    state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
+    state.save(session_dir)
+    payload = {
+        "base_tput": 100.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_graded",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+    }
+    measurement = {
+        "status": "succeeded",
+        "framework": "sglang",
+        "output_throughput": 110.0,
+        "input_throughput": 990.0,
+        "total_token_throughput": 1100.0,
+        "intvty_p90": 100.0,
+        "tpot_p90_ms": 10.0,
+        "completed_requests": 80,
+        "submission_valid": True,
+        "accuracy": 0.80,
+        "accuracy_task": "gsm8k",
+        "accuracy_metric": "exact_match,strict-match",
+    }
+
+    async def _measure(ctx):
+        assert ctx.task.kind == "baseline"
+        assert ctx.task.params["defer_accuracy_until_after_measure"] is True
+        assert ctx.task.params["post_measure_accuracy_min_tput"] == 101.0
+        assert ctx.task.params["post_measure_accuracy_keep_policy"] == {
+            "base_tput": 100.0,
+            "keep_threshold_pct": 1.0,
+            "stack_incremental_keep_threshold_pct": 0.5,
+        }
+        assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
+        workspace = Path(ctx.task.params["output_dir"]) / "benchmark_sglang_e2e"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "server.log").write_text(f"INFO importing {target.name}\n", encoding="utf-8")
+        if "input_throughput" in measurement and "total_token_throughput" in measurement:
+            measurement["input_throughput"] = measurement["total_token_throughput"] - measurement["output_throughput"]
+        measurement["workspace"] = str(workspace)
+        measurement["report_path"] = str(workspace / "benchmark_report.json")
+        Path(measurement["report_path"]).write_text(json.dumps(measurement), encoding="utf-8")
+        return measurement
+
+    executor = AsyncMock(side_effect=_measure)
+    monkeypatch.setattr(BaselineExecutor, "__call__", executor)
+    yield state, payload, measurement, target
+    executor.assert_awaited_once()
+
+
 # integrate_handler
+@pytest.mark.asyncio
+async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir, tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "sglang"
+    state.benchmark_mode = "agentx"
+    state.baseline_double_run = False
+    state.baseline_tput = 100.0
+    state.baseline_accuracy = 0.80
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "intvty_p90": 100.0,
+    }
+    state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
+    state.save(session_dir)
+    seen = {}
+    measurement = {
+        "status": "succeeded",
+        "framework": "sglang",
+        "output_throughput": 110.0,
+        "input_throughput": 990.0,
+        "total_token_throughput": 1100.0,
+        "intvty_p90": 100.0,
+        "completed_requests": 80,
+        "submission_valid": True,
+        "accuracy": 0.80,
+        "accuracy_task": "gsm8k",
+        "accuracy_metric": "exact_match,strict-match",
+    }
+
+    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+        seen["shared_state"] = executor.shared_state
+        seen["benchmark"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+        workspace = output_dir / "benchmark_sglang_e2e"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "server.log").write_text(f"INFO importing {target.name}\n", encoding="utf-8")
+        measurement["workspace"] = str(workspace)
+        measurement["report_path"] = str(workspace / "benchmark_report.json")
+        Path(measurement["report_path"]).write_text(json.dumps(measurement), encoding="utf-8")
+        return measurement
+
+    monkeypatch.setattr(BaselineExecutor, "_run_single_benchmark", _measure)
+    result = await krh.integrate_handler(
+        {
+            "base_tput": 100.0,
+            "config_path": str(base_yaml),
+            "kernel_id": "k_persisted_agentx",
+            "patch_path": str(patch_file),
+            "target_file": str(target),
+            "allow_unknown_target": True,
+            "skip_rebuild": True,
+        },
+        session_dir=session_dir,
+    )
+
+    assert seen["benchmark"]["benchmark_script"] == "aiperf_client.sh"
+    assert seen["shared_state"] is not None
+    assert seen["shared_state"].benchmark_mode == "agentx"
+    assert yaml.safe_load(base_yaml.read_text(encoding="utf-8"))["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
+    assert result["status"] == "ok"
+    assert result["decision"] == "KEEP"
+    assert result["graded_objective"] == "total_throughput"
+    assert result["bench_result"] == measurement
+    assert result["gain_pct"] == pytest.approx(10.0)
+
+
+@pytest.fixture
+def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session_dir))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--disable-cuda-graph --mem-fraction-static 0.7")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps({"OPERATOR_DROP": "1", "OPERATOR_KEEP": "1"}))
+    base_yaml = tmp_path / "recipe.yaml"
+    _write_baseline_yaml(base_yaml)
+    cfg = yaml.safe_load(base_yaml.read_text(encoding="utf-8"))
+    cfg["benchmark"]["envs"].update(
+        EXTRA_SGLANG_ARGS="--disable-cuda-graph --cuda-graph-max-bs 8 --page-size 16",
+        YAML_DROP="1",
+        YAML_KEEP="1",
+        SHARED="yaml",
+        REENABLE="yaml",
+    )
+    base_yaml.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "sglang"
+    state.benchmark_mode = "agentx"
+    state.baseline_double_run = False
+    state.baseline_tput = 100.0
+    state.baseline_config_path = str(base_yaml)
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "intvty_p90": 100.0,
+    }
+    state.reference_server_args = "--disable-cuda-graph --max-running-requests 64"
+    state.reference_envs = {"REFERENCE_DROP": "1", "REFERENCE_KEEP": "1"}
+    state.current_best = {
+        "action": "integrate",
+        "tput": 100.0,
+        **state.baseline_perf,
+        "extra_server_args": "--page-size 32 --cuda-graph-max-bs 16",
+        "extra_envs": {"CURRENT_ONLY": "1", "SHARED": "state"},
+        "remove_args": ["--disable-cuda-graph", "--cuda-graph-max-bs 8"],
+        "unset_envs": ["YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP", "REENABLE"],
+        "args_mode": "replace",
+    }
+    state.save(session_dir)
+    benchmarks = []
+
+    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+        benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+        benchmarks.append(benchmark)
+        tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "output_throughput": tput,
+            "input_throughput": tput * 9,
+            "total_token_throughput": tput * 10,
+            "intvty_p90": 100.0,
+            "completed_requests": 80,
+            "submission_valid": True,
+        }
+
+    monkeypatch.setattr(BaselineExecutor, "_run_single_benchmark", _measure)
+    return state, base_yaml, benchmarks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args_mode", ["append", "replace"])
+@pytest.mark.parametrize("controls_source", ["current-best", "request"])
+async def test_integrate_handler_materializes_recipe_controls(
+    session_dir, integrate_recipe_case, args_mode, controls_source
+):
+    state, base_yaml, benchmarks = integrate_recipe_case
+    state.current_best["args_mode"] = args_mode
+    controls = {key: deepcopy(state.current_best[key]) for key in ("remove_args", "unset_envs", "args_mode")}
+    payload = {
+        "kernel_id": "gemm_recipe",
+        "source": "forge_gemm_tuning",
+        "extra_server_args": "",
+        "extra_envs": {"CANDIDATE_ONLY": "1", "SHARED": "candidate", "REENABLE": "candidate"},
+    }
+    if controls_source == "request":
+        payload.update(controls, extra_server_args="--page-size 64 --cuda-graph-max-bs 16")
+        state.current_best.update(
+            remove_args=["--page-size"],
+            unset_envs=["CURRENT_ONLY"],
+            args_mode="replace" if args_mode == "append" else "append",
+        )
+    state.save(session_dir)
+    original_yaml = base_yaml.read_bytes()
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["status"] == "ok", result
+    assert len(benchmarks) == 1
+    envs = benchmarks[0]["envs"]
+    args = envs["EXTRA_SGLANG_ARGS"]
+    assert "--disable-cuda-graph" not in args
+    assert "--cuda-graph-max-bs 8" not in args
+    assert "--cuda-graph-max-bs 16" in args
+    assert f"--page-size {64 if controls_source == 'request' else 32}" in args
+    for inherited in ("--page-size 16", "--max-running-requests 64", "--mem-fraction-static 0.7"):
+        assert (inherited in args) is (args_mode == "append")
+    for key in ("YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP"):
+        assert key not in envs
+    for key in ("YAML_KEEP", "REFERENCE_KEEP", "OPERATOR_KEEP", "CURRENT_ONLY", "CANDIDATE_ONLY"):
+        assert envs[key] == "1"
+    assert envs["SHARED"] == "candidate"
+    assert envs["REENABLE"] == "candidate"
+    assert benchmarks[0]["benchmark_script"] == "aiperf_client.sh"
+    assert base_yaml.read_bytes() == original_yaml
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_explicit_empty_controls_keep_inherited_recipe(session_dir, integrate_recipe_case):
+    _state, _base_yaml, benchmarks = integrate_recipe_case
+
+    result = await krh.integrate_handler(
+        {
+            "kernel_id": "gemm_empty_controls",
+            "source": "forge_gemm_tuning",
+            "extra_envs": {"CANDIDATE_ONLY": "1"},
+            "remove_args": [],
+            "unset_envs": [],
+            "args_mode": "",
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["status"] == "ok", result
+    assert len(benchmarks) == 1
+    envs = benchmarks[0]["envs"]
+    for arg in (
+        "--disable-cuda-graph",
+        "--cuda-graph-max-bs 8",
+        "--max-running-requests 64",
+        "--mem-fraction-static 0.7",
+    ):
+        assert arg in envs["EXTRA_SGLANG_ARGS"]
+    assert "--page-size 32" in envs["EXTRA_SGLANG_ARGS"]
+    for key in ("YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP", "CURRENT_ONLY", "CANDIDATE_ONLY"):
+        assert envs[key] == "1"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_requested_unset_removes_current_env_and_reenables_explicit_env(
+    session_dir, integrate_recipe_case
+):
+    state, _base_yaml, benchmarks = integrate_recipe_case
+    state.current_best["extra_envs"]["REENABLE"] = "state"
+    state.save(session_dir)
+
+    result = await krh.integrate_handler(
+        {
+            "kernel_id": "gemm_unset_current_env",
+            "source": "forge_gemm_tuning",
+            "unset_envs": ["CURRENT_ONLY", "REENABLE"],
+            "extra_envs": {"REENABLE": "candidate", "CANDIDATE_ONLY": "1"},
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["status"] == "ok", result
+    assert len(benchmarks) == 1
+    envs = benchmarks[0]["envs"]
+    assert "CURRENT_ONLY" not in envs
+    assert envs["REENABLE"] == "candidate"
+    assert envs["CANDIDATE_ONLY"] == "1"
+    assert envs["SHARED"] == "state"
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_unsetting_last_current_env_still_materializes_recipe(
+    session_dir, integrate_recipe_case
+):
+    state, _base_yaml, benchmarks = integrate_recipe_case
+    state.current_best.update(
+        extra_server_args="",
+        extra_envs={"CURRENT_ONLY": "1"},
+        remove_args=[],
+        unset_envs=[],
+        args_mode="append",
+    )
+    state.save(session_dir)
+
+    result = await krh.integrate_handler(
+        {
+            "kernel_id": "gemm_unset_last_env",
+            "source": "forge_gemm_tuning",
+            "unset_envs": ["CURRENT_ONLY"],
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["status"] == "ok", result
+    assert len(benchmarks) == 1
+    assert "CURRENT_ONLY" not in benchmarks[0]["envs"]
+    assert result["new_tput"] == 110.0
+    assert result["extra_envs"] == {}
+    assert result["apply_result"]["reason"] == "env_only_validation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_reference_controls", [False, True], ids=["frozen-controls", "empty-controls"])
+async def test_gemm_paired_materializes_each_frozen_recipe_controls(
+    session_dir, integrate_recipe_case, monkeypatch, empty_reference_controls
+):
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    state, base_yaml, benchmarks = integrate_recipe_case
+    monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "2")
+    reference = {
+        "tput": 100.0,
+        "extra_server_args": "--page-size 8",
+        "extra_envs": {"LEG": "A", "REFERENCE_ONLY": "1"},
+        "remove_args": [] if empty_reference_controls else ["--disable-cuda-graph"],
+        "unset_envs": [] if empty_reference_controls else ["YAML_DROP"],
+        "args_mode": "" if empty_reference_controls else "append",
+    }
+    candidate = {
+        "tput": 110.0,
+        "extra_server_args": "--page-size 64 --disable-cuda-graph --cuda-graph-max-bs 16",
+        "extra_envs": {"LEG": "B", "CANDIDATE_ONLY": "1", "REENABLE": "candidate"},
+        "remove_args": ["--disable-cuda-graph"],
+        "unset_envs": ["YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP", "REENABLE"],
+        "args_mode": "replace",
+    }
+    state.current_best.update(
+        extra_server_args="--page-size 128",
+        extra_envs={"LIVE_ONLY": "1"},
+        remove_args=["--page-size"],
+        unset_envs=["REFERENCE_ONLY", "CANDIDATE_ONLY"],
+        args_mode="replace",
+    )
+    state.save(session_dir)
+    frozen = deepcopy((reference, candidate, state.current_best))
+    payloads = []
+    integrate = krh.integrate_handler
+
+    async def _integrate(payload, **kwargs):
+        payloads.append(deepcopy(payload))
+        return await integrate(payload, **kwargs)
+
+    monkeypatch.setattr(krh, "integrate_handler", _integrate)
+    verdict = await KernelPhase._confirm_gemm_gain_paired(
+        SimpleNamespace(session_dir=session_dir),
+        reference,
+        candidate,
+        config_path=str(base_yaml),
+        budget_minutes=1,
+    )
+
+    assert verdict is not None
+    assert verdict.pairs == [(100.0, 110.0), (100.0, 110.0)]
+    assert len(payloads) == len(benchmarks) == 4
+    for idx, (payload, benchmark) in enumerate(zip(payloads, benchmarks)):
+        recipe = reference if idx % 2 == 0 else candidate
+        for key in ("remove_args", "unset_envs", "args_mode"):
+            assert payload.get(key) == recipe[key]
+        envs = benchmark["envs"]
+        args = envs["EXTRA_SGLANG_ARGS"]
+        assert "LIVE_ONLY" not in envs
+        assert "--page-size 128" not in args
+        assert envs["LEG"] == ("A" if idx % 2 == 0 else "B")
+        if idx % 2 == 0:
+            assert "--page-size 8" in args
+            assert "--mem-fraction-static 0.7" in args
+            assert ("--disable-cuda-graph" in args) is empty_reference_controls
+            assert ("YAML_DROP" in envs) is empty_reference_controls
+            assert envs["REFERENCE_ONLY"] == "1"
+            assert "CANDIDATE_ONLY" not in envs
+        else:
+            assert "--page-size 64" in args
+            assert "--cuda-graph-max-bs 16" in args
+            for inherited in ("--disable-cuda-graph", "--page-size 16", "--mem-fraction-static 0.7"):
+                assert inherited not in args
+            for key in ("YAML_DROP", "REFERENCE_DROP", "OPERATOR_DROP", "REFERENCE_ONLY"):
+                assert key not in envs
+            assert envs["CANDIDATE_ONLY"] == "1"
+            assert envs["REENABLE"] == "candidate"
+    assert (reference, candidate, state.current_best) == frozen
+    assert SharedState.load_or_init(session_dir).current_best == frozen[2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output,total,stack,accuracy_outcome,decision",
+    [
+        pytest.param(90.0, 1100.0, False, "pass", "KEEP", id="total-win-output-drop"),
+        pytest.param(100.1, 1507.5, True, "pass", "KEEP", id="stack-exact-0.5-percent"),
+        pytest.param(100.1, 1509.0, True, "pass", "KEEP", id="stack-0.6-below-primary-1-percent"),
+        pytest.param(90.0, 1100.0, False, "missing", "NEEDS_REVIEW", id="accuracy-missing"),
+        pytest.param(90.0, 1100.0, False, "regressed", "REVERT", id="accuracy-regressed"),
+        pytest.param(90.0, 1100.0, False, "failed", "NEEDS_REVIEW", id="accuracy-failed"),
+    ],
+)
+async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
+    session_dir, tmp_path, monkeypatch, output, total, stack, accuracy_outcome, decision
+):
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "0")
+    monkeypatch.setenv("RUN_EVAL", "true")
+    # AgentX currently falls back to one round; admit its script only in this
+    # test to exercise deferred double-run scheduling, not enable AgentX reuse.
+    monkeypatch.setattr(
+        _server_lifecycle,
+        "MAGPIE_BUILTIN_SCRIPTS",
+        _server_lifecycle.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
+    )
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    target, patch_file = _write_patch_pair(tmp_path)
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "sglang"
+    state.benchmark_mode = "agentx"
+    state.baseline_double_run = True
+    state.baseline_tput = 100.0
+    state.baseline_accuracy = 0.80
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "intvty_p90": 100.0,
+    }
+    state.current_best = {"action": "baseline", "tput": 100.0, **state.baseline_perf}
+    if stack:
+        state.current_best.update(action="integrate", total_throughput=1500.0, input_throughput=1400.0)
+        state.optimization_stack = [dict(state.current_best)]
+    state.save(session_dir)
+    rounds = []
+    measured = {}
+
+    async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
+        assert executor.shared_state.baseline_double_run is True
+        assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
+        bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+        rounds.append((output_dir.name, bench))
+        run_eval = bench["envs"]["RUN_EVAL"] == "true"
+        if run_eval:
+            assert output_dir.name == "accuracy_round"
+            assert len(rounds) == 3
+        round_output, round_total, intvty = {
+            "warmup_round": (50.0, 500.0, 50.0),
+            "measure_round": (output, total, 100.0),
+            "accuracy_round": (999.0, 9999.0, 1.0),
+        }[output_dir.name]
+        workspace = output_dir / "benchmark_sglang_e2e"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "server.log").write_text(f"INFO importing {target.name}\n", encoding="utf-8")
+        result = {
+            "status": "succeeded",
+            "framework": "sglang",
+            "output_throughput": round_output,
+            "input_throughput": round_total - round_output,
+            "total_token_throughput": round_total,
+            "intvty_p90": intvty,
+            "tpot_p90_ms": 1000.0 / intvty,
+            "completed_requests": 80,
+            "submission_valid": True,
+            "workspace": str(workspace),
+            "report_path": str(workspace / "benchmark_report.json"),
+        }
+        if run_eval and accuracy_outcome in {"pass", "regressed"}:
+            score = 0.80 if accuracy_outcome == "pass" else 0.60
+            accuracy_file = workspace / "results_gsm8k.json"
+            accuracy_file.write_text(
+                json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}}), encoding="utf-8"
+            )
+            result.update(
+                accuracy=score,
+                accuracy_task="gsm8k",
+                accuracy_metric="exact_match,strict-match",
+                accuracy_source=str(accuracy_file),
+            )
+        elif run_eval and accuracy_outcome == "failed":
+            result.update(status="failed", error_class="subprocess_nonzero")
+        Path(result["report_path"]).write_text(json.dumps(result), encoding="utf-8")
+        if output_dir.name == "measure_round":
+            measured.update(result)
+        return result
+
+    monkeypatch.setattr(BaselineExecutor, "_run_single_benchmark", _benchmark)
+    result = await krh.integrate_handler(
+        {
+            "base_tput": 100.0,
+            "config_path": str(base_yaml),
+            "kernel_id": "k_deferred_accuracy",
+            "patch_path": str(patch_file),
+            "target_file": str(target),
+            "allow_unknown_target": True,
+            "skip_rebuild": True,
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["status"] == "ok"
+    assert [name for name, _ in rounds] == ["warmup_round", "measure_round", "accuracy_round"]
+    assert [bench["envs"]["RUN_EVAL"] for _, bench in rounds] == ["false", "false", "true"]
+    assert [bench["server_lifecycle"]["cleanup"] for _, bench in rounds] == [False, False, True]
+    assert len({bench["envs"]["PORT"] for _, bench in rounds}) == 1
+    assert len({bench["server_lifecycle"]["pid_dir"] for _, bench in rounds}) == 1
+    assert result["decision"] == decision
+    assert result["graded_objective"] == "total_throughput"
+    reference_total = 1500.0 if stack else 1000.0
+    assert result["gain_pct"] == pytest.approx((total - reference_total) / reference_total * 100.0)
+    assert result["new_tput"] == output
+    assert "accuracy" not in measured
+    assert all(result["bench_result"][key] == value for key, value in measured.items())
+    stage = result["bench_result"]["accuracy_stage"]
+    assert stage["status"] == ("failed" if accuracy_outcome == "failed" else "succeeded")
+    assert "accuracy_round" in Path(stage["workspace"]).parts
+    if decision == "KEEP":
+        assert result["accuracy_pass"] is True
+        assert result["accuracy"] == pytest.approx(0.80)
+        assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
+        if stack:
+            assert result["decision_reason"] == "stack_positive_increment"
+    else:
+        assert result["decision_reason"] == (
+            "accuracy_regression" if accuracy_outcome == "regressed" else "accuracy_evidence_missing"
+        )
+        assert result["revert_result"]["status"] == "ok"
+        assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agentx_env", [True, False], ids=["env", "persisted-mode"])
+@pytest.mark.parametrize(
+    "output,total,intvty,decision",
+    [
+        pytest.param(110.0, 900.0, 100.0, "REVERT", id="total-regression"),
+        pytest.param(110.0, 1100.0, 90.0, None, id="interactivity-veto"),
+        pytest.param(110.0, 1100.0, 100.0, "KEEP", id="total-win"),
+        pytest.param(90.0, 1100.0, 100.0, "KEEP", id="output-loss-total-win"),
+    ],
+)
+async def test_integrate_handler_grades_full_e2e_measurement(
+    session_dir, graded_integrate_case, monkeypatch, agentx_env, output, total, intvty, decision
+):
+    _, payload, measurement, target = graded_integrate_case
+    if not agentx_env:
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    measurement.update(output_throughput=output, total_token_throughput=total, intvty_p90=intvty)
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["status"] == "ok"
+    if decision is None:
+        assert result["decision"] != "KEEP"
+    else:
+        assert result["decision"] == decision
+    assert result["graded_objective"] == "total_throughput"
+    assert result["gain_pct"] == pytest.approx((total - 1000.0) / 1000.0 * 100.0)
+    assert result["base_tput"] == 100.0
+    assert result["new_tput"] == output
+    assert result["bench_result"] == measurement
+    expected_source = Path(payload["patch_path"]).read_text(encoding="utf-8")
+    if result["decision"] != "KEEP":
+        expected_source = "def kernel():\n    return 'original'\n"
+        assert result["revert_result"]["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == expected_source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_from", ["candidate", "reference"])
+@pytest.mark.parametrize("missing_axis", ["total", "intvty"])
+@pytest.mark.parametrize(
+    "output,stack",
+    [
+        pytest.param(200.0, False, id="large-output-gain"),
+        pytest.param(50.0, False, id="output-regression"),
+        pytest.param(100.75, True, id="stack-output-gain"),
+    ],
+)
+async def test_integrate_handler_requires_requested_axes(
+    session_dir, graded_integrate_case, missing_from, missing_axis, output, stack
+):
+    state, payload, measurement, target = graded_integrate_case
+    measurement["output_throughput"] = output
+    if stack:
+        state.current_best["action"] = "integrate"
+        state.optimization_stack = [dict(state.current_best)]
+    incomplete = measurement if missing_from == "candidate" else state.current_best
+    total_key = "total_token_throughput" if missing_from == "candidate" else "total_throughput"
+    for axis in ("input_throughput", total_key) if missing_axis == "total" else ("intvty_p90",):
+        incomplete.pop(axis)
+    state.save(session_dir)
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["status"] == "ok"
+    assert result["decision"] == "NEEDS_REVIEW"
+    assert result["graded_objective"] == "output_throughput"
+    assert result["gain_pct"] == pytest.approx(output - 100.0)
+    assert result["base_tput"] == 100.0
+    assert result["new_tput"] == output
+    assert result["bench_result"] == measurement
+    assert "accuracy_gate" not in result
+    assert result.get("decision_reason") != "stack_positive_increment"
+    assert result["revert_result"]["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_output", [True, False], ids=["explicit-output", "synthetic"])
+@pytest.mark.parametrize("with_axes", [True, False], ids=["complete-axes", "output-only"])
+@pytest.mark.parametrize(
+    "output,decision",
+    [(110.0, "KEEP"), (101.0, "NEEDS_REVIEW"), (98.0, "REVERT")],
+)
+async def test_integrate_handler_preserves_output_grading_and_threshold(
+    session_dir, graded_integrate_case, monkeypatch, explicit_output, with_axes, output, decision
+):
+    state, payload, measurement, _ = graded_integrate_case
+    if explicit_output:
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    else:
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        state.benchmark_mode = ""
+        state.save(session_dir)
+    measurement.update(output_throughput=output, total_token_throughput=900.0, intvty_p90=90.0)
+    if not with_axes:
+        for axis in ("input_throughput", "total_token_throughput", "intvty_p90"):
+            measurement.pop(axis)
+        for axis in ("input_throughput", "total_throughput", "intvty_p90"):
+            state.current_best.pop(axis)
+        state.save(session_dir)
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["decision"] == decision
+    assert result["graded_objective"] == "output_throughput"
+    assert result["gain_pct"] == pytest.approx(output - 100.0)
+    assert result["base_tput"] == 100.0
+    assert result["new_tput"] == output
+    assert result["bench_result"] == measurement
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output,total,intvty,decision",
+    [
+        pytest.param(100.75, 1350.0, 100.0, "REVERT", id="stack-total-regression"),
+        pytest.param(100.1, 1507.35, 100.0, "NEEDS_REVIEW", id="stack-under-noise-floor"),
+        pytest.param(100.1, 1507.5, 100.0, "KEEP", id="stack-exact-noise-floor"),
+        pytest.param(100.1, 1511.25, 100.0, "KEEP", id="stack-positive-increment"),
+        pytest.param(100.75, 1507.5, 90.0, None, id="stack-interactivity-veto"),
+    ],
+)
+async def test_integrate_handler_grades_stack_increment_on_live_total_anchor(
+    session_dir, graded_integrate_case, output, total, intvty, decision
+):
+    state, payload, measurement, _ = graded_integrate_case
+    state.current_best.update(action="integrate", total_throughput=1500.0, input_throughput=1400.0)
+    state.optimization_stack = [dict(state.current_best)]
+    state.save(session_dir)
+    measurement.update(output_throughput=output, total_token_throughput=total, intvty_p90=intvty)
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    if decision is None:
+        assert result["decision"] != "KEEP"
+    else:
+        assert result["decision"] == decision
+    expected_gain = (total - 1500.0) / 1500.0 * 100.0
+    assert result["gain_pct"] == pytest.approx(expected_gain)
+    assert result["graded_objective"] == "total_throughput"
+    if decision == "KEEP":
+        assert result["decision_reason"] == "stack_positive_increment"
+        assert result["stack_incremental_gain_pct"] == pytest.approx(expected_gain)
+        assert result["stack_incremental_keep_threshold_pct"] == pytest.approx(0.5)
+    else:
+        assert result.get("decision_reason") != "stack_positive_increment"
+        assert result["revert_result"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ["accuracy", "submission_valid"])
+async def test_integrate_handler_total_win_still_requires_valid_e2e_evidence(session_dir, graded_integrate_case, gate):
+    _, payload, measurement, target = graded_integrate_case
+    measurement[gate] = 0.60 if gate == "accuracy" else False
+
+    result = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert result["decision"] != "KEEP"
+    assert result["revert_result"]["status"] == "ok"
+    assert target.read_text(encoding="utf-8") == "def kernel():\n    return 'original'\n"
+    if gate == "accuracy":
+        assert result["decision_reason"] == "accuracy_regression"
+
+
 @pytest.mark.asyncio
 async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypatch):
     server_log = tmp_path / "server.log"

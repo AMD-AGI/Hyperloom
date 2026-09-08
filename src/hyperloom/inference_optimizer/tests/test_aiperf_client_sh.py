@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -78,8 +79,14 @@ _FAKE_CURL = r"""#!/usr/bin/env bash
 for a in "$@"; do case "$a" in *v1/models*) echo '{"data":[{"id":"m"}]}'; exit 0;; esac; done
 for a in "$@"; do
   case "$a" in
-    *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";;
-    *stop_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}";;
+    *start_profile*)
+      printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}"
+      printf '%s\n' start_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      exit "${FAKE_START_PROFILE_RC:-0}";;
+    *stop_profile*)
+      printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}"
+      printf '%s\n' stop_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      exit "${FAKE_STOP_PROFILE_RC:-0}";;
   esac
 done
 exit 0
@@ -131,6 +138,53 @@ if sys.argv[1] == "write-capture-status":
 raise SystemExit(2)
 """
 
+_FAKE_PROGRESS_AIPERF = r"""#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+argv = sys.argv[1:]
+events = Path(os.environ["AGENTX_PROFILE_EVENTS"])
+
+class ProgressHandler(BaseHTTPRequestHandler):
+    requests_seen = 0
+
+    def do_GET(self):
+        assert self.path == "/api/progress"
+        type(self).requests_seen += 1
+        phase = "warmup" if self.requests_seen == 1 else "profiling"
+        with events.open("a", encoding="utf-8") as handle:
+            handle.write(phase + "\n")
+        stats = {"start_ns": 123456789}
+        if self.requests_seen >= 3:
+            stats["requests_end_ns"] = 123456999
+        body = json.dumps({"phases": {phase: stats}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+with HTTPServer(("127.0.0.1", int(argv[argv.index("--api-port") + 1])), ProgressHandler) as server:
+    server.timeout = 0.05
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        server.handle_request()
+        seen = events.read_text().splitlines() if events.exists() else []
+        if "stop_profile" in seen or (os.environ.get("FAKE_START_PROFILE_RC") == "22" and "start_profile" in seen):
+            break
+    else:
+        raise SystemExit("client did not bracket profiling")
+raise SystemExit(subprocess.call(["bash", str(Path(__file__).with_name("aiperf-export")), *argv]))
+"""
+
 _FAKE_FUSER = "#!/usr/bin/env bash\nexit 0\n"
 
 
@@ -161,6 +215,7 @@ def _run(bench, bind, res, tmp_path, **extra_env):
     for _k in [k for k in env if k.startswith("AGENTX_")]:
         env.pop(_k, None)
     env.pop("WEKA_LOADER_OVERRIDE", None)
+    env.pop("MAGPIE_RUN_PHASE", None)
     env["PATH"] = f"{bind}:{env.get('PATH', '')}"
     env.update(
         MODEL="/m",
@@ -210,6 +265,84 @@ def test_aiperf_failure_not_mapped(tmp_path):
     r = _run(bench, bind, res, tmp_path, FAKE_RC="7")
     assert r.returncode == 7
     assert not (res / "inferencex_result.json").exists()
+
+
+def _client_only_env(bind, tmp_path):
+    lifecycle_marker = shlex.quote(str(tmp_path / "server-lifecycle.txt"))
+    bash_env = tmp_path / "bash-env.sh"
+    bash_env.write_text(
+        f"""kill() {{
+  printf 'kill %s\\n' "$*" >> {lifecycle_marker}
+  [ "${{1:-}}" != "-0" ]
+}}
+""",
+        encoding="utf-8",
+    )
+    _write_exec(bind / "fuser", f"#!/usr/bin/env bash\nprintf 'fuser %s\\n' \"$*\" >> {lifecycle_marker}\n")
+    return {
+        "MAGPIE_RUN_PHASE": "client",
+        "BASH_ENV": str(bash_env),
+        "AGENTX_TEST_SERVER_MARKER": str(tmp_path / "builtin-called.txt"),
+    }
+
+
+def _assert_external_server_untouched(tmp_path):
+    assert not (tmp_path / "builtin-called.txt").exists(), "client-only mode launched a builtin server"
+    assert not (tmp_path / "server-lifecycle.txt").exists(), "client-only mode called kill or fuser"
+
+
+@pytest.mark.parametrize("existing_pid", [False, True])
+@pytest.mark.parametrize("client_rc", [0, 7])
+def test_client_only_preserves_external_server_on_success_and_failure(tmp_path, existing_pid, client_rc):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    pidfile = res / "agentx_server.pid"
+    if existing_pid:
+        pidfile.write_text("987654321\n", encoding="utf-8")
+    r = _run(bench, bind, res, tmp_path, FAKE_RC=str(client_rc), **_client_only_env(bind, tmp_path))
+    _assert_external_server_untouched(tmp_path)
+    assert r.returncode == client_rc, r.stdout + r.stderr
+    assert (res / "inferencex_result.json").exists() is (client_rc == 0)
+    if existing_pid:
+        assert pidfile.read_text() == "987654321\n"
+    else:
+        assert not pidfile.exists()
+    argv = _aiperf_args(res).splitlines()
+    for flag, value in _UPSTREAM_FLAGS:
+        assert argv[argv.index(flag) + 1] == value, flag
+    for flag in _UPSTREAM_BARE_FLAGS:
+        assert flag in argv
+    assert "--max-context-length" not in argv
+    if client_rc == 0:
+        assert not _result(res)["submission_invalid_reasons"]
+
+
+@pytest.mark.parametrize("framework", ["vllm", ""])
+def test_client_only_needs_no_builtin_or_framework(tmp_path, framework):
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK=framework, **_client_only_env(bind, tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (res / "inferencex_result.json").exists()
+    assert not (res / "agentx_server.pid").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_client_only_still_requires_explicit_concurrency(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    r = _run(bench, bind, res, tmp_path, CONC="", **_client_only_env(bind, tmp_path))
+    assert r.returncode != 0
+    assert "CONC required" in r.stderr + r.stdout
+    assert not (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_client_only_noncanonical_workload_stays_invalid(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    r = _run(bench, bind, res, tmp_path, AGENTX_NUM_ENTRIES="50", **_client_only_env(bind, tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("entries=50" in reason for reason in out["submission_invalid_reasons"])
+    _assert_external_server_untouched(tmp_path)
 
 
 def test_scrub_keeps_aiperf_bin_drops_others(tmp_path):
@@ -554,6 +687,65 @@ def _run_profile(bench, bind, res, tmp_path, **extra_env):
 
 def _capture_status_path(res: Path) -> Path:
     return res / "agentx-profile" / "test-capture" / "capture-status.json"
+
+
+@pytest.mark.parametrize(
+    "start_rc,stop_rc,reason",
+    [
+        (0, 0, "profiler_output_unconfigured"),
+        (22, 0, "start_profile_failed"),
+        (0, 22, "stop_profile_failed"),
+    ],
+)
+def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, start_rc, stop_rc, reason):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    shutil.copy2(agentx_asset_dir() / "aiperf_phase_gate.py", bench / "aiperf_phase_gate.py")
+    _write_exec(bind / "aiperf-export", _FAKE_AIPERF)
+    _write_exec(bind / "aiperf", _FAKE_PROGRESS_AIPERF)
+    events = tmp_path / "profile-events.txt"
+    start_marker = tmp_path / "start-profile.txt"
+    stop_marker = tmp_path / "stop-profile.txt"
+    body = '{"start_step":0,"num_steps":128,"with_stack":true}'
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        PROFILE_EXTRA_BODY=body,
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_PROFILE_WINDOW_S="20",
+        AGENTX_PHASE_WAIT_TIMEOUT_S="10",
+        AGENTX_CAPTURE_ID="test-capture",
+        AGENTX_CAPTURE_STATUS_PATH=str(_capture_status_path(res)),
+        AGENTX_PROFILE_EVENTS=str(events),
+        AGENTX_CURL_MARKER=str(start_marker),
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_START_PROFILE_RC=str(start_rc),
+        FAKE_STOP_PROFILE_RC=str(stop_rc),
+        **_client_only_env(bind, tmp_path),
+    )
+    _assert_external_server_untouched(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (res / "inferencex_result.json").exists()
+    assert not _result(res)["submission_invalid_reasons"]
+    seen = events.read_text().splitlines()
+    assert seen.index("warmup") < seen.index("profiling") < seen.index("start_profile")
+    argv = start_marker.read_text().splitlines()
+    assert argv[argv.index("-d") + 1] == body
+    assert "-sf" in argv
+    assert stop_marker.exists() is (start_rc == 0)
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["capture_id"] == "test-capture"
+    assert capture["phase_start_ns"] == 123456789
+    assert capture["requested_window_seconds"] == 20
+    assert capture["status"] == "failed"
+    assert capture["reason"] == reason
+    if start_rc == 0:
+        assert seen.index("start_profile") < seen.index("stop_profile")
+        assert "-sf" in stop_marker.read_text().splitlines()
+        assert capture["decision"]["stop_reason"] == "phase_complete"
 
 
 def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):

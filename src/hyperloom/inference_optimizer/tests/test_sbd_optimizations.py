@@ -64,6 +64,479 @@ def test_a_promoted_collective_keep_is_credited_to_its_own_family(tmp_path):
     assert warnings == []
 
 
+@pytest.mark.parametrize("lane", ["gemm", "collective"])
+def test_promotion_recorder_keeps_unknown_gain_unknown(tmp_path, lane):
+    if lane == "gemm":
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            result={
+                "status": "ok",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": 150.0,
+                "e2e_gain_pct": None,
+            },
+        )
+    else:
+        instrument.record_collective_promotion(
+            tmp_path,
+            integration_id="unknown-gain",
+            baseline_tput=100.0,
+            new_tput=150.0,
+            gain_pct=None,
+        )
+
+    parts = assemble_parts(tmp_path)
+    assert not any(row["name"] == "e2e_gain_pct" for row in parts["measurements"])
+    [adoption] = parts["adoptions"]
+    assert adoption.get("gain_pct") is None
+    result = collect_recorded_optimizations(
+        "s1",
+        parts["operations"],
+        parts["measurements"],
+        parts["adoptions"],
+        [],
+        [],
+        [],
+        [],
+    )
+    assert result["attempts"][0]["local_gain_pct"] is None
+    assert result["entries"][0]["gain_pct"] is None
+
+
+@pytest.mark.parametrize("lane", ["gemm", "collective"])
+@pytest.mark.parametrize(
+    ("objective", "recorded_gain"),
+    [
+        pytest.param("total_throughput", 20.0, id="total"),
+        pytest.param("output_throughput", 50.0, id="explicit_output"),
+        pytest.param(None, 50.0, id="legacy_output"),
+        pytest.param("total_throughput", None, id="unknown_total_gain"),
+    ],
+)
+def test_promotion_ledger_uses_recorded_objective_not_output_pair(tmp_path, lane, objective, recorded_gain):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-objective",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+        phase="BASELINE",
+    )
+    if lane == "gemm":
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            result={
+                "status": "ok",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": 150.0,
+                "e2e_gain_pct": recorded_gain,
+            },
+            graded_objective=objective,
+        )
+    else:
+        instrument.record_collective_promotion(
+            tmp_path,
+            integration_id="objective-promotion",
+            baseline_tput=100.0,
+            new_tput=150.0,
+            gain_pct=recorded_gain,
+            graded_objective=objective,
+            ts="2026-01-01T00:00:20+00:00",
+        )
+
+    parts = assemble_parts(tmp_path)
+    [baseline] = [row for row in parts["operations"] if row["name"] == "baseline"]
+    [adoption] = parts["adoptions"]
+    [operation] = [row for row in parts["operations"] if row["operation_id"] == adoption["operation_id"]]
+    by_id = {row["measurement_id"]: row for row in parts["measurements"]}
+    [baseline_reading] = [by_id[mid] for mid in baseline["measurement_refs"]]
+    assert (baseline_reading["value"], baseline_reading["metric_basis"]) == (100.0, "output")
+    assert operation["outputs"]["graded_objective"] == objective
+    assert adoption["gain_pct"] == recorded_gain
+    pinned = {by_id[mid]["name"]: by_id[mid] for mid in adoption["measurement_ids"]}
+    assert (pinned["baseline_throughput"]["value"], pinned["baseline_throughput"]["metric_basis"]) == (100.0, "output")
+    assert (pinned["final_throughput"]["value"], pinned["final_throughput"]["metric_basis"]) == (150.0, "output")
+    if recorded_gain is None:
+        assert "e2e_gain_pct" not in pinned
+    else:
+        assert pinned["e2e_gain_pct"]["value"] == recorded_gain
+        assert pinned["e2e_gain_pct"]["metric_basis"] == ("total" if objective == "total_throughput" else "output")
+
+    result = collect_recorded_optimizations(
+        "s1",
+        parts["operations"],
+        parts["measurements"],
+        parts["adoptions"],
+        parts.get("artifacts") or [],
+        [],
+        [],
+        [],
+    )
+
+    assert result["schema_version"] == 5
+    assert result["source_of_truth"] == "recorder"
+    assert result["available"] is True
+    [attempt] = result["attempts"]
+    [entry] = result["entries"]
+    assert attempt["decision"] == "KEEP"
+    assert attempt["decision_source"] == "adoption.decision"
+    assert attempt["validation_basis"] == "e2e_validation"
+    assert attempt["measurement_source"] == "adoption_pinned"
+    assert attempt["local_gain_pct"] == recorded_gain
+    assert attempt["local_gain_source"] == ("adoption.gain_pct" if recorded_gain is not None else "")
+    assert entry["adopted_attempt_id"] == attempt["attempt_id"] == operation["operation_id"]
+    assert entry["adoption_id"] == adoption["adoption_id"]
+    assert entry["source"] == "kernel_agent"
+    assert entry["optimization_kind"] == ("gemm_tuning" if lane == "gemm" else "kernel_collective")
+    if recorded_gain is None:
+        assert entry["gain_pct"] is None
+    else:
+        assert entry["gain_pct"] == pytest.approx(recorded_gain)
+    if objective != "total_throughput":
+        assert entry["gain_method"] == "baseline_chain"
+    projected_measurements = {row["name"]: row for row in attempt["measurements"]}
+    assert projected_measurements["baseline_throughput"]["metric_basis"] == "output"
+    assert projected_measurements["final_throughput"]["metric_basis"] == "output"
+    if recorded_gain is not None:
+        assert projected_measurements["e2e_gain_pct"]["metric_basis"] == pinned["e2e_gain_pct"]["metric_basis"]
+    credited_gain = entry["gain_pct"] or 0.0
+    assert entry["cumulative_gain_pct"] == pytest.approx(credited_gain)
+    assert result["validation"]["ledger_total_gain_pct"] == pytest.approx(credited_gain)
+    assert result["validation"]["attributed_total_gain_pct"] == pytest.approx(credited_gain)
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == pytest.approx(credited_gain)
+    assert result["validation"]["keep_count"] == 1
+    if entry["gain_pct"] is None:
+        assert entry["gain_method"] == "missing"
+        assert result["validation"]["unmeasured_keep_count"] == 1
+
+
+def test_promotion_ledger_does_not_sum_different_gain_axes(tmp_path):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-mixed-objectives",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for integration_id, before, after, gain, objective, ts in (
+        ("output-step", 100.0, 150.0, 50.0, "output_throughput", "2026-01-01T00:00:10+00:00"),
+        ("total-step", 150.0, 165.0, 20.0, "total_throughput", "2026-01-01T00:00:20+00:00"),
+    ):
+        instrument.record_collective_promotion(
+            tmp_path,
+            integration_id=integration_id,
+            baseline_tput=before,
+            new_tput=after,
+            gain_pct=gain,
+            graded_objective=objective,
+            ts=ts,
+        )
+    instrument.record_session_validation(
+        tmp_path,
+        baseline_tput=1000.0,
+        validated_tput=1200.0,
+        validated_gain_pct=20.0,
+        stack_len=2,
+        source="collective_integrate",
+        measurement_basis="e2e_rebench",
+        graded_objective="total_throughput",
+        ts="2026-01-01T00:00:30+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    output_entry, total_entry = result["entries"]
+    assert output_entry["gain_pct"] is None
+    assert output_entry["local_gain_pct"] == 50.0
+    assert total_entry["gain_pct"] == 20.0
+    assert total_entry["local_gain_pct"] == 20.0
+    assert total_entry["cumulative_gain_pct"] == 20.0
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 20.0
+    assert result["validation"]["validated_total_gain_pct"] == 20.0
+    assert result["validation"]["ledger_total_gain_pct"] == 20.0
+    assert result["validation"]["validation_basis"] == "e2e_rebench"
+    assert result["validation"]["keep_count"] == 2
+    assert any("gain basis" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("objective", ["total_throughput", "output_throughput"], ids=["total", "output"])
+def test_gemm_ledger_credits_changes_in_session_baseline_gain(tmp_path, monkeypatch, objective):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-gemm-chain",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for cycle, after, gain, ts in (
+        (1, 120.0, 20.0, "2026-01-01T00:00:10+00:00"),
+        (2, 130.0, 30.0, "2026-01-01T00:00:20+00:00"),
+    ):
+        monkeypatch.setattr(instrument, "_now_iso_safe", lambda: ts)
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            macro_cycle=cycle,
+            result={
+                "status": "complete",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": after,
+                "e2e_gain_pct": gain,
+            },
+            graded_objective=objective,
+        )
+    parts = assemble_parts(tmp_path)
+    gemm_operations = [row for row in parts["operations"] if row["kind"] == "gemm_tuning"]
+    assert len(gemm_operations) == 2
+    assert {row["macro_cycle"] for row in gemm_operations} == {1, 2}
+    assert all(row["extensions"]["gemm"]["result"]["baseline_tput"] == 100.0 for row in gemm_operations)
+    assert sorted(row["gain_pct"] for row in parts["adoptions"]) == [20.0, 30.0]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    first, second = result["entries"]
+    assert [first["gain_pct"], second["gain_pct"]] == [20.0, 10.0]
+    assert [first["local_gain_pct"], second["local_gain_pct"]] == [20.0, 30.0]
+    assert [first["cumulative_gain_pct"], second["cumulative_gain_pct"]] == [20.0, 30.0]
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 30.0
+    assert result["validation"]["ledger_total_gain_pct"] == 30.0
+    assert result["validation"]["attributed_total_gain_pct"] == 30.0
+    assert result["validation"]["unattributed_gain_pct"] == 0.0
+    assert not any("belongs to no attempt" in warning for warning in warnings)
+
+
+def test_collective_total_gains_without_total_anchors_do_not_form_a_chain(tmp_path):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-collective-total",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for integration_id, before, after, gain, ts in (
+        ("first-total", 100.0, 120.0, 20.0, "2026-01-01T00:00:10+00:00"),
+        ("second-total", 120.0, 132.0, 10.0, "2026-01-01T00:00:20+00:00"),
+    ):
+        instrument.record_collective_promotion(
+            tmp_path,
+            integration_id=integration_id,
+            baseline_tput=before,
+            new_tput=after,
+            gain_pct=gain,
+            graded_objective="total_throughput",
+            ts=ts,
+        )
+    parts = assemble_parts(tmp_path)
+    throughputs = [row for row in parts["measurements"] if row["name"] in {"baseline_throughput", "final_throughput"}]
+    assert all(row["metric_basis"] == "output" for row in throughputs)
+    assert sorted(row["gain_pct"] for row in parts["adoptions"]) == [10.0, 20.0]
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    first, second = result["entries"]
+    assert first["gain_pct"] == 20.0
+    assert first["chain_continuous"] is False
+    assert second["local_gain_pct"] == 10.0
+    assert second["gain_pct"] is None
+    assert second["chain_continuous"] is False
+    assert result["validation"]["ledger_total_gain_pct"] == 20.0
+    assert result["validation"]["unmeasured_keep_count"] == 1
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 20.0
+    assert any("total" in warning and "gain basis" in warning for warning in warnings)
+
+
+def test_unknown_gain_breaks_later_gemm_increment_attribution(tmp_path, monkeypatch):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-unknown-gap",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    for cycle, after, gain, ts in (
+        (1, 120.0, 20.0, "2026-01-01T00:00:10+00:00"),
+        (2, 140.0, 40.0, "2026-01-01T00:00:30+00:00"),
+    ):
+        monkeypatch.setattr(instrument, "_now_iso_safe", lambda: ts)
+        instrument.record_gemm_tuning_operation(
+            tmp_path,
+            macro_cycle=cycle,
+            result={
+                "status": "complete",
+                "decision": "KEEP",
+                "e2e_validated": True,
+                "baseline_tput": 100.0,
+                "new_tput": after,
+                "e2e_gain_pct": gain,
+            },
+            graded_objective="total_throughput",
+        )
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="unknown-middle-anchor",
+        baseline_tput=120.0,
+        new_tput=132.0,
+        gain_pct=10.0,
+        graded_objective="total_throughput",
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    first, unanchored, last = result["entries"]
+    assert [first["gain_pct"], unanchored["gain_pct"], last["gain_pct"]] == [20.0, None, None]
+    assert [first["local_gain_pct"], unanchored["local_gain_pct"], last["local_gain_pct"]] == [20.0, 10.0, 40.0]
+    assert last["gain_method"] == "missing"
+    assert last["chain_continuous"] is False
+    assert result["validation"]["attributed_total_gain_pct"] == 20.0
+    assert result["validation"]["unmeasured_keep_count"] == 2
+    assert result["summary_by_agent"]["kernel_agent"]["attributable_gain_pct"] == 20.0
+    assert warnings
+
+
+@pytest.mark.parametrize("with_ineligible_keep", [False, True], ids=["attributable_only", "with_ineligible_keep"])
+def test_session_validation_checkpoint_does_not_reconcile_against_later_keeps(tmp_path, with_ineligible_keep):
+    instrument.record_action_operation(
+        tmp_path,
+        action="baseline",
+        task_id="baseline-checkpoint",
+        status="succeeded",
+        decision="measured",
+        result={"output_throughput": 100.0, "metric_basis": "output", "ts": "2026-01-01T00:00:00+00:00"},
+    )
+    if with_ineligible_keep:
+        instrument.record_action_operation(
+            tmp_path,
+            action="integrate_patch",
+            task_id="ineligible-before-checkpoint",
+            status="kept",
+            decision="KEEP",
+            result={
+                "status": "kept",
+                "base_tput": 100.0,
+                "output_throughput": 100.0,
+                "delta_pct": 0.0,
+                "validated": True,
+                "attribution_eligible": False,
+                "metric_basis": "output",
+                "ts": "2026-01-01T00:00:05+00:00",
+            },
+        )
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="before-checkpoint",
+        baseline_tput=100.0,
+        new_tput=120.0,
+        gain_pct=20.0,
+        graded_objective="output_throughput",
+        ts="2026-01-01T00:00:10+00:00",
+    )
+    instrument.record_session_validation(
+        tmp_path,
+        baseline_tput=100.0,
+        validated_tput=120.0,
+        validated_gain_pct=20.0,
+        stack_len=2 if with_ineligible_keep else 1,
+        source="collective_promote",
+        measurement_basis="e2e_rebench",
+        graded_objective="output_throughput",
+        ts="2026-01-01T00:00:15+00:00",
+    )
+    instrument.record_collective_promotion(
+        tmp_path,
+        integration_id="after-checkpoint",
+        baseline_tput=120.0,
+        new_tput=132.0,
+        gain_pct=10.0,
+        graded_objective="output_throughput",
+        ts="2026-01-01T00:00:20+00:00",
+    )
+    parts = assemble_parts(tmp_path)
+    warnings: list[str] = []
+
+    result = collect_recorded_optimizations(
+        "s1", parts["operations"], parts["measurements"], parts["adoptions"], [], [], [], warnings
+    )
+
+    assert [entry["gain_pct"] for entry in result["entries"]] == [20.0, 12.0]
+    validation = result["validation"]
+    assert validation["validated_total_gain_pct"] == 20.0
+    assert validation["validated_at_stack_len"] == (2 if with_ineligible_keep else 1)
+    assert validation["non_attributable_keep_count"] == int(with_ineligible_keep)
+    assert validation["ledger_total_gain_pct"] == 32.0
+    assert validation["attributed_total_gain_pct"] == 32.0
+    assert validation["reconciliation_gap_pct"] is None
+    assert validation["attribution_gap_pct"] is None
+    assert validation["validation_basis"] == "e2e_rebench"
+    assert validation["validation_source"] == "collective_promote"
+    assert any("stale" in warning and "checkpoint" in warning for warning in warnings)
+    assert not any("but the run promoted" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("explicit_output", [False, True], ids=["total", "explicit_output"])
+@pytest.mark.parametrize("provenance", ["e2e_rebench", "e2e_decision_round"])
+def test_session_validation_records_objective_without_replacing_provenance(
+    tmp_path, monkeypatch, explicit_output, provenance
+):
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    if explicit_output:
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        benchmark_mode="agentx",
+        baseline_tput=100.0,
+        baseline_perf={"total_throughput": 1000.0, "intvty_p90": 100.0},
+    )
+    measurement = {"output_throughput": 150.0, "total_token_throughput": 1200.0, "intvty_p90": 100.0}
+
+    assert coord.writeback._update_cumulative_gain_validated(
+        150.0, measurement, source="recorder_objective_test", measurement_basis=provenance
+    )
+
+    parts = assemble_parts(tmp_path)
+    [operation] = parts["operations"]
+    gain = 50.0 if explicit_output else 20.0
+    objective = "output_throughput" if explicit_output else "total_throughput"
+    assert operation["outputs"]["validated_gain_pct"] == pytest.approx(gain)
+    assert operation["outputs"]["measurement_basis"] == provenance
+    assert operation["outputs"].get("graded_objective") == objective
+    measurements = {row["name"]: row for row in parts["measurements"]}
+    assert measurements["baseline_throughput"]["value"] == (100.0 if explicit_output else 1000.0)
+    assert measurements["throughput"]["value"] == (150.0 if explicit_output else 1200.0)
+    assert measurements["gain"]["value"] == pytest.approx(gain)
+    result = collect_recorded_optimizations("s1", parts["operations"], parts["measurements"], [], [], [], [], [])
+    assert result["validation"]["validated_total_gain_pct"] == pytest.approx(gain)
+    assert result["validation"]["validation_basis"] == provenance
+
+
 def test_collective_stack_entry_keeps_campaign_evidence():
     state = {
         "cumulative_gain_validated_stack_len": 1,

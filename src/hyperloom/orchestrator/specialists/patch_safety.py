@@ -20,8 +20,11 @@ imported from the runner, the Critic backend, and tests without cycles.
 
 from __future__ import annotations
 
+import io
 import re
 import subprocess
+import tempfile
+import tokenize
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -858,6 +861,106 @@ def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(removed))
 
 
+_SPECIALIST_WORK_ARTIFACT_ROOTS = (
+    "patches",
+    "specialist_done.json",
+    "specialist_done.partial.json",
+    "scratch/rebench",
+)
+SPECIALIST_WORK_ARTIFACT_PATHSPECS = tuple(f":(top,exclude){root}" for root in _SPECIALIST_WORK_ARTIFACT_ROOTS) + (
+    ":(top,glob,exclude)**/__pycache__/**",
+)
+
+
+def patch_work_artifact_targets(patch_text: str) -> tuple[str, ...]:
+    """Find task-owned targets, including binary sections in mixed diffs."""
+    targets: list[str] = []
+    for section in re.split(r"(?m)(?=^diff --git )", patch_text):
+        if not section.strip():
+            continue
+        try:
+            parsed = parse_patch_targets(section)
+        except ValueError:
+            continue  # Structural/root validation reports invalid targets separately.
+        for path in parsed.all:
+            if "__pycache__" in PurePosixPath(path).parts or any(
+                path == root or path.startswith(root + "/") for root in _SPECIALIST_WORK_ARTIFACT_ROOTS
+            ):
+                targets.append(path)
+    return tuple(dict.fromkeys(targets))
+
+
+def _python_runtime_tokens(source: bytes) -> list[tuple[int, str]]:
+    tokens: list[tuple[int, str]] = []
+    for token in tokenize.tokenize(io.BytesIO(source).readline):
+        if token.type == tokenize.COMMENT:
+            # Directive placement matters: a shebang only executes on the first line.
+            if token.string.startswith("#!") or re.match(r"#\s*(?:type:|noqa\b|fmt:|pragma:|cython:)", token.string):
+                tokens.append((token.type, f"{token.start}:{token.string}"))
+            continue
+        if token.type != tokenize.NL:
+            tokens.append((token.type, token.string))
+    return tokens
+
+
+def patch_is_annotation_only(patch_text: str, source_root: Path, *, reverse: bool = False) -> bool:
+    """Prove a patch changes only Python comments using complete source files.
+
+    ``source_root`` holds the pre-image, or the post-image when ``reverse`` is
+    true (a specialist's edited worktree). Git reconstructs the other version
+    in a disposable directory; the real checkout and its index stay untouched.
+    Creations, metadata changes, non-Python files and unavailable context are
+    not classified as annotations.
+    """
+    pairs = patch_file_targets(patch_text)
+    if not pairs or not is_unified_diff(patch_text):
+        return False
+    if re.search(
+        r"^(?:new file mode |deleted file mode |old mode |new mode |rename |copy |Binary files |GIT binary patch)",
+        patch_text,
+        re.M,
+    ):
+        return False
+    try:
+        paths: list[str] = []
+        for raw_old, raw_new in pairs:
+            old, new = _safe_patch_path(raw_old), _safe_patch_path(raw_new)
+            if old != new or not old.endswith(".py"):
+                return False
+            paths.append(old)
+        root = source_root.resolve()
+        originals: dict[str, bytes] = {}
+        for rel in paths:
+            source = (root / rel).resolve()
+            if not source.is_relative_to(root):
+                return False
+            originals[rel] = source.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="hyperloom-annotation-") as directory:
+            mirror = Path(directory)
+            for rel, content in originals.items():
+                target = mirror / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            subprocess.run(["git", "init", "-q", str(mirror)], capture_output=True, timeout=30.0, check=True)
+            proc = subprocess.run(
+                ["git", "apply", *(["--reverse"] if reverse else []), "-"],
+                cwd=mirror,
+                input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return False
+            return all(
+                _python_runtime_tokens(content) == _python_runtime_tokens((mirror / rel).read_bytes())
+                for rel, content in originals.items()
+            )
+    except (OSError, ValueError, SyntaxError, tokenize.TokenError, subprocess.SubprocessError):
+        return False
+
+
 def vet_patches(
     patch_paths: list[str],
     *,
@@ -867,11 +970,11 @@ def vet_patches(
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
     """Ground each patch against the candidate checkouts, one root per patch.
 
-    Structural rejects (unreadable / non-diff / path escape) are dropped first.
-    Each survivor then resolves its own root, so a cross-repo set survives even
-    though no single root holds every target. Only a patch absent from every
-    candidate is dropped. Stale-but-valid patches are kept for integrate_patch
-    and the Critic to adjudicate.
+    Structural rejects and patches targeting task-owned work artifacts are
+    dropped first. Each survivor resolves its own root, so a cross-repo set
+    survives even though no single root holds every target. Grounded Python
+    comment-only patches are not installable deliverables. Stale-but-valid
+    source patches remain for integrate_patch and the Critic to adjudicate.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.
@@ -917,6 +1020,10 @@ def vet_patches(
             )
             grounding[path] = GROUND_PATH_ESCAPE
             continue
+        work_artifacts = patch_work_artifact_targets(text)
+        if work_artifacts:
+            dropped.append({"path": path, "verdict": "work_artifact", "detail": ", ".join(work_artifacts)})
+            continue
         readable.append((path, text))
 
     if not readable:
@@ -953,6 +1060,9 @@ def vet_patches(
         if res.is_garbage:
             dropped.append({"path": path, "verdict": res.verdict, "detail": res.detail})
             continue
+        if res.verdict == GROUND_APPLIES and patch_is_annotation_only(text, resolution.root):
+            dropped.append({"path": path, "verdict": "annotation_only", "detail": "only Python comments changed"})
+            continue
         resolved_roots.add(resolution.root)
         kept.append(path)
     return kept, dropped, grounding, len(resolved_roots) > 1
@@ -978,6 +1088,7 @@ __all__ = [
     "PatchSafetyReport",
     "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
+    "SPECIALIST_WORK_ARTIFACT_PATHSPECS",
     "advisory_only_reason_codes",
     "advisory_rules_govern",
     "cross_domain_rule_descriptors",
@@ -986,7 +1097,9 @@ __all__ = [
     "numeric_claims",
     "patch_escapes_tree",
     "patch_file_targets",
+    "patch_is_annotation_only",
     "patch_targets_missing",
+    "patch_work_artifact_targets",
     "quantitative_claim_rule_descriptor",
     "resolve_patch_apply_root",
     "scan_numeric_claims",

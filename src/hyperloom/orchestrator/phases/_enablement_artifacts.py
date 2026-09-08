@@ -82,7 +82,7 @@ def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -
 def role_path(files: list[dict[str, str]], role: str) -> str:
     """The session-relative path recorded for ``role``, or ``""`` when absent.
 
-    For the single-valued roles: ``patch`` repeats and needs the list itself.
+    For single-valued roles; ``patch`` and ``patch_evidence`` need the list itself.
     """
     return next((entry["path"] for entry in files if entry["role"] == role), "")
 
@@ -99,9 +99,11 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
 
     Returns:
         One ``{"path", "role"}`` entry per deliverable that landed, ``path``
-        session-relative POSIX. Roles: ``patch`` (any number),
+        session-relative POSIX. Roles: ``patch`` for applied patches,
+        ``patch_evidence`` for unapplied attempts (both repeat),
         ``specialist_result``, ``prompt``, ``launch_config``, ``server_log``.
-        A copy the size ceiling refused is absent rather than listed.
+        Evidence preserves specialist output without claiming integration accepted
+        it. A copy the size ceiling refused is absent rather than listed.
     """
     task_id = str(res.get("specialist_task_id") or "").strip()
     if not task_id:
@@ -130,15 +132,15 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> list[dict[st
         if _copy(workspace / name, dest):
             _record(role, dest)
 
-    # Patches the round did not apply still explain what was attempted.
+    # Disk scans include rejected output: preserve evidence, not accepted patches.
     for base in (workspace, workspace / "worktree"):
         for pattern in ("*.patch", "*.diff"):
             for src in sorted((base / "patches").glob(pattern)):
                 if src.name in copied:
                     continue
-                dest = patches_dir / src.name
+                dest = round_dir / "attempted_patches" / src.name
                 if _copy(src, dest):
-                    _record("patch", dest)
+                    _record("patch_evidence", dest)
                 copied.add(src.name)
 
     accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()

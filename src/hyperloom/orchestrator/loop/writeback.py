@@ -135,6 +135,31 @@ def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[s
     return {**measurement, "output_throughput": float(output_tput)}
 
 
+def _integrate_measurement_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep performance axes and launch evidence on the same E2E measurement."""
+    from hyperloom.common.perf_metric import graded_axes_of
+
+    return {
+        **graded_axes_of(measurement),
+        **{
+            key: measurement[key]
+            for key in (
+                "ttft_mean_ms",
+                "e2el_mean_ms",
+                "tpot_mean_ms",
+                "workspace",
+                "raw_result_path",
+                "report_path",
+                "materialized_config",
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+            )
+            if key in measurement
+        },
+    }
+
+
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     """Name the lever a settled KEEP moved, reading the delivery first.
 
@@ -639,8 +664,8 @@ class WritebackCollaborator:
         source: str = "writeback",
         measurement_basis: str = "e2e_rebench",
         ts: str | None = None,
-    ) -> None:
-        """Update cumulative_gain_validated, its timestamp, and stack-length watermark.
+    ) -> bool:
+        """Update cumulative_gain_validated only for a comparable baseline measurement.
 
         Call only when ``baseline_tput > 0`` and ``new_tput`` is a positive
         measured throughput.  The caller remains responsible for any surrounding
@@ -658,12 +683,16 @@ class WritebackCollaborator:
                 round an explore variant was graded on.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
+
+        Returns:
+            Whether a comparable measurement updated the validation watermark.
         """
         graded = resolve_graded_comparison(
             self.shared_state, _graded_source(measurement, new_tput), against_baseline=True
         )
-        if graded.degrade_reason:
-            log.info("cumulative gain graded on output throughput (%s)", graded.degrade_reason)
+        if not graded.comparable:
+            log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)
+            return False
         validated_gain = (
             (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
         )
@@ -684,6 +713,7 @@ class WritebackCollaborator:
                 stack_len=self.shared_state.cumulative_gain_validated_stack_len,
                 source=source,
                 measurement_basis=measurement_basis,
+                graded_objective=graded.objective,
                 ts=ts,
             )
         except Exception as exc:  # noqa: BLE001
@@ -698,6 +728,7 @@ class WritebackCollaborator:
                 entity=source,
                 error=exc,
             )
+        return True
 
     async def _record_integrate_keep(self, result: dict[str, Any]) -> None:
         """Promote a kernel integrate KEEP into the optimization stack.
@@ -709,11 +740,13 @@ class WritebackCollaborator:
         Args:
             result (dict[str, Any]): The integrate-patch executor result.
         """
-        from hyperloom.common.perf_metric import graded_axes_of
-
-        new_tput = result.get("output_throughput")
-        if new_tput is None:
-            new_tput = result.get("new_tput")
+        measurement = result.get("bench_result") or result
+        if measurement is not result and "output_throughput" in measurement:
+            new_tput = measurement["output_throughput"]
+        else:
+            new_tput = result.get("output_throughput")
+            if new_tput is None:
+                new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
         # A fusion sibling drained through the shared integrate lane must still
@@ -730,11 +763,7 @@ class WritebackCollaborator:
             "candidate_extra_server_args": result.get("extra_server_args"),
             "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
             "source_phase": str(getattr(self.shared_state, "phase", "") or "KERNEL_AGENT"),
-            "ttft_mean_ms": result.get("ttft_mean_ms"),
-            "e2el_mean_ms": result.get("e2el_mean_ms"),
-            "tpot_mean_ms": result.get("tpot_mean_ms"),
-            **graded_axes_of(result),
-            "workspace": result.get("workspace"),
+            **_integrate_measurement_fields(measurement),
         }
         if is_fusion:
             variant["provenance"] = "forge_fusion"
@@ -757,20 +786,11 @@ class WritebackCollaborator:
                 **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
             },
         )
+        if not lifted:
+            return
         if is_fusion:
-            # ``build_kernel_fusion_value`` gates the remote-recipe fusion export
-            # on this being a KEEP; the old inline path set it and the generic
-            # drain does not, so restore it here for the fusion-origin case.
-            try:
-                self.shared_state.last_fusion_integrate = {
-                    **result,
-                    "decision": "KEEP",
-                }
-            except Exception:  # noqa: BLE001 - state shape tolerant, matches inline path
-                pass
-        if lifted and self.shared_state.baseline_tput > 0:
-            # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
-            self._update_cumulative_gain_validated(new_tput, result.get("bench_result") or result)
+            self.shared_state.last_fusion_integrate = {**result, "decision": "KEEP"}
+        if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(new_tput, measurement):
             await self._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
@@ -2758,7 +2778,10 @@ class WritebackCollaborator:
         gap_canonical_id: str = "",
         entry_extra: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Lift a winner only when it improves the current throughput anchor.
+        """Accept prebaseline enablement config or lift an improving measured winner.
+
+        Prebaseline enablement has no runnable reference to grade against; its
+        configuration is retained without gain attribution.
 
         The only writer of ``optimization_stack``, and the only config-KEEP
         writer of ``current_best`` (the baseline anchor is the other one). Also
@@ -2783,31 +2806,40 @@ class WritebackCollaborator:
                 ``current_best`` stays a pure config record.
 
         Returns:
-            ``True`` when the winner was lifted, ``False`` when it was refused
-            for not beating the current anchor.
+            ``True`` when the configuration was accepted, ``False`` when a
+            performance winner was not comparable or did not beat the anchor.
         """
         from hyperloom.common.perf_metric import graded_axes_of
 
         cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
-        graded = resolve_graded_comparison(self.shared_state, cand_source)
-        if graded.degrade_reason:
-            log.info(
-                "lift: total-throughput grading unavailable (%s); grading %s winner on output throughput",
-                graded.degrade_reason,
-                task_kind,
-            )
-        if graded.vetoed:
-            log.info("current_best held: %s winner failed the interactivity constraint", task_kind)
-            return False
-        if graded.reference > 0 and graded.candidate <= graded.reference:
-            log.info(
-                "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
-                graded.reference,
-                graded.objective,
-                task_kind,
-                graded.candidate,
-            )
-            return False
+        prebaseline_enablement = (
+            task_kind == "integrate_patch"
+            and isinstance(bv, dict)
+            and bv.get("baseline_enablement") is True
+            and bv.get("attribution_eligible") is False
+            and float(self.shared_state.baseline_tput or 0.0) <= 0.0
+        )
+        if not prebaseline_enablement:
+            graded = resolve_graded_comparison(self.shared_state, cand_source)
+            if not graded.comparable:
+                log.info(
+                    "current_best held: %s winner not comparable (%s)",
+                    task_kind,
+                    graded.degrade_reason,
+                )
+                return False
+            if graded.vetoed:
+                log.info("current_best held: %s winner failed the interactivity constraint", task_kind)
+                return False
+            if graded.reference > 0 and graded.candidate <= graded.reference:
+                log.info(
+                    "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
+                    graded.reference,
+                    graded.objective,
+                    task_kind,
+                    graded.candidate,
+                )
+                return False
         previous = self.shared_state.current_best or {}
         base_args = ""
         if isinstance(previous, dict):
@@ -3258,10 +3290,13 @@ class WritebackCollaborator:
                 self.shared_state.enablement.origin = ""
                 self.shared_state.enablement.pending = False
             changed = True
-        # Accuracy / config / wall-clock describe the anchor run, so they only
+        # Performance / accuracy / config / wall-clock describe the anchor run, so they only
         # move when the anchor itself moves; otherwise the recorded reference
         # tput and the config it was measured with drift apart.
         if anchor_accepted:
+            from hyperloom.common.perf_metric import perf_snapshot_from_mapping
+
+            self.shared_state.baseline_perf = perf_snapshot_from_mapping(result) or {}
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):
                 self.shared_state.baseline_accuracy = float(acc)
@@ -3341,11 +3376,8 @@ class WritebackCollaborator:
                 "intvty_p90": result.get("intvty_p90"),
                 "workspace": result.get("workspace"),
             }
-            from hyperloom.common.perf_metric import perf_snapshot_from_mapping
-
-            snap = perf_snapshot_from_mapping(result)
+            snap = self.shared_state.baseline_perf
             if snap:
-                self.shared_state.baseline_perf = dict(snap)
                 current_best["total_throughput"] = snap["total_throughput"]
                 current_best["intvty_p90"] = snap["intvty_p90"]
                 for _axis in ("input_throughput", "tpot_p90_ms"):
@@ -3903,6 +3935,7 @@ class WritebackCollaborator:
         best_winner = result.get("best_variant")
         best_tput = result.get("output_throughput")
         promoted = False
+        last_lifted_winner: dict[str, Any] | None = None
         # A post-resume revalidation task confirms the EXISTING stack/current
         # best rather than adding a variant, so it never "promotes".
         # Reconcile the validation watermark + clear the
@@ -4204,7 +4237,8 @@ class WritebackCollaborator:
                 changed = True
             else:
                 if measured_ok and self.shared_state.baseline_tput > 0:
-                    self._update_cumulative_gain_validated(measured, result)
+                    if self._update_cumulative_gain_validated(measured, result):
+                        self.shared_state.resume_pending_revalidation = False
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
@@ -4224,8 +4258,6 @@ class WritebackCollaborator:
                                 "floor_pct": floor,
                             },
                         )
-                if measured_ok:
-                    self.shared_state.resume_pending_revalidation = False
                 changed = True
         # A revalidation task only CONFIRMS the existing stack/current_best; its
         # winner is not a new discovery. Skip the accept/lift path so a rebench
@@ -4250,16 +4282,8 @@ class WritebackCollaborator:
                             prov,
                         )
                 changed = True
-            # 4. Lift every applied winner into current_best / optimization_stack in
-            # application order.  Winners are applied cumulatively inside the executor
-            # (running_base_tput advances with each in-batch KEEP), so output_throughput
-            # reflects the full stack.  Lifting only the highest-gain winner credited
-            # that stacked throughput to a config missing the others' args, and the
-            # missed winners' recipe_deltas never reached the ledger at all.
-            # Each winner carries its own tput from the round that graded it.
-            # Because KEEP requires a positive gain over the advancing running base, each
-            # winner's tput is strictly greater than the previous one, so the anchor
-            # check inside _lift_to_current_best clears for every in-round winner.
+            # Lift cumulative winners in application order on their own measurements.
+            # The graded axis can improve even when output throughput decreases.
             explore_gap_cid = str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
             for winner in winners:
                 if not isinstance(winner, dict):
@@ -4277,22 +4301,19 @@ class WritebackCollaborator:
                     gap_canonical_id=explore_gap_cid,
                 ):
                     promoted = True
+                    last_lifted_winner = entry
             changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("depth: note_explore_outcome failed")
-        if promoted:
-            # A KEEP's own measurement promotes into cumulative_gain_validated and
-            # advances validated_stack_len so the unvalidated-stack guard clears.
-            # An explore round grades a variant on its decision round and reports
-            # that, so the basis names the round the number came from.
-            if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                self._update_cumulative_gain_validated(
-                    best_tput,
-                    best_winner if isinstance(best_winner, dict) else result,
-                    measurement_basis="e2e_decision_round",
-                )
+        if last_lifted_winner is not None:
+            # The last successful lift owns every axis of the validated measurement.
+            if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(
+                float(last_lifted_winner["tput"]),
+                last_lifted_winner,
+                measurement_basis="e2e_decision_round",
+            ):
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
@@ -4331,7 +4352,8 @@ class WritebackCollaborator:
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         status = str(result.get("status") or "")
-        new_tput = result.get("output_throughput")
+        measurement = result.get("bench_result") or result
+        new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
         # Register framework-rewrite switches as search levers. Done for both KEEP
         # verdicts: a bundle that cleared the gate is on and gets leave-one-out
@@ -4369,8 +4391,6 @@ class WritebackCollaborator:
                 origin_provenance = f"specialist:{origin_domain}"
             source_phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip()
             gap_canonical_id = str(task_params.get("gap_canonical_id") or result.get("gap_canonical_id") or "").strip()
-            from hyperloom.common.perf_metric import graded_axes_of
-
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
@@ -4389,29 +4409,13 @@ class WritebackCollaborator:
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
                 "tput": float(new_tput),
-                **graded_axes_of(result.get("bench_result") or result),
-                "workspace": result.get("workspace"),
+                **_integrate_measurement_fields(measurement),
                 "provenance": origin_provenance or "integrate_patch",
                 "scope": "source_patch",
                 # Durable source-layer handles so current_best stays relaunchable
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
             }
-            # ``IntegratePatchExecutor`` nests benchmark output in
-            # ``bench_result``. Preserve its launch evidence when lifting the
-            # winning measurement; otherwise the handoff is correctly marked
-            # unverified despite the grid runner having captured proof.
-            bench_result = result.get("bench_result")
-            if not isinstance(bench_result, Mapping):
-                bench_result = {}
-            for evidence_field in (
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-            ):
-                value = result.get(evidence_field) or bench_result.get(evidence_field)
-                if value:
-                    lift[evidence_field] = value
             # The mandate's stamp and the deliverable's markers together;
             # the result wins on a collision.
             lever_kind = _lever_for_keep(task_params, result)
@@ -4454,8 +4458,11 @@ class WritebackCollaborator:
                     lift,
                     gap_canonical_id=gap_canonical_id,
                 )
-                if lifted and self.shared_state.baseline_tput > 0:
-                    self._update_cumulative_gain_validated(new_tput, result)
+                if (
+                    lifted
+                    and self.shared_state.baseline_tput > 0
+                    and self._update_cumulative_gain_validated(new_tput, measurement)
+                ):
                     self.shared_state.resume_pending_revalidation = False
                     await self._maybe_enqueue_watermark_roofline(
                         reason="integrate_keep_watermark",
@@ -4634,6 +4641,13 @@ class WritebackCollaborator:
             "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
             "overlay_digest": str(env_spec.get("overlay_digest") or ""),
         }
+        # Keep legacy identities unchanged for launches with default controls.
+        for key in ("remove_args", "unset_envs"):
+            values = sorted(set(to_str_list(config.get(key))))
+            if values:
+                payload[key] = values
+        if str(config.get("args_mode") or "").strip().lower() == "replace":
+            payload["args_mode"] = "replace"
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
@@ -4850,7 +4864,7 @@ class WritebackCollaborator:
         """The launch config ``current_best`` was measured on.
 
         Returns:
-            ``extra_server_args`` / ``extra_envs`` / ``final_overlay``.
+            Server args, envs, removal/replacement controls, and ``final_overlay``.
         """
         cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
         args = str(cb.get("extra_server_args") or "").strip()
@@ -4869,6 +4883,9 @@ class WritebackCollaborator:
         return {
             "extra_server_args": args,
             "extra_envs": envs,
+            "remove_args": to_str_list(cb.get("remove_args")),
+            "unset_envs": to_str_list(cb.get("unset_envs")),
+            "args_mode": "replace" if str(cb.get("args_mode") or "").strip().lower() == "replace" else "append",
             "final_overlay": str(cb.get("final_overlay") or "").strip(),
         }
 
@@ -4950,6 +4967,9 @@ class WritebackCollaborator:
             "config": {
                 "extra_server_args": materialized.get("extra_server_args") or "",
                 "extra_envs": dict(materialized.get("extra_envs") or {}),
+                "remove_args": list(materialized["remove_args"]),
+                "unset_envs": list(materialized["unset_envs"]),
+                "args_mode": materialized["args_mode"],
                 # Authoritative, COMPLETE engine flags (run-specific stripped);
                 # empty => consumer keeps its own adapter defaults (prior behavior).
                 "server_launch_flags": server_launch_flags,
@@ -5638,7 +5658,7 @@ class WritebackCollaborator:
         # too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
         if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
-            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+            from ..actions.executors._proposal_identity import effective_fingerprint
 
             ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
             # An overlay that cannot load installs nothing: the server launches
@@ -5664,12 +5684,16 @@ class WritebackCollaborator:
                     "fallback": "geak_harness",
                 }
             if ps_flags or ps_envs or ps_overlay:
-                # Identity hash uses the SAME (args, envs) contract the grid
-                # executor fingerprints with (overlay is NOT part of the hash,
-                # matching canonical_fingerprint) so expected == the
-                # ran variant's fingerprint by construction, and any executor-side
-                # drop/alter of config is caught downstream.
-                expected_cfg_hash = canonical_fingerprint(ps_flags, ps_envs)
+                launch = self._current_best_launch_config()
+                base_controls: dict[str, Any] = {}
+                if launch["remove_args"]:
+                    base_controls["base_remove_args"] = launch["remove_args"]
+                if launch["unset_envs"]:
+                    base_controls["base_unset_envs"] = launch["unset_envs"]
+                if launch["args_mode"] == "replace":
+                    base_controls["base_args_mode"] = "replace"
+                # Explore folds the frozen base controls into its variant identity.
+                expected_cfg_hash = effective_fingerprint(ps_flags, ps_envs, **base_controls)
                 # ``expected_cfg_hash`` cannot see the overlay, so carry the
                 # overlay's own identity beside it. The consumer re-checks both
                 # after the run: a dropped or altered overlay then reads as
@@ -5679,6 +5703,7 @@ class WritebackCollaborator:
                 # string as its whole identity and the kernel rides along unnamed.
                 ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
                 params_ps: dict[str, Any] = {
+                    **base_controls,
                     "source": "resume_stack_revalidate",
                     "reason": reason,
                     "geak_fallback": True,
@@ -5818,6 +5843,27 @@ class WritebackCollaborator:
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
+        from hyperloom.common.jsonio import read_json
+        from ..actions.executors._workload_envs import agentx_active
+
+        handoff = read_json(self.session_dir / "geak" / "handoff.json", default={}, require_dict=True)
+        env_spec = self.build_env_spec()
+        client_config = handoff.get("bench_client_config") or {}
+        expected_identity = client_config.get("workload_identity") if isinstance(client_config, Mapping) else None
+        expected_client = str(handoff.get("bench_client") or "").strip().lower()
+        result_client = str(ps.get("bench_client") or "").strip().lower()
+        agentx = agentx_active(self.shared_state) or "agentx" in {expected_client, result_client}
+        if agentx:
+            identity_error = ""
+            if expected_client != "agentx" or result_client != "agentx":
+                identity_error = "agentx_replay_client_mismatch"
+            elif not isinstance(expected_identity, Mapping) or not expected_identity:
+                identity_error = "agentx_replay_missing_handoff_workload_identity"
+            elif ps.get("workload_identity") != expected_identity:
+                identity_error = "agentx_replay_workload_identity_mismatch"
+            if identity_error:
+                log.warning("geak 2a: %s; canonical revalidation required", identity_error)
+                return {"validated": False, "status": "incomparable", "reason": identity_error}
         # Overlay identity, captured BEFORE the replay so it can be compared
         # after. 2a replays GEAK's own launch script, which is why a
         # ``succeeded`` status proves the *config* engaged -- but the overlay is
@@ -5871,6 +5917,15 @@ class WritebackCollaborator:
             osl = int(reg.get("osl") or 1024)
         except (TypeError, ValueError):
             conc, isl, osl = 64, 1024, 1024
+        if agentx:
+            workload = handoff.get("workload") or {}
+            canonical_conc = workload.get("conc") if isinstance(workload, Mapping) else None
+            if type(canonical_conc) is not int or canonical_conc <= 0 or conc != canonical_conc:
+                return {
+                    "validated": False,
+                    "status": "incomparable",
+                    "reason": "agentx_replay_canonical_concurrency_mismatch",
+                }
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
 
@@ -5880,6 +5935,8 @@ class WritebackCollaborator:
             timeout = 2400
         res = await sweep_via_geak(
             result=ps,
+            handoff=handoff,
+            env_spec=env_spec,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
             # A kernel-lane re-benchmark, not a dispatched action: it borrows the
@@ -5892,6 +5949,34 @@ class WritebackCollaborator:
             # etc.) so it is protocol-identical to the reported result.
             pin_num_prompts=True,
         )
+        promotion_measurement = res.get("promotion_measurement")
+        promotion_result = ps
+        if agentx and str(res.get("status") or "") == "succeeded":
+            if (
+                not isinstance(promotion_measurement, Mapping)
+                or promotion_measurement.get("bench_client") != "agentx"
+                or promotion_measurement.get("workload_identity") != expected_identity
+                or not isinstance(promotion_measurement.get("measurement"), Mapping)
+            ):
+                return {
+                    "validated": False,
+                    "status": "incomparable",
+                    "reason": "agentx_replay_missing_current_measurement",
+                }
+            promotion_result = dict(ps)
+            for key in (
+                "output_throughput",
+                "input_throughput",
+                "total_throughput",
+                "total_token_throughput",
+                "intvty_p90",
+                "tpot_p90_ms",
+                "submission_valid",
+                "submission_invalid_reasons",
+            ):
+                promotion_result.pop(key, None)
+                if key in promotion_measurement:
+                    promotion_result[key] = promotion_measurement[key]
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
             # Rebench-first: write the headline from the GEAK-harness MEASURED
             # throughput (engages by construction via the launch-script replay),
@@ -5930,22 +6015,23 @@ class WritebackCollaborator:
                     overlay_digest_before,
                     _geak_overlay_digest(ps_overlay_2a),
                 )
-            self._promote_geak_from_candidate(
-                ps,
+            accepted = self._promote_geak_from_candidate(
+                promotion_result,
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
                 overlay_loaded=overlay_loaded_2a,
-                measurement_provenance=(
-                    res.get("promotion_measurement") if isinstance(res.get("promotion_measurement"), Mapping) else res
-                ),
+                measurement_provenance=promotion_measurement if isinstance(promotion_measurement, Mapping) else res,
             )
-            base = float(self.shared_state.baseline_tput or 0.0)
-            gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0
+            if not accepted:
+                return {"validated": False, "status": "no_promote", "reason": "replay_not_accepted"}
+            gain_out = float(self.shared_state.cumulative_gain_validated)
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive
                 log.exception("geak 2a: SharedState.save failed")
             return {"validated": True, "gain": gain_out, "reason": reason}
+        if res.get("error"):
+            reason = str(res["error"])
         log.warning(
             "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
             res.get("status"),

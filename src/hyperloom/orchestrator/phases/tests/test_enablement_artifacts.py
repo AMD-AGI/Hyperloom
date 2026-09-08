@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import subprocess
@@ -20,6 +21,8 @@ from hyperloom.orchestrator.phases._enablement_artifacts import (
     snapshot_round,
     write_setting_script,
 )
+from hyperloom.orchestrator.specialists.patch_safety import vet_patches
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 
@@ -73,14 +76,16 @@ def test_every_patch_of_a_round_is_reported(tmp_path):
     assert patches == [f"reports/enablement/abc123/patches/{n}" for n in ("001_a.patch", "002_b.patch", "003_c.patch")]
 
 
-def test_unapplied_workspace_patch_is_still_copied(tmp_path):
-    """A reverted attempt still explains what was tried."""
+def test_unapplied_workspace_patch_is_preserved_as_evidence(tmp_path):
+    """An unapplied attempt explains what was tried, not what passed integration."""
     src = tmp_path / "runs" / "specialist" / "abc123" / "worktree" / "patches"
     src.mkdir(parents=True)
-    (src / "002_try.diff").write_text("diff\n", encoding="utf-8")
+    evidence = b"diff\r\n"
+    (src / "002_try.diff").write_bytes(evidence)
     written = snapshot_round(tmp_path, _res())
-    assert (tmp_path / "reports" / "enablement" / "abc123" / "patches" / "002_try.diff").is_file()
-    assert written == [{"path": "reports/enablement/abc123/patches/002_try.diff", "role": "patch"}]
+    assert written == [{"path": "reports/enablement/abc123/attempted_patches/002_try.diff", "role": "patch_evidence"}]
+    assert (tmp_path / written[0]["path"]).read_bytes() == evidence
+    assert role_path(written, "patch") == ""
 
 
 def test_specialist_result_and_prompt_are_copied(tmp_path):
@@ -257,6 +262,140 @@ def _patch(tmp_path, rel, body="diff --git a/f b/f\n"):
 def _round(*patches, artifacts=()):
     """One accepted enablement round for ``EnablementRound.kept_rounds``."""
     return {"patches": list(patches), "artifacts": list(artifacts)}
+
+
+def _collected_and_vetted_round(tmp_path, target, before, after):
+    workspace = tmp_path / "runs" / "specialist" / "abc123"
+    worktree = workspace / "worktree"
+    worktree.mkdir(parents=True)
+    _git("init", "-q", str(worktree))
+    (worktree / "runtime.py").write_text("# Original comment\nENABLED = True\n", encoding="utf-8")
+    if before:
+        original = worktree / target
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_text(before, encoding="utf-8")
+    _git("-C", str(worktree), "add", ".")
+    _git("-C", str(worktree), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "init")
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{target}" if before else "/dev/null",
+            tofile=f"b/{target}",
+        )
+    )
+    patch = Path(_patch(worktree, "patches/manual.patch", diff))
+    collected, _roots = SpecialistSubprocessDispatcher._collect_patches(worktree, workspace, worktree)
+    assert collected == [str(patch)]
+    kept, dropped, _grounding, _spans_roots = vet_patches(collected, base_checkout=worktree)
+    payload = {"patches_written": kept, "setup_commands": ["pip install local-runtime==1.0"]}
+    (workspace / "specialist_done.json").write_text(json.dumps(payload), encoding="utf-8")
+    return worktree, patch, kept, dropped
+
+
+@pytest.mark.parametrize(
+    ("target", "before", "after", "verdict"),
+    [
+        ("scratch/rebench/probe.py", "", "print('one-off probe')\n", "work_artifact"),
+        (
+            "runtime.py",
+            "# Original comment\nENABLED = True\n",
+            "# Revised comment\nENABLED = True\n",
+            "annotation_only",
+        ),
+    ],
+)
+def test_snapshot_does_not_readmit_vet_rejected_patch(tmp_path, target, before, after, verdict):
+    worktree, patch, kept, dropped = _collected_and_vetted_round(tmp_path, target, before, after)
+    assert kept == []
+    assert [(d["path"], d["verdict"]) for d in dropped] == [(str(patch), verdict)]
+    evidence = patch.read_bytes()
+
+    written = snapshot_round(tmp_path, _res(patches_applied=kept, framework_root=str(worktree)))
+
+    assert patch.read_bytes() == evidence
+    assert role_path(written, "specialist_result")
+    assert [entry for entry in written if entry["role"] == "patch"] == []
+    archived_evidence = role_path(written, "patch_evidence")
+    assert archived_evidence == "reports/enablement/abc123/attempted_patches/manual.patch"
+    assert (tmp_path / archived_evidence).read_bytes() == evidence
+
+
+@pytest.mark.parametrize(
+    ("target", "before", "after", "verdict"),
+    [
+        ("scratch/rebench/probe.py", "", "print('one-off probe')\n", "work_artifact"),
+        (
+            "runtime.py",
+            "# Original comment\nENABLED = True\n",
+            "# Revised comment\nENABLED = True\n",
+            "annotation_only",
+        ),
+    ],
+)
+def test_setup_only_round_does_not_install_rejected_scan_patch(tmp_path, target, before, after, verdict):
+    worktree, patch, kept, dropped = _collected_and_vetted_round(tmp_path, target, before, after)
+    assert kept == []
+    assert dropped[0]["verdict"] == verdict
+    setup = ["pip install local-runtime==1.0"]
+    result = _res(patches_applied=kept, setup_commands_applied=setup, framework_root=str(worktree))
+    snapshot_round(tmp_path, result)
+    en = EnablementRound()
+    en.framework_root = result["framework_root"]
+    en.setup_commands = result["setup_commands_applied"]
+    en.kept_rounds = [_round(*result["patches_applied"])]
+
+    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
+
+    text = (tmp_path / rel).read_text(encoding="utf-8")
+    assert setup[0] in text
+    assert "apply_patch" not in text
+    assert "install -D" not in text
+    assert en.kept_rounds == [{"patches": [], "artifacts": []}]
+    assert not (tmp_path / "reports" / "enablement" / "patches").exists()
+    assert patch.is_file()
+
+
+@pytest.mark.parametrize(
+    ("target", "before", "after"),
+    [
+        ("runtime.py", "ENABLED = False\n", "ENABLED = True\n"),
+        ("kernels/new_kernel.py", "", "def block_size():\n    return 128\n"),
+        ("configs/runtime.yaml", "block_size: 64\n", "block_size: 128\n"),
+        ("configs/runtime.json", '{"block_size": 64}\n', '{"block_size": 128}\n'),
+    ],
+)
+def test_vetted_source_and_config_patches_survive_snapshot_and_replay(tmp_path, target, before, after):
+    worktree, patch, kept, dropped = _collected_and_vetted_round(tmp_path, target, before, after)
+    assert kept == [str(patch)]
+    assert dropped == []
+    _git("-C", str(worktree), "apply", str(patch))
+
+    written = snapshot_round(tmp_path, _res(patches_applied=kept, framework_root=str(worktree)))
+    archived_patch = role_path(written, "patch")
+    assert (tmp_path / archived_patch).read_bytes() == patch.read_bytes()
+    en = EnablementRound()
+    en.framework_root = str(worktree)
+    en.kept_rounds = [_round(*kept)]
+    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
+    text = (tmp_path / rel).read_text(encoding="utf-8")
+    assert "apply_patch patches/001_manual.patch" in text
+    assert (tmp_path / "reports" / "enablement" / "patches" / "001_manual.patch").read_bytes() == patch.read_bytes()
+
+
+def test_whole_file_artifact_is_replayed_without_claiming_a_patch(tmp_path):
+    source = Path(_patch(tmp_path, "runs/runtime.yaml", "block_size: 128\n"))
+    target = tmp_path / "framework" / "configs" / "runtime.yaml"
+    en = EnablementRound()
+    en.kept_rounds = [_round(artifacts=[{"source": str(source), "target": str(target)}])]
+
+    rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
+
+    text = (tmp_path / rel).read_text(encoding="utf-8")
+    assert "install -D" in text
+    assert "apply_patch" not in text
+    assert en.kept_rounds[0]["patches"] == []
+    assert (tmp_path / "reports" / "enablement" / "artifacts" / "001_runtime.yaml").read_bytes() == source.read_bytes()
 
 
 def test_write_setting_script_produces_executable(tmp_path):

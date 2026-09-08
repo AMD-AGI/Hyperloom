@@ -208,6 +208,11 @@ class GradedComparison:
     degrade_reason: str = ""
 
     @property
+    def comparable(self) -> bool:
+        """Whether both measurements provide the axes required for a performance verdict."""
+        return not self.degrade_reason
+
+    @property
     def graded_on_total(self) -> bool:
         """Whether the total-token-throughput objective actually applied."""
         return self.objective == GRADED_TOTAL

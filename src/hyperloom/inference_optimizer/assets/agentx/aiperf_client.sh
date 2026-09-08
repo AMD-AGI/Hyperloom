@@ -9,9 +9,10 @@
 # Design: DELEGATE the server phase to the maintained per-framework builtin
 # (vllm_mi300x.sh / sglang_mi300x.sh) via MAGPIE_RUN_PHASE=server, so server
 # boot + torch-profiler enabling stay correct across frameworks and versions
-# (no profiler flags reimplemented here). Then run `aiperf profile` (AgentX
-# weka-trace scenario) as the client, and map its export into the InferenceX
-# result schema. On single node the client owns profiling: InferenceX's
+# (no profiler flags reimplemented here). MAGPIE_RUN_PHASE=client instead reuses
+# a caller-managed server without launching, checking PIDs, or tearing it down.
+# Then run `aiperf profile` (AgentX weka-trace scenario) as the client, and map
+# its export into the InferenceX result schema. The client owns profiling: InferenceX's
 # benchmark_serving.py self-triggers /start_profile, and aiperf does not, so
 # when PROFILE=1 this script self-brackets a /start_profile..stop_profile window
 # after AIPerf reports the measured phase through its progress API.
@@ -72,127 +73,131 @@ ART="${RESULT_DIR}/aiperf_artifacts"
 rm -rf "$ART"
 mkdir -p "$RESULT_DIR" "$ART"
 
-# ── Resolve the per-framework builtin server script ──────────────────────────
-FRAMEWORK="${FRAMEWORK:-}"
-GPU="$(printf '%s' "${GPU_TYPE:-${RUNNER_TYPE:-mi300x}}" | tr '[:upper:]' '[:lower:]')"
-BUILTIN="${AGENTX_SERVER_SCRIPT:-${FRAMEWORK}_${GPU}.sh}"
-# The AgentX switch injects FRAMEWORK from benchmark.framework; a missing value
-# (and no explicit AGENTX_SERVER_SCRIPT) is misconfiguration -- fail loud rather
-# than silently defaulting to a framework and booting the wrong server.
-if [ -z "${AGENTX_SERVER_SCRIPT:-}" ] && [ -z "$FRAMEWORK" ]; then
-  log "ERROR: FRAMEWORK unset and AGENTX_SERVER_SCRIPT not provided; cannot resolve the builtin server script"
-  exit 2
-fi
-if [ ! -f "${BENCH_DIR}/${BUILTIN}" ]; then
-  log "ERROR: builtin server script not found: ${BENCH_DIR}/${BUILTIN}"
-  exit 2
-fi
-
-# ── Server phase: delegate to builtin (correct boot + profiler per framework) ─
-PIDFILE="${RESULT_DIR}/agentx_server.pid"
-rm -f "$PIDFILE"
-SERVER_PID=""  # set after boot; cleanup guards ${SERVER_PID:-} + a port fallback
-
-cleanup() {
-  [ "${AGENTX_KEEP_SERVER:-0}" = "1" ] && return 0
-  if [ -n "${SERVER_PID:-}" ]; then
-    log "tearing down server pid=${SERVER_PID}"
-    kill -TERM "-${SERVER_PID}" 2>/dev/null || kill -TERM "${SERVER_PID}" 2>/dev/null || true
-    # vLLM can ignore/stall on SIGTERM (graceful shutdown hangs after a large
-    # profiler-trace flush), leaking the GPUs. Escalate to SIGKILL if the
-    # process group is still alive after a grace period.
-    _i=0
-    while [ "$_i" -lt 10 ]; do
-      kill -0 "${SERVER_PID}" 2>/dev/null || break
-      sleep 2
-      _i=$((_i + 1))
-    done
-    if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      log "server survived SIGTERM after grace period; sending SIGKILL"
-      kill -KILL "-${SERVER_PID}" 2>/dev/null || kill -KILL "${SERVER_PID}" 2>/dev/null || true
-    fi
-  fi
-  # Belt-and-suspenders: free the port even if the pid was unknown/stale, so a
-  # server that booted without a recorded pid can never leak the GPUs.
-  command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
-}
-# Install the trap BEFORE booting the server: if the builtin starts the server
-# then returns nonzero, set -e aborts here and the EXIT trap still fires (the
-# port fallback reaps a server booted without a recorded pid) — no leak window.
-trap cleanup EXIT INT TERM
-
-# ── Server-side keep-alive: the other half of AGENTX_HTTP_TCP_USER_TIMEOUT ────
-# AIPerf pins ONE pooled keep-alive connection per agentic session and reuses it
-# across that session's turns. The inter-turn gap in an agentic replay is a
-# model think-time, not a client delay, and routinely exceeds a serving
-# framework's default idle timeout -- vLLM's is 5s (envs.py:
-# ``VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``). When the gap crosses it the server
-# closes the socket exactly as the client reuses it, and aiohttp surfaces
-# ServerDisconnectedError. AIPerf escalates that to a TERMINAL warmup failure:
-# "A root AgentX warmup request failed, so profiling was not started" -- against
-# a completely healthy server, with no error anywhere in the server log.
-#
-# Measured here on a conc=16 K3 round: the server logged an orderly
-# "Application shutdown complete" while warmup sat at 64/177, and the only
-# symptom was a burst of ServerDisconnectedError on the client. Upstream hit the
-# same failure (InferenceX #2371 aborted a c4 arm ~15 min in) and fixes it by
-# raising the SERVER idle timeout to match the client's tolerance.
-#
-# The client half already ships above as AIPERF_HTTP_TCP_USER_TIMEOUT (900s);
-# without this the two disagree by 180x. Exported per framework because the knob
-# name is framework-specific, and only when the operator has not pinned one.
-_KEEPALIVE_S="${AGENTX_HTTP_KEEP_ALIVE_S:-900}"
-# Decide from BUILTIN, not from a concatenation. Matching against
-# "${FRAMEWORK}${BUILTIN}" glued the two together, so FRAMEWORK=vllm with
-# BUILTIN=sglang_mi300x.sh formed "vllmsglang_mi300x.sh", hit the *vllm* arm
-# first, and left SGLang on its 5s default -- while this very line went on to
-# report 900s. The server then closed the connection mid-warmup and the round
-# died as "root AgentX warmup request failed", with the log actively denying the
-# cause. BUILTIN is the script that actually boots, so it is the authority;
-# FRAMEWORK is only a fallback for a script name that carries no framework, and
-# a disagreement between them is worth saying out loud rather than resolving
-# silently in either direction.
-_ka_target=""
-case "$BUILTIN" in
-  *vllm*) _ka_target=vllm ;;
-  *sglang*) _ka_target=sglang ;;
-  *)
-    case "${FRAMEWORK:-}" in
-      *vllm*) _ka_target=vllm ;;
-      *sglang*) _ka_target=sglang ;;
-    esac
-    ;;
-esac
-case "${FRAMEWORK:-}" in
-  "") ;;
-  *"$_ka_target"*) ;;
-  *)
-    [ -n "$_ka_target" ] && log "WARN FRAMEWORK=${FRAMEWORK} disagrees with the server script ${BUILTIN}; keep-alive follows the script"
-    ;;
-esac
-case "$_ka_target" in
-  vllm) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
-  sglang) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
-esac
-if [ -n "$_ka_target" ]; then
-  log "server keep-alive: ${_ka_target} ${_KEEPALIVE_S}s (client tcp-user-timeout ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms)"
+if [ "${MAGPIE_RUN_PHASE:-full}" = "client" ]; then
+  log "client-only mode: reusing caller-managed server on port ${PORT}"
 else
-  log "WARN no keep-alive knob for server script ${BUILTIN}; server idle timeout left at its default while the client tolerates ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms"
-fi
+  # ── Resolve the per-framework builtin server script ──────────────────────────
+  FRAMEWORK="${FRAMEWORK:-}"
+  GPU="$(printf '%s' "${GPU_TYPE:-${RUNNER_TYPE:-mi300x}}" | tr '[:upper:]' '[:lower:]')"
+  BUILTIN="${AGENTX_SERVER_SCRIPT:-${FRAMEWORK}_${GPU}.sh}"
+  # The AgentX switch injects FRAMEWORK from benchmark.framework; a missing value
+  # (and no explicit AGENTX_SERVER_SCRIPT) is misconfiguration -- fail loud rather
+  # than silently defaulting to a framework and booting the wrong server.
+  if [ -z "${AGENTX_SERVER_SCRIPT:-}" ] && [ -z "$FRAMEWORK" ]; then
+    log "ERROR: FRAMEWORK unset and AGENTX_SERVER_SCRIPT not provided; cannot resolve the builtin server script"
+    exit 2
+  fi
+  if [ ! -f "${BENCH_DIR}/${BUILTIN}" ]; then
+    log "ERROR: builtin server script not found: ${BENCH_DIR}/${BUILTIN}"
+    exit 2
+  fi
 
-log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
-MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
-  PORT="$PORT" RESULT_DIR="$RESULT_DIR" \
-  bash "${BENCH_DIR}/${BUILTIN}"
-SERVER_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+  # ── Server phase: delegate to builtin (correct boot + profiler per framework) ─
+  PIDFILE="${RESULT_DIR}/agentx_server.pid"
+  rm -f "$PIDFILE"
+  SERVER_PID=""  # set after boot; cleanup guards ${SERVER_PID:-} + a port fallback
 
-# Fail loud if the builtin server phase did not record a pid: proceeding would
-# run a benchmark against a server we cannot reliably tear down.
-if [ -z "${SERVER_PID:-}" ]; then
-  log "ERROR: builtin server phase wrote no pid to ${PIDFILE}; refusing to run (would risk a GPU leak)"
-  exit 3
+  cleanup() {
+    [ "${AGENTX_KEEP_SERVER:-0}" = "1" ] && return 0
+    if [ -n "${SERVER_PID:-}" ]; then
+      log "tearing down server pid=${SERVER_PID}"
+      kill -TERM "-${SERVER_PID}" 2>/dev/null || kill -TERM "${SERVER_PID}" 2>/dev/null || true
+      # vLLM can ignore/stall on SIGTERM (graceful shutdown hangs after a large
+      # profiler-trace flush), leaking the GPUs. Escalate to SIGKILL if the
+      # process group is still alive after a grace period.
+      _i=0
+      while [ "$_i" -lt 10 ]; do
+        kill -0 "${SERVER_PID}" 2>/dev/null || break
+        sleep 2
+        _i=$((_i + 1))
+      done
+      if kill -0 "${SERVER_PID}" 2>/dev/null; then
+        log "server survived SIGTERM after grace period; sending SIGKILL"
+        kill -KILL "-${SERVER_PID}" 2>/dev/null || kill -KILL "${SERVER_PID}" 2>/dev/null || true
+      fi
+    fi
+    # Belt-and-suspenders: free the port even if the pid was unknown/stale, so a
+    # server that booted without a recorded pid can never leak the GPUs.
+    command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
+  }
+  # Install the trap BEFORE booting the server: if the builtin starts the server
+  # then returns nonzero, set -e aborts here and the EXIT trap still fires (the
+  # port fallback reaps a server booted without a recorded pid) — no leak window.
+  trap cleanup EXIT INT TERM
+
+  # ── Server-side keep-alive: the other half of AGENTX_HTTP_TCP_USER_TIMEOUT ────
+  # AIPerf pins ONE pooled keep-alive connection per agentic session and reuses it
+  # across that session's turns. The inter-turn gap in an agentic replay is a
+  # model think-time, not a client delay, and routinely exceeds a serving
+  # framework's default idle timeout -- vLLM's is 5s (envs.py:
+  # ``VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``). When the gap crosses it the server
+  # closes the socket exactly as the client reuses it, and aiohttp surfaces
+  # ServerDisconnectedError. AIPerf escalates that to a TERMINAL warmup failure:
+  # "A root AgentX warmup request failed, so profiling was not started" -- against
+  # a completely healthy server, with no error anywhere in the server log.
+  #
+  # Measured here on a conc=16 K3 round: the server logged an orderly
+  # "Application shutdown complete" while warmup sat at 64/177, and the only
+  # symptom was a burst of ServerDisconnectedError on the client. Upstream hit the
+  # same failure (InferenceX #2371 aborted a c4 arm ~15 min in) and fixes it by
+  # raising the SERVER idle timeout to match the client's tolerance.
+  #
+  # The client half already ships above as AIPERF_HTTP_TCP_USER_TIMEOUT (900s);
+  # without this the two disagree by 180x. Exported per framework because the knob
+  # name is framework-specific, and only when the operator has not pinned one.
+  _KEEPALIVE_S="${AGENTX_HTTP_KEEP_ALIVE_S:-900}"
+  # Decide from BUILTIN, not from a concatenation. Matching against
+  # "${FRAMEWORK}${BUILTIN}" glued the two together, so FRAMEWORK=vllm with
+  # BUILTIN=sglang_mi300x.sh formed "vllmsglang_mi300x.sh", hit the *vllm* arm
+  # first, and left SGLang on its 5s default -- while this very line went on to
+  # report 900s. The server then closed the connection mid-warmup and the round
+  # died as "root AgentX warmup request failed", with the log actively denying the
+  # cause. BUILTIN is the script that actually boots, so it is the authority;
+  # FRAMEWORK is only a fallback for a script name that carries no framework, and
+  # a disagreement between them is worth saying out loud rather than resolving
+  # silently in either direction.
+  _ka_target=""
+  case "$BUILTIN" in
+    *vllm*) _ka_target=vllm ;;
+    *sglang*) _ka_target=sglang ;;
+    *)
+      case "${FRAMEWORK:-}" in
+        *vllm*) _ka_target=vllm ;;
+        *sglang*) _ka_target=sglang ;;
+      esac
+      ;;
+  esac
+  case "${FRAMEWORK:-}" in
+    "") ;;
+    *"$_ka_target"*) ;;
+    *)
+      [ -n "$_ka_target" ] && log "WARN FRAMEWORK=${FRAMEWORK} disagrees with the server script ${BUILTIN}; keep-alive follows the script"
+      ;;
+  esac
+  case "$_ka_target" in
+    vllm) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+    sglang) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+  esac
+  if [ -n "$_ka_target" ]; then
+    log "server keep-alive: ${_ka_target} ${_KEEPALIVE_S}s (client tcp-user-timeout ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms)"
+  else
+    log "WARN no keep-alive knob for server script ${BUILTIN}; server idle timeout left at its default while the client tolerates ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms"
+  fi
+
+  log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
+  MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
+    PORT="$PORT" RESULT_DIR="$RESULT_DIR" \
+    bash "${BENCH_DIR}/${BUILTIN}"
+  SERVER_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+
+  # Fail loud if the builtin server phase did not record a pid: proceeding would
+  # run a benchmark against a server we cannot reliably tear down.
+  if [ -z "${SERVER_PID:-}" ]; then
+    log "ERROR: builtin server phase wrote no pid to ${PIDFILE}; refusing to run (would risk a GPU leak)"
+    exit 3
+  fi
+  log "server up (pid=${SERVER_PID}) on port ${PORT}"
 fi
-log "server up (pid=${SERVER_PID}) on port ${PORT}"
 
 # ── Resolve served model name (a reused server may expose a different id) ─────
 SERVE_MODEL="$MODEL"

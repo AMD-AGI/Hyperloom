@@ -302,6 +302,36 @@ class TestApplyUserSkipList:
 
 
 class TestVariantResultToDict:
+    def test_preserves_measurement_fields(self):
+        from dataclasses import asdict
+
+        result = VariantResult(
+            name="agentx",
+            extra_server_args="--kv-cache-dtype fp8",
+            extra_envs={"CONC": "4"},
+            status="succeeded",
+            output_throughput=100.0,
+            input_throughput=900.0,
+            total_token_throughput=1000.0,
+            intvty_p90=80.0,
+            tpot_p90_ms=12.5,
+            completed_requests=20,
+            duration_seconds=3600.0,
+            workspace="/runs/benchmark",
+            raw_result_path="/runs/benchmark/inferencex_result.json",
+            launch_evidence={"identity": "measured-server"},
+        )
+
+        encoded = result.to_dict()
+        assert encoded == {**asdict(result), "fingerprint": result.fingerprint}
+
+    def test_preserves_unmeasured_axes(self):
+        result = VariantResult(name="legacy", extra_server_args="", extra_envs={}, status="failed")
+        encoded = result.to_dict()
+        for key in ("input_throughput", "total_token_throughput", "intvty_p90", "tpot_p90_ms"):
+            assert key in encoded
+            assert encoded[key] is None
+
     def test_succeeded_default_shape(self):
         vr = VariantResult(
             name="v",

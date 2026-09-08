@@ -1602,8 +1602,10 @@ class SpecialistSubprocessDispatcher:
         A new file is untracked, and ``git diff`` does not see untracked paths.
         Intent-to-add stages their existence so they render as creations without
         committing anything, which is what keeps "edited a file and added one"
-        from harvesting a patch that silently omits the addition. ``patches/`` is
-        excluded because the harvest itself lands there.
+        from harvesting a patch that silently omits the addition. Task-owned
+        done files, rebench scratch, bytecode caches and the harvest's own
+        ``patches/`` directory are not source deliverables. Proven Python
+        comment-only edits likewise produce no installable patch.
 
         Args:
             worktree: Per-task worktree holding a ``.git`` marker.
@@ -1626,11 +1628,16 @@ class SpecialistSubprocessDispatcher:
                 log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
                 return None
 
-        _git("add", "-A", "-N", "--", ".", ":(exclude)patches")
-        diff = _git("diff", "HEAD", "--", ".", ":(exclude)patches")
-        if diff is None or diff.returncode != 0:
+        from .patch_safety import SPECIALIST_WORK_ARTIFACT_PATHSPECS, patch_is_annotation_only
+
+        paths = (".", *SPECIALIST_WORK_ARTIFACT_PATHSPECS)
+        _git("add", "-A", "-N", "--", *paths)
+        diff = _git("diff", "HEAD", "--", *paths)
+        if diff is None or diff.returncode != 0 or not diff.stdout.strip():
             return ""
-        return diff.stdout if diff.stdout.strip() else ""
+        if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
+            return ""
+        return diff.stdout
 
     @staticmethod
     def _collect_patches(
@@ -1673,7 +1680,8 @@ class SpecialistSubprocessDispatcher:
                 continue
             for ext in ("*.patch", "*.diff"):
                 for p in sorted(patches_dir.glob(ext)):
-                    out.append(str(p))
+                    if p.name != "_worktree_diff.patch":
+                        out.append(str(p))
         return out, {}
 
     @staticmethod

@@ -366,7 +366,14 @@ def test_vet_patches(tmp_path, monkeypatch):
         returncode = 0
         stderr = ""
 
-    monkeypatch.setattr(ps.subprocess, "run", lambda *a, **k: _Proc())
+    real_run = ps.subprocess.run
+
+    def _ground_only(cmd, *args, **kwargs):
+        if "--check" in cmd:
+            return _Proc()
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(ps.subprocess, "run", _ground_only)
     kept, dropped, grounding, spans_roots = ps.vet_patches([str(good), str(bad)], base_checkout=tmp_path)
     assert str(good) in kept
     assert any(d["verdict"] == ps.GROUND_NOT_DIFF for d in dropped)
@@ -394,6 +401,63 @@ def _make_git_repo(root: Path, files: dict[str, str]) -> Path:
         check=True,
     )
     return root
+
+
+def test_vet_patches_drops_annotation_only_diff_that_applies(tmp_path: Path) -> None:
+    before = "# Runtime selection.\nBLOCK_SIZE = 64\n"
+    root = _make_git_repo(tmp_path / "repo", {"runtime.py": before})
+    (root / "runtime.py").write_text("# Runtime selection, unchanged.\nBLOCK_SIZE = 64\n", encoding="utf-8")
+    diff = subprocess.run(["git", "-C", str(root), "diff", "HEAD"], check=True, capture_output=True, text=True).stdout
+    (root / "runtime.py").write_text(before, encoding="utf-8")
+    patch = tmp_path / "annotation.patch"
+    patch.write_text(diff, encoding="utf-8")
+    assert ps.ground_patch_text(diff, base_checkout=root, explicit_root=root).verdict == ps.GROUND_APPLIES
+
+    kept, dropped, _grounding, spans_roots = ps.vet_patches([str(patch)], base_checkout=root, explicit_root=root)
+
+    assert kept == []
+    assert len(dropped) == 1
+    assert dropped[0]["path"] == str(patch)
+    assert dropped[0]["verdict"] == "annotation_only"
+    assert not spans_roots
+    assert patch.read_text(encoding="utf-8") == diff
+    assert (root / "runtime.py").read_text(encoding="utf-8") == before
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"], check=True, capture_output=True, text=True
+    )
+    assert status.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("target", "before", "after"),
+    [
+        ("configs/runtime.json", '{"block_size": 64}\n', '{"block_size": 128}\n'),
+        ("configs/runtime.yaml", "block_size: 64\n", "block_size: 128\n"),
+        ("runtime.py", 'PROMPT = """\n# Original instruction\n"""\n', 'PROMPT = """\n# Revised instruction\n"""\n'),
+        ("runtime.py", "#!/usr/bin/python\npass\n", "#!/usr/bin/python3\npass\n"),
+        pytest.param(
+            "runtime.py",
+            "#!/usr/bin/env python3\npass\n",
+            "# Runtime entrypoint.\n#!/usr/bin/env python3\npass\n",
+            id="shebang-first-line",
+        ),
+        ("runtime.py", "# cython: boundscheck=True\npass\n", "# cython: boundscheck=False\npass\n"),
+    ],
+)
+def test_vet_patches_keeps_runtime_data_changes(tmp_path: Path, target: str, before: str, after: str) -> None:
+    root = _make_git_repo(tmp_path / "repo", {target: before})
+    (root / target).write_text(after, encoding="utf-8")
+    diff = subprocess.run(["git", "-C", str(root), "diff", "HEAD"], check=True, capture_output=True, text=True).stdout
+    (root / target).write_text(before, encoding="utf-8")
+    patch = tmp_path / "runtime.patch"
+    patch.write_text(diff, encoding="utf-8")
+
+    kept, dropped, grounding, spans_roots = ps.vet_patches([str(patch)], base_checkout=root, explicit_root=root)
+
+    assert kept == [str(patch)]
+    assert dropped == []
+    assert grounding == {str(patch): ps.GROUND_APPLIES}
+    assert not spans_roots
 
 
 def test_nested_root_collapse_picks_outer(tmp_path):
