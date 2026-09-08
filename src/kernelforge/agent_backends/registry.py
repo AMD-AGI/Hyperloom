@@ -380,7 +380,7 @@ register_agent_provider(
     AgentProvider(
         name="codex",
         factory=_create_codex_backend,
-        default_model="gpt-5.6",
+        default_model="gpt-5.6-sol",
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,

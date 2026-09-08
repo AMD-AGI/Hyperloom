@@ -659,6 +659,20 @@ for the user-facing summary.
 
 ### Fixed
 
+- **The Codex default named a deployment the gateway does not serve.**
+  `DEFAULT_CODEX_MODEL` was `gpt-5.6`; measured against the gateway Hyperloom
+  points Forge at, that id answers `400 Deployment of "gpt-5.6" ... is not
+  found!` on both ChatCompletions and Responses, while `gpt-5.6-sol` answers
+  200 on both. Both appear in `/v1/models`, so the catalog alone does not
+  separate them -- only a request does. Hyperloom's own install guide already
+  names `gpt-5.6-sol` and states that it is a deployment name rather than a
+  suffixed variant of a bare `gpt-5.6`, so this default disagreed with the
+  documentation shipped beside it: a box that named no model started every
+  Codex session on a rejected id and survived only by falling back to
+  `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
+  a context-window suffix -- bracketed ids remain rejected by this gateway and
+  `with_context_window()` stays default-off.
+
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
   three axes carried nothing under an agentic replay — request shapes come from

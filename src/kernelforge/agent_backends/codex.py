@@ -35,7 +35,15 @@ log = logging.getLogger(__name__)
 
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
-DEFAULT_CODEX_MODEL = "gpt-5.6"
+#: The gateway Hyperloom points Forge at publishes both ``gpt-5.6`` and
+#: ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
+#: behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found"
+#: on both ChatCompletions and Responses. Hyperloom's own install guide
+#: already names ``gpt-5.6-sol`` and says it is a deployment name rather
+#: than a suffixed variant; this default disagreed with it, so a
+#: deployment that named no model started every Codex session on an id the
+#: gateway rejects.
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
 
 class CodexBackendError(AgentProviderError):

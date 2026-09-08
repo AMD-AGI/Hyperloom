@@ -724,7 +724,7 @@ def test_shared_model_option_is_provider_neutral() -> None:
         "agent_backend": "codex",
     }
     assert resolve_codex_model("provider-model") == "provider-model"
-    assert resolve_codex_model("") == "gpt-5.6"
+    assert resolve_codex_model("") == "gpt-5.6-sol"
     assert resolve_codex_reasoning_effort("") == "high"
     assert resolve_codex_reasoning_effort("max") == "xhigh"
     assert resolve_codex_reasoning_effort("xhigh") == "xhigh"
