@@ -74,6 +74,13 @@ HOST_CPU="${HOST_CPU:-196}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SH
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
 LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
+# One warm HuggingFace cache for every leg. lm_eval resolves its dataset through
+# the hub API and all legs share this cluster's egress IP, so anonymous access
+# burns a single per-IP quota and the legs that reach eval last are refused after
+# their benchmark already succeeded. A shared cache plus offline mode removes the
+# dependency; warm it with the pinned revision before a run.
+HF_CACHE_ROOT="${HF_CACHE_ROOT:-${NFS_ROOT%/}/hf-cache}"
+
 # The nested containers share the host pod's memory, so their limits must sum
 # under HOST_MEM: two 3h legs plus four 12h legs is 1920Gi of 2048Gi, leaving the
 # rest for dockerd and the pod itself. Raising HOST_MEM is not an option here.
@@ -219,6 +226,7 @@ common_env_json() {
     --arg tgain "$TARGET_GAIN" \
     --arg cmodel "$CLAUDE_MODEL" --arg cver "$CLAUDE_CLI_VERSION" \
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
+    --arg hfhome "$HF_CACHE_ROOT" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     --arg rtag "$VERSION_TAG" \
@@ -232,7 +240,8 @@ common_env_json() {
       CLAUDE_MODEL: $cmodel,
       CLAUDE_CLI_VERSION: $cver,
       RUN_TAG: $rtag,
-      ANTHROPIC_API_KEY_B64: $keyb64
+      ANTHROPIC_API_KEY_B64: $keyb64,
+      HF_HOME:$hfhome
     }
     + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL: $baseurl} end)
     + (if $cheaders == "" then {} else {ANTHROPIC_CUSTOM_HEADERS: $cheaders} end)'
@@ -384,6 +393,7 @@ if [ "$want_docker_host" = 1 ]; then
     --arg m3 "$MODEL_3H" --arg m12 "$MODEL_12H" \
     --arg tgain "$TARGET_GAIN" --arg cmodel "$CLAUDE_MODEL" --arg cver "$CLAUDE_CLI_VERSION" \
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
+    --arg hfhome "$HF_CACHE_ROOT" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     --arg legs "$docker_legs" \
@@ -396,6 +406,7 @@ if [ "$want_docker_host" = 1 ]; then
       TARGET_GAIN:$tgain, CLAUDE_MODEL:$cmodel, CLAUDE_CLI_VERSION:$cver,
       RUN_TAG:$rtag,
       ANTHROPIC_API_KEY_B64:$keyb64,
+      HF_HOME:$hfhome,
       HYPERLOOM_RUN_MODE:"docker",
       E2E_DOCKER_HOST:"1",
       DOCKER_LEGS:$legs,

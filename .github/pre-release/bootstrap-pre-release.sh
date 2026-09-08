@@ -196,6 +196,13 @@ run_leg() {
   ( umask 077
     {
       echo "ANTHROPIC_API_KEY=$(printf '%s' "$ANTHROPIC_API_KEY_B64" | base64 -d)"
+      # One warm cache for every leg, read offline: the eval dataset resolves from
+      # disk instead of the hub, whose per-IP quota all the legs share.
+      if [ -n "${HF_HOME:-}" ]; then
+        echo "HF_HOME=${HF_HOME}"
+        echo "HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}"
+        echo "HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}"
+      fi
       [ -n "${ANTHROPIC_BASE_URL:-}" ] && echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
       # Gateways like AMD's APIM (llm-api.amd.com) reject the bearer key alone with
       # "401 Access denied due to missing subscription key" -- they need an

@@ -33,6 +33,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.env_safety import DOTENV_EXACT_ALLOWLIST
+
 _SELF_HOSTED_LABEL = "hyperloom-pre-e2e-baremetal"
 
 
@@ -144,6 +146,25 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     body = cleanup[0]["run"]
     assert "/stop" in body
     assert "leave_running" in body
+
+
+def test_the_eval_dataset_is_read_from_the_shared_cache_offline(dispatch_script: str, bootstrap_script: str) -> None:
+    """The eval must not depend on the hub being reachable or generous.
+
+    lm_eval resolves its dataset through the hub API, every leg leaves through
+    one egress IP, and anonymous access is rate limited per IP: the legs that
+    reach eval last are refused and lose a benchmark that already succeeded.
+    A warm shared cache plus offline mode removes the dependency instead of
+    raising the ceiling on it.
+    """
+    assert dispatch_script.count("HF_HOME:$hfhome") == 2, (
+        "both the per-leg env and the docker host env must point at the shared cache"
+    )
+    assert "${NFS_ROOT%/}/hf-cache" in dispatch_script, "the cache lives beside the run tree on NFS"
+    for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE"):
+        assert f'echo "{key}=' in bootstrap_script, f"{key} must reach the leg .env"
+        # A key outside the allowlist is dropped with a warning, so writing it is not enough.
+        assert key in DOTENV_EXACT_ALLOWLIST, f"{key} would be ignored when read back from .env"
 
 
 def test_nested_container_memory_fits_the_host_pod(dispatch_script: str) -> None:
