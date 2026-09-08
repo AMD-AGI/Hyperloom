@@ -395,7 +395,12 @@ class RecoverExecutor:
         for entry in candidates:
             pid = entry["pid"]
             cmd = str(entry.get("cmd", ""))
-            pattern = next((marker for marker in self.OWNER_PATTERNS if marker in cmd), None)
+            is_atom = self._is_atom_server(cmd)
+            pattern = (
+                "atom.entrypoints"
+                if is_atom
+                else next((marker for marker in self.OWNER_PATTERNS if marker in cmd), None)
+            )
             if pattern is None:
                 log.warning(
                     "recover_executor: pid %d is not a recognized session owner; not signalling",
@@ -405,22 +410,21 @@ class RecoverExecutor:
                 continue
             entry["pattern"] = pattern
             pgid = entry.get("pgid")
-            if (
-                pattern == "atom.entrypoints"
-                and os.name == "posix"
-                and isinstance(pgid, int)
-                and pgid > 1
-                and pgid != os.getpgrp()
-            ):
+            if is_atom and os.name == "posix" and isinstance(pgid, int) and pgid > 1 and pgid != os.getpgrp():
                 members = self._atom_group_members(pgid)
                 # Capture identities while the recorded ATOM leader can still
                 # establish ownership; its anonymous workers may outlive TERM.
                 if (
-                    pid in members
-                    and "atom.entrypoints" in self._pid_cmdline(pid)
-                    and self._process_identity(pid) == (pgid, members[pid])
+                    pid not in members
+                    or not self._is_atom_server(self._pid_cmdline(pid))
+                    or self._process_identity(pid) != (pgid, members[pid])
                 ):
-                    atom_members[pid] = members
+                    log.warning(
+                        "recover_executor: ATOM owner identity could not be confirmed for pid %d; not signalling", pid
+                    )
+                    self._remove_finished_pidfile(entry)
+                    continue
+                atom_members[pid] = members
             sent = (
                 self._send_group_signal(int(pgid), signal.SIGTERM) or self._send_signal(pid, signal.SIGTERM)
                 if isinstance(pgid, int)
@@ -467,6 +471,16 @@ class RecoverExecutor:
                 entry["signal"] = "KILL"
             self._remove_finished_pidfile(entry, force=bool(sent))
         return killed + killed_workers
+
+    @staticmethod
+    def _is_atom_server(cmd: str) -> bool:
+        """Identify the module entrypoint rather than framework names in its arguments."""
+        args = cmd.split()
+        try:
+            entry = args[args.index("-m") + 1]
+        except (ValueError, IndexError):
+            return False
+        return entry == "atom.entrypoints.openai_server"
 
     @staticmethod
     def _process_identity(pid: int) -> tuple[int, int] | None:

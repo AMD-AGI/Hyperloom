@@ -730,7 +730,16 @@ class TestKillStaleOwnersNoneSignalled:
             ],
         )
         sent: list[tuple[int, signal.Signals]] = []
-        monkeypatch.setattr(exe, "_send_group_signal", lambda pgid, sig: sent.append((pgid, sig)) or True)
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: {111: 10})
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "python3 -m atom.entrypoints.openai_server")
+        monkeypatch.setattr(exe, "_process_identity", lambda _pid: (222, 10))
+
+        def send_term(pgid, sig):
+            sent.append((pgid, sig))
+            monkeypatch.setattr(exe, "_process_identity", lambda _pid: None)
+            return True
+
+        monkeypatch.setattr(exe, "_send_group_signal", send_term)
         monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: False)
         monkeypatch.setattr(recmod.time, "sleep", lambda _s: None)
 
@@ -808,7 +817,7 @@ class TestDiscoverStalePidsBranches:
 
 
 class TestAtomRecoveryIdentities:
-    def _recovery(self, monkeypatch, tmp_path, identity, *, framework="atom", owner_after_term=""):
+    def _recovery(self, monkeypatch, tmp_path, identity, *, framework="atom", owner_after_term="", command=None):
         pidfile = tmp_path / f"{framework}_8888.pid"
         pidfile.write_text("111 222\n", encoding="utf-8")
         commands = {
@@ -816,17 +825,18 @@ class TestAtomRecoveryIdentities:
             "vllm": "python3 -m vllm.entrypoints.openai.api_server",
             "sglang": "python3 -m sglang.launch_server",
         }
+        command = command or commands[framework]
         exe = RecoverExecutor()
         phase = {"after_term": False}
         sent = []
         monkeypatch.setattr(
             exe,
             "_discover_stale_pids",
-            lambda: [{"pid": 111, "pgid": 222, "cmd": commands[framework], "pid_file": str(pidfile)}],
+            lambda: [{"pid": 111, "pgid": 222, "cmd": command, "pid_file": str(pidfile)}],
         )
         monkeypatch.setattr(recmod.os, "getpgrp", lambda: 999, raising=False)
         monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: {111: 10, 112: 20})
-        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "" if phase["after_term"] else commands[framework])
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: "" if phase["after_term"] else command)
         monkeypatch.setattr(
             exe,
             "_process_identity",
@@ -870,19 +880,54 @@ class TestAtomRecoveryIdentities:
         exe._kill_stale_owners()
         assert sent == [("group", 222, signal.SIGTERM)]
 
-    def test_no_worker_snapshot_without_a_live_recorded_leader(self, monkeypatch, tmp_path):
+    def test_no_signals_without_a_live_recorded_atom_leader(self, monkeypatch, tmp_path):
         exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
         monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: {112: 20})
-        exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM)]
+        assert exe._kill_stale_owners() == []
+        assert sent == []
         assert pidfile.exists()
 
-    def test_changed_leader_identity_cannot_authorize_worker_cleanup(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("leader_identity", [None, (222, 99), (333, 10)])
+    def test_changed_leader_identity_cannot_authorize_signals(self, monkeypatch, tmp_path, leader_identity):
         exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
-        monkeypatch.setattr(exe, "_process_identity", lambda pid: (222, 99) if pid == 111 else (222, 20))
-        exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM)]
+        monkeypatch.setattr(exe, "_process_identity", lambda pid: leader_identity if pid == 111 else (222, 20))
+        assert exe._kill_stale_owners() == []
+        assert sent == []
         assert pidfile.exists()
+
+    @pytest.mark.parametrize("command", ["", "python3 unrelated.py", "python3 -m vllm.entrypoints.openai.api_server"])
+    def test_replaced_leader_command_cannot_authorize_signals(self, monkeypatch, tmp_path, command):
+        exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
+        monkeypatch.setattr(exe, "_pid_cmdline", lambda _pid: command)
+        assert exe._kill_stale_owners() == []
+        assert sent == []
+        assert pidfile.exists()
+
+    @pytest.mark.parametrize("path_marker", ["vllm.entrypoints", "sglang.srt", "sglang.launch_server"])
+    def test_atom_model_path_cannot_select_another_framework(self, monkeypatch, tmp_path, path_marker):
+        exe, sent, _ = self._recovery(
+            monkeypatch,
+            tmp_path,
+            {112: (222, 20)},
+            command=f"python3 -m atom.entrypoints.openai_server --model /models/{path_marker}.export/model",
+        )
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM), ("pid", 112, signal.SIGKILL)]
+
+    @pytest.mark.parametrize("framework", ["vllm", "sglang"])
+    def test_atom_marker_in_another_frameworks_model_path_does_not_snapshot(self, monkeypatch, tmp_path, framework):
+        entrypoint = "vllm.entrypoints.openai.api_server" if framework == "vllm" else "sglang.launch_server"
+        exe, sent, _ = self._recovery(
+            monkeypatch,
+            tmp_path,
+            {},
+            framework=framework,
+            command=f"python3 -m {entrypoint} --model /models/atom.entrypoints.export/model",
+            owner_after_term=entrypoint,
+        )
+        monkeypatch.setattr(exe, "_atom_group_members", lambda _pgid: pytest.fail("not an ATOM server"))
+        exe._kill_stale_owners()
+        assert sent == [("group", 222, signal.SIGTERM), ("group", 222, signal.SIGKILL)]
 
     def test_non_posix_does_not_snapshot_group_members(self, monkeypatch, tmp_path):
         exe, sent, _ = self._recovery(monkeypatch, tmp_path, {})
@@ -952,21 +997,22 @@ def test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path):
     )
     leader_code = (
         "import subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[3]])\n"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
         "time.sleep(60)\n"
     )
+    atom_package = tmp_path / "atom" / "entrypoints"
+    atom_package.mkdir(parents=True)
+    (atom_package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (atom_package / "__init__.py").write_text("", encoding="utf-8")
+    (atom_package / "openai_server.py").write_text(leader_code, encoding="utf-8")
     leader = subprocess.Popen(
-        [sys.executable, "-c", leader_code, "atom.entrypoints.openai_server", worker_code, str(ready)],
+        [sys.executable, "-m", "atom.entrypoints.openai_server", worker_code, str(ready)],
+        cwd=tmp_path,
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    outsider = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    outsider = None
     worker_pid = None
 
     def running(pid):
@@ -977,6 +1023,12 @@ def test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path):
         return fields[0] != "Z"
 
     try:
+        outsider = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if ready.exists() and ready.read_text().strip():
@@ -1007,8 +1059,36 @@ def test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path):
             # Successful recovery can remove the entire group before test cleanup.
             pass
         leader.wait(timeout=5)
-        outsider.kill()
-        outsider.wait(timeout=5)
+        if outsider is not None:
+            outsider.kill()
+            outsider.wait(timeout=5)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="requires Linux process groups")
+def test_atom_recover_test_cleans_up_when_second_launch_fails(tmp_path, monkeypatch):
+    real_popen = subprocess.Popen
+    leaders = []
+
+    def fail_second_launch(*args, **kwargs):
+        if leaders:
+            raise OSError("second test process could not start")
+        proc = real_popen(*args, **kwargs)
+        leaders.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fail_second_launch)
+    try:
+        with pytest.raises(OSError, match="second test process could not start"):
+            test_atom_recover_reaps_anonymous_worker_after_leader_exits(tmp_path)
+        assert leaders[0].poll() is not None, "test setup failure left its first process running"
+    finally:
+        for leader in leaders:
+            try:
+                os.killpg(leader.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # The tested cleanup may already have reaped this group.
+                pass
+            leader.wait(timeout=5)
 
 
 class TestPidAliveTrue:

@@ -101,16 +101,22 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
 def test_completed_warmup_keeps_its_persistent_server(tmp_path, framework):
     """The lifecycle owner, not a completed warmup wrapper, decides when to stop the server."""
     pidfile = tmp_path / "server.pid"
-    server_code = (
-        "import os, pathlib, sys, time\npathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\ntime.sleep(60)\n"
-    )
+    server_code = "import time; time.sleep(60)"
     wrapper_code = (
-        "import pathlib, subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1], sys.argv[3]], "
+        "import pathlib, subprocess, sys\n"
+        "server = subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[3]], "
         "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-        "deadline = time.monotonic() + 5\n"
-        "while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:\n"
-        "    time.sleep(0.02)\n"
+        "published = False\n"
+        "try:\n"
+        "    pidfile = pathlib.Path(sys.argv[1])\n"
+        "    pending = pidfile.with_suffix('.tmp')\n"
+        "    pending.write_text(str(server.pid))\n"
+        "    pending.replace(pidfile)\n"
+        "    published = True\n"
+        "finally:\n"
+        "    if not published:\n"
+        "        server.kill()\n"
+        "        server.wait()\n"
     )
     server_pid = None
     try:
@@ -122,8 +128,12 @@ def test_completed_warmup_keeps_its_persistent_server(tmp_path, framework):
         assert os.getpgid(server_pid) == server_pid
         os.kill(server_pid, 0)
     finally:
-        if server_pid is None and pidfile.exists():
-            server_pid = int(pidfile.read_text())
+        if server_pid is None:
+            try:
+                server_pid = int(pidfile.read_text())
+            except (OSError, ValueError):
+                # Failed publication is cleaned up by the wrapper itself.
+                pass
         if server_pid is not None:
             try:
                 os.killpg(server_pid, signal.SIGKILL)
