@@ -2921,10 +2921,38 @@ class IntegratePatchExecutor:
             advanced = not booted and round_advanced(before_loaded.observation, after_loaded.observation)
             if advanced:
                 wall = after_loaded.observation.stage_failed if after_loaded.observation is not None else None
-                stacked_patches = [str(p) for p in applied]
                 new_log = str(bench_result.get("error") or "")
-                artifacts_reverted = self._revert_artifacts(applied_artifacts)
-                reverted = self._revert_patches(framework_root, applied)
+                commit_failure, _ = self._commit_accepted_work(
+                    framework_root=framework_root,
+                    applied=applied,
+                    applied_artifacts=applied_artifacts,
+                    message=f"hyperloom advanced {specialist_task_id}",
+                )
+                if commit_failure:
+                    log.error(
+                        "integrate_patch: commit-on-advanced failed (%s); reverting",
+                        commit_failure,
+                    )
+                    artifacts_reverted = self._revert_artifacts(applied_artifacts)
+                    reverted = self._revert_patches(framework_root, applied)
+                    return _with_stash_restore(
+                        framework_root,
+                        stash_state,
+                        stash_note,
+                        {
+                            "status": "reverted",
+                            "error_class": "keep_commit_failed",
+                            "error": commit_failure,
+                            "specialist_task_id": specialist_task_id,
+                            "patches_applied": [],
+                            "patches_reverted": [str(p) for p in reverted],
+                            "artifacts_reverted": artifacts_reverted,
+                            "enablement": True,
+                            "framework_root": str(framework_root or ""),
+                            "reason": f"enablement advanced but commit failed: {commit_failure}",
+                            "workspace": str(output_root),
+                        },
+                    )
                 await self._maybe_write_framework_kb_record(
                     params=params,
                     done_payload=done_payload,
@@ -2939,10 +2967,9 @@ class IntegratePatchExecutor:
                     {
                         "status": "advanced",
                         "specialist_task_id": specialist_task_id,
-                        "patches_applied": stacked_patches,
-                        "patches_reverted": [str(p) for p in reverted],
+                        "patches_applied": [str(p) for p in applied],
+                        "patches_reverted": [],
                         "artifacts_applied": applied_artifacts,
-                        "artifacts_reverted": artifacts_reverted,
                         "extra_envs_applied": extra_envs_applied,
                         "extra_server_args_applied": extra_server_args_applied,
                         "framework_root": str(framework_root or ""),
@@ -2953,8 +2980,7 @@ class IntegratePatchExecutor:
                         "correctness_verified": False,
                         "reason": _with_skipped_setup_reason(
                             f"enablement progressed: {run_reason}; boot advanced "
-                            f"to a new gap ({wall.name if wall is not None else 'no wall recorded'}) — "
-                            f"patch recorded as a base for the next round",
+                            f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
                             setup_result,
                         ),
                         "after_signature": after_signature.to_dict() if after_signature is not None else {},
@@ -3009,6 +3035,38 @@ class IntegratePatchExecutor:
                 },
             )
 
+        commit_failure, _ = self._commit_accepted_work(
+            framework_root=framework_root,
+            applied=applied,
+            applied_artifacts=applied_artifacts,
+            message=f"hyperloom enablement kept {specialist_task_id}",
+        )
+        if commit_failure:
+            log.error(
+                "integrate_patch: commit-on-enablement-kept failed (%s); reverting",
+                commit_failure,
+            )
+            artifacts_reverted = self._revert_artifacts(applied_artifacts)
+            reverted = self._revert_patches(framework_root, applied)
+            _gc_on_revert()
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "reverted",
+                    "error_class": "keep_commit_failed",
+                    "error": commit_failure,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "enablement": True,
+                    "framework_root": str(framework_root or ""),
+                    "reason": f"enablement kept but commit failed: {commit_failure}",
+                    "workspace": str(output_root),
+                },
+            )
         provisional = correctness_ok is None
         reason = f"enablement runnable: {run_reason}"
         if provisional:
