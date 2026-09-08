@@ -177,9 +177,20 @@ reap_stale_workloads() {
     summary "• reclaimed stale workload \`$wid\` (stop HTTP $code)"
     n=$((n+1))
   done <<< "$stale"
-  summary "• reclaimed $n stale e2e workload(s) before dispatch"
+  summary "• reclaimed $n stale e2e workload(s) to free capacity"
 }
-reap_stale_workloads
+
+# Reclaiming is a last resort, not a precondition. A superseded run's poll leaves
+# its legs alive on purpose, and this cluster often has room for both, so stopping
+# them up front discards a run that could have finished. Reclaim once, only after
+# SaFE has actually refused a create for want of capacity.
+_reaped_for_capacity=0
+reap_stale_workloads_once() {
+  [ "$_reaped_for_capacity" -eq 0 ] || return 1
+  _reaped_for_capacity=1
+  reap_stale_workloads
+  return 0
+}
 
 # All 9 legs. Fields: mode backend hours model_path -- gpu index within the docker host
 # Keep the duration suffix LAST: the helpers below parse by glob, so `...-12h-forge`
@@ -271,6 +282,15 @@ create_workload() {
     "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
   code="$(printf '%s' "$resp" | tail -n1)"
   json="$(printf '%s' "$resp" | sed '$d')"
+  # A refused create is the one moment reclaiming stale legs is worth their loss.
+  # The reclaim skips this run's own tag, so legs already placed are never stopped.
+  if { [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; } && reap_stale_workloads_once; then
+    echo "⚠ create '$name' refused (HTTP $code); reclaimed stale e2e workloads and retrying once" >&2
+    resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
+      "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
+    code="$(printf '%s' "$resp" | tail -n1)"
+    json="$(printf '%s' "$resp" | sed '$d')"
+  fi
   if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
     # Report to stderr: this runs inside wid="$(create_workload ...)" command
     # substitution, so a stdout message would be captured into $wid and never

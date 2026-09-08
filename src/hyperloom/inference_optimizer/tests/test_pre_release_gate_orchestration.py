@@ -146,6 +146,23 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     assert "leave_running" in body
 
 
+def test_dispatch_does_not_reap_before_it_needs_the_capacity(dispatch_script: str) -> None:
+    """A push must not stop legs that are still running when the cluster has room.
+
+    The predecessor's poll leaves its workloads alive on purpose, so reclaiming
+    them up front throws away a run that could have finished. Let SaFE's
+    admission decide: dispatch first, reclaim only once a create is refused.
+    """
+    top_level_calls = [line for line in dispatch_script.splitlines() if line == "reap_stale_workloads"]
+    assert top_level_calls == []
+    assert "reap_stale_workloads_once" in dispatch_script
+
+
+def test_dispatch_retries_a_refused_create_after_reclaiming(dispatch_script: str) -> None:
+    """The reclaim is only useful if the create that triggered it is retried."""
+    assert "_reaped_for_capacity" in dispatch_script
+
+
 def test_dispatch_version_tag_is_unique_per_run(dispatch_script: str) -> None:
     """Reap must distinguish repeated pushes that reuse the same CI_VERSION wheel."""
     assert (
