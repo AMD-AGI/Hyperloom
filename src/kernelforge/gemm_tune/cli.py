@@ -10,11 +10,14 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .tuners.base import TuneResult
 
 log = logging.getLogger("kernelforge.gemm_tune")
 
@@ -104,20 +107,33 @@ def _load_demand_report(demand_json: str) -> dict | None:
         return None
 
 
-def _coverage_gaps(demand_report: dict | None, tuner_specs: list, output_dir: Path) -> list:
-    """Write the demanded tables no selected tuner will produce, and return them."""
+def _coverage_gaps(
+    demand_report: dict | None,
+    tuner_specs: list,
+    output_dir: Path,
+    results: list | None = None,
+) -> list:
+    """Write the demanded tables no selected tuner produced, and return them.
+
+    Called twice per run, and the difference is the point: before the tuners run
+    ``results`` is None and selection alone says what is uncovered; after, a
+    table whose owner came back empty-handed joins the list, which is the state
+    the runtime is in either way. Best-effort -- a report must not affect the
+    tuning it describes.
+    """
     if not demand_report:
         return []
     try:
         from .tier3 import coverage_gaps
 
-        gaps = coverage_gaps(demand_report, tuner_specs)
-        if not gaps:
-            return []
-        (output_dir / "coverage_gaps.json").write_text(
-            json.dumps([g.to_dict() for g in gaps], indent=2),
-            encoding="utf-8",
-        )
+        gaps = coverage_gaps(demand_report, tuner_specs, results)
+        # The second pass writes even when it finds nothing, or the pre-run
+        # file it supersedes would be read as this run's final answer.
+        if gaps or results is not None:
+            (output_dir / "coverage_gaps.json").write_text(
+                json.dumps([g.to_dict() for g in gaps], indent=2),
+                encoding="utf-8",
+            )
         return gaps
     except Exception:  # noqa: BLE001 - a report must never fail the run
         log.debug("could not record coverage gaps", exc_info=True)
@@ -132,13 +148,25 @@ def _attempt_tier3(
     profile: Any,
     gpu_type: str,
     framework: str,
-) -> dict | None:
-    """Try a generated tuner for the strongest gap nothing else can cover."""
+) -> "TuneResult | None":
+    """Try a generated tuner for the strongest gap nothing else covered.
+
+    Reached only for a table that went untuned anyway, so its time is not taken
+    from a tuner that would have covered it. Returns a ``TuneResult`` only when
+    the referee confirmed an improvement, so verified rows travel the same road
+    as every other tuner's -- candidate, report, e2e, deploy -- and everything
+    else stays off that road entirely.
+
+    Never raises. Note the caller must not compute arguments for this call
+    either: reading one wrong attribute off the profile at the call site took
+    down a completed run, because argument evaluation happens outside the guard.
+    Hence ``profile`` rather than fields pulled from it.
+    """
     if not gaps:
         return None
     try:
         model_name = str(getattr(profile, "model_path", "") or getattr(profile, "architecture", "") or "unknown")
-        from .evidence import load_demand
+        from .evidence import demand_shapes, load_demand
         from .tier3 import attempt_generated_tuner
         from .tier3.dispatch import adapters_for
         from .tier3.gate import should_generate
@@ -146,14 +174,20 @@ def _attempt_tier3(
         decision = should_generate(gaps)
         if not decision.allowed or decision.gap is None:
             log.info("tier3: not attempted -- %s", "; ".join(decision.reasons))
-            return {"attempted": False, "reasons": decision.reasons}
+            return None
 
         adapter = adapters_for(decision.gap.table)
         demand = load_demand(demand_json)
 
         def shapes_for(gap):
-            entry = demand.tables.get(gap.table) if demand else None
-            return list(getattr(entry, "shapes", None) or [])
+            # ``load_demand`` returns the parsed document, not an object: this
+            # read ``demand.tables`` and raised AttributeError inside the guard
+            # below, so every attempt died as "tier3 attempt failed" before it
+            # had a mandate to write.
+            for entry in (demand or {}).get("demands") or []:
+                if str(entry.get("table") or "") == gap.table:
+                    return demand_shapes(entry)
+            return []
 
         outcome = attempt_generated_tuner(
             gaps,
@@ -173,10 +207,46 @@ def _attempt_tier3(
             json.dumps(outcome.to_dict(), indent=2),
             encoding="utf-8",
         )
-        return outcome.to_dict()
+        return _tier3_result(outcome, decision.gap)
     except Exception:  # noqa: BLE001 - a bonus attempt must not fail the run
         log.warning("tier3 attempt failed; tuning continues", exc_info=True)
         return None
+
+
+def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
+    """A verified generated tuner as an ordinary tuner result, or nothing.
+
+    ``outcome.ok`` is the referee's verdict on our own clock, and nothing short
+    of it becomes a result: an attempt that stopped at the gate, failed the
+    contract, or was re-timed and found no faster kernel has produced no rows
+    worth deploying, and emitting it as a no-improvement result would only put
+    an unverified artifact in front of the integrate lane.
+
+    ``candidate=True`` rather than relying on ``has_improvement``, so this
+    lands on the same e2e-validated path as split-K: the referee's micro
+    speedup is measured on graph replays of individual kernels and is not by
+    itself a claim about end-to-end throughput.
+    """
+    from .tuners.base import TuneResult
+
+    if not outcome.ok or not outcome.output_csv:
+        return None
+    best = max(
+        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
+        default=1.0,
+    )
+    return TuneResult(
+        tuner_name=f"tier3_generated_{Path(outcome.table).stem}",
+        status="ok",
+        artifact_path=outcome.output_csv,
+        env_var=gap.env_var,
+        env_value=outcome.output_csv,
+        candidate=True,
+        total_shapes=len(outcome.judgements),
+        improved_shapes=outcome.improved_shapes,
+        best_micro_speedup=float(best or 1.0),
+        key_source="runtime_observed",
+    )
 
 
 def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
@@ -616,9 +686,12 @@ def run(
             result.elapsed_s,
         )
 
-    # Last, and only on what the selected tuners left behind.
+    # Last, and only on what the selected tuners left behind: by now they have
+    # all run, so a generated tuner cannot take time from one that would have
+    # produced something, and the recomputed list says which of them did.
+    coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path, results)
     if coverage_gap_list and time.time() < global_deadline:
-        _attempt_tier3(
+        generated = _attempt_tier3(
             coverage_gap_list,
             demand_json,
             output_path,
@@ -626,6 +699,8 @@ def run(
             gpu_type=gpu_type,
             framework=framework,
         )
+        if generated is not None:
+            results.append(generated)
 
     # Build report
     total_elapsed = time.time() - start_time

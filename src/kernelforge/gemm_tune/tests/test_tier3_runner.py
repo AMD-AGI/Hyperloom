@@ -58,13 +58,21 @@ class TestGate:
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
         assert gate.should_generate([_gap()]).allowed
 
-    def test_a_tuner_that_exists_never_opens_the_gate(self, monkeypatch):
-        # Whatever the whitelist says.
+    def test_an_unrouted_tuner_never_opens_the_gate(self, monkeypatch):
+        # Whatever the whitelist says. The table has an owner that was simply
+        # not selected, and generating a second one papers over that.
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
-        for kind in ("not_selected", "skipped"):
+        d = gate.should_generate([_gap(kind="not_selected", tuner="a8w8")])
+        assert not d.allowed
+        assert "not_selected" in d.reasons[0]
+
+    def test_an_owner_that_produced_nothing_does_open_it(self, monkeypatch):
+        # The table has an owner and is still untuned. That is the state the
+        # runtime is in, and it is indistinguishable from having no owner.
+        monkeypatch.setenv(gate.ALLOW_ENV, "*")
+        for kind in ("skipped", "empty"):
             d = gate.should_generate([_gap(kind=kind, tuner="a8w8")])
-            assert not d.allowed
-            assert kind in d.reasons[0]
+            assert d.allowed, kind
 
     def test_too_little_demand_stays_closed(self, monkeypatch):
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
@@ -306,6 +314,139 @@ class TestTheCliActuallyReachesTier3:
 
         assert adapters_for("a4w4_blockscale_tuned_gemm.csv") is None
         assert adapters_for("bf16_tuned_gemm.csv") is not None
+
+    def test_the_call_site_keeps_what_it_returns(self):
+        # It did not. `_attempt_tier3(...)` was called for its side effects and
+        # its return value dropped on the floor, so a generated tuner that had
+        # survived generation, the sandbox, the contract and the referee still
+        # reached no report, no candidate and no deploy.
+        import inspect
+
+        from kernelforge.gemm_tune import cli
+
+        source = inspect.getsource(cli.run.callback)
+        assert "generated = _attempt_tier3(" in source
+        assert "results.append(generated)" in source
+
+    def test_the_gaps_it_acts_on_are_recomputed_after_the_tuners_ran(self):
+        # The list built before tuning cannot say which owners came back with
+        # nothing, and that is the only condition tier3 exists for in practice.
+        import inspect
+
+        from kernelforge.gemm_tune import cli
+
+        source = inspect.getsource(cli.run.callback)
+        recompute = source.index("_coverage_gaps(demand_report, tuner_specs, output_path, results)")
+        assert source.index("tuner_instance.execute()") < recompute < source.index("_attempt_tier3(")
+
+
+class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
+    """What the referee approved has to travel the same road as everything else.
+
+    Anything short of the referee's approval must not: the point of the tier is
+    that a generated tuner's own numbers are discarded, so an outcome that never
+    reached re-timing has established nothing to deploy.
+    """
+
+    @staticmethod
+    def _outcome(**kw):
+        from kernelforge.gemm_tune.tier3.runner import Tier3Outcome
+
+        base = {"attempted": True, "stage": "referee", "ok": True, "table": "bf16_tuned_gemm.csv"}
+        out = Tier3Outcome(**{**base, **kw})
+        out.output_csv = kw.get("output_csv", "/work/tier3/out.csv")
+        return out
+
+    @staticmethod
+    def _judgement(speedup: float):
+        """``improved`` is derived from the timing, so the timing is the input."""
+        from kernelforge.gemm_tune.tier3.referee import Judgement, PairedTiming
+
+        return Judgement(
+            shape="16x1536x7168",
+            best_timing=PairedTiming(baseline_us=10.0, candidate_us=10.0 / speedup, speedup=speedup),
+        )
+
+    def test_an_approved_outcome_maps_onto_a_tune_result(self):
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        out = self._outcome(judgements=[self._judgement(1.5), self._judgement(0.9)])
+        res = _tier3_result(out, _gap(table="bf16_tuned_gemm.csv"))
+        assert res is not None
+        assert res.tuner_name == "tier3_generated_bf16_tuned_gemm"
+        assert res.artifact_path == "/work/tier3/out.csv"
+        assert res.env_var == "AITER_CONFIG_ODD" and res.env_value == "/work/tier3/out.csv"
+        assert res.total_shapes == 2 and res.improved_shapes == 1
+        assert res.best_micro_speedup == pytest.approx(1.5)
+        assert res.key_source == "runtime_observed"
+
+    def test_it_is_a_candidate_so_e2e_still_has_to_agree(self):
+        from kernelforge.gemm_tune.candidates import is_candidate, per_tuner_candidates
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        res = _tier3_result(self._outcome(judgements=[self._judgement(1.5)]), _gap())
+        assert res.candidate is True
+        assert is_candidate(res)
+        assert [c.tuner for c in per_tuner_candidates([res])] == [res.tuner_name]
+
+    def test_an_outcome_the_referee_did_not_approve_is_not_a_result(self):
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        assert _tier3_result(self._outcome(ok=False), _gap()) is None
+
+    def test_an_attempt_that_never_reached_a_csv_is_not_a_result(self):
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        assert _tier3_result(self._outcome(output_csv=""), _gap()) is None
+
+    def test_the_outcome_carries_its_own_artifact_path(self):
+        # Rather than the caller rebuilding it from the work root by
+        # convention, which would deploy the wrong file the day that changes.
+        from kernelforge.gemm_tune.tier3.runner import Tier3Outcome
+
+        assert "output_csv" in Tier3Outcome().to_dict()
+
+
+class TestShapesComeFromTheDemandDocument:
+    def test_the_demand_lookup_matches_what_load_demand_returns(self, tmp_path):
+        # It did not: the call site read ``demand.tables`` off a plain dict, and
+        # the AttributeError was swallowed by the guard around the attempt, so
+        # every tier3 run died as "tier3 attempt failed" before writing a
+        # mandate. Nothing noticed, because nothing asserted it got that far.
+        from kernelforge.gemm_tune import cli, evidence
+
+        report = evidence.parse_log(
+            "[aiter] shape is M:512, N:1536, K:7168, "
+            "not found tuned config in /tmp/aiter_configs/a8w8_blockscale_tuned_gemm.csv"
+        )
+        path = evidence.write_demand(report, tmp_path / "demand.json")
+
+        seen = {}
+
+        def fake_attempt(gaps, shapes_for, *a, **kw):
+            seen["shapes"] = shapes_for(gaps[0])
+            raise RuntimeError("stop here; the mandate is not what this asserts")
+
+        # ``_attempt_tier3`` imports it inside the function, so the module
+        # attribute is the patch point.
+        import kernelforge.gemm_tune.tier3 as tier3
+
+        original = tier3.attempt_generated_tuner
+        tier3.attempt_generated_tuner = fake_attempt
+        try:
+            cli._attempt_tier3(
+                [_gap(table="a8w8_blockscale_tuned_gemm.csv")],
+                str(path),
+                tmp_path,
+                profile=None,
+                gpu_type="MI355X",
+                framework="sglang",
+            )
+        finally:
+            tier3.attempt_generated_tuner = original
+
+        assert seen["shapes"], "the demand document has one key and it did not arrive"
+        assert int(seen["shapes"][0]["N"]) == 1536
 
 
 class TestTheProviderCallMatchesTheProviderAPI:
