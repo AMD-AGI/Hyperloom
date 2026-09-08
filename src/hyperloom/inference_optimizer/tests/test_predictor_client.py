@@ -109,17 +109,29 @@ class TestConfig:
         assert not hasattr(cfg.PredictorConfig(), "budget_pct")
 
     def test_chain_and_variant_caps_are_not_operator_knobs(self, monkeypatch):
-        """One losing round, every distinct sample. Leftover env vars are ignored."""
-        assert cfg.DEFAULT_MAX_CHAIN == 1
-        assert not hasattr(cfg, "ENV_MAX_CHAIN")
-        assert not hasattr(cfg, "ENV_MAX_VARIANTS")
-        assert not hasattr(cfg, "DEFAULT_MAX_VARIANTS")
-        assert not hasattr(cfg.PredictorConfig(), "max_variants")
+        """Neither the retired chain cap nor a variant cap is configurable.
+
+        ``max_chain`` bounded a losing streak that decided when the paid
+        proposers were let back in. Nothing defers them any more -- the answer
+        goes on the proposal queue and orchestration chooses -- so the cap has
+        no consumer, and how much of one answer reaches the queue is
+        ``pump.MAX_PROPOSALS``, matched to the grid size the prompt asks for.
+        """
+        for name in (
+            "ENV_MAX_CHAIN",
+            "DEFAULT_MAX_CHAIN",
+            "ENV_MAX_VARIANTS",
+            "DEFAULT_MAX_VARIANTS",
+        ):
+            assert not hasattr(cfg, name), name
+        conf = cfg.PredictorConfig()
+        assert not hasattr(conf, "max_chain")
+        assert not hasattr(conf, "max_variants")
         monkeypatch.setenv("HYPERLOOM_PREDICTOR_MAX_CHAIN", "9")
         monkeypatch.setenv("HYPERLOOM_PREDICTOR_MAX_VARIANTS", "2")
-        conf = cfg.load()
-        assert conf.max_chain == 1
-        assert not hasattr(conf, "max_variants")
+        loaded = cfg.load()
+        assert not hasattr(loaded, "max_chain")
+        assert not hasattr(loaded, "max_variants")
 
     def test_only_sglang_and_vllm_are_supported(self):
         conf = cfg.PredictorConfig()
@@ -229,9 +241,7 @@ class TestSampledAnswer:
 
     def test_empty_actions_are_dropped(self, service):
         """An empty one would become a variant with no flags to benchmark."""
-        service.reply = self._reply(
-            [{}, {"server_args": {"--kv-cache-dtype": "fp8"}}, {"envs": {}, "server_args": {}}]
-        )
+        service.reply = self._reply([{}, {"server_args": {"--kv-cache-dtype": "fp8"}}, {"envs": {}, "server_args": {}}])
         out = _predict(service)
         assert len(out.actions) == 1
         assert out.server_args == {"--kv-cache-dtype": "fp8"}

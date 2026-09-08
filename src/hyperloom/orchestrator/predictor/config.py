@@ -5,8 +5,8 @@
 
 The pump reads settings through this module rather than off ``SharedState`` so
 a resumed session picks up an operator's change of endpoint or mode without
-having to re-pass flags. What *is* session state — how many chain steps a
-macro-cycle has spent — stays on ``SharedState``.
+having to re-pass flags. What *is* session state — which decision points have
+already been answered — stays on ``SharedState``.
 
 Everything here fails safe: an unparseable value logs once and falls back to
 the default rather than raising into the tick loop.
@@ -23,9 +23,9 @@ log = logging.getLogger(__name__)
 
 #: Predict nothing; the pump returns before building a request.
 MODE_OFF = "off"
-#: Predict, parse and log, but enqueue nothing. Costs no GPU time.
+#: Predict, parse and log, but queue nothing. Costs no benchmark time.
 MODE_SHADOW = "shadow"
-#: Predict and enqueue.
+#: Predict and file the answer on the untested-proposal queue.
 MODE_ACTIVE = "active"
 
 MODES = (MODE_OFF, MODE_SHADOW, MODE_ACTIVE)
@@ -40,14 +40,6 @@ ENV_PHASE_LABEL = "HYPERLOOM_PREDICTOR_PHASE_LABEL"
 #: the mode that measures them instead of the one that spends benchmark cycles
 #: on them.
 DEFAULT_MODE = MODE_SHADOW
-
-#: Consecutive *losing* rounds before the phase falls back to the LLM
-#: specialists and orchestration explore. Hardcoded: one sample batch is
-#: measured in full, and a KEEP still resets the streak so a win can deepen
-#: the stack and earn a second HTTP at the new depth. An operator knob here
-#: either truncated the batch (max_variants) or spent the FRAMEWORK budget on
-#: extra losing rounds that found nothing.
-DEFAULT_MAX_CHAIN = 1
 
 DEFAULT_TIMEOUT_SEC = 120.0
 
@@ -82,7 +74,6 @@ class PredictorConfig:
 
     endpoint: str = ""
     mode: str = DEFAULT_MODE
-    max_chain: int = DEFAULT_MAX_CHAIN
     timeout_sec: float = DEFAULT_TIMEOUT_SEC
     phase_label: str = DEFAULT_PHASE_LABEL
 
@@ -97,7 +88,7 @@ class PredictorConfig:
 
     @property
     def enqueues(self) -> bool:
-        """Whether a prediction may become a task."""
+        """Whether a prediction may reach the untested-proposal queue."""
         return self.enabled and self.mode == MODE_ACTIVE
 
     def supports(self, framework: Any) -> bool:  # noqa: ANN401 - accepts whatever state carries
@@ -118,7 +109,6 @@ def load() -> PredictorConfig:
     return PredictorConfig(
         endpoint=os.environ.get(ENV_ENDPOINT, "").strip(),
         mode=mode,
-        max_chain=DEFAULT_MAX_CHAIN,
         timeout_sec=_env_float(ENV_TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC, minimum=1.0),
         phase_label=os.environ.get(ENV_PHASE_LABEL, "").strip() or DEFAULT_PHASE_LABEL,
     )

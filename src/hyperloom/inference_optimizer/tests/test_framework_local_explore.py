@@ -44,24 +44,6 @@ def test_every_phase_gets_a_budget_share_and_the_shares_sum_to_one():
     assert overhead <= 0.1
 
 
-@pytest.fixture(autouse=True)
-def _no_predictor(monkeypatch):
-    """Take the predictor out of the picture for the whole module.
-
-    An operator's shell often carries these -- the launch env exports them --
-    and a configured predictor holds the LLM specialists back, which is the
-    first rung of the ladder these tests walk. Without this the module passes
-    or fails depending on whose terminal it ran in.
-    """
-    from hyperloom.orchestrator.predictor import config as predictor_config
-
-    for name in (
-        predictor_config.ENV_ENDPOINT,
-        predictor_config.ENV_MODE,
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 # --------------------------------------------------------------------------- #
 # Shared stub for the arm behavior
 # --------------------------------------------------------------------------- #

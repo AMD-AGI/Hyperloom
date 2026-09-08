@@ -106,6 +106,65 @@ class IntentRouter:
         # Attributes not defined on the router resolve onto the coordinator.
         return getattr(object.__getattribute__(self, "_coord"), name)
 
+    def _resolve_first_pass_mandate(self, params: dict[str, Any]) -> None:
+        """Substitute a queued first-pass mandate for the id that referenced it.
+
+        The predictor files a prose source change on the untested-proposal queue
+        as an opaque id, and orchestration dispatches the specialist itself. All
+        it has to carry back is that id: the mandate text is looked up here, so
+        the specialist reads what the predictor actually wrote rather than a
+        paraphrase, and the work is attributable without trusting an LLM to
+        label its own sources.
+
+        A ``task_description`` still has to arrive -- PolicyGate's freeform gate
+        rejects an empty one before this runs -- so whatever orchestration wrote
+        is a placeholder that this overwrites. An unknown id is left alone and
+        logged: the dispatch proceeds as the ordinary LLM-authored specialist it
+        looks like, with no predictor credit.
+
+        Note:
+            Side-effecting: rewrites ``task_description`` and the dial / lever /
+            provenance params in place.
+
+        Args:
+            params: The specialist dispatch params.
+        """
+        mandate_id = str(params.get("primatune_mandate_id") or "").strip()
+        if not mandate_id:
+            return
+        from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+            LEVER_SOURCE_PATCH,
+        )
+        from ..predictor.pump import PROVENANCE as FIRST_PASS_PROVENANCE
+        from ..predictor.pump import find_mandate
+
+        mandate = find_mandate(self.shared_state, mandate_id)
+        if not mandate:
+            log.warning(
+                "specialist dispatch cites unknown primatune_mandate_id=%r; "
+                "dispatching the caller's own task_description with no predictor attribution",
+                mandate_id,
+            )
+            return
+        params["task_description"] = mandate
+        params["scope"] = "freeform"
+        params["mode"] = "patch"
+        # CPU: the mandate asks for a patch, not a measurement, so it has no
+        # reason to hold cards the explore grid is using.
+        params.setdefault("lane", "cpu")
+        # No ``domain``: _forward_integrate_source rewrites provenance to
+        # specialist:<domain> when one is present, which would erase the label
+        # this whole exercise exists to measure.
+        params.pop("domain", None)
+        params.pop("tags", None)
+        params["provenance"] = FIRST_PASS_PROVENANCE
+        params["lever_kind"] = LEVER_SOURCE_PATCH
+        log.info(
+            "specialist dispatch resolved primatune_mandate_id=%s (%d chars)",
+            mandate_id,
+            len(mandate),
+        )
+
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created.
 
@@ -643,6 +702,9 @@ class IntentRouter:
                 )
                 return
         if action_name == "specialist":
+            # Before the ownership stamp: resolving a mandate sets the lever the
+            # stamp would otherwise have to guess at.
+            self._resolve_first_pass_mandate(params)
             # Capture proposal ownership at dispatch. Specialist work can finish
             # after the state machine advances, so completion-time phase is not
             # a reliable source for a later integrate_patch KEEP.

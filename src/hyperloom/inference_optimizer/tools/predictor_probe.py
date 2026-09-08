@@ -119,8 +119,7 @@ def _report(request: dict[str, Any]) -> list[str]:
             named = sum(1 for k in kernels if k.get("name"))
             with_args = sum(1 for k in kernels if k.get("args"))
             lines.append(
-                f"kernels    : {len(kernels)} rows, {named} named, {with_args} with args, "
-                f"{framed} with a source line"
+                f"kernels    : {len(kernels)} rows, {named} named, {with_args} with args, {framed} with a source line"
             )
             if not framed:
                 lines.append(
@@ -208,8 +207,8 @@ def main(argv: list[str] | None = None) -> int:
             if key in prediction.meta:
                 print(f"{key:14}: {prediction.meta[key]}")
         if not prediction.parsed:
-            # The pump treats this as "chain stops here", which is a normal
-            # outcome; it is only a problem if it is the usual outcome.
+            # The pump spends the decision point and queues nothing, which is a
+            # normal outcome; it is only a problem if it is the usual outcome.
             print("\nNo action. Fine occasionally; a pattern means the prompt is off-distribution.")
     return 0
 

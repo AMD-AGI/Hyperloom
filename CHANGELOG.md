@@ -7,43 +7,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **An external first-pass tuning predictor can propose at FRAMEWORK entry.**
-  `--primatune-endpoint` points Hyperloom at a service that answers with a
-  launch-configuration change or a prose source change, given the state of a
-  decision point. Config answers become ordinary `explore` variants and source
-  answers become free-form specialist mandates, so both are graded by the KEEP
-  threshold and accuracy gate that already grade `default_grid` and
-  `llm_direct` — the evaluation path gains no new branch.
+- **An external first-pass tuning predictor can propose alongside the
+  specialists.** `--primatune-endpoint` points Hyperloom at a service that
+  answers with a launch-configuration change or a prose source change, given
+  the state of a FRAMEWORK decision point. Its answers are filed on the same
+  untested-proposal queue a finished specialist writes to, so orchestration
+  composes the `explore` grid and dispatches any source-change mandate itself.
+  The predictor creates no tasks, takes no lease and defers nothing: every
+  proposal is graded by the KEEP threshold and accuracy gate that already grade
+  `default_grid` and `llm_direct`, and the scheduling path gains no new branch.
 
-  The pump re-fires as the stack deepens, forming a greedy chain that ends by
-  itself: one losing round of every distinct sample hands FRAMEWORK to the
-  LLM specialists and to orchestration `explore`. A KEEP still resets the
-  streak, so a win can deepen the stack and earn a second HTTP. Cross-framework
-  envs (`SGLANG_*` on vLLM) are dropped when the grid is built.
+  It is asked once per decision point, keyed
+  `c{macro_cycle}-s{stack_depth}-r{roofline_count}`. A KEEP deepens the stack, a
+  `cycle_reloop` re-enters against a different one, and a landed roofline is
+  fresh evidence — each earns a new answer, and each is *pulled* by the pump on
+  its own tick rather than pushed from the writeback that produced it.
 
-  Default mode is `shadow`: predict, parse and log without enqueueing.
+  The service samples N times and returns proposals in sampling order, so the
+  ranking is done here: by how many samples voted for a proposal (surfaced to
+  orchestration as `votes=k/n`), then de-duplicated by flag family so one knob
+  sweep cannot take every slot, then truncated to the grid size the prompt
+  already asks for. Proposals matching the stack or `explore_search.tested` are
+  dropped, as are cross-framework envs (`SGLANG_*` on vLLM).
+
+  Default mode is `shadow`: predict, parse and log, queueing nothing.
   Hyperloom's request is built from its own field names and the consumer owns
   the mapping, and both ways that can go wrong are silent, so the default is
   the mode that measures the connection rather than the one that spends
   benchmark cycles on it.
   `tools/predictor_probe.py` renders what a real session would send.
 
-  Adopted proposals land in a `primatune` agent bucket in
-  `session_breakdown.json`, following `warm_replay`. Without one their gain
-  would read as `explore`'s, since the action name records the machinery that
-  measured a proposal rather than whoever made it.
+  A variant orchestration copied off the queue is re-labelled `primatune` by
+  fingerprint rather than by asking the LLM to cite its own sources, and lands
+  in a `primatune` agent bucket following `warm_replay`. A mixed grid has no
+  single owner, so per-proposer comparisons belong in `decision_trace`
+  (per-variant) rather than `optimizations.summary_by_agent` (per-operation);
+  the predictor also spends no gateway tokens by construction, so it appears in
+  neither `llm_calls.jsonl` nor `token_usage`.
+
+  Off unless an endpoint is set, and inert when off down to the bytes of the
+  orchestration prompt.
   See [Predictor HTTP contract](docs/reference/primatune-predictor.md).
 
 ### Changed
 
-- **The first-pass predictor holds all FRAMEWORK LLM measurement, not only
-  specialists.** While it leads, orchestration `delegate explore` /
-  `propose_action explore` is denied (`explore_deferred_to_predictor`) so a
-  PRELUDE `proposal_set` cannot steal the serving lane. The predictor's own
-  grid is unchanged (`source=coordinator_internal_primatune`). One losing
-  round of every distinct sample is measured (`max_chain` hardcoded to 1; no
-  `--primatune-max-chain` / `HYPERLOOM_PREDICTOR_MAX_VARIANTS`). A KEEP still
-  resets the streak. Cross-framework envs are dropped in `_grid_entries`.
+- **The untested-proposal queue ranks by proposer priority before gap
+  severity.** `_untested_proposal_rows` gained a primary sort key so a proposer
+  with no gap anchor is not forced below every gap-anchored proposal, and rows
+  can carry a marker and a consensus count that the block's own header explains.
+  The key defaults to `0`, so a queue no prioritised round has written to sorts
+  exactly as it did before, and the rendered header is byte-identical.
 
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP

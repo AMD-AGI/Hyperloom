@@ -226,11 +226,13 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity and truncated to a count the block states.
-Draw from it first and copy an entry's fields verbatim — an entry marked
-ATOMIC is a coupled set that must go in as one variant, never split or
-re-authored. Target **4 variants per grid, hard maximum 6**: they run serially
+carries the executable proposals this cycle that no explore round has benched,
+ranked and truncated to a count the block states. Draw from it first and copy
+an entry's fields verbatim — an entry marked ATOMIC is a coupled set that must
+go in as one variant, never split or re-authored. That block states its own
+ranking rule and explains any marker its rows carry; read the header rather
+than assuming every row came from the same kind of proposer.
+Target **4 variants per grid, hard maximum 6**: they run serially
 on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
 finish is truncated from the end. Top up from the idea-generation moves only
 after the queue holds nothing else worth running.

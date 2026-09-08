@@ -606,14 +606,10 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cycle_minutes",
         "gain_at_cycle_start",
         "no_gain_cycle_streak",
-        # First-pass predictor chain accounting; Coordinator-only writers. The
-        # streak is what decides when the paid specialists are let back in, so
-        # an LLM that could reset it would be handing itself unlimited predictor
-        # rounds -- or, by advancing it, an early exemption from the hold. The
-        # round marker keeps two rounds off the benchmark lane at once.
-        "predictor_chain_steps",
-        "predictor_chain_cycle",
-        "predictor_round_task_id",
+        # Decision points the first-pass predictor has already answered;
+        # Coordinator-only writer. Clearing it would re-POST the same question
+        # at an unchanged decision point on every tick.
+        "predictor_asked_keys",
         "pending_bottleneck_switch",
         "last_cycle_bottleneck",
         "saturated_directions",
@@ -1016,13 +1012,6 @@ class PolicyGate:
         # R1 phase_incompatible; after structural checks so cheaper denials win.
         if check_phase:
             self._validate_phase_action(role, action_name, intent_kind="delegate")
-            # Intent ingress only. Dispatch replay uses check_phase=False, which
-            # is what lets the predictor's own explore (enqueued outside this
-            # gate) still run while orchestration explores are held.
-            if action_name == EXPLORE_ACTION_NAME and not self._explore_is_predictor_owned(
-                payload
-            ):
-                self._deny_explore_while_predictor_leads()
         # R5 — block a delegate whose action_name invokes an external tool.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -1088,8 +1077,6 @@ class PolicyGate:
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
         # R1 phase_incompatible.
         self._validate_phase_action(role, action_name, intent_kind="propose_action")
-        if action_name == EXPLORE_ACTION_NAME and not self._explore_is_predictor_owned(payload):
-            self._deny_explore_while_predictor_leads()
         # R5 — defense in depth on propose_action.
         self._validate_tool_whitelist_collision(
             role.name,
@@ -1711,8 +1698,6 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
 
-        self._deny_specialist_while_predictor_leads()
-
         # scope='freeform' has no domain anchor: it skips the tag / gap
         # vocabulary checks and runs a lightweight mechanical sanity gate instead.
         scope_raw = str(params.get("scope") or "").strip().lower()
@@ -1770,85 +1755,6 @@ class PolicyGate:
         validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
 
         self._validate_specialist_gpu_request(params)
-
-    @staticmethod
-    def _explore_is_predictor_owned(payload: dict[str, Any]) -> bool:
-        """Whether this explore was enqueued by the predictor pump, not an LLM."""
-        params = payload.get("params")
-        if not isinstance(params, dict):
-            return False
-        from hyperloom.orchestrator.predictor.pump import TASK_SOURCE
-
-        return str(params.get("source") or "").strip() == TASK_SOURCE
-
-    def _deny_while_predictor_leads(self, *, rule: str, hint: str) -> None:
-        """Shared hold: FRAMEWORK only, and only while the predictor still leads."""
-        state = self.shared_state
-        if state is None:
-            return
-        from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
-        from hyperloom.orchestrator.predictor import config as predictor_config
-        from hyperloom.orchestrator.predictor import pump as predictor_pump
-
-        if str(getattr(state, "phase", "") or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
-            return
-        if not predictor_pump.predictor_holds_specialists(state):
-            return
-        cap = predictor_config.load().max_chain
-        spent = predictor_pump.attempts_without_keep(state)
-        raise PolicyDenied(
-            f"the first-pass predictor still leads this phase "
-            f"({spent}/{cap} rounds without a KEEP)",
-            rule=rule,
-            hint=hint,
-        )
-
-    def _deny_specialist_while_predictor_leads(self) -> None:
-        """Refuse a paid specialist while the free predictor still leads FRAMEWORK.
-
-        The predictor is a local model: seconds of GPU on its own host and no API
-        spend. An LLM specialist is the opposite -- over one measured session
-        they were 83 of 87 LLM calls and 97% of the output tokens, and the two
-        most expensive of them produced candidates that all benchmarked
-        negative. So the loop asks the free proposer first and admits these only
-        once it has spent its one losing round without a KEEP.
-
-        Scoped to FRAMEWORK_AGENT, and a no-op when the predictor could not
-        answer anyway. The PRELUDE research scout and static recon are
-        unaffected twice over: they run in a different phase, and the
-        Coordinator dispatches them without passing through the gate at all.
-
-        Raises:
-            PolicyDenied: while the hold is on.
-        """
-        self._deny_while_predictor_leads(
-            rule="specialist_deferred_to_predictor",
-            hint=(
-                "The predictor costs no API spend and re-fires after every KEEP. "
-                "Specialists are admitted once it has spent its rounds without "
-                "landing one, so there is nothing to retry here."
-            ),
-        )
-
-    def _deny_explore_while_predictor_leads(self) -> None:
-        """Refuse an orchestration explore while the free predictor still leads.
-
-        PRELUDE scout/recon ``proposal_set`` explores wait until the losing
-        streak hits the cap. The predictor's own grid never comes through this
-        path: the pump enqueues it as ``source=coordinator_internal_primatune``
-        and intent validation never sees it.
-
-        Raises:
-            PolicyDenied: while the hold is on.
-        """
-        self._deny_while_predictor_leads(
-            rule="explore_deferred_to_predictor",
-            hint=(
-                "The predictor measures every distinct sample from its batch first. "
-                "Orchestration explores, including PRELUDE proposal_sets, are "
-                "admitted once that round finishes without a KEEP."
-            ),
-        )
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
         """Validate a specialist's optional GPU request against the GPU

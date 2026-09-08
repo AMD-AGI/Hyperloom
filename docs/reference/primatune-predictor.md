@@ -1,16 +1,21 @@
 ---
 myst:
     html_meta:
-        "description": "HTTP contract between Hyperloom's FRAMEWORK-entry predictor pump and an external first-pass tuning model. Covers the request and response bodies, field provenance, the greedy chain, gating, and attribution."
-        "keywords": "Hyperloom, predictor, PrimaTune, first-pass tuning, FRAMEWORK phase, explore, server args, provenance, attribution, AMD GPU, ROCm, LLM inference"
+        "description": "HTTP contract between Hyperloom's FRAMEWORK predictor pump and an external first-pass tuning model. Covers the request and response bodies, field provenance, decision points, proposal ranking, and attribution."
+        "keywords": "Hyperloom, predictor, PrimaTune, first-pass tuning, FRAMEWORK phase, explore, untested proposals, server args, provenance, attribution, AMD GPU, ROCm, LLM inference"
 ---
 # Predictor HTTP contract
 
-Hyperloom can consult an external *first-pass tuning* model at FRAMEWORK entry
-and turn its answer into ordinary `explore` variants and specialist mandates.
+Hyperloom can consult an external *first-pass tuning* model at each FRAMEWORK
+decision point and file its answer on the untested-proposal queue, alongside the
+proposals its own specialists produce. Orchestration reads that queue, composes
+the `explore` grid, and dispatches any source-change mandate itself; the
+predictor schedules nothing and creates no tasks.
+
 This topic is the wire contract for that call plus the runtime rules the pump
 obeys. It is a reference, not a tutorial: the predictor is off by default and a
-session that never sets an endpoint behaves exactly as before.
+session that never sets an endpoint behaves exactly as before, down to the bytes
+of the orchestration prompt.
 
 The design constraint that shapes everything below: **the model must not run on
 the machine under test.** IR-1 requires every visible GPU to be idle before a
@@ -39,7 +44,7 @@ Hyperloom                                    Predictor service
 SharedState + analysis.md + source map
   -> request body (native names)  --POST-->  map -> render -> generate
   <-------------------------------  200  --  parse + repair -> action
-  -> explore variants / specialist mandate
+  -> untested-proposal queue rows
 ```
 
 ## Endpoint
@@ -264,94 +269,98 @@ Any non-200, a body that fails to parse, or a timeout is treated exactly like
 
 ## Runtime behaviour
 
-### The greedy chain
+### Decision points
 
-The predictor is a single-shot predictor, not a search. But a KEEP changes
-`current_best`, `optimization_stack` and `cumulative_gain_validated` — a new
-state, and one the model is equally equipped to answer. So the pump re-fires
-after each accepted variant:
+The predictor answers one question at a time, and its answer is a function of
+the request. So asking twice at an unchanged state buys the same proposals for
+the price of a second request. `predictor_asked_keys` on `SharedState` records
+which questions have been asked, keyed by
 
 ```text
-FRAMEWORK entry -> predict -> explore task -> KEEP -> watermark roofline
-      ^                                                          |
-      |______________ fresh snapshot, stack depth + 1 ____________|
+c{macro_cycle}-s{stack_depth}-r{len(roofline_snapshots)}
 ```
 
-The chain is re-fired from three places: FRAMEWORK entry and every tick
-(`phases/framework.py`), the moment a variant is promoted, and the moment a
-fresh roofline lands (both in `loop/writeback.py`). The last two matter because
-one tick spans a whole explore round — a chain that only advanced between ticks
-got exactly one prediction per session, which is what an earlier version did.
+That key is what makes the pump safe to call from the phase-entry hook and from
+every tick. Each component moves for a reason worth a fresh answer:
 
-Termination is a losing streak, hardcoded to one round. `predictor_chain_steps`
-counts *consecutive* rounds that produced no KEEP within one macro-cycle: it is
-bumped when a round is enqueued and cleared by `note_keep` from writeback when
-one of its variants lands. A KEEP therefore still earns a second HTTP at the
-new stack depth (that is how a later flag can stack on fp8 KV cache). A round
-that does not KEEP hands the phase to the LLM specialists and to orchestration
-`explore` (PRELUDE scout/recon `proposal_set`s wait until then).
+- **stack depth** — a KEEP changes `current_best`, `optimization_stack` and
+  `cumulative_gain_validated`. The stack is what the answer is conditioned on:
+  the same AITER backend switch measured -1.17% on a bare baseline and +2.68%
+  stacked on fp8 KV cache in this fleet.
+- **macro-cycle** — a `cycle_reloop` re-enters the phase against a different
+  stack.
+- **roofline generation** — a landed roofline is new evidence. It is also the
+  only thing that earns a second look inside a cycle whose first answer landed
+  no KEEP, which matters because nothing else defers to the predictor any more.
 
-That count is also the attempt number in the idempotency key,
-`primatune-c{macro_cycle}-s{stack_depth}-a{attempt}`. After a KEEP the depth
-changes and the key is new. While a round is in flight the key is unchanged, so
-the registry returns the existing row and nothing is enqueued twice. Because
-`coordinator.db` is durable, a resumed session does not re-benchmark a
-prediction it already tried.
+All three are **pulled** by the pump on its own tick. Nothing outside
+`orchestrator/predictor/` pushes to it, and in particular the writeback that
+promotes a KEEP or a roofline does not know the predictor exists.
 
-### Going first, and going first cheaply
+An answer marks its decision point spent whatever came back. A predictor that
+declined, or one whose every proposal was already measured, has answered the
+question; re-POSTing it next tick would only spend the request again.
 
-`_on_enter_framework` runs synchronously at phase entry, while an
-orchestration-proposed `explore` has to wait for the next tick's reactor pass.
-The entry prediction therefore takes the serving lane's lease first.
+### Why it runs at phase entry as well as on the tick
 
-It also goes first by design, not just by timing. The predictor is a local
-model: one request is seconds of GPU on its own host and no API spend. An LLM
-specialist is the opposite — measured over a real session, specialists were 83
-of 87 LLM calls and 97% of the output tokens, and the two most expensive of them
-returned candidates that all measured negative. So while the predictor is still
-inside its streak allowance, the FRAMEWORK phase holds back its paid proposers;
-see [Holding the specialists](#holding-the-specialists-and-orchestration-explore).
+The tick runs the orchestration reactor *before* the FRAMEWORK pump. A
+prediction made only on the tick path would therefore miss the phase's first
+orchestration turn entirely and sit unread for a full tick. `_on_enter_framework`
+calls the pump inside the entry hook, which runs before any reactor pass, so the
+first orchestration turn of the phase already sees the queue rows.
 
-### Waiting for fresh evidence
+This is a visibility ordering, not a priority one. The pump takes no lease,
+holds no lane and denies nothing.
 
-A KEEP large enough to cross the roofline watermark (a 10% step) leaves a
-re-profile in flight, and `auto_roofline_pending_task_id` names it. The pump
-declines while that is set: asking again would answer over the snapshot the KEEP
-just invalidated, since the request carries `roofline_snapshots[-1]`.
+### Choosing what reaches the queue
 
-A KEEP too small to cross the watermark is deliberately **not** waited for.
-There would be nothing to wait for, and a chain that waited anyway would stall
-for the rest of the phase.
+The service samples N times and returns every distinct proposal, but in
+*sampling* order — its `chosen` is merely the first sample that parsed. The head
+of `actions[]` therefore carries no quality signal, and ranking is the
+consumer's job.
 
-### Holding the specialists (and orchestration explore)
+`meta.candidates` carries every raw sample, which makes the model's own
+self-consistency measurable at no cost: how many samples proposed a variant is a
+real signal, and it is surfaced to orchestration as `votes=k/n`. The pump then
+applies, in order:
 
-`predictor_holds_specialists` in `orchestrator/predictor/pump.py` is the single
-predicate. The streak is counted when a round is enqueued, so with
-`max_chain=1` an in-flight round (`predictor_round_task_id`) must keep the
-hold on until that grid is graded; otherwise orchestration explore and
-candidate_discovery take the serving lane the moment the HTTP returns.
+1. the duplicate filters below, against the stack and `explore_search.tested`
+2. a sort by vote count, with the sampling order as the stable tie-break
+3. **flag-family de-duplication** — a proposal is reduced to the set of knobs it
+   moves, ignoring their values, and only the best-voted member of a family
+   survives. At N=8, three of eight proposals differed only in `--block-size`;
+   without this, three of four slots would have measured one sweep.
+4. truncation to `pump.MAX_PROPOSALS` (4), matching the grid size orchestration
+   is told to target, so the predictor and the LLM specialists contribute on
+   symmetric terms
 
-It is read from three places:
+Everything ranking or family de-duplication set aside is recorded on the round
+under `dropped`, with a reason, so a finished session still shows what the model
+proposed before the consumer narrowed it.
 
-- `phases/framework.py` before `_maybe_enqueue_candidate_discovery` and
-  `_maybe_dispatch_local_explore`
-- `policy/gate.py` `_validate_specialist_dispatch`, which refuses a specialist
-  `delegate` while the hold is on (`specialist_deferred_to_predictor`)
-- `policy/gate.py` `_validate_delegate_body` / `_validate_propose_action`, which
-  refuse an orchestration `explore` while the hold is on
-  (`explore_deferred_to_predictor`)
+Historical `explore_search.tested` **is** an eligibility gate here. A proposal
+is dropped when its delta was already measured, when its launched recipe matches
+one already measured (`already_tested_launch` — the case that caught round-2
+`--quantization fp8` on an `fp8_e4m3` champion), when it duplicates another
+proposal in the same answer, or when it is already on the stack. Cross-framework
+envs (`SGLANG_*` on vLLM and the reverse) are stripped: the service's own repair
+drops illegal flags but not envs.
 
-The predictor's own explore never hits that gate: the pump enqueues it as
-`source=coordinator_internal_primatune`. Dispatch-time replay of that row uses
-`check_phase=False`, so the hold cannot cancel a grid that is already queued.
+### The queue row
 
-It returns false whenever the predictor could not answer anyway — no endpoint,
-shadow mode, a framework with no flag catalogue. Getting that wrong would
-suppress every proposer at once and leave the phase with nothing to benchmark.
+The answer is filed with `record_specialist_round` — the same ledger a finished
+specialist writes its `proposal_set` into — as `domain="primatune"` with
+`priority=1`. It then surfaces in `=== Untested proposals (current cycle) ===`,
+which is outside the SEED gate and so reaches orchestration on every FRAMEWORK
+tick.
 
-The PRELUDE research scout and static recon **run** as usual. What waits is
-orchestration turning their `proposal_set` into a FRAMEWORK `explore` until the
-predictor's first round finishes without a KEEP.
+`priority` is a new primary sort key on that queue and exists because a
+predictor round carries no gap: on gap severity alone it would rank below every
+gap-anchored specialist proposal. The default is `0`, so a queue with no
+prioritised round sorts exactly as it did before the key existed.
+
+Two further keys are recorded and never rendered: `dropped` (above) and
+`predict_meta` (`latency_ms`, `prompt_chars`, `samples`, `actions_returned`).
 
 ### Gating
 
@@ -361,82 +370,118 @@ The pump returns immediately, before any HTTP call, when:
 - the session is not in `FRAMEWORK_AGENT`
 - `framework` is not one of `sglang` / `vllm`. Flag catalogues exist only for
   those two; the consumer cannot validate an answer for the others
-- the streak has reached one round without a KEEP (`max_chain` is hardcoded)
-- a watermark roofline is in flight, so the evidence it would answer over is
-  known to be stale
+- this decision point is already in `predictor_asked_keys`
 
-`mode=shadow` is the default and goes one step further: it renders, calls, parses
-and logs, then enqueues nothing. Shadow mode costs no GPU time and is the only
-way to see whether the request above lands inside the consumer's trained
-distribution before spending benchmark cycles on it.
+`mode=shadow` is the default: it renders, calls, parses and logs, then queues
+nothing and leaves the decision point unspent. Shadow mode costs no benchmark
+time and is the only way to see whether the request above lands inside the
+consumer's trained distribution before spending benchmark cycles on it.
 
 ## The patch channel
 
-`action.source_change` is prose, not a diff, so it cannot go to
-`integrate_patch` directly — that path needs a real patch and Critic approval.
-Instead it becomes the mandate of a free-form specialist, which writes the diff
-and then rejoins the normal route:
+`action.source_change` is prose, not a diff, so it cannot reach
+`integrate_patch` directly — that path needs a real patch and a Critic verdict.
+It is offered on the queue as an opaque **mandate id**, and orchestration
+dispatches the specialist:
 
 ```text
-source_change -> freeform specialist -> patches_written -> Critic
-              -> integrate_patch -> apply + bench + accuracy gate -> KEEP/REVERT
+source_change -> queue row {mandate_id, mandate}
+              -> orchestration delegates specialist{scope=freeform, mode=patch,
+                 primatune_mandate_id=...}
+              -> Coordinator substitutes the verbatim mandate
+              -> patches_written -> Critic -> integrate_patch
+              -> apply + bench + accuracy gate -> KEEP/REVERT
 ```
 
-The specialist prompt needs no changes; its free-form mandate block was built
-to carry exactly this kind of externally supplied instruction. Three details do
-matter:
+Carrying an id rather than the text is what keeps the mandate faithful: an LLM
+asked to relay prose can reword it, and one asked to relay an opaque token
+cannot. `_resolve_first_pass_mandate` in `loop/intent_router.py` looks the id up
+and overwrites `task_description` with the stored text. An id it cannot resolve
+is left alone and logged — the dispatch proceeds as the ordinary LLM-authored
+specialist it looks like, with no predictor credit.
 
-- **`mode="patch"` must be set explicitly.** A free-form specialist defaults to
+A `task_description` must still arrive: PolicyGate's freeform gate rejects an
+empty one before the substitution runs, so whatever orchestration wrote is a
+placeholder the Coordinator replaces.
+
+Three details of the resolved params matter:
+
+- **`mode="patch"` is set explicitly.** A free-form specialist defaults to
   `research`, because the profile resolves the mode before the domain is
   assigned and so `FREEFORM_DOMAIN.default_mode` never applies. Without it there
   is no worktree, no patch-writing instruction, and no `patches_written`.
-- **`domain` must be left unset.** `_forward_integrate_source` overwrites
+- **`domain` is left unset.** `_forward_integrate_source` overwrites
   `provenance` with `specialist:<domain>` when a domain is present, which would
   erase the attribution label.
-- **The mandate is sanitized on our side.** `task_description` is interpolated
-  into a one-line markdown quote (`> {desc}`) exactly as given. A newline in it
-  would leave the quote, so model-authored text could forge a section header in
-  the specialist's own prompt. The pump runs it through `flatten_for_prompt`,
-  which folds every line separator and defangs code fences and angle brackets,
-  then caps the length.
+- **The mandate is sanitized on our side.** It is interpolated into a one-line
+  markdown quote (`> {desc}`) exactly as given, so a newline in it could leave
+  the quote and let model-authored text forge a section header in the
+  specialist's own prompt. The pump runs it through `flatten_for_prompt`, which
+  folds every line separator and defangs code fences and angle brackets, then
+  caps the length.
+
+Only the newest mandate of the current cycle is offered. An older one answered a
+stack the session has already moved past, and offering every one of them would
+grow the block without bound.
 
 ## Attribution
 
-Adopted variants are attributed to a dedicated agent bucket, following the
-`warm_replay` precedent — the existing case of a non-LLM external source owning
-headline credit. Three closed sets carry it: `_SOURCES` in the optimizations
-collector, `AgentBucket` in the breakdown schema, and `_AGENT_BY_ACTION` in the
-recorder.
+Orchestration composes the grid, so a variant it copied off the queue arrives
+labelled `llm_direct` like anything else it authored. The label is recovered
+deterministically instead of being asked for:
+`_stamp_first_pass_provenance` in `loop/proposals.py` fingerprints every grid
+variant and re-stamps `provenance="primatune"` on the ones matching a recorded
+proposal. A variant whose flags were edited no longer matches, so the edit keeps
+its own credit. The grid is **not** reordered — that stays orchestration's call.
 
 `lever_kind` stays inside its own five-value closed set: the config channel
 reports `config`, the patch channel stamps `source_patch`. An unknown lever is
 silently reduced to an empty string, so inventing a value there would lose the
 attribution rather than extend it.
 
-The point of the bucket is measurement. With it, `session_breakdown.json`
-answers how much validated gain the predictor produced next to `default_grid`
-and `llm_direct`, under the same KEEP threshold and the same accuracy gate.
+### Reading the numbers afterwards
 
-One caveat when reading those numbers: the grading anchor is `current_best`, so
-every KEEP the chain lands raises the bar for whatever explores afterwards. Part
-of a chain's measured contribution is having gone first. That is inherent to the
+Three things are worth knowing before comparing proposers in
+`session_breakdown.json`.
+
+**Use `decision_trace`, not `optimizations.summary_by_agent`.** The headline
+agent bucket is resolved per *operation*, and one explore task is one operation
+however many variants it benchmarked. A grid mixing predictor and LLM proposals
+has no single owner, so `_round_provenance` reports none and the bucket credits
+neither. `decision_trace` is per-variant and carries `provenance`, `outcome` and
+`gain_pct` on each entry.
+
+**The predictor spends no tokens, and that is not a gap in the accounting.** It
+is a plain HTTP POST to a service on another host, not a gateway LLM call, so it
+is deliberately not a `VALID_COMPONENTS` member and appears in neither
+`llm_calls.jsonl` nor `token_usage`. Its cost is GPU seconds on the predictor's
+own host, which Hyperloom cannot see; `predict_meta.latency_ms` on each round is
+the only figure recorded from this side. Specialist spend, by contrast, is fully
+attributed — `token_usage.by_component["specialist"]` and per-`task_id` in
+`token_usage.timeline`.
+
+**Going first is worth something.** The grading anchor is `current_best`, so
+every KEEP raises the bar for whatever is measured afterwards. Part of any early
+proposer's measured contribution is having gone first. That is inherent to the
 loop rather than introduced here, but it is worth remembering before concluding
-that free exploration underperformed.
+that a later proposer underperformed.
 
 ## Configuration
 
 | Flag | Environment | Default | Meaning |
 |---|---|---|---|
 | `--primatune-endpoint URL` | `HYPERLOOM_PREDICTOR_ENDPOINT` | unset | Service base URL. Unset disables the pump. |
-| `--primatune-mode MODE` | `HYPERLOOM_PREDICTOR_MODE` | `shadow` | `off`, `shadow` (predict + log), `active` (enqueue). |
+| `--primatune-mode MODE` | `HYPERLOOM_PREDICTOR_MODE` | `shadow` | `off`, `shadow` (predict + log), `active` (file on the proposal queue). |
 | `--no-primatune` | — | — | Force `off` regardless of the other two. |
-| — | `HYPERLOOM_PREDICTOR_TIMEOUT_SEC` | `120` | Per-request timeout. Exceeding it ends the chain. |
+| — | `HYPERLOOM_PREDICTOR_TIMEOUT_SEC` | `120` | Per-request timeout. A timeout reads as a declined answer. |
 | — | `HYPERLOOM_PREDICTOR_PHASE_LABEL` | `EXPLORE` | Value sent as `phase.phase`. See below. |
 
-Chain length and variant count are not operator knobs. One losing round of
-every distinct sample is measured; a KEEP still resets the streak. Leftover
+How much of one answer reaches the queue is not an operator knob either: it is
+`pump.MAX_PROPOSALS`, held equal to the grid size the orchestration prompt asks
+for so neither proposer is handed a structurally larger share. Leftover
 `HYPERLOOM_PREDICTOR_MAX_CHAIN` / `HYPERLOOM_PREDICTOR_MAX_VARIANTS` values in
-the environment are ignored.
+the environment are ignored; the losing-streak cap they configured no longer
+exists, because nothing defers to the predictor.
 
 ### Why the phase label is configurable
 

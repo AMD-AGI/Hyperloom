@@ -833,176 +833,42 @@ def test_patch_capable_domains_default_to_patch():
 
 
 # --------------------------------------------------------------------------- #
-# Deferring the paid proposers to the free one
+# A configured predictor gates nothing
 # --------------------------------------------------------------------------- #
-def _gate_with_predictor_state(**fields) -> PolicyGate:
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState()
-    state.phase = "FRAMEWORK_AGENT"
-    state.framework = "vllm"
-    state.macro_cycle = 0
-    state.predictor_chain_cycle = 0
-    for name, value in fields.items():
-        setattr(state, name, value)
-    return PolicyGate(role_registry=default_role_registry(), shared_state=state)
-
-
 @pytest.fixture
 def predictor_active(monkeypatch):
-    """A configured, enqueueing predictor."""
+    """A configured predictor in its enqueueing mode."""
     from hyperloom.orchestrator.predictor import config as predictor_config
 
     monkeypatch.setenv(predictor_config.ENV_ENDPOINT, "http://predictor:8973")
     monkeypatch.setenv(predictor_config.ENV_MODE, predictor_config.MODE_ACTIVE)
 
 
-def test_specialist_deferred_while_the_predictor_leads(predictor_active, orchestration_role):
-    """The predictor costs no API spend; a specialist was 97% of a session's.
+def _framework_gate() -> PolicyGate:
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    Denied rather than queued: the point is that the specialist subprocess never
-    starts, which is where essentially all of the cost sits.
+    state = SharedState()
+    state.phase = "FRAMEWORK_AGENT"
+    state.framework = "vllm"
+    return PolicyGate(role_registry=default_role_registry(), shared_state=state)
+
+
+def test_a_configured_predictor_does_not_defer_a_specialist(predictor_active, orchestration_role):
+    """The predictor competes for a slot on the proposal queue, not for the gate.
+
+    It used to hold the paid proposers back until it had spent a losing round.
+    That put a scheduling decision inside PolicyGate, which owns permissions
+    rather than strategy, so the ordering moved to the queue's own ranking. A
+    denial reappearing here would be that coupling coming back.
     """
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_specialist_dispatch(
-            orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
-        )
-    assert excinfo.value.rule == "specialist_deferred_to_predictor"
-
-
-def test_specialist_admitted_once_the_predictor_stops_landing(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(predictor_chain_steps=1)
-    gate._validate_specialist_dispatch(
-        orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
-    )
-
-
-def test_specialist_still_deferred_while_the_cap_round_is_in_flight(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(
-        predictor_chain_steps=1, predictor_round_task_id="explore-in-flight"
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_specialist_dispatch(
-            orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
-        )
-    assert excinfo.value.rule == "specialist_deferred_to_predictor"
-
-
-def _explore_payload(**params) -> dict:
-    return {"action_name": "explore", "params": params}
-
-
-def test_explore_deferred_while_the_predictor_leads(predictor_active, orchestration_role):
-    """PRELUDE proposal_sets must not steal the FRAMEWORK lane from the grid."""
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_delegate(
-            orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
-        )
-    assert excinfo.value.rule == "explore_deferred_to_predictor"
-
-
-def test_propose_explore_deferred_while_the_predictor_leads(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_propose_action(
-            orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
-        )
-    assert excinfo.value.rule == "explore_deferred_to_predictor"
-
-
-def test_explore_admitted_once_the_predictor_stops_landing(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(predictor_chain_steps=1)
-    gate._validate_delegate(
-        orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
-    )
-
-
-def test_explore_still_deferred_while_the_cap_round_is_in_flight(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(
-        predictor_chain_steps=1, predictor_round_task_id="explore-in-flight"
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_delegate(
-            orchestration_role, _explore_payload(grid=[{"name": "scout-fp8"}])
-        )
-    assert excinfo.value.rule == "explore_deferred_to_predictor"
-
-
-def test_predictor_owned_explore_is_not_held_on_the_intent_path(
-    predictor_active, orchestration_role
-):
-    """The pump's own grid is coordinator-internal; the hold is for LLM explores."""
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    gate._validate_delegate(
+    _framework_gate()._validate_specialist_dispatch(
         orchestration_role,
-        _explore_payload(source="coordinator_internal_primatune", grid=[{"name": "p0"}]),
+        _dispatch({"scope": "freeform", "task_description": "tune the decode path"}),
     )
 
 
-def test_dispatched_predictor_explore_skips_the_hold(predictor_active):
-    """Dispatch replay uses check_phase=False; the predictor grid must still run."""
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    gate.validate_dispatched_task(
-        "explore",
-        {"source": "coordinator_internal_primatune", "grid": [{"name": "p0"}]},
-    )
-
-
-def test_no_explore_deferral_outside_the_framework_phase(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(phase="PRELUDE", predictor_chain_steps=0)
-    gate._validate_delegate(
-        orchestration_role, _explore_payload(grid=[{"name": "prelude-ok"}])
-    )
-
-
-def test_anchored_specialist_is_deferred_too(predictor_active, orchestration_role):
-    """Every LLM specialist is paid, not just the freeform ones."""
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_specialist_dispatch(
-            orchestration_role,
-            _dispatch({"domain": "serving_specialist", "gap_canonical_id": "gap.x"}),
-        )
-    assert excinfo.value.rule == "specialist_deferred_to_predictor"
-
-
-def test_no_deferral_outside_the_framework_phase(predictor_active, orchestration_role):
-    """PRELUDE's research scout and static recon must not be held back."""
-    gate = _gate_with_predictor_state(phase="PRELUDE", predictor_chain_steps=0)
-    gate._validate_specialist_dispatch(
-        orchestration_role, _dispatch({"scope": "freeform", "task_description": "survey"})
-    )
-
-
-def test_no_deferral_without_a_predictor(monkeypatch, orchestration_role):
-    """Suppressing every proposer would leave the phase nothing to benchmark."""
-    from hyperloom.orchestrator.predictor import config as predictor_config
-
-    monkeypatch.delenv(predictor_config.ENV_ENDPOINT, raising=False)
-    gate = _gate_with_predictor_state(predictor_chain_steps=0)
-    gate._validate_specialist_dispatch(
-        orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
-    )
-
-
-def test_no_deferral_for_a_framework_the_predictor_cannot_answer_for(
-    predictor_active, orchestration_role
-):
-    gate = _gate_with_predictor_state(framework="atom", predictor_chain_steps=0)
-    gate._validate_specialist_dispatch(
-        orchestration_role, _dispatch({"scope": "freeform", "task_description": "tune it"})
+def test_a_configured_predictor_does_not_defer_an_explore(predictor_active, orchestration_role):
+    _framework_gate()._validate_delegate(
+        orchestration_role,
+        {"action_name": "explore", "params": {"grid": [{"name": "scout-fp8"}]}},
     )

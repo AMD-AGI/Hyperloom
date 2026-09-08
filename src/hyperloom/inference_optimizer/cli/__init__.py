@@ -1645,16 +1645,8 @@ def _export_predictor_settings(args: argparse.Namespace) -> None:
 
     conf = predictor_config.load()
     if conf.enabled:
-        held = (
-            "; one round of every sampled variant, specialists and "
-            "orchestration explore held until that round has no KEEP"
-            if conf.enqueues
-            else ""
-        )
-        print(
-            f"  predictor          : {conf.mode} at {conf.endpoint} "
-            f"(phase label {conf.phase_label}{held})"
-        )
+        queued = "; answers join the untested-proposal queue for orchestration to draw from" if conf.enqueues else ""
+        print(f"  predictor          : {conf.mode} at {conf.endpoint} (phase label {conf.phase_label}{queued})")
 
 
 def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:

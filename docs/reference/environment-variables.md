@@ -205,8 +205,10 @@ The following variables control the kernel optimization backend ladder.
 
 ## First-pass tuning predictor
 
-Consulted at FRAMEWORK entry, and again as each accepted step deepens the
-stack. Off unless an endpoint is set. The CLI flags below write these
+Consulted once per FRAMEWORK decision point — phase entry, and again whenever
+an accepted step deepens the stack or a fresh roofline lands. Its answers join
+the untested-proposal queue; orchestration composes the grid and dispatches any
+patch mandate itself. Off unless an endpoint is set. The CLI flags below write these
 variables, but only when actually passed, so a resume — including the one the
 robustness monitor drives without knowing the original command line — keeps
 whatever the environment already carries. Full contract:
@@ -215,8 +217,8 @@ whatever the environment already carries. Full contract:
 | Variable                                | Default    | Description                                                                                                                                                                                       |
 |-----------------------------------------|------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_PREDICTOR_ENDPOINT`          | Unset      | Base URL of the predictor service (`--primatune-endpoint`). Unset is the off switch: no endpoint, no request, no behaviour change. Non-http(s) schemes are refused before any request, so a `file://` value cannot become a local read. |
-| `HYPERLOOM_PREDICTOR_MODE`              | `shadow`   | `off` / `shadow` / `active` (`--primatune-mode`). `shadow` renders, calls, parses and logs but enqueues nothing, which costs no GPU time. It is the default because the two ways this connection can be wrong — a phase label the consumer never trained on, an evidence key it does not recognise — are both silent, so a misconnection is indistinguishable from a weak model until it is measured. `--no-primatune` forces `off` whatever this says. |
-| `HYPERLOOM_PREDICTOR_TIMEOUT_SEC`       | `120`      | Per-request timeout. There is no retry: the call sits in the tick loop, the answer is advisory, and a chain that stops a step early costs nothing measurable. A timeout is treated exactly like a declined answer. |
+| `HYPERLOOM_PREDICTOR_MODE`              | `shadow`   | `off` / `shadow` / `active` (`--primatune-mode`). `shadow` renders, calls, parses and logs but queues nothing, which costs no benchmark time and leaves the decision point unspent. It is the default because the two ways this connection can be wrong — a phase label the consumer never trained on, an evidence key it does not recognise — are both silent, so a misconnection is indistinguishable from a weak model until it is measured. `active` files the answer on the untested-proposal queue for orchestration to draw from. `--no-primatune` forces `off` whatever this says. |
+| `HYPERLOOM_PREDICTOR_TIMEOUT_SEC`       | `120`      | Per-request timeout. There is no retry: the call sits in the tick loop, the answer is advisory, and a decision point that goes unanswered costs nothing measurable. A timeout is treated exactly like a declined answer. |
 | `HYPERLOOM_PREDICTOR_PHASE_LABEL`       | `EXPLORE`  | Value sent as `phase.phase`. Defaults to `EXPLORE` rather than the live `FRAMEWORK_AGENT` because the pump feeds the configuration arm, which was its own phase under that name before the two merged — it names the decision being made, not the enclosing phase. Set to `FRAMEWORK_AGENT` to pass the live phase through. |
 
 ---

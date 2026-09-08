@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING, Any
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
-from ..predictor import config as _predictor_config
-from ..predictor import pump as _predictor_pump
 from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
@@ -69,9 +67,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         # A reopened macro-cycle re-measures before either arm spends anything.
         await self._on_cycle_start_reprofile(from_phase=from_phase)
         # Ordered after the reprofile so the predictor sees fresh evidence, and
-        # before the arms so its task takes the serving lease first. Going first
-        # needs no suppression: an LLM-proposed explore only arrives on the next
-        # tick's reactor pass, while this runs inside the entry hook.
+        # inside the entry hook because the tick runs orchestration BEFORE the
+        # FRAMEWORK pump: a prediction made only on the tick path would miss
+        # this phase's first orchestration turn entirely.
         await self._pump_predictor(caller="entry")
         try:
             await self._pump_framework_agent_phase()
@@ -143,19 +141,6 @@ class FrameworkPhase(CoordinatorCollaborator):
                 and getattr(state, "framework_agent_authoring_enabled", False)
                 and await self._framework_agent_authoring_inflight()
             ):
-                return
-            # The free proposer owns the phase until it stops landing KEEPs.
-            # Returning rather than falling through is the point: falling
-            # through reaches _record_framework_agent_phase_done below, which
-            # would close FRAMEWORK while a prediction is still being
-            # benchmarked. The phase stays open and the next tick re-asks.
-            if _predictor_pump.predictor_holds_specialists(state):
-                log.info(
-                    "FRAMEWORK: holding LLM specialists, predictor has %d/%d "
-                    "attempts left before fallback",
-                    _predictor_pump.attempts_without_keep(state),
-                    _predictor_config.load().max_chain,
-                )
                 return
             # Minimum supply: with the pool empty and no discovery in flight,
             # ask for one. Orchestration may dispatch the same specialist
@@ -2024,8 +2009,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             caller: Label identifying the caller ("tick" / "run"), used only in
                 the failure log.
         """
-        # The chain's later steps land here: a KEEP deepens the stack, which
-        # changes the idempotency key, which lets the next prediction enqueue.
+        # Later decision points land here: a KEEP deepens the stack and a fresh
+        # roofline bumps the snapshot count, either of which changes the
+        # decision-point key the pump dedups on. Pulled from here rather than
+        # pushed from writeback, so nothing outside this phase has to know the
+        # predictor exists.
         await self._pump_predictor(caller=caller)
         try:
             await self._pump_framework_agent_phase()

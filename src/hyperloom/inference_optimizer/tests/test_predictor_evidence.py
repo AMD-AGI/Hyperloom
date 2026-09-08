@@ -26,9 +26,7 @@ import pytest
 
 from hyperloom.orchestrator.predictor import evidence as ev
 
-_TOOLS_DIR = (
-    Path(__file__).resolve().parents[3] / "hyperloom" / "agents" / "kernel" / "tools"
-)
+_TOOLS_DIR = Path(__file__).resolve().parents[3] / "hyperloom" / "agents" / "kernel" / "tools"
 
 
 def _load_renderer():
@@ -36,9 +34,7 @@ def _load_renderer():
     tools = str(_TOOLS_DIR)
     if tools not in sys.path:
         sys.path.insert(0, tools)
-    spec = importlib.util.spec_from_file_location(
-        "_analysis_md_under_test", _TOOLS_DIR / "_analysis_md.py"
-    )
+    spec = importlib.util.spec_from_file_location("_analysis_md_under_test", _TOOLS_DIR / "_analysis_md.py")
     if spec is None or spec.loader is None:  # pragma: no cover - defensive
         pytest.skip(f"cannot load renderer at {_TOOLS_DIR}")
     module = importlib.util.module_from_spec(spec)
@@ -174,9 +170,7 @@ def test_exposed_comm_comes_from_the_signals_table_not_the_summary():
 
 def test_operators_aggregate_category_shares():
     """``category_pct`` sums P-item rows; the renderer canonicalises the label."""
-    block = ev.parse_operators(
-        _render(exec_summary=_FULL_EXEC, system_signals=_FULL_SIGNALS, p_items=_FULL_P_ITEMS)
-    )
+    block = ev.parse_operators(_render(exec_summary=_FULL_EXEC, system_signals=_FULL_SIGNALS, p_items=_FULL_P_ITEMS))
     assert block is not None
     assert sorted(block["category_pct"].values()) == [14.1, 27.5]
     assert block["top3_cumulative_pct"] == 41.6
@@ -185,24 +179,18 @@ def test_operators_aggregate_category_shares():
 
 def test_null_attribution_survives_as_none():
     """``None`` means "no attribution column"; ``0.0`` means "nothing attributed"."""
-    block = ev.parse_operators(
-        _render(exec_summary=_FULL_EXEC, system_signals=_FULL_SIGNALS, p_items=_FULL_P_ITEMS)
-    )
+    block = ev.parse_operators(_render(exec_summary=_FULL_EXEC, system_signals=_FULL_SIGNALS, p_items=_FULL_P_ITEMS))
     assert block["attribution_pct"] is None
 
     exec_summary = dict(_FULL_EXEC)
     exec_summary["attribution_pct"] = 0.0
-    zero = ev.parse_operators(
-        _render(exec_summary=exec_summary, system_signals=_FULL_SIGNALS, p_items=_FULL_P_ITEMS)
-    )
+    zero = ev.parse_operators(_render(exec_summary=exec_summary, system_signals=_FULL_SIGNALS, p_items=_FULL_P_ITEMS))
     assert zero["attribution_pct"] == 0.0
 
 
 def test_operators_block_absent_without_p_items():
     """No per-category share means no operator-distribution block."""
-    assert (
-        ev.parse_operators(_render(exec_summary=_FULL_EXEC, system_signals=_FULL_SIGNALS)) is None
-    )
+    assert ev.parse_operators(_render(exec_summary=_FULL_EXEC, system_signals=_FULL_SIGNALS)) is None
 
 
 def test_p_item_index_supplies_args_and_launch_count():

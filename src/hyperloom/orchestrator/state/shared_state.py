@@ -313,6 +313,10 @@ _GAPS_ATTEMPTS_HISTORY = 20
 # Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
 _INTERVENTION_MIX_CAP = 500
 _SPECIALIST_ROUNDS_CAP = 200
+# Decision-point keys the predictor has answered (predictor_asked_keys). One
+# key per KEEP / cycle / roofline within a session, so a small cap suffices;
+# an evicted key only risks one repeat request at a depth long since passed.
+_PREDICTOR_ASKED_KEYS_CAP = 200
 _SEEN_PR_IDS_CAP = 2000
 _WINNERS_HISTORY_CAP = 200
 # Negative ledger (explore_search["tested"]); oldest insertion-order keys
@@ -1093,23 +1097,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle's start, and the consecutive no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
-    # First-pass predictor chain: consecutive rounds that landed no KEEP, and
-    # the macro-cycle they belong to. A losing streak rather than a total --
-    # writeback clears it whenever a variant is promoted -- so it answers two
-    # questions at once: whether the free proposer still leads the phase
-    # (``predictor_holds_specialists``), and which attempt number goes in the
-    # idempotency key so a sampling predictor can take a second look at an
-    # unchanged stack depth. The cycle stamp is what resets the count on a
-    # cycle_reloop without a separate clear. Coordinator-only writers.
-    predictor_chain_steps: int = 0
-    predictor_chain_cycle: int = -1
-    # The predictor's explore round currently on the benchmark lane, or "".
-    # Gates the chain to one round at a time: the attempt number bumps on
-    # dispatch, so without this the next tick would see a changed idempotency
-    # key and buy a duplicate round while the first was still being measured.
-    # ``pump`` releases it by asking the registry, so a task that reported
-    # nothing cannot leave a gate behind. Coordinator-only writer.
-    predictor_round_task_id: str = ""
+    # Decision points the first-pass predictor has already answered, as
+    # ``c{macro_cycle}-s{stack_depth}-r{roofline_snapshot_count}`` keys. The
+    # predictor is deterministic in its inputs, so re-asking at an unchanged
+    # decision point buys the same answer at the cost of another request; this
+    # is what makes the pump safe to call on every tick. Each of the three
+    # components moves for a reason worth a fresh answer: a KEEP deepens the
+    # stack, a cycle_reloop re-enters against a different one, and a landed
+    # roofline is new evidence. Tail-trimmed at ``_PREDICTOR_ASKED_KEYS_CAP``;
+    # Coordinator-only writer (locked in ``policy.CORE_STATE_FIELDS``).
+    predictor_asked_keys: list[str] = field(default_factory=list)
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the
     # cycle down; the next macro-cycle's prompt surfaces a redirect advisory off
     # ``last_cycle_bottleneck``. Cleared once the live top bottleneck drifts off it.

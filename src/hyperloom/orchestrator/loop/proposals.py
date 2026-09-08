@@ -12,6 +12,11 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from ..phases import machine_state as _phase_state
+from ..actions.executors._proposal_identity import (
+    controls_of,
+    effective_fingerprint,
+    normalize_proposal,
+)
 from ..bus.message_bus import Message
 from .coordinator_helpers import approved_proposal_idempotency_key
 from ..state.shared_state import inject_stack_base_params
@@ -423,6 +428,71 @@ class ProposalsCollaborator:
             params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
+        self._stamp_first_pass_provenance(params)
+
+    def _stamp_first_pass_provenance(self, params: dict) -> None:
+        """Label grid variants the first-pass predictor proposed.
+
+        Orchestration composes the grid, so a variant it copied off the queue
+        arrives stamped ``llm_direct`` like anything else it authored. Matching
+        on the proposal's own fingerprint is what recovers the proposer without
+        asking the LLM to label its sources honestly -- and without reordering
+        the grid, which stays orchestration's call.
+
+        A variant is only claimed when it matches a recorded proposal exactly,
+        so an LLM that edited the flags keeps the credit for the edit. No-op
+        when no predictor ever wrote to the queue.
+
+        Note:
+            Side-effecting: rewrites ``provenance`` on matching grid entries.
+
+        Args:
+            params: Explore-task params, mutated in place.
+        """
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        from ..predictor.pump import PROVENANCE as FIRST_PASS_PROVENANCE
+        from ..predictor.pump import QUEUE_DOMAIN as FIRST_PASS_DOMAIN
+
+        offered: set[str] = set()
+        for entry in getattr(self.shared_state, "specialist_rounds", None) or []:
+            if not isinstance(entry, dict) or str(entry.get("domain") or "") != FIRST_PASS_DOMAIN:
+                continue
+            for proposal in entry.get("proposal_set") or []:
+                if not isinstance(proposal, dict):
+                    continue
+                fields = normalize_proposal(proposal)
+                offered.add(
+                    effective_fingerprint(
+                        fields["extra_args"],
+                        fields["extra_envs"],
+                        controls=controls_of(fields),
+                    )
+                )
+        if not offered:
+            return
+        stamped = 0
+        for variant in grid:
+            if not isinstance(variant, dict):
+                continue
+            fields = normalize_proposal(variant)
+            fingerprint = effective_fingerprint(
+                fields["extra_args"],
+                fields["extra_envs"],
+                controls=controls_of(fields),
+            )
+            if fingerprint not in offered:
+                continue
+            variant["provenance"] = FIRST_PASS_PROVENANCE
+            stamped += 1
+        if stamped:
+            log.info(
+                "explore grid: stamped %d/%d variant(s) as %s (matched a queued first-pass proposal)",
+                stamped,
+                len(grid),
+                FIRST_PASS_PROVENANCE,
+            )
 
     async def _materialize_approved_proposal(
         self,

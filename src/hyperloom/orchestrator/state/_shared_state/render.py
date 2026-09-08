@@ -457,8 +457,10 @@ class _RenderMixin:
         would otherwise make everything benched before it look untried.
 
         Returns:
-            Rows ranked by gap severity then recency, each carrying the
-            normalized proposal fields plus ``domain`` / ``severity``.
+            Rows ranked by proposer priority, then gap severity, then recency,
+            each carrying the normalized proposal fields plus ``domain`` /
+            ``severity`` / ``priority`` / ``first_pass`` and, when the proposer
+            recorded them, ``votes`` / ``samples``.
         """
         from hyperloom.common.coerce import to_int
 
@@ -468,6 +470,7 @@ class _RenderMixin:
             is_executable,
             normalize_proposal,
         )
+        from ...predictor.pump import QUEUE_DOMAIN as _FIRST_PASS_DOMAIN
 
         def content_fingerprint(fields: dict[str, Any]) -> str:
             return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
@@ -485,7 +488,7 @@ class _RenderMixin:
         }
         rank = {"high": 3, "medium": 2, "low": 1}
 
-        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
@@ -493,6 +496,12 @@ class _RenderMixin:
             domain = str(entry.get("domain") or "?").removesuffix("_specialist")
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
             task_id = str(entry.get("task_id") or "")[:8]
+            # A proposer with no gap anchor would otherwise rank below every
+            # gap-anchored proposal on severity alone. Default 0 leaves the
+            # ordering of a queue that carries no prioritised round exactly as
+            # it was before this key existed.
+            priority = to_int(entry.get("priority"), default=0)
+            first_pass = domain == _FIRST_PASS_DOMAIN
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -506,9 +515,18 @@ class _RenderMixin:
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
                 row["severity"] = severity
-                ranked.append((rank.get(severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1]))
-        return [row for _, _, row in ranked]
+                row["priority"] = priority
+                row["first_pass"] = first_pass
+                # Not part of the variant field set, so ``normalize_proposal``
+                # drops them; carried across here for the line renderer.
+                votes = to_int(proposal.get("votes"), default=-1)
+                samples = to_int(proposal.get("samples"), default=-1)
+                if votes >= 0 and samples > 0:
+                    row["votes"] = votes
+                    row["samples"] = samples
+                ranked.append((priority, rank.get(severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        return [row for _, _, _, row in ranked]
 
     @staticmethod
     def _untested_proposal_line(row: dict[str, Any]) -> str:
@@ -521,6 +539,10 @@ class _RenderMixin:
             A single ``•``-prefixed line.
         """
         parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+        if row.get("first_pass"):
+            parts.append("[first-pass]")
+        if "votes" in row:
+            parts.append(f"votes={row['votes']}/{row['samples']}")
         if row["atomic"]:
             parts.append("ATOMIC")
         if row["extra_args"]:
@@ -538,8 +560,36 @@ class _RenderMixin:
             parts.append(f"why={reason}")
         return _flatten_for_prompt(" ".join(parts))
 
+    def _untested_patch_mandate(self) -> dict[str, str]:
+        """The newest un-benched first-pass source-change mandate this cycle.
+
+        A mandate is prose, not a variant, so it never survives
+        :func:`is_executable` and cannot ride the row queue. Only the newest one
+        in the cycle is offered: an older mandate answered a stack this session
+        has already moved past, and offering every one of them would grow the
+        block without bound.
+
+        Returns:
+            dict[str, str]: ``{mandate_id, mandate}``, or ``{}`` when none.
+        """
+        from hyperloom.common.coerce import to_int
+
+        cycle = to_int(self.macro_cycle, default=0)
+        for entry in reversed(self.specialist_rounds or []):
+            if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
+                continue
+            mandate_id = str(entry.get("mandate_id") or "").strip()
+            mandate = str(entry.get("mandate") or "").strip()
+            if mandate_id and mandate:
+                return {"mandate_id": mandate_id, "mandate": mandate}
+        return {}
+
     def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot.
+        """Render the proposals still waiting for a benchmark slot.
+
+        The header is byte-identical to the specialist-only one whenever the
+        queue carries no first-pass prediction, so a session that configures no
+        predictor sees the prompt it always saw.
 
         Args:
             max_entries (int): Rows to render before collapsing the rest into a
@@ -549,17 +599,44 @@ class _RenderMixin:
             str: The rendered queue, or ``""`` when nothing is waiting.
         """
         rows = self._untested_proposal_rows()
-        if not rows:
+        shown = rows[:max_entries]
+        mandate = self._untested_patch_mandate()
+        if not rows and not mandate:
             return ""
-        out = [
-            "Executable specialist proposals from this cycle that no explore round has benched.",
-            "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
-            "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
-            "",
-        ]
-        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
+        if any(row.get("first_pass") for row in shown) or mandate:
+            out = [
+                "Executable proposals from this cycle that no explore round has benched.",
+                "Ranked first-pass predictions first, then by gap severity and recency. Compose the",
+                "next `explore` grid from these; dispatch an ATOMIC entry verbatim as one variant —",
+                "never split or re-derive its flags.",
+                "A `[first-pass]` row is a free local prediction that costs no API spend: prefer it",
+                "over an equally plausible idea of your own and copy its fields verbatim. `votes=k/n`",
+                "is how many of the predictor's own samples proposed it, so it reads as confidence.",
+            ]
+        else:
+            out = [
+                "Executable specialist proposals from this cycle that no explore round has benched.",
+                "Ranked by gap severity, then most recent. Compose the next `explore` grid from these;",
+                "dispatch an ATOMIC entry verbatim as one variant — never split or re-derive its flags.",
+            ]
+        out.append("")
+        out.extend(self._untested_proposal_line(row) for row in shown)
         if len(rows) > max_entries:
             out.append(f"(+{len(rows) - max_entries} more not shown)")
+        if mandate:
+            reason = mandate["mandate"].replace("\n", " ").strip()[:160].rstrip()
+            out.extend(
+                [
+                    "",
+                    "First-pass source-change mandate (prose, not a variant). To act on it, dispatch",
+                    "`delegate{action_name='specialist', params={scope:'freeform', mode:'patch', "
+                    f"primatune_mandate_id:'{mandate['mandate_id']}', task_description:'<one line>'}}}}`.",
+                    "Carry the id verbatim: the Coordinator substitutes the mandate's own text over",
+                    "your task_description, so a one-line placeholder there is enough. Re-authoring the",
+                    "prose instead loses the attribution and risks changing what it asked for.",
+                    _flatten_for_prompt(f"• {mandate['mandate_id']} why={reason}"),
+                ]
+            )
         return "\n".join(out)
 
     def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:

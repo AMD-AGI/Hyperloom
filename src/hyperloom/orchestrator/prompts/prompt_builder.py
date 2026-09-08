@@ -462,7 +462,10 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "provenance values: 'llm_direct', 'default_grid', "
-            "'specialist:<domain-or-tag>' (audit/advisory, not a gate). "
+            "'specialist:<domain-or-tag>', 'primatune' (audit/advisory, not a "
+            "gate; a variant copied verbatim off the untested queue is "
+            "re-labelled from the queue entry either way, so an omitted or "
+            "wrong value costs nothing but a less readable audit trail). "
             "SIZE: target 4 variants, hard maximum 6. Variants run serially "
             "on a single benchmark lane at ~13min each, so a 4-variant round "
             "is about an hour of GPU. Submit a 5th or 6th only when it still "
@@ -594,10 +597,11 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   c. **KB sub-graphs + warm-start recipe** when present —",
             "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
             "   d. **`=== Untested proposals (current cycle) ===`** — the",
-            "      executable specialist proposals this cycle that no explore",
-            "      round has benched, ranked by gap severity and truncated to",
-            "      a count the block states. This is the grid's primary",
-            "      source; an entry marked ATOMIC goes in verbatim.",
+            "      executable proposals this cycle that no explore round has",
+            "      benched, ranked and truncated to a count the block states.",
+            "      This is the grid's primary source; an entry marked ATOMIC",
+            "      goes in verbatim. The block's own header states its ranking",
+            "      rule and explains any marker its rows carry.",
             "   e. **Ordering facts**: baseline runs before anything else",
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
             "      automatically from the Coordinator-owned analysis task at",

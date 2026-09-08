@@ -203,9 +203,7 @@ class TestRoofline:
 class TestProfileAge:
     def test_derives_seconds_from_the_iso_stamp(self):
         stamped = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=300)
-        state = _state(
-            last_trace_analyze={"hot_kernels_top15": [{"name": "k"}], "ts": stamped.isoformat()}
-        )
+        state = _state(last_trace_analyze={"hot_kernels_top15": [{"name": "k"}], "ts": stamped.isoformat()})
         age = pl.build_request(state)["evidence"]["profile_age_sec"]
         assert 295 <= age <= 320
 
@@ -233,9 +231,7 @@ class TestHotKernels:
                 "source_file": "tuned_gemm.py",
             }
         ]
-        kernel = pl.build_request(_state(last_trace_analyze={"hot_kernels_top15": rows}))["evidence"][
-            "hot_kernels"
-        ][0]
+        kernel = pl.build_request(_state(last_trace_analyze={"hot_kernels_top15": rows}))["evidence"]["hot_kernels"][0]
         # Not op / efficiency_pct / category.
         assert kernel["name"] == "torch_gemm"
         assert kernel["efficiency_percent"] == pytest.approx(61.0)

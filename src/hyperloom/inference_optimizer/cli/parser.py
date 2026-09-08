@@ -990,10 +990,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="primatune_endpoint",
         type=str,
         default=None,
-        help="Base URL of a first-pass tuning predictor consulted at FRAMEWORK "
-        "entry. Its answers become ordinary explore variants and free-form "
-        "specialist mandates, graded by the same KEEP threshold and accuracy "
-        "gate as every other proposal. Unset disables the feature. "
+        help="Base URL of a first-pass tuning predictor consulted at each "
+        "FRAMEWORK decision point. Its answers join the untested-proposal "
+        "queue alongside the specialists', so orchestration composes the "
+        "explore grid and dispatches any patch mandate itself; they are graded "
+        "by the same KEEP threshold and accuracy gate as every other proposal. "
+        "Unset disables the feature. "
         "See docs/reference/primatune-predictor.md.",
     )
     opt.add_argument(
@@ -1002,9 +1004,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         choices=("off", "shadow", "active"),
         default=None,
-        help="'shadow' (default) predicts and logs without enqueueing, which "
-        "costs no GPU time and is how you check the request lands inside the "
-        "predictor's trained distribution; 'active' enqueues; 'off' disables.",
+        help="'shadow' (default) predicts and logs without queueing anything, "
+        "which costs no benchmark time and is how you check the request lands "
+        "inside the predictor's trained distribution; 'active' files the answer "
+        "on the untested-proposal queue; 'off' disables.",
     )
     opt.add_argument(
         "--no-primatune",
