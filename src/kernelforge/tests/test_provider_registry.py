@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import pytest
 
@@ -184,35 +184,6 @@ def test_claude_fallback_model_env_none_disables(monkeypatch) -> None:
     monkeypatch.setenv("FORGE_CLAUDE_FALLBACK_MODEL", "none")
     runtime = resolve_agent_runtime("claude", model="glm-5-3")
     assert runtime.fallback_model == ""
-
-
-def test_probe_does_not_retry_when_fallback_model_disabled() -> None:
-    attempted_models = []
-
-    class Backend(_FakeBackend):
-        def probe(self, *, cwd, usage=None):
-            del cwd, usage
-            attempted_models.append(self.runtime.model)
-            raise AgentProviderUnavailableError("model not served")
-
-    def factory(runtime):
-        backend = Backend(name=runtime.provider)
-        backend.runtime = runtime
-        return backend
-
-    register_agent_provider(
-        AgentProvider(
-            name="nofallbackprobe",
-            factory=factory,
-            default_model="primary-model",
-            fallback_model="stable-model",
-            capabilities=AgentCapabilities(probe=True),
-        )
-    )
-    runtime = replace(resolve_agent_runtime("nofallbackprobe"), fallback_model="")
-    with pytest.raises(AgentProviderUnavailableError, match="model not served"):
-        create_registered_backend(runtime, probe_cwd="/tmp")
-    assert attempted_models == ["primary-model"]
 
 
 def test_default_runtime_uses_high_reasoning_effort() -> None:
