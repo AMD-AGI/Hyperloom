@@ -1074,6 +1074,8 @@ class KernelPhase(PhaseHandler):
             else "output"
         )
         if agentx:
+            # The saved recipe names aiperf_client.sh, not a server launcher.
+            handoff["bench_launcher"] = "native"
             log.info(
                 "GEAK uses output throughput only as a proposal proxy; "
                 "canonical AgentX validation remains in Hyperloom."

@@ -131,6 +131,7 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
 
     assert handoff["schema_version"] == 3
     assert handoff["bench_client"] == "auto"
+    assert handoff["bench_launcher"] == "native"
     assert not {"bench_client_config", "benchmark_mode", "launch_server_script", "workload_identity"} & handoff.keys()
     assert handoff["framework"] == framework
     assert handoff["model_path"] == "/models/accepted"
@@ -205,6 +206,7 @@ async def test_synthetic_handoff_keeps_existing_protocol_and_metric_policy(
 
     assert handoff["bench_client"] == "auto"
     assert "bench_client_config" not in handoff
+    assert "bench_launcher" not in handoff
     assert handoff["e2e_metric"] == expected_metric
     assert handoff["same_config_reference_status"] == "verified"
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
