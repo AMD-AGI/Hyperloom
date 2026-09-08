@@ -5958,7 +5958,10 @@ class WritebackCollaborator:
         # a result carrying an accepted, positive-delta kernel is revalidated
         # too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
-        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or "env_map" in ps_cfg or ps_overlay):
+        ps_has_material = ps_admissible and _geak_result_has_material(ps)
+        if ps_admissible and (
+            ps_cfg.get("flags") or ps_cfg.get("env") or "env_map" in ps_cfg or ps_overlay or ps_has_material
+        ):
             from ..actions.executors._proposal_identity import effective_fingerprint
 
             ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
@@ -5966,6 +5969,7 @@ class WritebackCollaborator:
             # as plain baseline and any delta measured against it belongs to the
             # flags alone. Resolve that BEFORE dispatch so the task never carries
             # a dead path, and so the row cannot be read as a kernel win.
+            overlay_requested = bool(ps_overlay)
             ps_overlay_loadable = _geak_overlay_is_loadable(ps_overlay)
             if ps_overlay and not ps_overlay_loadable:
                 log.warning(
@@ -5975,13 +5979,13 @@ class WritebackCollaborator:
                 )
                 ps_overlay = ""
             if not (ps_flags or ps_envs or ps_overlay):
-                # The overlay was the only material and it is dead. A rebench
-                # here would measure plain baseline and credit GEAK for the
-                # noise. Hand it to the GEAK harness (2a), which reproduces the
-                # optimized config from result.json and so engages by construction.
+                if not ps_has_material:
+                    return {"skipped": True, "reason": "geak_no_material"}
+                # A dead overlay or a source-patch-only result cannot be
+                # represented by this grid. Its final launcher may deploy it.
                 return {
                     "skipped": True,
-                    "reason": "geak_overlay_unloadable",
+                    "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
                     "fallback": "geak_harness",
                 }
             if ps_flags or ps_envs or ps_overlay:

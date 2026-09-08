@@ -476,13 +476,14 @@ async def test_structured_environment_alone_dispatches_geak_rebench(coordinator)
 
 
 @pytest.mark.asyncio
-async def test_empty_structured_environment_does_not_rebench_legacy_values(coordinator) -> None:
+@pytest.mark.parametrize("legacy_env", ["", "SGLANG_USE_AITER=1"])
+async def test_empty_structured_environment_does_not_rebench_legacy_values(coordinator, legacy_env) -> None:
     st = coordinator.shared_state
     st.baseline_tput = 100.0
-    st.geak_result = {"status": "ok", "accepted_config": {"env_map": {}, "env": "SGLANG_USE_AITER=1"}}
+    st.geak_result = {"status": "ok", "accepted_config": {"env_map": {}, "env": legacy_env}}
 
     enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
-    assert enqueued["skipped"] is True
+    assert enqueued == {"skipped": True, "reason": "geak_no_material"}
     assert not await coordinator.tasks.queued()
 
 
@@ -493,6 +494,40 @@ async def test_malformed_structured_environment_does_not_dispatch(coordinator, e
     with pytest.raises(ValueError, match="env_map must map strings to strings"):
         await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
     assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "material",
+    [{"final_patch": "/geak/final.patch"}, {"accepted_kernels": ["gemm"]}, {"accepted_heads": ["attention"]}],
+)
+async def test_artifact_only_result_requires_its_own_harness(coordinator, material) -> None:
+    coordinator.shared_state.geak_result = {"status": "ok", **material}
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert enqueued == {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path, monkeypatch) -> None:
+    c = coordinator
+    _arm_kernel_to_sweep(c.shared_state)
+    geak_dir = tmp_path / "geak"
+    geak_dir.mkdir()
+    result = {"status": "ok", "final_throughput_tok_s": 116.0, "accepted_config": {"env_map": {}}}
+    (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    c.shared_state.geak_result = {}
+
+    async def _must_not_fallback(**_kwargs):
+        pytest.fail("empty optimization must not launch a fallback")
+
+    monkeypatch.setattr(c, "_validate_geak_via_geak_harness", _must_not_fallback)
+    await c._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert c.shared_state.geak_result["revalidation_status"] == "no_material"
+    assert not c.shared_state.geak_pending
+    assert not c.shared_state.resume_pending_revalidation
+    assert not await c.tasks.queued()
 
 
 def test_material_check_ignores_untrusted_env_names() -> None:

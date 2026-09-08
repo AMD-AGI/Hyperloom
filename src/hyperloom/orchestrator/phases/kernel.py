@@ -1347,8 +1347,16 @@ class KernelPhase(PhaseHandler):
                 log.exception("geak: enqueue same-harness revalidation failed")
                 summary = {"skipped": True, "reason": repr(exc)}
 
-            # The dispatcher refuses to launch a rebench whose only material is an overlay that cannot load — that run
-            # would measure plain baseline and credit GEAK for the noise.
+            if isinstance(summary, dict) and summary.get("reason") == "geak_no_material":
+                state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
+                state.geak_pending = {}
+                state.resume_pending_revalidation = False
+                state.save(self.session_dir)
+                return False
+
+            # The grid cannot carry a dead overlay or a source-patch-only
+            # deployment. GEAK's final launcher may materialize that artifact;
+            # its fresh measurements still have to pass the fallback gates.
             if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
                 log.warning(
                     "geak: 2b declined (%s); validating through the GEAK harness instead",
