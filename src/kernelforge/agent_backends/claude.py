@@ -184,6 +184,28 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
     return translated
 
 
+def _options_accept(options_type: Any, field: str) -> bool:
+    """Whether this SDK's options type carries ``field``.
+
+    Read off the dataclass when it is one and off the constructor otherwise, so
+    a fake options object in a test is treated as accepting everything -- the
+    same as the real type it stands in for.
+    """
+    import dataclasses
+    import inspect
+
+    if dataclasses.is_dataclass(options_type):
+        return any(item.name == field for item in dataclasses.fields(options_type))
+    try:
+        signature = inspect.signature(options_type)
+    except (TypeError, ValueError):
+        return True
+    parameters = signature.parameters
+    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
+        return True
+    return field in parameters
+
+
 def _load_claude_sdk() -> tuple[Any, Any]:
     """Load the optional Claude SDK or raise a provider-level error."""
     try:
@@ -250,6 +272,16 @@ def _prepare_claude_environment() -> None:
             os.environ["ANTHROPIC_BASE_URL"] = normalized
     if gateway.headers:
         os.environ["ANTHROPIC_CUSTOM_HEADERS"] = format_custom_headers(gateway.headers)
+
+
+def _builtin_tools(names: list[str]) -> list[str]:
+    """Narrow a permission list to the built-in tools it names.
+
+    ``--tools`` selects from the CLI's built-in set and rejects anything else, so
+    an MCP tool -- which reaches the session through ``allowed_tools`` and its own
+    server declaration -- must not be forwarded here.
+    """
+    return [name for name in dict.fromkeys(names) if not name.startswith("mcp__")]
 
 
 class ClaudeBackend:
@@ -391,6 +423,16 @@ class ClaudeBackend:
             allowed_tools.extend(policy.extra_tools)
             options.update(
                 allowed_tools=list(dict.fromkeys(allowed_tools)),
+                # ``allowed_tools`` is only a permission list: the CLI still loads
+                # and describes every built-in tool, and those schemas sit in the
+                # cached prefix that is re-read on every turn of the session. A
+                # trivial one-turn session measures 33,374 prefix tokens with the
+                # default set and 6,148 with the four an implementer actually uses,
+                # so naming the base set here takes ~27k tokens off *each* turn --
+                # on a 72-turn session that is most of its cache_read. MCP tools
+                # are not part of the built-in set and are carried by
+                # ``allowed_tools`` alone.
+                tools=_builtin_tools(allowed_tools),
                 permission_mode=(policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
             )
             if policy.max_turns is not None:
@@ -427,6 +469,10 @@ class ClaudeBackend:
             allowed = options.setdefault("allowed_tools", [])
             if "Task" not in allowed:
                 allowed.append("Task")
+            if "tools" in options and "Task" not in options["tools"]:
+                # Task is built-in, so a restricted base set has to name it or the
+                # subagents declared just above are unreachable.
+                options["tools"] = [*options["tools"], "Task"]
         if spec.mcp_servers:
             options["mcp_servers"] = {
                 name: {
@@ -510,6 +556,11 @@ class ClaudeBackend:
         provider_options = self._provider_options(spec)
         if resume_session_id:
             provider_options["resume"] = resume_session_id
+        if "tools" in provider_options and not _options_accept(self._options_type, "tools"):
+            # Naming the built-in base set is a saving, not a requirement: an SDK
+            # too old to have the field must still run rather than fail to build
+            # its options at all.
+            provider_options.pop("tools")
         options = self._options_type(**provider_options)
         text_parts: list[str] = []
         tool_calls: list[tuple[str, dict[str, Any]]] = []
