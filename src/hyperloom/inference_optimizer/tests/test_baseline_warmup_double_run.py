@@ -126,7 +126,7 @@ def _cold_then_hot_fake_run(
     boot_sec: float = 0.0,
     benchmark_sec: float = 0.0,
 ):
-    """Return a ``run_with_session_kill`` stand-in that emits a cold throughput"""
+    """Return a ``run_with_session_kill`` stand-in that emits a cold throughput on its first call and a hot throughput thereafter."""
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
@@ -1325,7 +1325,7 @@ def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):
 
 
 def test_baseline_no_workspace_persists_stderr_to_file(tmp_path):
-    """When Magpie exits nonzero before creating a benchmark_* workspace, the"""
+    """When Magpie exits nonzero before creating a benchmark_* workspace, the executor must persist the captured stderr to ``baseline_stderr.log`` so the failure leaves an on-disk artifact that survives the NFS clone / S3 archive."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="sglang")
     output_dir = tmp_path / "ws"
@@ -1362,7 +1362,7 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     tmp_path,
     monkeypatch,
 ):
-    """A vLLM engine-core bootstrap failure (server.log carries ``Engine core"""
+    """A vLLM engine-core bootstrap failure (server.log carries ``Engine core initialization failed`` while Magpie exits nonzero without a benchmark_* workspace) is classified ``server_init_dead`` with the server.log root cause surfaced in ``error``."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1404,7 +1404,7 @@ def test_baseline_server_dead_returncode_classifies_server_init_dead(
     tmp_path,
     monkeypatch,
 ):
-    """When the liveness watchdog reaps a hung server"""
+    """When the liveness watchdog reaps a hung server (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead`` even when no server.log marker is independently visible."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         SERVER_DEAD_RETURNCODE,
     )
@@ -1439,7 +1439,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
     tmp_path,
     monkeypatch,
 ):
-    """When Magpie creates a benchmark_* workspace with no valid measurement, a"""
+    """When Magpie creates a benchmark_* workspace with no valid measurement, a server.log death marker takes precedence — the failure is classified ``server_init_dead`` and the real engine fault is surfaced in ``error``."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1481,7 +1481,7 @@ def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
 
 
 def test_baseline_clears_stale_server_log_before_run(tmp_path, monkeypatch):
-    """A stale server.log death marker in a reused output_dir must NOT bias a"""
+    """A stale server.log death marker in a reused output_dir must NOT bias a fresh attempt's classification."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1562,7 +1562,7 @@ def test_baseline_nonzero_rc_with_valid_measurement_fails(tmp_path):
 
 
 def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
-    """A stale benchmark_* workspace from a prior attempt must not be adopted"""
+    """A stale benchmark_* workspace from a prior attempt must not be adopted as a successful result when the current subprocess crashes (rc=1)."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1604,7 +1604,7 @@ def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
 
 
 def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
-    """A stale benchmark_* workspace must not be adopted when the subprocess"""
+    """A stale benchmark_* workspace must not be adopted when the subprocess exits 0 without producing any new workspace (silent no-op)."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1726,7 +1726,7 @@ def test_baseline_picks_fresh_workspace_sorting_before_a_stale_one(tmp_path, mon
 
 
 def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypatch):
-    """A new workspace with valid throughput produced by the current run succeeds"""
+    """A new workspace with valid throughput produced by the current run succeeds even when an older stale workspace is present in the same output_dir."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1776,7 +1776,7 @@ def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
 
 
 def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
-    """A checkout on a simulated network mount is mirrored to local disk and the"""
+    """A checkout on a simulated network mount is mirrored to local disk and the returned path points at the local copy, not the original."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -1804,7 +1804,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     tmp_path,
     monkeypatch,
 ):
-    """Callers can include a task/output-dir key in the mirror hash so two"""
+    """Callers can include a task/output-dir key in the mirror hash so two overlapping baselines sharing one wekafs checkout never rmtree/replace a directory that another server is currently ``cd``-ed into."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -1842,7 +1842,7 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     tmp_path,
     monkeypatch,
 ):
-    """When the mirror copy itself fails (e.g. local disk full), the helper"""
+    """When the mirror copy itself fails (e.g. local disk full), the helper degrades to the original network-mount path instead of raising, so the run still proceeds rather than aborting."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -1867,7 +1867,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     tmp_path,
     monkeypatch,
 ):
-    """If the copy lands but the mirror is missing the load-bearing"""
+    """If the copy lands but the mirror is missing the load-bearing ``benchmarks/benchmark_lib.sh``, the helper rejects it and returns the original path rather than handing Magpie a broken ``cd`` target."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     src = tmp_path / "wekafs_InferenceX"
@@ -1885,7 +1885,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
 
 
 def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
-    """When INFERENCEX_PATH is on a network mount, the local mirror is what"""
+    """When INFERENCEX_PATH is on a network mount, the local mirror is what Magpie actually ``cd``-s into."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     base = tmp_path / "base.yaml"
@@ -1951,7 +1951,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
 
 
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):
-    """The Magpie parent subprocess cwd is anchored to the stable task"""
+    """The Magpie parent subprocess cwd is anchored to the stable task output_dir (never the default ``/tmp``) as defence-in-depth."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -2058,7 +2058,7 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
 
 
 def test_pre_start_cleanup_unlinks_meta_and_kills_unconditionally(tmp_path, monkeypatch):
-    """Pre-start cleanup no longer probes port health: it unconditionally"""
+    """Pre-start cleanup no longer probes port health: it unconditionally (a) unlinks stale pid/json without sending signals to potentially-recycled PIDs, and (b) invokes _kill_stale_servers() -- Hyperloom's own scheduling (gpu_research_lane, capacity 1) guarantees nothing matching should be alive at this point, so no extra evidence is required before reaping."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
@@ -2091,7 +2091,7 @@ def test_pre_start_cleanup_unlinks_meta_and_kills_unconditionally(tmp_path, monk
 
 
 def test_pre_start_cleanup_skipped_under_pytest(tmp_path):
-    """Direct guard: _kill_stale_servers must NOT fire while"""
+    """Direct guard: _kill_stale_servers must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the same guard on the per-launch preclean in ``_grid_runner.py``."""
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
     pid_file = output_dir / "vllm_8888.pid"
@@ -2123,7 +2123,7 @@ def test_pre_start_cleanup_skipped_under_pytest(tmp_path):
 
 
 def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
-    """The pre-start cleanup is best-effort: a raising _kill_stale_servers()"""
+    """The pre-start cleanup is best-effort: a raising _kill_stale_servers() must not propagate out of _pre_start_cleanup() itself."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
@@ -2148,7 +2148,7 @@ def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypat
 
 
 def test_pre_start_cleanup_skipped_when_round_is_not_affordable(tmp_path):
-    """The pre-start cleanup must not pay its cost for a round the budget"""
+    """The pre-start cleanup must not pay its cost for a round the budget gate is about to refuse: it now runs right before the round actually boots (after the affordability check and the Ray lease construction), not up front where an unaffordable round would still have paid for a scan it gets no benefit from (review on AMD-AGI/Hyperloom#1354)."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -2183,7 +2183,7 @@ def test_pre_start_cleanup_skipped_when_round_is_not_affordable(tmp_path):
 
 @pytest.mark.parametrize("baseline_double_run", [True, False])
 def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseline_double_run):
-    """The pre-start deep clean must run exactly once before the round(s)"""
+    """The pre-start deep clean must run exactly once before the round(s) boot, whether this is a double-run or a single round."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -2645,7 +2645,7 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         assert result["status"] == "succeeded"
 
     def test_the_profile_arm_gets_all_of_it(self, tmp_path):
-        """Profile is the same executor with a four-hour default -- longer than"""
+        """Profile is the same executor with a four-hour default -- longer than any session budget it could be given."""
         _result, calls = _run_baseline_under_budget(
             tmp_path,
             remaining_sec=120.0,
@@ -2675,7 +2675,7 @@ def test_classify_fast_exit_unrecognized_args():
 
 
 def test_classify_slow_failure_not_arg_error():
-    """A slow failure (>30s) with the same stderr pattern must NOT be"""
+    """A slow failure (>30s) with the same stderr pattern must NOT be classified as arg error — it could be a real inference crash."""
     assert _classify_subprocess_error(120.0, "ValueError: some runtime error") == "subprocess_nonzero"
 
 

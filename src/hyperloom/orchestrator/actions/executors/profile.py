@@ -55,7 +55,7 @@ _USER_ANNOTATION_MARKER = '"user_annotation"'
 
 
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
-    """Stream-decompress ``path`` for ``substring``, reading at most"""
+    """Stream-decompress ``path`` for ``substring``, reading at most ``max_bytes`` (default :data:`_TRACE_CONFIRM_BYTES`)."""
     if not substring:
         return False
     if max_bytes is None:
@@ -89,7 +89,7 @@ def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) ->
 
 
 def _sample_trace_text(path: Path) -> str | None:
-    """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a"""
+    """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a gzipped trace."""
     try:
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
             return fh.read(_TRACE_INSPECT_BYTES)
@@ -104,7 +104,7 @@ def _sample_trace_text(path: Path) -> str | None:
 
 
 def _count_substring_occurrences(text: str, substring: str) -> int:
-    """Count non-overlapping ``substring`` occurrences as a cheap"""
+    """Count non-overlapping ``substring`` occurrences as a cheap lower-bound event count (avoids full JSON parsing)."""
     if not substring:
         return 0
     return text.count(substring)

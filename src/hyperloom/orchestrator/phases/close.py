@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLOSE phase handler: the close sequencer, post-opt roofline, and the"""
+"""CLOSE phase handler: the close sequencer, post-opt roofline, and the closing-grace / report-terminal helpers used by ``Coordinator.run``."""
 
 from __future__ import annotations
 import asyncio

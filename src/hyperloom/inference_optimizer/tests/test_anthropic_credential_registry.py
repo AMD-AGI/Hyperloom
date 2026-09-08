@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Consistency tests binding every Anthropic-credential consumer to the single"""
+"""Consistency tests binding every Anthropic-credential consumer to the single source of truth in ``ANTHROPIC_CREDENTIAL_ENV_ORDER``."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def test_detection_sites_recognize_a_newly_registered_form(registered_fake_crede
 
 
 def test_oauth_only_probe_skips_only_for_the_token_itself(registered_fake_credential, monkeypatch):
-    """Any other registered form can authenticate the catalog probe, so only a"""
+    """Any other registered form can authenticate the catalog probe, so only a lone subscription token may skip it."""
     monkeypatch.setenv(CLAUDE_OAUTH_TOKEN_ENV, "sk-ant-oat01-fake")
     # The fake form is registered and set, so this host is not oauth-only.
     assert cli._catalog_probe_has_no_credential() is False
@@ -99,7 +99,7 @@ def test_materializing_subsets_ignore_a_newly_registered_form(registered_fake_cr
 
 
 def test_specialist_allowlist_registers_every_credential_form():
-    """Explicit registration, per the minimum-privilege boundary: this fails"""
+    """Explicit registration, per the minimum-privilege boundary: this fails when a form joins the tuple without a decision on subprocess exposure."""
     missing = [name for name in ANTHROPIC_CREDENTIAL_ENV_ORDER if name not in _SPECIALIST_SECRET_ENV_ALLOWLIST]
     assert missing == []
 
@@ -110,7 +110,7 @@ def test_gateway_signal_keys_cover_every_credential_form():
 
 
 def test_supersets_keep_their_non_anthropic_entries():
-    """Both consumers are proper supersets; collapsing either onto the tuple"""
+    """Both consumers are proper supersets; collapsing either onto the tuple would drop OpenAI-side env isolation and AWS credentials respectively."""
     for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "LLM_GATEWAY_KEY"):
         assert name in CLAUDE_GATEWAY_SIGNAL_KEYS
     for name in (
@@ -175,7 +175,7 @@ def test_heredoc_bodies_are_excluded_from_the_shell_scan():
 
 @pytest.mark.parametrize("script", _install_scripts(), ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_shell_credential_checks_know_every_credential_form(script: Path):
-    """Shell entrypoints cannot import the tuple, so assert textually that each"""
+    """Shell entrypoints cannot import the tuple, so assert textually that each registered form is read or assigned by their credential handling."""
     code = _executable_lines(script)
     missing = [
         name
@@ -196,7 +196,7 @@ def test_some_installer_still_writes_the_claude_config_key():
 
 @pytest.mark.parametrize("script", _config_json_writers(), ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_shell_config_json_key_excludes_the_subscription_token(script: Path):
-    """The variable feeding ~/.claude/config.json primaryApiKey must be built"""
+    """The variable feeding ~/.claude/config.json primaryApiKey must be built from the synthesizable subset only."""
     code = _executable_lines(script)
     sources = [line for line in code if line.startswith("local _claude_key=")]
     assert sources, f"{script.name} writes primaryApiKey from an unrecognized variable"

@@ -543,7 +543,7 @@ def _finalize_framework_server_args(
     osl_val: int,
     drop_moe_runner_backend: bool = False,
 ) -> None:
-    """Apply the final framework server-arg guard pipeline in place"""
+    """Apply the final framework server-arg guard pipeline in place (context-length/watchdog/attention/MoE/EP/dedup/compact/shell-safe); order is fixed."""
     framework_env = server_args_env_name(bench.get("framework"))
     resolved_server_args = str(envs.get(framework_env, "")).strip()
     resolved_server_args = inject_sglang_context_length(
@@ -1174,7 +1174,8 @@ def materialize_config_with_envs(
                     if _mimo_hf_existing
                     else _mimo_arch_override
                 )
-    # Sparse-attention KV-cache block size (config-derived, model-agnostic).
+    # MSA models share main/indexer KV caches and accept only sparse_block_size; vLLM's default 16 makes every
+    # benchmark path fail with "No common block size". Pin the model value here unless the operator already did.
     if "vllm" in str(bench.get("framework") or "").lower():
         _sparse_bs = _sparse_kv_block_size(str(model_path or bench.get("model") or ""))
         if _sparse_bs:

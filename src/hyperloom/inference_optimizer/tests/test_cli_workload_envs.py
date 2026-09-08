@@ -235,7 +235,7 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
 
 
 def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):
-    """The shape-capture materialization path must remove its inherited port"""
+    """The shape-capture materialization path must remove its inherited port without corrupting a sibling JSON-valued server flag."""
     src = tmp_path / "cfg.yaml"
     _write_yaml_with_envs(
         src,

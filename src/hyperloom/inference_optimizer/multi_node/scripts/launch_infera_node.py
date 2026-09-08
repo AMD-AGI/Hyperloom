@@ -248,7 +248,7 @@ def _proc_tree(root: int) -> list[int]:
 
 
 def _reap_stale_engines_by_cmdline() -> None:
-    """SIGKILL any residual sglang / infera engine process matched by cmdline via"""
+    """SIGKILL any residual sglang / infera engine process matched by cmdline via /proc, before a fresh launch."""
     import signal as _sig
 
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
@@ -295,7 +295,7 @@ def _reap_stale_engines_by_cmdline() -> None:
 
 
 def _kill_prior(pid_file: Path) -> None:
-    """SIGTERM then SIGKILL the prior server's whole process tree, then sweep any"""
+    """SIGTERM then SIGKILL the prior server's whole process tree, then sweep any residual holder of the managed sglang engine ports."""
     kill_wait_s = float(os.environ.get("HYPERLOOM_MN_KILL_WAIT_S", "120") or 120)
     pid = None
     if pid_file.is_file():

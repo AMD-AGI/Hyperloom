@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the GEAK e2e breakdown collector and the"""
+"""Unit coverage for the GEAK e2e breakdown collector and the sweep ``benchmark_report.json`` writer."""
 
 from __future__ import annotations
 
@@ -764,7 +764,7 @@ class TestCandidateTunedFile:
     """The artifact a KEEP adopted, named from the candidate's own env."""
 
     def test_prefers_the_candidate_env_var(self) -> None:
-        """The candidate's own key wins over whatever the env happens to list"""
+        """The candidate's own key wins over whatever the env happens to list first -- a stacked env carries the earlier KEEPs' vars too."""
         from hyperloom.orchestrator.phases.kernel import _candidate_tuned_file
 
         # Deliberately not first: falling back to insertion order would pick the wrong artifact and still look right

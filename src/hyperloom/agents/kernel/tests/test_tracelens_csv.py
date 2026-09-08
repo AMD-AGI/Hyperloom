@@ -154,7 +154,7 @@ def test_a_rejects_kernel_cat_when_name_is_runtime_api():
 
 
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
-    """Build a synthetic trace mirroring the resume4 shape and confirm"""
+    """Build a synthetic trace mirroring the resume4 shape and confirm is_kernel_event rejects the sync events before they can reach top-K."""
     events = [
         # 5 host-side sync events, big durations (the buggy ones)
         {"name": "torch/cuda/streams.py(222): synchronize", "cat": "python_function", "dur": 88673.0},
@@ -1467,7 +1467,7 @@ def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypa
 
 
 def test_run_tracelens_skill_aborts_on_stream_idle_timeout(tmp_path, monkeypatch):
-    """A gateway stream that goes silent mid-response must abort on the"""
+    """A gateway stream that goes silent mid-response must abort on the per-message idle timeout instead of blocking forever."""
     import asyncio
     from dataclasses import dataclass
     from typing import Any
@@ -2346,7 +2346,7 @@ def test_194_3_splitter_receives_R_from_cli_arg(tmp_path):
 
 
 def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
-    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO"""
+    """Without --split-r, the wrapper falls back to RANDOM_RANGE_RATIO env — the same variable Hyperloom propagates from the YAML config into every Magpie subprocess."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -2359,7 +2359,7 @@ def test_194_3_splitter_receives_R_from_random_range_ratio_env(tmp_path):
 
 
 def test_194_3_splitter_omits_R_when_unset(tmp_path):
-    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must"""
+    """No --split-r and no RANDOM_RANGE_RATIO env → the splitter must not see --R."""
     captured, _ = _drive_main_capturing_subprocess(
         tmp_path,
         extra_argv=["--split-conc", "32", "--split-osl", "1024"],
@@ -2918,7 +2918,7 @@ def test_classify_patchability_rejects_missing_source_file():
 
 
 def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
-    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling"""
+    """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling .cuh/.cpp.jinja) must be skipped, not edited."""
     src = "/path/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
@@ -2943,7 +2943,7 @@ def test_library_token_pairing():
 
 
 def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
-    """aiter .cu/.cuh device sources are patchable even when source_type is"""
+    """aiter .cu/.cuh device sources are patchable even when source_type is 'unknown' (classifier ran before source_file resolved)."""
     src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
@@ -2953,7 +2953,7 @@ def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypat
 
 
 def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
-    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled"""
+    """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
     src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
     monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
     reusable, reason = tla.classify_patchability(
@@ -3280,7 +3280,7 @@ def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatc
 
 
 def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
-    """When the first candidate root holds a stub that fails AST"""
+    """When the first candidate root holds a stub that fails AST validation, the resolver MUST keep walking the candidate list instead of short-circuiting — otherwise a single bad spec (shadowed pkg / stale wheel) permanently masks the real source on the fallback path."""
     bad_root = tmp_path / "bad"
     good_root = tmp_path / "good"
     bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
@@ -3762,7 +3762,7 @@ def test_aggregate_drops_empty_prose_entries(tmp_path):
 
 
 def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
-    """Candidates with empty / em-dash Kernel Path (LLama70B fixture"""
+    """Candidates with empty / em-dash Kernel Path (LLama70B fixture shape) produce zero groups — caller falls back to per-kernel."""
     cands = [
         {"kernel_id": "k001", "name": "x", "tracelens_launcher_path": ""},
         {"kernel_id": "k002", "name": "y", "tracelens_launcher_path": "—"},
@@ -3773,7 +3773,7 @@ def test_aggregate_by_source_function_skips_unparseable_launcher_paths():
 
 
 def test_aggregate_falls_back_to_source_file_when_no_launcher_path():
-    """Candidates from raw-trace / csv fallback paths lack"""
+    """Candidates from raw-trace / csv fallback paths lack ``tracelens_launcher_path`` but may carry a Python-shaped path in ``source_file``; we still parse those when possible."""
     cands = [
         {
             "kernel_id": "k001",
@@ -3864,7 +3864,7 @@ def test_is_native_source_detects_device_extensions():
 
 
 def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
-    """Profiler-derived names can begin with ``-``; grep must not treat them"""
+    """Profiler-derived names can begin with ``-``; grep must not treat them as command-line options."""
     src = tmp_path / "kernel.py"
     src.write_text("def uses_dash_prefixed_name():\n    return '--danger'\n", encoding="utf-8")
 
@@ -3873,7 +3873,7 @@ def test_grep_for_keyword_treats_dash_prefixed_keyword_as_literal(tmp_path):
 
 
 def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
-    """A native .cu kernel invoked from two call sites reports two different"""
+    """A native .cu kernel invoked from two call sites reports two different ``#L`` lines (no Python AST def-line exists)."""
     src = tmp_path / "rmsnorm.cu"
     src.write_text(
         "__global__ void rmsnorm_kernel(float* x) { /* ... */ }\n",
@@ -3906,7 +3906,7 @@ def test_aggregate_merges_native_kernel_across_call_site_lines(tmp_path):
 
 
 def test_aggregate_merges_native_template_instances_by_source(tmp_path):
-    """Three instantiations of ONE ``__global__`` template"""
+    """Three instantiations of ONE ``__global__`` template (``add_rmsnorm_quant_kernel``) in ONE .cu, named with DIFFERENT Itanium-mangled symbols and autoresolving to the SAME bare .cu path, must collapse into ONE task_group: the mangled operation and per-call line are NOT part of the native key."""
     src = tmp_path / "rmsnorm_quant_kernels.cu"
     src.write_text(
         "template <typename DTYPE_I, typename DTYPE_O, int BlockSize,\n"
@@ -3981,7 +3981,7 @@ def test_aggregate_splits_distinct_native_operators_in_one_source(tmp_path):
 
 
 def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
-    """Operation normalization applies to the Python track too: two"""
+    """Operation normalization applies to the Python track too: two candidates sharing one wrapper whose names differ only by dtype template args merge."""
     src = tmp_path / "layer.py"
     src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
     launcher = f"{src}(1): forward"
@@ -4007,7 +4007,7 @@ def test_aggregate_normalizes_template_dtype_on_python_track(tmp_path):
 
 
 def test_aggregate_canonicalizes_native_source_path():
-    """The same .cu file reached via a non-normalized path"""
+    """The same .cu file reached via a non-normalized path (``sub/../rmsnorm.cu``) and a clean path must canonicalize to one group rather than splitting on the literal path string."""
     cands = [
         {
             "kernel_id": "k001",
@@ -4031,7 +4031,7 @@ def test_aggregate_canonicalizes_native_source_path():
 
 # build_task_groups (tracelens_analysis.py wrapper)
 def test_build_task_groups_filters_non_reusable():
-    """build_task_groups skips candidates with reusable_native_kernel=False"""
+    """build_task_groups skips candidates with reusable_native_kernel=False so vendor / aten:: / runtime-generated kernels never appear in a group's kernel_ids."""
     cands = [
         {
             "kernel_id": "k001",
@@ -4698,7 +4698,7 @@ def test_pretrim_threshold_is_the_module_default(tmp_path):
 
 
 def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
-    """The kept step's host ops survive even though they start inside the"""
+    """The kept step's host ops survive even though they start inside the dropped step's device span."""
     src = _write_trace(
         tmp_path / "r.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 40,
@@ -4739,7 +4739,7 @@ def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
 
 
 def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
-    """Step count downstream is set by --num-steps, and the trim keeps well"""
+    """Step count downstream is set by --num-steps, and the trim keeps well clear of it: the splitter still gets its full window, only shifted."""
     src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
     dst = tmp_path / "r.pretrimmed.trace.json.gz"
 

@@ -72,7 +72,7 @@ class BestResultPublisher:
 
     @classmethod
     def _fsync_tree(cls, root: Path) -> None:
-        """fsync every file and directory under ``root`` (bottom of the bundle"""
+        """fsync every file and directory under ``root`` (bottom of the bundle must be durable before the top-level rename makes it visible)."""
         for dirpath, _dirnames, filenames in os.walk(root):
             for name in filenames:
                 file_path = Path(dirpath) / name

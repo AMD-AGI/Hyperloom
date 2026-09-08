@@ -486,7 +486,7 @@ def _preflight_missing_targets(
     framework_root: Path,
     patch_paths: list[Path],
 ) -> list[dict[str, Any]]:
-    """Return per-patch records for patches whose modify/delete targets are"""
+    """Return per-patch records for patches whose modify/delete targets are absent from ``framework_root`` at every ``-p`` strip level."""
     records: list[dict[str, Any]] = []
     for patch in patch_paths:
         try:
@@ -549,7 +549,7 @@ def _git_apply(
     three_way: bool = False,
     check_only: bool = False,
 ) -> tuple[bool, str]:
-    """Run ``git apply [-3] -p<auto> [--check] <patch>`` inside"""
+    """Run ``git apply [-3] -p<auto> [--check] <patch>`` inside ``framework_root``, auto-detecting the strip level."""
     lvl = _detect_p_level(framework_root, patch_path, three_way=three_way)
     if lvl is None:
         # Surface a representative error at the git-native default level.
@@ -660,7 +660,7 @@ def _git_apply_reverse(
     framework_root: Path,
     patch_path: Path,
 ) -> tuple[bool, str]:
-    """Reverse-apply ``patch_path`` (``git apply -R -p<auto>``) as the REVERT"""
+    """Reverse-apply ``patch_path`` (``git apply -R -p<auto>``) as the REVERT path; caller falls back to ``git checkout`` on failure."""
     for lvl in _P_LEVELS:
         cp = _run_git_cp(
             ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", "--check", str(patch_path)],
@@ -1188,7 +1188,7 @@ def _enforce_critic_gate(
     shared_state: Any,
     subject: str,
 ) -> "dict[str, Any] | None":
-    """Enforce a permissive Critic verdict on ``subject`` before any side"""
+    """Enforce a permissive Critic verdict on ``subject`` before any side effect; returns a ``rejected_by_critic`` dict on failure, else ``None`` when no SharedState is available or the verdict is permissive."""
     if shared_state is None:
         return None
     try:
@@ -3274,7 +3274,7 @@ class IntegratePatchExecutor:
     def _find_frameworkoposal(
         done_payload: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Return the first proposal whose provenance starts with"""
+        """Return the first proposal whose provenance starts with ``specialist:serving:framework`` (F2-5); ``None`` otherwise so the KB writeback hook no-ops for legacy / kernel outputs."""
         if not isinstance(done_payload, dict):
             return None
         proposal_set = done_payload.get("proposal_set") or []
@@ -3325,7 +3325,7 @@ class IntegratePatchExecutor:
         accuracy_delta_pct: float | None = None,
         config_fingerprint: str = "",
     ) -> None:
-        """Append a JSONL record to ``lessons.jsonl`` when the patch"""
+        """Append a JSONL record to ``lessons.jsonl`` when the patch carries an upstream PR identity."""
         proposal = self._find_frameworkoposal(done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate rather than in a specialist's ``fa_*``
@@ -3428,7 +3428,7 @@ class IntegratePatchExecutor:
         framework_root: Path | None,
         applied: list[Path],
     ) -> list[Path]:
-        """Reverse-apply the applied patches (best-effort); returns those"""
+        """Reverse-apply the applied patches (best-effort); returns those actually reverted."""
         reverted: list[Path] = []
         if framework_root is None:
             return reverted

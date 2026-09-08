@@ -1630,7 +1630,7 @@ def test_experience_ledger_skips_bad_rows_without_losing_valid_suffix(
 
 
 def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monkeypatch):
-    """Review #1: a fresh campaign with task preparation enabled must persist the"""
+    """Review #1: a fresh campaign with task preparation enabled must persist the driver digest and pristine base_commit captured AFTER prep runs."""
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
 

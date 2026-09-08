@@ -24,7 +24,7 @@ class TestServedContextHostsEval:
         assert "2048" in reason
 
     def test_the_real_session_configuration_is_rejected(self):
-        """The exact shape seen in session e268b0be: env asks 6144, the server"""
+        """The exact shape seen in session e268b0be: env asks 6144, the server args override it to 2048, and the override is what the server honours."""
         served = ag.resolve_served_context(
             server_args=("--kv-cache-dtype fp8 --max-num-batched-tokens 32768 --max-model-len 2048 --async-scheduling"),
             env_max_model_len=6144,
@@ -91,7 +91,7 @@ class TestInfeasibleEvalIsAFault:
 
 
 class TestGradeMarksTheRoundInfeasible:
-    """``_grade_integrate_accuracy`` must separate \"eval broke\" from \"eval"""
+    """``_grade_integrate_accuracy`` must separate "eval broke" from "eval cannot run here"."""
 
     @staticmethod
     def _grade(monkeypatch, tmp_path, server_args):

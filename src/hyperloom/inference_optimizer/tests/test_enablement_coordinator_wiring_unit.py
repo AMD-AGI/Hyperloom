@@ -436,7 +436,7 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_watchdog_rearms_silently_finished_round(monkeypatch):
-    """A round whose inflight_task_id maps to a terminal task counts as a stall"""
+    """A round whose inflight_task_id maps to a terminal task counts as a stall and clears the guard so a fresh round can dispatch."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -457,7 +457,7 @@ async def test_watchdog_rearms_silently_finished_round(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_watchdog_does_not_fire_when_task_running(monkeypatch):
-    """When the inflight_task_id maps to a running task, the round is not"""
+    """When the inflight_task_id maps to a running task, the round is not counted as a stall — the specialist is still working."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -489,7 +489,7 @@ def _integrate_proposal(specialist_task_id: str, *, decided: bool = False):
 
 @pytest.mark.asyncio
 async def test_in_flight_defers_on_undecided_integrate_proposal():
-    """The specialist goes terminal a tick before the Critic sees the integrate"""
+    """The specialist goes terminal a tick before the Critic sees the integrate proposal; the round must still count as in flight."""
     # No task rows, so the specialist lookup raises TaskNotFound (terminal).
     fake = _enqueue_self(enablement_inflight_task_id="spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
@@ -498,7 +498,7 @@ async def test_in_flight_defers_on_undecided_integrate_proposal():
 
 @pytest.mark.asyncio
 async def test_in_flight_ignores_decided_integrate_proposal():
-    """Once the Critic has ruled, the proposal stops deferring so a dropped"""
+    """Once the Critic has ruled, the proposal stops deferring so a dropped proposal cannot hold the round open forever."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done", decided=True)
     assert await fake._enablement_in_flight() is False
@@ -537,7 +537,7 @@ async def test_in_flight_ignores_integrate_task_for_other_specialist():
 
 @pytest.mark.asyncio
 async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
-    """Regression: a terminal specialist with an unreviewed integrate proposal"""
+    """Regression: a terminal specialist with an unreviewed integrate proposal must not bump the stall streak nor dispatch a second concurrent round."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -931,7 +931,7 @@ def test_enablement_close_guard_blocks_premature_skip_to_close():
 
 
 def test_enablement_close_guard_active_during_validation_pending():
-    """An eval-origin KEEP awaiting revalidation must keep the guard active even"""
+    """An eval-origin KEEP awaiting revalidation must keep the guard active even if a stale positive tput is present."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     s = SharedState()
@@ -1360,7 +1360,7 @@ async def test_rearm_advanced_merges_args_by_flag_not_substring():
 
 @pytest.mark.asyncio
 async def test_rearm_advanced_stacks_artifacts(monkeypatch):
-    """Artifacts applied in an advanced round must be recorded in kept_artifacts"""
+    """Artifacts applied in an advanced round must be recorded in kept_artifacts so that _replay_base_artifacts re-installs them at the start of the next round."""
     fake = _enqueue_self(enablement_inflight_task_id="spec-1", enablement_stall_streak=0)
     art = {
         "target": "/sgl-workspace/sglang/srt/server_args.py",

@@ -147,7 +147,7 @@ def _validate_review_verdict_payload(
     *,
     index: int,
 ) -> None:
-    """Enforce REVIEW_VERDICT shape: exactly one of ``verdict`` (single) or"""
+    """Enforce REVIEW_VERDICT shape: exactly one of ``verdict`` (single) or ``verdict_map`` (per-variant batch), each carrying a recognised verdict."""
     has_single = "verdict" in payload
     has_map = "verdict_map" in payload
     if not has_single and not has_map:

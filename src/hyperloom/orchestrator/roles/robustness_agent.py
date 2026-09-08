@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness``"""
+"""RobustnessAgentBackend — bridges the ``hyperloom.agents.robustness`` runtime into the Coordinator as a real Robustness Backend."""
 
 from __future__ import annotations
 

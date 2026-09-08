@@ -947,7 +947,7 @@ def _prepare_inplace(
     *,
     lock_fd: _RepoLock | None = None,
 ) -> tuple[str, str, dict] | None:
-    """In-place mode (Option 1): edit the LIVE repo so an editable-finder import"""
+    """In-place mode (Option 1): edit the LIVE repo so an editable-finder import sees the changes."""
     repo = kernel_repo or _git_toplevel(source_file)
     if not repo or not (Path(repo) / ".git").exists():
         _release_repo_lock(lock_fd)
@@ -1101,7 +1101,7 @@ def _apply_tracked_baseline(repo: str, patch: bytes) -> None:
 
 
 def _restore_inplace(restore: dict) -> None:
-    """Restore the live repo after in-place editing: revert EVERY file the agent"""
+    """Restore the live repo after in-place editing: revert EVERY file the agent changed back to its pre-forge content, return to the original branch/HEAD, and drop the temp branch."""
     if not restore:
         return
     repo = restore["repo"]
@@ -1470,7 +1470,7 @@ def _export_best_artifacts(
 
 
 def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float, skipped: bool = False) -> dict:
-    """Shape the kernel-backend result dict (``returncode`` / ``skipped`` /"""
+    """Shape the kernel-backend result dict (``returncode`` / ``skipped`` / ``stdout_tail`` / ``stderr_tail`` / ``stdout`` / ``gpu_ids`` / ``elapsed_s`` / ``cmd``)."""
     return {
         "returncode": returncode,
         "skipped": bool(skipped),
@@ -3286,7 +3286,7 @@ def _claim_marker_age_s(claim_path: Path) -> float | None:
 
 
 def _claim_is_stale(claim_path: Path, timeout_s: int) -> bool:
-    """A claim is stale (its holder is presumed done or dead) when either."""
+    """Return whether a claim has an expired result or exceeded its attempt budget plus grace."""
     lock_dir = claim_path.parent
     cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
     if cached is None and (lock_dir / "result.json").is_file():
@@ -3343,7 +3343,7 @@ def _claim_vendor_playbook_run(lock_dir: Path, timeout_s: int) -> bool:
 
 
 def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float, timeout_s: int) -> dict | None:
-    """Poll for the winner's result until it appears, the claim looks"""
+    """Poll for the winner's result until it appears, the claim looks abandoned, or ``deadline_unix`` passes."""
     claim_path = lock_dir / "claimed.lock"
     while True:
         cached = _read_vendor_playbook_cached_result(lock_dir, max_failure_age_s=_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S)
@@ -3383,7 +3383,7 @@ def _stage_vendor_playbook_artifact_for_reuse(cached: dict, output_dir: Path) ->
 
 
 def _copy_vendor_task_bundle(task_bundle_root: Path, workspace: Path) -> None:
-    """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and"""
+    """Copy a KernelForge ``examples/<task>/`` bundle into ``workspace`` and git-init it there."""
     workspace.mkdir(parents=True, exist_ok=True)
     for item in sorted(task_bundle_root.iterdir()):
         if item.name in (".git", "__pycache__"):

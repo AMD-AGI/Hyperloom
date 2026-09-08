@@ -13,7 +13,7 @@ _T = TypeVar("_T")
 
 
 def to_float(value: Any, default: _T | None = None) -> float | _T | None:
-    """Coerce *value* to a finite ``float``, rejecting ``bool``, ``None``, and"""
+    """Coerce *value* to a finite ``float``, rejecting ``bool``, ``None``, and non-finite values (``nan`` / ``inf``)."""
     if value is None or isinstance(value, bool):
         return default
     try:

@@ -169,7 +169,7 @@ class TestValidateAsksWhetherRunCanDeriveShapes:
         assert err and "shape" in err.lower()
 
     def test_an_input_run_never_reads_cannot_waive_the_check(self, tmp_path, monkeypatch):
-        """``untuned_csv`` is not a shape source here, so it cannot rescue a"""
+        """``untuned_csv`` is not a shape source here, so it cannot rescue a config that derives nothing -- crediting it is what silently dropped the caller's shapes in the first place."""
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
         csv = tmp_path / "untuned.csv"
         csv.write_text("M,N,K\n64,4096,4096\n", encoding="utf-8")
@@ -241,7 +241,7 @@ class TestValidateCannotEscapeExecute:
 
 
 class TestRunNamesTheInputsItIgnores:
-    """Dropping a caller's shapes without a word is the failure this line exists"""
+    """Dropping a caller's shapes without a word is the failure this line exists to remove."""
 
     def test_untuned_csv_is_reported_as_ignored(self, tmp_path, monkeypatch, caplog):
         csv = tmp_path / "untuned.csv"
@@ -583,7 +583,7 @@ class TestOuterTimeoutKeepsWhatWasWritten:
 
 
 class TestHelpProbeGate:
-    """The probe must refuse the run *before* it costs minutes, and must never"""
+    """The probe must refuse the run *before* it costs minutes, and must never veto a run just because it could not read --help."""
 
     def test_missing_with_hipblaslt_fails_before_running(self, tmp_path, monkeypatch):
         ran: list = []

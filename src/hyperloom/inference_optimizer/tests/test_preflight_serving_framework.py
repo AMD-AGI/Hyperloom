@@ -579,7 +579,7 @@ def test_a_framework_setup_cannot_install_is_not_blocked(monkeypatch, capsys):
 
 
 def test_the_installable_set_matches_the_installer():
-    """Two lists that must agree, in different languages, with nothing else"""
+    """Two lists that must agree, in different languages, with nothing else tying them together."""
     from pathlib import Path
 
     import hyperloom
@@ -607,7 +607,7 @@ def test_an_uninstallable_framework_is_not_blocked_for_a_cuda_build(monkeypatch,
 
 # Wiring: nothing above proves _preflight still calls the gate
 def test_preflight_still_invokes_the_gate():
-    """Every other test calls the gate directly, so deleting the one line that"""
+    """Every other test calls the gate directly, so deleting the one line that reaches it from _preflight would leave them all green."""
     import ast
     from pathlib import Path as _Path
 

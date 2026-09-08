@@ -90,7 +90,7 @@ def canonical_id_from_components(
     framework_version: str,
     precision: str,
 ) -> str:
-    """Inverse of :func:`cid_to_path_components` — pass-through to"""
+    """Inverse of :func:`cid_to_path_components` — pass-through to :func:`recipe_canonical_id` for symmetry / discoverability."""
     return recipe_canonical_id(
         model=model,
         hardware=hardware,

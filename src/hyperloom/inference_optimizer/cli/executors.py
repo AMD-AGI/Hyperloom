@@ -57,7 +57,7 @@ def _build_specialist_executor(
     session_dir: Path,
     knowledge_plane: Any,
 ) -> "Callable[[Any], Awaitable[dict]]":
-    """Build the specialist executor adapter (async fn(ctx) -> dict wrapping a"""
+    """Build the specialist executor adapter (async fn(ctx) -> dict wrapping a SpecialistRunner)."""
     import shutil
 
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
@@ -174,7 +174,7 @@ def _build_specialist_executor(
         )
 
     async def _executor(ctx: Any) -> dict:
-        """Adapter SubAgentRunner.run_task -> SpecialistRunner.run. Always"""
+        """Adapter SubAgentRunner.run_task -> SpecialistRunner.run."""
         run_result = await runner.run(ctx)
         return {
             "runner_status": run_result.status,
@@ -201,7 +201,7 @@ def _register_executors(
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
 ) -> None:
-    """Wire all available action executors onto ``coordinator``: the"""
+    """Wire all available action executors onto ``coordinator``: the _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors, and the optional specialist executor."""
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
 

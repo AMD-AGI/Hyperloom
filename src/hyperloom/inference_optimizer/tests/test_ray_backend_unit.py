@@ -858,7 +858,7 @@ def test_ray_serving_priority_enabled_default_and_off(monkeypatch: pytest.Monkey
 
 
 def test_serving_slot_busy_off_ray_path_is_false(monkeypatch: pytest.MonkeyPatch):
-    """Off the single-node Ray path (pytest default), serving_slot_busy never"""
+    """Off the single-node Ray path (pytest default), serving_slot_busy never probes Ray and returns False (no serving-priority pause)."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_RAY_EXEC", raising=False)
     assert rb.serving_slot_busy() is False
 
@@ -906,7 +906,7 @@ def test_gpu_specialist_lease_is_alive_false_before_start():
 
 
 def test_gpu_specialist_lease_start_async_poll_and_pending(monkeypatch: pytest.MonkeyPatch):
-    """§3.3 non-blocking start: start_async submits without blocking, and"""
+    """§3.3 non-blocking start: start_async submits without blocking, and poll_started returns None while pending (ray.wait empty) and the pid once ready."""
 
     class _FakeRayWait(_FakeRayP2):
         def __init__(self):
@@ -1263,7 +1263,7 @@ def test_managed_process_pid_exit_code_before_start():
 
 # ── coverage: ServingActor class body via a pass-through fake ray.remote ─────
 class _PassthroughRay:
-    """Fake ray whose @remote is an identity decorator, so the ServingActor"""
+    """Fake ray whose @remote is an identity decorator, so the ServingActor class body runs as plain Python (no cluster) for coverage of start / run_blocking / is_alive / pid / exit_code / stop."""
 
     def remote(self, *dargs, **dkw):
         # Support both @ray.remote and @ray.remote(...) forms.
@@ -1277,7 +1277,7 @@ class _PassthroughRay:
 
 
 def test_serving_actor_body_methods_drive_real_subprocess(monkeypatch: pytest.MonkeyPatch):
-    """Instantiate the ServingActor class directly and drive its lifecycle on a"""
+    """Instantiate the ServingActor class directly and drive its lifecycle on a real short-lived subprocess (covers _serving_actor_body's method bodies)."""
     monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
     actor_cls = rs._serving_actor_body()
     actor = actor_cls()  # plain instance (identity-decorated)

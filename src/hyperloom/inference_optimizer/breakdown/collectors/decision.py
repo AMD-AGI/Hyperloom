@@ -222,7 +222,7 @@ _OVERHEAD_COMPONENTS: frozenset[str] = frozenset(
 
 
 def _decision_key(task_id: str, dyn_id: str) -> str | None:
-    """Canonical join key for a decision / call: ``dyn_id`` wins over"""
+    """Canonical join key for a decision / call: ``dyn_id`` wins over ``task_id`` (a dynamic_action dispatch owns both)."""
     d = (dyn_id or "").strip()
     if d:
         return f"dyn:{d}"
@@ -233,7 +233,7 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
 
 
 def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
-    """Copy a token bucket and add ``total_in_out``, ``grand_total`` and"""
+    """Copy a token bucket and add ``total_in_out``, ``grand_total`` and ``cache_hit_rate``."""
     b = dict(bucket or {})
     ti = int(b.get("total_in", 0) or 0)
     to = int(b.get("total_out", 0) or 0)

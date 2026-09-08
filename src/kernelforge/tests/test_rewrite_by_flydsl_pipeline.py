@@ -75,7 +75,7 @@ def test_port_program_md_describes_the_source_in_its_own_language(
     fence,
     banned,
 ):
-    """A HIP kernel fenced as ``python``, and a rule naming only Triton, both"""
+    """A HIP kernel fenced as ``python``, and a rule naming only Triton, both misled the agent in the block it reads most closely."""
     s = _spec(tmp_path)
     s.source_language = language
     driver = tmp_path / "driver.py"

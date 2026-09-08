@@ -284,7 +284,7 @@ def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
-    """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or"""
+    """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or missing on disk."""
     if arg:
         root = Path(arg)
     else:
@@ -766,7 +766,7 @@ def _markers_present(path: Path, markers: Sequence[str]) -> bool:
 
 
 def _is_patched(plan: _PatchPlan) -> bool:
-    """True iff the sentinel file (and every extra_sentinel) exists with all of"""
+    """True iff the sentinel file (and every extra_sentinel) exists with all of its marker substrings present."""
     if not _markers_present(plan.sentinel_file, plan.sentinel_text):
         return False
     # The plan only keeps sentinels this patch set writes, so an absent file is an incomplete apply, not an
@@ -1050,7 +1050,7 @@ def _patch_apply(
     *,
     reverse: bool = False,
 ) -> bool:
-    """Real ``patch -p<strip> --fuzz=2`` apply (or reverse). Mirrors"""
+    """Real ``patch -p<strip> --fuzz=2`` apply (or reverse)."""
     flags = ("--reverse", "--silent") if reverse else ("--silent",)
     return _run_patch(
         patch_bin,

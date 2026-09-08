@@ -201,7 +201,7 @@ def _sha256_file(path: str | Path) -> str:
 
 
 def _load_execution_details(capdir: Path) -> dict[str, dict[str, Any]]:
-    """Map ``capture filename -> {batch_size, mode}`` from vLLM's"""
+    """Map ``capture filename -> {batch_size, mode}`` from vLLM's ``execution_details.json`` (a list of ``{file, batch_size, mode}``)."""
     out: dict[str, dict[str, Any]] = {}
     try:
         data = json.loads((capdir / "execution_details.json").read_text(encoding="utf-8"))

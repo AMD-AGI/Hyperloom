@@ -928,7 +928,7 @@ def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
 
 
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
-    """A second flush_session() must NOT re-scan leftovers / decision_trace and"""
+    """A second flush_session() must NOT re-scan leftovers / decision_trace and re-emit (would duplicate Generations/Scores)."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
@@ -1611,7 +1611,7 @@ def test_disabled_flush_still_writes_receipt(tmp_path, monkeypatch):
 
 
 def test_pair_key_distinguishes_same_second_burst():
-    """Two calls in the same (component, tick, role) and same UTC second but"""
+    """Two calls in the same (component, tick, role) and same UTC second but different turns must NOT collide (otherwise a token row pairs with the wrong conversation row in a burst)."""
     base = {
         "component": "specialist",
         "tick": 3,
@@ -1643,7 +1643,7 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
 
 
 def test_pair_key_distinguishes_concurrent_models_same_second():
-    """Concurrent models land in the same UTC second with identical keys except"""
+    """Concurrent models land in the same UTC second with identical keys except model -> must not collide (usage of model A pairing with model B's text)."""
     base = {
         "component": "proposal_scorer",
         "tick": None,
@@ -1659,7 +1659,7 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
 
 
 def test_pair_key_scorer_token_and_text_pair_when_roles_match():
-    """The scorer's token row and conversation row must share role+model so"""
+    """The scorer's token row and conversation row must share role+model so their pair_key matches."""
     token = {
         "component": "proposal_scorer",
         "role": "proposal_scorer",
@@ -1671,7 +1671,7 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
 
 
 def test_pair_key_degrades_when_turn_absent():
-    """Rows without turn/task_id/dyn_id still produce a stable key rather than"""
+    """Rows without turn/task_id/dyn_id still produce a stable key rather than raising."""
     row = {"component": "forge", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k

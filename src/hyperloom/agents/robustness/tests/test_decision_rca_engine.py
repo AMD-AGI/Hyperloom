@@ -298,7 +298,7 @@ async def test_anthropic_engine_hands_the_discovered_credentials_to_the_transpor
 
 @pytest.mark.asyncio
 async def test_engine_disables_itself_after_a_missing_credential(monkeypatch: pytest.MonkeyPatch):
-    """A missing credential fails identically on every later tick, so it costs"""
+    """A missing credential fails identically on every later tick, so it costs one ERROR and stops the engine rather than a warning per symptom."""
     calls: list[int] = []
 
     async def _raise(**_kw: Any) -> Any:
@@ -338,7 +338,7 @@ async def test_engine_keeps_retrying_after_a_transient_failure(monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch: pytest.MonkeyPatch):
-    """The claude CLI going missing mid-run is permanent for this process, and"""
+    """The claude CLI going missing mid-run is permanent for this process, and is recognised by re-probing rather than by matching the error text."""
     ready = {"value": True}
 
     async def _raise(**_kw: Any) -> Any:
@@ -357,7 +357,7 @@ async def test_engine_disables_itself_when_the_transport_disappears(monkeypatch:
 
 @pytest.mark.asyncio
 async def test_anthropic_engine_skips_when_no_transport_is_available(monkeypatch: pytest.MonkeyPatch):
-    """A host with no Anthropic credential — or a subscription token but no"""
+    """A host with no Anthropic credential — or a subscription token but no claude CLI — must not retry a doomed call on every tick."""
     stub = _install_anthropic_completion(monkeypatch)
     monkeypatch.setattr(f"{_LLM_CONFIG}.anthropic_transport_ready", lambda *_a, **_kw: False)
 

@@ -615,7 +615,7 @@ def test_nested_schema_one_best_result_is_never_consulted_for_an_applyback(repo)
 
 @pytest.mark.parametrize("version", [1, 2, 3, None])
 def test_a_schema_bump_alone_does_not_discard_a_proven_best(repo, version):
-    """What actually broke: the producer went to 2, this stayed on 1, and every"""
+    """What actually broke: the producer went to 2, this stayed on 1, and every published best was dropped for six days."""
     workspace, base_commit = repo
     best_commit = _commit_improvement(workspace)
     _publish(workspace, _manifest(best_commit, schema_version=version))

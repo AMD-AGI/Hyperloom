@@ -93,7 +93,7 @@ def test_match_vendor_operator_playbook_matches_mori_dispatch_and_combine():
 
 
 def test_role_haystack_takes_trailing_segment_of_fully_qualified_operation():
-    """A fully-qualified ``operation`` must not reintroduce the dispatch/"""
+    """A fully-qualified ``operation`` must not reintroduce the dispatch/ combine ambiguity _last_symbol_segment() exists to resolve."""
     combine_candidate = {
         "name": "mori::EpDispatchCombineOp::combine",
         "operation": "mori::EpDispatchCombineOp::combine",
@@ -128,7 +128,7 @@ def test_match_vendor_operator_playbook_ignores_unrelated_kernels():
 
 
 def test_match_vendor_operator_playbook_matches_via_trace_launcher_file_when_graph_captured():
-    """A CUDA/HIP-graph-captured launch is reconstructed by TraceLens as a"""
+    """A CUDA/HIP-graph-captured launch is reconstructed by TraceLens as a "Synthetic Op" (e.g."""
     dispatch_candidate = {
         "name": "vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16 (Synthetic Op)",
         "device_kernel_name": "EpDispatchIntraNodeKernel_bf16",
@@ -171,7 +171,7 @@ def test_classify_patchability_routes_mori_dispatch_and_combine():
 
 
 def test_classify_patchability_routes_graph_captured_mori_synthetic_ops():
-    """Same as ``test_classify_patchability_routes_mori_dispatch_and_combine``"""
+    """Same as ``test_classify_patchability_routes_mori_dispatch_and_combine`` but for the real, graph-captured candidate shape (empty library/ source_file/kernel_repo, mori identity only in ``trace_launcher_file``) -- without the ``_candidate_haystack`` fix this fell through to ``"source file not resolved"`` instead of routing to the playbook."""
     dispatch_candidate = {
         "name": "vllm::moe_forward_shared->EpDispatchIntraNodeKernel_bf16 (Synthetic Op)",
         "library": "",
@@ -235,7 +235,7 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
 
 
 def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
-    """mori's dispatch/combine are compiled bindings with no on-disk .py/.cu"""
+    """mori's dispatch/combine are compiled bindings with no on-disk .py/.cu source -- TraceLens realistically hands classify_patchability a candidate with an *empty* source_file (unlike the fixtures above, which set one for unrelated reasons)."""
     candidates = [
         _mori_dispatch_candidate(source_file=""),
         _mori_combine_candidate(source_file=""),
@@ -632,7 +632,7 @@ def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatc
 
 
 def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
-    """A relative ``source_file`` stand-in is later reinterpreted by"""
+    """A relative ``source_file`` stand-in is later reinterpreted by ``Path(...).resolve()`` against whatever the apply-stage process's CWD happens to be, not against the KernelForge bundle it was meant to name -- resolve_kernel_anchor_path() must never return a bare relative string, whether it resolves against the packaged tree or against an operator's $KERNELFORGE_PROJECT_ROOT substitution (PR #1191 review finding #8)."""
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     assert playbook is not None
 
@@ -653,7 +653,7 @@ def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
 
 
 def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(monkeypatch, tmp_path):
-    """The vendor-playbook path reuses one forge-loop run but used to never"""
+    """The vendor-playbook path reuses one forge-loop run but used to never write ``optimization_report.md``, so ``kernel_optimization.py``'s correctness extraction (which scans ``cli_workspace``/ ``optimization_report.md`` for a "[correctness] pass" marker) never found a signal and ``make_proposal()`` could never return KEEP even when SNR validation had already passed inside forge-loop (PR #1191 review finding #5)."""
     project_root = tmp_path / "kernelforge-project"
     _write_fake_mori_bundle(project_root)
     monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
@@ -687,7 +687,7 @@ def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass
 
 
 def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tmp_path):
-    """A cached FAILURE only de-dupes submissions within"""
+    """A cached FAILURE only de-dupes submissions within ``_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S``; once it ages out, a fresh submission must actually retry instead of one transient failure (an unresolvable task bundle, here) permanently wedging the whole playbook group for the rest of the session (PR #1191 review finding #2)."""
     monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", lambda relative: tmp_path / "absent" / relative)
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     candidate = _mori_dispatch_candidate(
@@ -750,7 +750,7 @@ def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tm
 
 
 def test_claim_vendor_playbook_run_steals_a_claim_orphaned_by_a_dead_process(tmp_path):
-    """A holder killed by SIGKILL/OOM/node-restart never writes"""
+    """A holder killed by SIGKILL/OOM/node-restart never writes ``result.json`` and never releases ``claimed.lock``; every later submission used to poll ``_wait_for_vendor_playbook_result`` all the way to its deadline (``timeout_s`` + 300s) and still find nothing -- for a 60-minute-budget attempt, an hour burned per submission."""
     lock_dir = tmp_path / "vendor_playbook_locks" / "mori_ep_dispatch_combine"
     lock_dir.mkdir(parents=True)
     claim_path = lock_dir / "claimed.lock"
@@ -770,7 +770,7 @@ def test_claim_vendor_playbook_run_steals_a_claim_orphaned_by_a_dead_process(tmp
 
 
 def test_claim_vendor_playbook_run_does_not_steal_a_live_claim(tmp_path):
-    """A claim well within its holder's own budget must not be stolen out"""
+    """A claim well within its holder's own budget must not be stolen out from under a genuinely still-running attempt."""
     lock_dir = tmp_path / "vendor_playbook_locks" / "mori_ep_dispatch_combine"
     lock_dir.mkdir(parents=True)
     claim_path = lock_dir / "claimed.lock"
@@ -787,7 +787,7 @@ def test_claim_vendor_playbook_run_does_not_steal_a_live_claim(tmp_path):
 
 
 def test_registry_json_is_valid_and_ships_in_package_data():
-    """The JSON registry parses and pyproject.toml declares it as package-data"""
+    """The JSON registry parses and pyproject.toml declares it as package-data (mirrors KernelForge's own wheel-packaging regression for framework/mori/)."""
     registry_path = _TOOLS_DIR / "vendor_operator_playbooks.json"
     data = json.loads(registry_path.read_text(encoding="utf-8"))
     playbook_ids = {p["id"] for p in data["playbooks"]}

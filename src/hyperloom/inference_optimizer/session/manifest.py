@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session manifest writer — the first file written after"""
+"""Session manifest writer — the first file written after ``make_session_dir()`` and the canonical session-resume tag (atomic write via tmp + ``os.replace``)."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ _POD_LOCAL_PREFIXES = ("/workspace", "/tmp", "/root")  # nosec B108 - path-prefi
 
 
 def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
-    """Warn when a dependency checkout points at a pod-local, non-persistent"""
+    """Warn when a dependency checkout points at a pod-local, non-persistent path (erased on pod recycle); a shared checkout outside USER_DATA_PATH is legitimate and does not warn."""
     user_data = (os.environ.get(_paths.ENV_USER_DATA_PATH) or "").strip()
     if not user_data:
         return
@@ -101,7 +101,7 @@ def _warn_if_dependency_escapes_user_data(env_var: str, raw: str) -> None:
 
 
 def _describe_dep(*env_vars: str) -> dict[str, str]:
-    """Build a ``{path, commit, remote}`` provenance dict for one dependency"""
+    """Build a ``{path, commit, remote}`` provenance dict for one dependency pointed at by the first set env var among ``env_vars`` (in priority order)."""
     raw = ""
     for env_var in env_vars:
         raw = (os.environ.get(env_var) or "").strip()
@@ -121,7 +121,7 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
 
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
-    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this"""
+    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this session executes against, so debuggers can answer "which upstream?" later."""
     return {
         "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
@@ -129,7 +129,7 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
 
 
 def _detect_image() -> str | None:
-    """Best-effort container image detection: env vars -> known mount points"""
+    """Best-effort container image detection: env vars -> known mount points -> cgroup probe."""
     for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
         val = (os.environ.get(var) or "").strip()
         if val:
@@ -180,7 +180,7 @@ def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_session_id(model_name: str = "") -> str:
-    """Derive an internal session_id label for manifest / SharedState / report"""
+    """Derive an internal session_id label for manifest / SharedState / report metadata (not used for path computation)."""
     stem = (model_name or "session").strip().replace("/", "_") or "session"
     return f"{stem}_{utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
@@ -288,7 +288,7 @@ def write_manifest(
     args: argparse.Namespace | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically write ``manifest.json`` under session_dir; returns the"""
+    """Atomically write ``manifest.json`` under session_dir; returns the manifest dict."""
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
     target = manifest_path(sd)
@@ -305,7 +305,7 @@ def write_manifest(
 
 
 def load_manifest(session_dir: Path) -> dict[str, Any]:
-    """Read ``manifest.json`` for an existing session. Raises"""
+    """Read ``manifest.json`` for an existing session."""
     p = manifest_path(Path(session_dir))
     if not p.exists():
         raise FileNotFoundError(

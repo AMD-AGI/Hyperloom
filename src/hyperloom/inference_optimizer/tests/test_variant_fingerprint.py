@@ -136,7 +136,7 @@ def test_variant_result_to_dict_carries_fingerprint() -> None:
 
 
 def test_shared_state_normalizes_explore_search_tested() -> None:
-    """SharedState.from_dict shapes the ``explore_search`` ledger with"""
+    """SharedState.from_dict shapes the ``explore_search`` ledger with defensive defaults and preserves fingerprint-keyed ``tested``."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     fp_a = canonical_fingerprint("--A", {})

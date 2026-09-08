@@ -98,7 +98,7 @@ async def test_an_unreadable_keep_envelope_leaves_fusion_retryable(tmp_path):
 
 @pytest.mark.asyncio
 async def test_repeated_unreadable_envelopes_stop_being_retried(tmp_path):
-    """A producer too old to answer the contract does not heal mid-session, and"""
+    """A producer too old to answer the contract does not heal mid-session, and every retry re-runs LLM discovery before failing the same way."""
     phase = _phase(spent=MAX_FUSION_INFRA_RETRIES - 1, session_dir=tmp_path)
 
     await RECORD(phase, _kept())

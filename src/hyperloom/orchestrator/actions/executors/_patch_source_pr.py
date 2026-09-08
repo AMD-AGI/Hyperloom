@@ -44,7 +44,7 @@ def _pr_number_of(candidate: dict[str, Any]) -> int:
 
 
 def _candidate_slug(candidate: dict[str, Any]) -> str:
-    """Filesystem-safe candidate id (variant names + paths). Prefer"""
+    """Filesystem-safe candidate id (variant names + paths)."""
     repo = str(candidate.get("repo") or "").replace("/", "-")
     pr = _pr_number_of(candidate)
     if repo and pr:
@@ -123,7 +123,7 @@ def _candidate_is_same_repo(
     candidate: dict[str, Any],
     framework_root: Path,
 ) -> bool:
-    """True unless we can positively prove the candidate lives in a different"""
+    """True unless we can positively prove the candidate lives in a different repo than the framework_root's origin (where checkout-head's fetch would resolve the wrong ref)."""
     cand_repo = _normalize_repo_id(str(candidate.get("repo") or candidate.get("discovered_repo_url") or ""))
     if not cand_repo or "/" not in cand_repo:
         return True

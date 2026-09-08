@@ -1412,7 +1412,7 @@ def test_eval_success_keeps_run_success(tmp_path, monkeypatch):
 
 
 def test_lifecycle_reuse_without_metadata_fails(tmp_path, monkeypatch):
-    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie"""
+    """YAML-lifecycle: /health=200 but no pid/meta files means a foreign/zombie server occupies the port. bypass must NOT silently reuse or re-boot over it; it fails explicitly so the reuse-key mismatch surfaces instead of being papered over."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1716,7 +1716,7 @@ def test_tokenize_extra_args_falls_back_on_bad_quoting():
 
 
 def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatch):
-    """phase=server: a server that never becomes ready is torn down, no pid/meta"""
+    """phase=server: a server that never becomes ready is torn down, no pid/meta is persisted, and the run fails (rc=1)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1744,7 +1744,7 @@ def test_server_phase_server_not_ready_terminates_and_fails(tmp_path, monkeypatc
 
 
 def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
-    """phase=server: build_server_command raising ValueError emits a failing"""
+    """phase=server: build_server_command raising ValueError emits a failing report and returns rc=2 before any server launch."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1762,7 +1762,7 @@ def test_server_phase_build_command_value_error_fails(tmp_path, monkeypatch):
 
 
 def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
-    """phase=server: when os.getpgid fails, the pgid falls back to the pid and"""
+    """phase=server: when os.getpgid fails, the pgid falls back to the pid and the server still persists successfully (rc=0)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1790,7 +1790,7 @@ def test_server_phase_pgid_oserror_falls_back_to_pid(tmp_path, monkeypatch):
 
 
 def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
-    """YAML lifecycle boot round: a server that never becomes ready is torn down"""
+    """YAML lifecycle boot round: a server that never becomes ready is torn down and the round fails (rc=1)."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
@@ -1818,7 +1818,7 @@ def test_lifecycle_all_boot_server_not_ready_fails(tmp_path, monkeypatch):
 
 
 def test_scriptable_nonzero_rc_without_error_reports_failure(tmp_path, monkeypatch):
-    """scriptable: run_scriptable returns rc!=0 with no error string and no result"""
+    """scriptable: run_scriptable returns rc!=0 with no error string and no result file -> the report records both failures and the rc propagates."""
     inferencex = tmp_path / "InferenceX"
     inferencex.mkdir()
     cfg = {
@@ -1864,7 +1864,7 @@ def test_lifecycle_all_build_command_value_error_fails(tmp_path, monkeypatch):
 
 
 def test_lifecycle_all_boot_cleanup_tears_down_server(tmp_path, monkeypatch):
-    """YAML lifecycle boot round with cleanup=True: after the client runs the"""
+    """YAML lifecycle boot round with cleanup=True: after the client runs the server is terminated AND the lifecycle files are torn down."""
     inferencex = tmp_path / "InferenceX"
     (inferencex / "utils" / "bench_serving").mkdir(parents=True)
     (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")

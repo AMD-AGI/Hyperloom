@@ -67,7 +67,7 @@ def max_supported_splitk(m: int, n: int, k: int, ceiling: int = 6, device: str =
 
 
 def make_support_fn(ceiling: int = 6, gpu_ids: str = ""):
-    """Return an (m,n,k)->int|None callable memoized per shape for reuse as the"""
+    """Return an (m,n,k)->int|None callable memoized per shape for reuse as the ``support_fn`` of ``_cap_splitk_to_serve_safe``."""
     cache: dict[tuple[int, int, int], int | None] = {}
     device = _resolve_device(gpu_ids)
 

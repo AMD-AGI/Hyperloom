@@ -103,7 +103,7 @@ def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
 
 
 def md_kv_list(items: list[tuple[str, Any]]) -> str:
-    """Render ``[(k, v), ...]`` as a bullet list, skipping ``None`` /"""
+    """Render ``[(k, v), ...]`` as a bullet list, skipping ``None`` / empty-string values."""
     out = []
     for k, v in items:
         if v in (None, "", []):

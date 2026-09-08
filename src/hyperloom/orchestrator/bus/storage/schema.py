@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SQLite schema for the unified Coordinator state DB"""
+"""SQLite schema for the unified Coordinator state DB (``$SESSION_DIR/storage/coordinator.db``)."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ _MANAGED_TABLES = (
 
 
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
-    """Idempotently insert default capacity rows; existing rows are left"""
+    """Idempotently insert default capacity rows; existing rows are left alone so a resume preserves the operator's choice."""
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
         cur.execute(
             "INSERT OR IGNORE INTO lane_capacity(lane, capacity) VALUES (?, ?)",
@@ -174,7 +174,7 @@ def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Idempotently create all tables, seed lane_capacity defaults, and"""
+    """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")

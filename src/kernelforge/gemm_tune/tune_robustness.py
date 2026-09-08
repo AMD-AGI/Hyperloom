@@ -92,7 +92,7 @@ def count_soft_faults(stdout: str, stderr: str) -> int:
 
 
 def read_untuned_csv(path: str | Path) -> tuple[str, list[str]]:
-    """Read an untuned CSV into (header_line, data_lines). Never raises on a"""
+    """Read an untuned CSV into (header_line, data_lines)."""
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError:

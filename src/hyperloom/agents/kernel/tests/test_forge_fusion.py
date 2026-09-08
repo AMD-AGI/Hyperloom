@@ -795,7 +795,7 @@ def test_an_llm_outage_verdict_never_discards_a_validated_fusion(tmp_path):
 
 
 def test_an_llm_outage_verdict_is_matched_tolerantly(tmp_path):
-    """Matching must not fail open: a stray space would fall back to the"""
+    """Matching must not fail open: a stray space would fall back to the no_improvement mapping, i.e. straight back into the bug this prevents."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -924,7 +924,7 @@ def test_a_loop_that_ran_still_reports_no_improvement(tmp_path):
 
 @pytest.mark.parametrize("reason", ["  harness_author_failed  ", "Harness_Author_Failed", "NO_GIT_WORKSPACE"])
 def test_an_abort_reason_is_matched_tolerantly(tmp_path, reason):
-    """Matching must not fail open: stray case or spacing would fall back to the"""
+    """Matching must not fail open: stray case or spacing would fall back to the no_improvement mapping, i.e. straight back into the bug this prevents."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(json.dumps(_aborted_manifest(reason)), encoding="utf-8")
@@ -966,7 +966,7 @@ def test_an_abort_never_discards_a_measured_compile_pass(tmp_path):
 
 
 def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monkeypatch, capsys):
-    """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit"""
+    """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit that still carries a valid manifest."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     input_json = tmp_path / "input.json"
@@ -1004,7 +1004,7 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
 
 
 def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
-    """A run that DID reach the model and found nothing is unchanged: it is a real"""
+    """A run that DID reach the model and found nothing is unchanged: it is a real conclusion, and re-running it in the same session would buy nothing."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
@@ -1021,7 +1021,7 @@ def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
 
 
 def test_normalize_manifest_prefers_artifacts_repo_root(tmp_path, monkeypatch):
-    """kernel_repo must come from the root forge-fusion exported against (authoritative"""
+    """kernel_repo must come from the root forge-fusion exported against (authoritative for a non-git pip framework), NOT a git toplevel that would break patch apply."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {

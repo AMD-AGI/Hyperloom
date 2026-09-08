@@ -274,7 +274,7 @@ async def test_run_action_now_calls_sequence_denial_with_single_arg(
     session_dir,
     monkeypatch,
 ):
-    """``_run_action_now`` must call ``_sequence_denial_for_action`` with only"""
+    """``_run_action_now`` must call ``_sequence_denial_for_action`` with only ``action_name``; this drives the real 1-arg signature."""
     c = _silent_coordinator(session_dir)
     try:
 
@@ -302,7 +302,7 @@ async def test_run_action_now_sync_bridges_to_coordinator_loop(
     session_dir,
     monkeypatch,
 ):
-    """The sync bridge marshals the coroutine onto the captured"""
+    """The sync bridge marshals the coroutine onto the captured coordinator loop and returns its rendered result."""
     c = _silent_coordinator(session_dir)
     try:
 
@@ -478,7 +478,7 @@ def test_format_variant_line_no_artifact_refs_when_absent():
 
 
 def test_format_variant_line_excerpt_tail_survives():
-    """error_excerpt on variant rows is a tail-1200 blob; the assertion at the"""
+    """error_excerpt on variant rows is a tail-1200 blob; the assertion at the end must reach the prompt, not the banner at the start."""
     from hyperloom.orchestrator.state._shared_state.render import _RenderMixin
 
     banner = "[INFO] config dump line filler\n" * 60

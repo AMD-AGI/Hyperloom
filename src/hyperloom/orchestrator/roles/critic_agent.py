@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into"""
+"""CriticAgentBackend — bridges the ``hyperloom.agents.critic`` runtime into the Coordinator as a real Critic Backend."""
 
 from __future__ import annotations
 
@@ -297,7 +297,7 @@ def _inject_phase_constraints(judge_bundle: dict[str, Any], phase: str) -> None:
 
 
 def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
-    """Set ``review_constraints.cross_domain`` + rule descriptors when any"""
+    """Set ``review_constraints.cross_domain`` + rule descriptors when any proposal is cross-domain (unified ``scope == 'domains'`` dial)."""
     proposals = judge_bundle.get("proposals") or []
     if not isinstance(proposals, list):
         return
@@ -684,7 +684,7 @@ class CriticAgentBackend:
     # Helpers
 
     def _load_static_context_from_manifest(self) -> dict[str, Any]:
-        """Derive per-session context for ``request.context`` from"""
+        """Derive per-session context for ``request.context`` from manifest.json (model / framework / gpu_type / model_path / tp / workload / precision); empty values dropped."""
         path = manifest_path(self.session_dir)
         try:
             raw = path.read_text(encoding="utf-8")

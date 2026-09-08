@@ -982,7 +982,7 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_no_patches_forwards_grounding_drops(tmp_path, monkeypatch):
-    """When all patches were grounding-dropped, the integrate result must carry"""
+    """When all patches were grounding-dropped, the integrate result must carry ``patches_dropped_by_grounding`` so framework.py can surface it in the next round's mandate."""
     session = tmp_path / "s"
     session.mkdir()
     ws = session / "runs" / "specialist" / "spec"

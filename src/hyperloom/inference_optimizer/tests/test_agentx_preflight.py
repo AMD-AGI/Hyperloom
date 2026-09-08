@@ -181,7 +181,7 @@ def test_agentx_dataset_outranks_weka_loader_override():
 
 
 def test_unreadable_allowlist_falls_back_and_says_so(capsys):
-    """Refusing outright would break setups that work today over what may be an"""
+    """Refusing outright would break setups that work today over what may be an unusual install layout -- but the weaker check must not pass silently."""
     check_aiperf_capability(
         "/venv/bin/aiperf",
         loader_probe=lambda _b: None,

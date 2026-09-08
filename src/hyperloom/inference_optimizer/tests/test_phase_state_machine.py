@@ -482,7 +482,7 @@ class TestAMetTargetDoesNotOutrankTheGuards:
 
 
 def test_a_met_target_renames_a_budget_limited_sweep_exit():
-    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would"""
+    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
     state = SimpleNamespace(
         phase=phase_state.PHASE_SWEEP,
         phase_started_unix=1.0,

@@ -50,7 +50,7 @@ def test_an_infrastructure_abort_is_retried():
 
 @pytest.mark.parametrize("spent", [MAX_FUSION_INFRA_RETRIES, MAX_FUSION_INFRA_RETRIES + 3])
 def test_repeated_infrastructure_aborts_stop_being_retried(spent):
-    """Retrying is not free: every run re-does LLM discovery before failing in"""
+    """Retrying is not free: every run re-does LLM discovery before failing in the same place, and a missing git workspace does not heal mid-session."""
     assert REQUIRED(_phase(_abort(), spent=spent)) is False
 
 
@@ -79,7 +79,7 @@ def test_a_result_that_is_not_an_abort_is_unaffected():
 
 @pytest.mark.asyncio
 async def test_each_abort_increments_the_counter(tmp_path):
-    """The count has to survive the record being replaced, or the cap never"""
+    """The count has to survive the record being replaced, or the cap never triggers and the retries stay unbounded."""
     phase = _phase(None, session_dir=tmp_path)
 
     for expected in (1, 2, 3):

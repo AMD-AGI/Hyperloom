@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Supplemental coverage for kernel_request_handlers pure helpers: precision /"""
+"""Supplemental coverage for kernel_request_handlers pure helpers: precision / budget / timeout resolution, backend order, tool-stdout shaping, roofline name lookup, artifact-path and in-flight scanning."""
 
 from __future__ import annotations
 
@@ -274,7 +274,7 @@ def test_parse_tool_stdout_recovers_a_pretty_printed_result() -> None:
 
 
 def test_shape_tool_result_will_not_call_unreadable_output_a_success() -> None:
-    """Inferring ``ok`` from rc==0 made a tool whose output could not be read"""
+    """Inferring ``ok`` from rc==0 made a tool whose output could not be read indistinguishable from one that worked, so the caller recorded an empty analysis over a real one and reported the leg as succeeded."""
     out = krh._shape_tool_result(0, "progress chatter, no json at all", "")
 
     assert out["status"] == "failed"

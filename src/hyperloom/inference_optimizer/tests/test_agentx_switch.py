@@ -152,7 +152,7 @@ def test_switch_only_serving_frameworks(tmp_path, monkeypatch):
 
 # ── Regression: the shared grid/baseline/profile rebuild path (E1 bug) ────────
 def test_runtime_overrides_honor_agentx_on(monkeypatch):
-    """apply_runtime_benchmark_overrides must apply the switch, else the"""
+    """apply_runtime_benchmark_overrides must apply the switch, else the gpu_type-derived synthetic script silently reverts a materialize-time swap (the exact defect E1 caught: run_grid rebuilt to vllm_mi300x.sh)."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     from hyperloom.orchestrator.actions.executors._grid_server_args import (
@@ -232,7 +232,7 @@ print("CONTRAST_OK")
 
 
 def test_agentx_package_importable_contrast():
-    """Contrast: the agentx package is real and importable (the ON _grid_runner"""
+    """Contrast: the agentx package is real and importable (the ON _grid_runner branch does exactly this lazy import), so the OFF assertion is not vacuous."""
     r = subprocess.run(
         [sys.executable, "-c", _PROBE_CONTRAST],
         env=dict(os.environ),
@@ -245,7 +245,7 @@ def test_agentx_package_importable_contrast():
 
 # ── Finding 1: framework injected so the wrapper delegates to the right builtin ─
 def test_switch_on_injects_framework_for_delegation(tmp_path, monkeypatch):
-    """ON must inject ``benchmark.framework`` into ``envs.FRAMEWORK`` so"""
+    """ON must inject ``benchmark.framework`` into ``envs.FRAMEWORK`` so aiperf_client.sh delegates to ``{framework}_{gpu}.sh``."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     for fw in ("sglang", "vllm"):

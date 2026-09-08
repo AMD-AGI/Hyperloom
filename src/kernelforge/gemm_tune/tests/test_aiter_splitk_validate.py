@@ -64,7 +64,7 @@ def test_make_support_fn_memoizes_per_shape(monkeypatch):
 
 
 class TestResolveDevice:
-    """`_resolve_device` pins the in-process trial to the tuner's assigned card"""
+    """`_resolve_device` pins the in-process trial to the tuner's assigned card instead of always using device 0 (review: multi-tenant wrong-GPU)."""
 
     def test_empty_gpu_ids_defaults_to_cuda(self, monkeypatch):
         for k in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):

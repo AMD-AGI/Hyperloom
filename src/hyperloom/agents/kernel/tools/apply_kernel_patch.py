@@ -922,7 +922,7 @@ def _invalidate_aiter_cpp_itfs_cache(
     *,
     build_dir_override: Path | None = None,
 ) -> dict[str, Any]:
-    """Move aiter cpp_itfs runtime-cache dirs aside so the re-baseline server"""
+    """Move aiter cpp_itfs runtime-cache dirs aside so the re-baseline server runtime-recompiles the patched kernel from clean state."""
     if not _target_is_in_aiter_cpp_itfs(target_file):
         return {
             "status": "skipped",

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-stack validation handler: draining pending KEEP integrates and"""
+"""Kernel-stack validation handler: draining pending KEEP integrates and running/recovering the positive-needs-review stack e2e validation."""
 
 from __future__ import annotations
 import logging as _logging

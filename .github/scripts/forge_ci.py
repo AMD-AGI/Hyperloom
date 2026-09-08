@@ -88,7 +88,7 @@ def _maybe_json(raw: str) -> Any:
 # --------------------------------------------------------------------------- # Response parsing (tolerant of flat vs
 # nested shapes) --------------------------------------------------------------------------- #
 def _dig(obj: Any, *keys: str) -> Any:
-    """Return the first non-None value found for any of ``keys``, searching the"""
+    """Return the first non-None value found for any of ``keys``, searching the top level and a nested ``run``/``score`` object."""
     if not isinstance(obj, dict):
         return None
     scopes = [obj]

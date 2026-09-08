@@ -133,7 +133,7 @@ async def test_prune_events_protects_pending_proposal(conn):
 
 @pytest.mark.asyncio
 async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
-    """The pruning guard's pending set must agree with the resume reconstruct"""
+    """The pruning guard's pending set must agree with the resume reconstruct logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to its msg_id (empty/missing targets do not decide anything)."""
     bus = MessageBus(conn)
     p_pending = Message.new("orchestration", "*", "proposal", {"action_name": "a"})
     p_decided = Message.new("orchestration", "*", "proposal", {"action_name": "b"})

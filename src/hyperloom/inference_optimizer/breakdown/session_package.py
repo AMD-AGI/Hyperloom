@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bundle a session's consumer-facing artifacts into a single zip under"""
+"""Bundle a session's consumer-facing artifacts into a single zip under ``/workspace`` so the Claw sandbox sync picks it up."""
 
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def _copy_loose_tree(
     included: list[tuple[Path, str, int]],
     loose_dir: Path,
 ) -> tuple[list[tuple[str, int]], list[str]]:
-    """Copy each included file into ``loose_dir`` preserving its relative"""
+    """Copy each included file into ``loose_dir`` preserving its relative tree."""
     loose_dir.mkdir(parents=True, exist_ok=True)
     copied: list[tuple[str, int]] = []
     failed: list[str] = []
@@ -136,7 +136,7 @@ def _is_packageable(path: Path, session_dir: Path) -> bool:
 
 
 def _iter_session_files(session_dir: Path) -> list[Path]:
-    """All files under session_dir (one walk), so glob matching is a"""
+    """All files under session_dir (one walk), so glob matching is a single pass instead of N globs each re-walking the tree."""
     out: list[Path] = []
     for dp, _dn, fn in os.walk(session_dir):
         for f in fn:
@@ -276,7 +276,7 @@ def package_session_artifacts(
     session_id: str = "",
     dest_root: Path | str | None = None,
 ) -> Path | None:
-    """Bundle curated artifacts of ``session_dir`` into one zip under the"""
+    """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``/workspace/<PACKAGE_SUBDIR>/``)."""
     try:
         sd = Path(session_dir).resolve()
         if not sd.is_dir():

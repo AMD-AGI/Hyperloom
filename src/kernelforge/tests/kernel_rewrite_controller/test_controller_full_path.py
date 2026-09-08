@@ -216,12 +216,10 @@ def test_controller_full_path_publishes_a_shared_base_patch(
     assert f"`{repo}` @ `{base_commit}`" in summary
 
 
-def test_an_unpublishable_validated_result_records_its_reason_durably(
+def test_an_unpublishable_validated_result_records_a_redacted_reason_durably(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    # Hyperloom throws this process's stdout and stderr away when it hard-kills the controller, so the reason a
-    # validated best commit never shipped has to reach disk or it reaches nobody.
     repo = _source_repo(tmp_path)
     _wire_fake_analysis(monkeypatch, _TaskAgentBackend(repo))
     monkeypatch.setattr(dispatcher, "run_forge_loop", _successful_forge)
@@ -241,13 +239,15 @@ def test_an_unpublishable_validated_result_records_its_reason_durably(
     assert [failure["operator_id"] for failure in state.recovery_failures] == [
         "kernel:forge-loop:kernel:standalone:unknown:triton:mi355x"
     ]
-    assert "patches root is read-only" in state.recovery_failures[0]["reason"]
+    assert state.recovery_failures[0]["reason"] == "could not publish forge result sidecar (RuntimeError)"
+    assert "patches root is read-only" not in state.recovery_failures[0]["reason"]
     assert state.recovery_failures[0]["best_commit"]
     persisted = json.loads((tmp_path / "output" / "controller" / "state.json").read_text(encoding="utf-8"))
     assert persisted["recovery_failures"] == [dict(state.recovery_failures[0])]
     summary = (tmp_path / "output" / "result" / "summary.md").read_text(encoding="utf-8")
     assert "Unpublishable Validated Results" in summary
-    assert "patches root is read-only" in summary
+    assert "could not publish forge result sidecar (RuntimeError)" in summary
+    assert "patches root is read-only" not in summary
 
 
 def test_invalid_agent_task_becomes_no_result_without_starting_forge(

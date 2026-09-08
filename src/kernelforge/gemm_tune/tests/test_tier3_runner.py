@@ -250,7 +250,7 @@ class TestLedger:
 
 
 class TestPlanPreviewsWhatRunDoes:
-    """A preview that answers a different question than the thing it previews"""
+    """A preview that answers a different question than the thing it previews is worse than no preview: it is consulted precisely when someone is unsure, and it was showing TunableOp skipped for inputs under which the real run selects it."""
 
     def _src(self, name):
         import inspect

@@ -316,7 +316,7 @@ _CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
 
 
 def _default_cycle_reloop_min_remaining_sec() -> float:
-    """Absolute reloop floor in seconds; env-overridable via"""
+    """Absolute reloop floor in seconds; env-overridable via ``INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC``."""
     raw = (_os_env.environ.get("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", "") or "").strip()
     if raw:
         try:
@@ -1707,7 +1707,7 @@ def exit_normal_sweep(
 
 # Transition decision (the only function the Coordinator calls each tick)
 def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
-    """Pull operator-tuned plateau thresholds off"""
+    """Pull operator-tuned plateau thresholds off :attr:`SharedState.plateau_overrides` (empty → library defaults)."""
     overrides = getattr(state, "plateau_overrides", None) or {}
     return dict(overrides) if isinstance(overrides, dict) else {}
 
@@ -1825,7 +1825,7 @@ def exit_normal_optimize(
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE: OPTIMIZE, else KERNEL, else SWEEP"""
+    """First active phase after PRELUDE: OPTIMIZE, else KERNEL, else SWEEP (``--no-framework-agent`` / ``--no-kernel`` collapse the chain)."""
     if optimize_enabled:
         return PHASE_FRAMEWORK_AGENT
     if kernel_enabled:

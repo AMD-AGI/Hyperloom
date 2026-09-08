@@ -206,7 +206,7 @@ class TestMergePreservesExistingSetting:
 
 
 class TestOpenAIFallbackIsNotBroken:
-    """resolve_openai_client_config reads Anthropic headers only while the"""
+    """resolve_openai_client_config reads Anthropic headers only while the OpenAI variable parses empty; creating it would drop gateway auth."""
 
     def test_openai_variable_is_not_created_when_it_would_end_the_fallback(self) -> None:
         env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Launcher-side preflight for hyperloom.inference_optimizer."""
+"""Launcher-side preflight for hyperloom.inference_optimizer.
+
+Usage:
+    python src/hyperloom/inference_optimizer/tools/preflight_optimizer.py MODEL_PATH
+"""
 
 from __future__ import annotations
 

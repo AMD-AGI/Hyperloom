@@ -138,7 +138,7 @@ def test_call_geak_uses_current_python_when_path_is_polluted(tmp_path, monkeypat
 
 
 def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
-    """On the hard-timeout path, SIGTERM gives the child time to flush; the"""
+    """On the hard-timeout path, SIGTERM gives the child time to flush; the flushed result.json is then read back (not discarded as no_result_json)."""
     runner = _write_fake_runner(
         tmp_path,
         """
@@ -166,7 +166,7 @@ def test_sigterm_grace_lets_child_flush_result(tmp_path, monkeypatch):
 
 
 def test_sigkill_escalation_when_child_ignores_sigterm(tmp_path, monkeypatch):
-    """A child that ignores SIGTERM and never flushes is SIGKILLed; the runner"""
+    """A child that ignores SIGTERM and never flushes is SIGKILLed; the runner reports a no-result error rather than hanging forever."""
     runner = _write_fake_runner(
         tmp_path,
         """

@@ -1,7 +1,35 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-framework runtime dependency installation."""
+"""Per-framework runtime dependency installation.
+
+Scriptable frameworks execute the model author's own code, which imports
+packages no serving image ships. A framework
+declares what it needs in ``assets/framework_deps/<framework>.txt``; nothing
+here is per-framework, so onboarding the next one is a data file rather than
+new code. A framework with no manifest is a no-op.
+
+Both entry points drive this module -- ``assets/install.sh`` shells out to it
+and the CLI preflight imports it -- so install-time and launch-time behaviour
+cannot drift. Preflight needs its own pass because the framework is only known
+from ``--framework`` at launch, while ``install.sh`` typically runs before that
+is in the environment.
+
+Manifest format, one entry per line, blanks and ``#`` comments ignored::
+
+    <pip-spec>[:<import-name>]      e.g. opencv-python:cv2
+
+The import name defaults to the pip name with ``-`` mapped to ``_`` and any
+version specifier stripped.
+
+No manifest ships yet, so today every framework takes the no-op path. That is
+the intended resting state, not an oversight: the two dependency sets currently
+installed are the shared quality-gate libraries, which every scriptable workload
+needs and ``install.sh`` therefore installs unconditionally, and an operator's
+own packages, which belong to the operator and cannot be enumerated here. The
+first manifest lands with the first vendored framework that needs packages of
+its own -- at which point onboarding it is this file plus a text file.
+"""
 
 from __future__ import annotations
 

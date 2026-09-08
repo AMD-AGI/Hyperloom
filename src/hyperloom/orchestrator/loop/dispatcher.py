@@ -107,7 +107,7 @@ class DispatcherCollaborator:
         return lanes, meta.lease_ttl_sec
 
     def _cycle_idem_suffix(self) -> str:
-        """Idempotency-key suffix scoping a per-cycle internal singleton to the"""
+        """Idempotency-key suffix scoping a per-cycle internal singleton to the current macro-cycle."""
         cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
         return f"-c{cycle}" if cycle > 0 else ""
 
@@ -229,7 +229,7 @@ class DispatcherCollaborator:
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def _pump_dispatcher_once(self) -> None:
-        """Dispatch queued tasks respecting per-lane capacity, re-scanning for"""
+        """Dispatch queued tasks respecting per-lane capacity, re-scanning for newly-fittable tasks while in-flight tasks run."""
         await self._reclaim_stale_dispatch_state()
         inflight: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
         # Cumulative across the whole pump, not just the live in-flight set, so a fast task reaped before its

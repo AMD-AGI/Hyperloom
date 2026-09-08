@@ -145,7 +145,7 @@ class TestGradeIntegrateAccuracy:
         assert out["blocked"] is False
 
     def test_falls_back_to_warmup_round_eval_output(self, monkeypatch, tmp_path):
-        """The double-run evaluates in the warmup round only, so the result dict"""
+        """The double-run evaluates in the warmup round only, so the result dict carries no accuracy and the score must be recovered from the workspace."""
         warmup = tmp_path / "warmup_round" / "benchmark_sglang_smoke"
         warmup.mkdir(parents=True)
         (warmup / "results_gsm8k.json").write_text(

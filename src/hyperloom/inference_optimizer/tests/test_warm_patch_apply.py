@@ -761,7 +761,7 @@ def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):
 
 
 def test_teardown_undoes_a_nogit_apply(tmp_path):
-    """Keying the revert on pre_sha alone leaked nogit patches into later tasks"""
+    """Keying the revert on pre_sha alone leaked nogit patches into later tasks that reuse the same checkout."""
     target = tmp_path / "vllm" / "fp8.py"
     target.parent.mkdir(parents=True)
     target.write_text("# fp8 module\noriginal = True\n")

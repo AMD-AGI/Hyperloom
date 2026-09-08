@@ -78,7 +78,7 @@ def _kernel(kid: str, *, gain: float, before: float, after: float) -> dict:
 
 
 def _column(session_dir: Path) -> dict:
-    """Run the real assembler and the real collector, and return the row the"""
+    """Run the real assembler and the real collector, and return the row the dashboard renders for the kernel agent."""
     warnings: list[str] = []
     parts = assemble_parts(session_dir, warnings=warnings)
     out = collectors.collect_recorded_optimizations(
@@ -159,7 +159,7 @@ def test_gain_is_stated_in_points_of_the_session_baseline(tmp_path: Path) -> Non
 
 
 def test_reverted_geak_kernel_is_not_credited(tmp_path: Path) -> None:
-    """The revert path is on the canonical stream too, so a kernel that was"""
+    """The revert path is on the canonical stream too, so a kernel that was taken back out does not keep the credit it was given."""
     coord = _coord(tmp_path)
     _record_baseline(tmp_path)
     kernel = _kernel("regressed", gain=-3.0, before=1000.0, after=970.0)

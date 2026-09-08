@@ -252,7 +252,7 @@ def classify_specialist_failure(
     runner_status: str,
     error: str,
 ) -> tuple[SpecialistFailureType, bool]:
-    """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure"""
+    """Map a :class:`SpecialistRunResult` ``(status, error)`` to a failure type + retry-eligibility flag."""
     status = (runner_status or "").strip().lower()
     err = (error or "").strip().lower()
     if status == "succeeded":
@@ -645,7 +645,7 @@ class SpecialistRunner:
         tick: int | None = None,
         phase: str | None = None,
     ) -> None:
-        """Append one ``conversations.jsonl`` row for an in-process specialist"""
+        """Append one ``conversations.jsonl`` row for an in-process specialist turn."""
         if self.session_dir is None:
             return
         try:
@@ -683,7 +683,7 @@ class SpecialistRunner:
         ctx: RunnerContext,
         prep: "_PreparedRun",
     ) -> SpecialistRunResult:
-        """Drive ``Backend.run`` one turn at a time until a specialist_done"""
+        """Drive ``Backend.run`` one turn at a time until a specialist_done intent shows up."""
         assert self.backend_factory is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap
@@ -860,7 +860,7 @@ class SpecialistRunner:
         ctx: RunnerContext,
         prep: "_PreparedRun",
     ) -> SpecialistRunResult:
-        """Spawn a per-task ``claude`` subprocess inside the worktree"""
+        """Spawn a per-task ``claude`` subprocess inside the worktree and reap its ``specialist_done.json`` / ``patches/`` output."""
         assert self.subprocess_dispatcher is not None  # narrowed by run()
         domain = prep.domain
         gap = prep.gap

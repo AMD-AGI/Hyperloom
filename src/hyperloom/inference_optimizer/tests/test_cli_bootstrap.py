@@ -285,7 +285,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Without a pinned display name (the common, non-quantized path) the model"""
+    """Without a pinned display name (the common, non-quantized path) the model name is still the plain model-path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -308,7 +308,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
 
 
 def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
-    """Regression: ``manifest.json`` ``model_name`` must honor the pinned"""
+    """Regression: ``manifest.json`` ``model_name`` must honor the pinned display name from the quantize prelude, not the collapsed path basename."""
     from hyperloom.inference_optimizer.session import manifest as m
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"

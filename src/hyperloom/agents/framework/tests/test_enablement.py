@@ -45,7 +45,7 @@ def test_accuracy_below_floor_kind() -> None:
 
 
 def test_generation_pathology_outranks_accuracy_below_floor() -> None:
-    """The probe's evidence carries the below-floor phrasing too, but a truncated"""
+    """The probe's evidence carries the below-floor phrasing too, but a truncated eval is a different repair from a model that answered and got them wrong."""
     sig = classify_failure(
         "baseline accuracy did not meet floor: accuracy=0.0 floor=0.05 task=gsm8k; "
         "eval_generation_pathology: 128/128 sampled responses stopped at the 16384-token cap"
@@ -60,7 +60,7 @@ def test_eval_runtime_failure_kind() -> None:
 
 
 def test_eval_crash_with_import_error_classifies_as_import_error() -> None:
-    """The generic eval rule is lowest priority: a real root cause in the same"""
+    """The generic eval rule is lowest priority: a real root cause in the same log (import/serve-flag) must win over eval_runtime_failure."""
     log = "run_eval failed with exit code 1\nModuleNotFoundError: No module named 'lm_eval'"
     assert classify_failure(log).kind == IMPORT_ERROR
     log2 = "run_eval failed with exit code 1\nvllm: error: unrecognized arguments: --bad"
@@ -79,7 +79,7 @@ def test_missing_model_arch() -> None:
 
 
 def test_missing_model_arch_transformers_unrecognized() -> None:
-    """Transformers 'does not recognize this architecture' (the DeepSeek-V4"""
+    """Transformers 'does not recognize this architecture' (the DeepSeek-V4 brand-new-arch-on-old-stack signature, wrapped in a vLLM ModelConfig ValidationError) -> missing_model_arch with the model_type as symbol."""
     log = (
         "pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig\n"
         "  Value error, The checkpoint you are trying to load has model type "
@@ -224,7 +224,7 @@ def test_enablement_setup_guidance_in_mandate() -> None:
 
 
 def test_enablement_progress_contract_in_mandate() -> None:
-    """Serial-enablement contract: the mandate must tell the specialist that a"""
+    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty=true."""
     from hyperloom.agents.framework.enablement import EnablementRequest
     from hyperloom.agents.framework.enablement_ops import (
         ENABLEMENT_PROGRESS_GUIDANCE,
@@ -313,7 +313,7 @@ def test_offending_file_from_inline_cpp_path() -> None:
 
 
 def test_hip_symbol_beats_import_error_ordering() -> None:
-    """An ImportError caused by an undefined HIP symbol resolves to the more"""
+    """An ImportError caused by an undefined HIP symbol resolves to the more actionable hip_kernel_missing, not the generic import_error."""
     log = "ImportError: /lib/_C.so: undefined symbol: hipLaunchKernel"
     sig = classify_failure(log)
     assert sig.kind == HIP_KERNEL_MISSING
@@ -323,7 +323,7 @@ def test_hip_symbol_beats_import_error_ordering() -> None:
 
 
 def test_stacked_import_error_masking_hip_symbol() -> None:
-    """A stacked traceback (ImportError wrapping an undefined HIP symbol) keeps"""
+    """A stacked traceback (ImportError wrapping an undefined HIP symbol) keeps the actionable hip_kernel_missing as primary and surfaces import_error as a secondary kind rather than discarding it."""
     log = (
         "Traceback (most recent call last):\n"
         '  File "/opt/vllm/_custom_ops.py", line 5, in <module>\n'
@@ -346,7 +346,7 @@ def test_single_signature_has_empty_secondary() -> None:
 
 
 def test_offending_file_prefers_frame_near_primary_hit() -> None:
-    """With two matching rules, the offending file is taken near the primary"""
+    """With two matching rules, the offending file is taken near the primary (earlier, more-specific) hit rather than the last frame overall."""
     log = (
         "Traceback (most recent call last):\n"
         '  File "/opt/vllm/loader.py", line 3, in load\n'

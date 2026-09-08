@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-architecture analytic FLOPs / compute-ceiling estimator for the xDiT"""
+"""Per-architecture analytic FLOPs / compute-ceiling estimator for the xDiT text-to-image models Hyperloom optimizes."""
 
 from __future__ import annotations
 
@@ -64,14 +64,14 @@ def _qkvo_flops(tokens: float, h: float) -> float:
 
 
 def _ffn_flops(tokens: float, h: float, inter: float, gated: bool = False) -> float:
-    """FFN matmuls: up + down (+ gate when gated). Ratio-agnostic (uses the"""
+    """FFN matmuls: up + down (+ gate when gated)."""
     mats = 3 if gated else 2
     # up/gate: h->inter ; down: inter->h. Each is 2*tokens*h*inter.
     return mats * _linear_flops(tokens, h, inter)
 
 
 def _full_attention_flops(seq: float, h: float) -> float:
-    """Softmax attention over ``seq`` tokens with model hidden ``h`` (summed"""
+    """Softmax attention over ``seq`` tokens with model hidden ``h`` (summed across heads): QK^T + softmax@V = 2 * (2*seq^2*h)."""
     return 4.0 * seq * seq * h
 
 
@@ -81,7 +81,7 @@ def _cross_attention_flops(q_tokens: float, kv_tokens: float, h: float) -> float
 
 
 def _linear_attention_flops(seq: float, h: float, head_dim: float) -> float:
-    """ReLU/linear attention (Sana): O(seq) instead of O(seq^2). K^T V builds a"""
+    """ReLU/linear attention (Sana): O(seq) instead of O(seq^2)."""
     return 4.0 * seq * h * head_dim
 
 

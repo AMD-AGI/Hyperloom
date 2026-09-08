@@ -169,7 +169,7 @@ class ModelGpuFitConfig:
 
 
 class ModelGpuFitDetector:
-    """Stateful: emit ``model_gpu_infeasible`` at most once per session, keyed off the"""
+    """Stateful: emit ``model_gpu_infeasible`` at most once per session, keyed off the immutable manifest fingerprint ``(model_name, gpu_type, tp, precision, max_model_len, conc)``."""
 
     def __init__(
         self,

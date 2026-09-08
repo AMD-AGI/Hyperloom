@@ -2,7 +2,33 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""End-to-end validation of the single-server-per-arm concurrency sweep."""
+"""End-to-end validation of the single-server-per-arm concurrency sweep.
+
+Reuses a real optimization session's baseline + accepted ``current_best`` and
+runs the *current* ``run_conc_sweep`` over a descending CONC ladder against the
+real model on GPU. It then answers one question:
+
+    "As CONC descends from high to low on a single reused server, does the
+     server get killed between points?"
+
+The verdict is derived from two independent signals:
+
+  1. Result signal  — every CONC point in each arm reports a measured
+     ``output_throughput``. If the server had been killed after the boot round,
+     the lower-CONC reuse rounds would fail with connection errors.
+  2. Boot signal    — the number of distinct server *launches* per arm, counted
+     from Magpie's ``server.log`` / ``reuse_server_spawn.pid`` artifacts. In the
+     single-server path this must be exactly one launch per arm.
+
+Finally it renders the InferenceX-style throughput-vs-interactivity plot from
+the produced ``conc_sweep_summary.json`` artifact, completing the full flow.
+
+Usage::
+
+    python scripts/test_conc_sweep_flow.py \\
+        --session-dir /shared/hyperloom-sessions/Qwen3-8B/20260715T033207Z \\
+        --concs 8,4,2
+"""
 
 from __future__ import annotations
 

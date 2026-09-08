@@ -2270,7 +2270,7 @@ def _eligible_coord(tmp_path, monkeypatch, **overrides):
 
 
 class TestCkBlockscaleSwitchEligible:
-    """``_ck_blockscale_switch_eligible`` gates the CK backend switch to"""
+    """``_ck_blockscale_switch_eligible`` gates the CK backend switch to forge + sglang + fp8 + gfx942 + block-scale checkpoints."""
 
     def test_eligible_for_forge_sglang_fp8_mi300x_blockscale(self, tmp_path, monkeypatch):
         coord = _eligible_coord(tmp_path, monkeypatch)

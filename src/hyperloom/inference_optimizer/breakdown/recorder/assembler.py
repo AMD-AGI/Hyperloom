@@ -344,7 +344,7 @@ def _merge_lists(
 
 
 def _compose_versions(out: dict[str, Any]) -> None:
-    """Fold the ``versions`` item substream into a top-level ``{tool: meta}``"""
+    """Fold the ``versions`` item substream into a top-level ``{tool: meta}`` map (last write per tool wins)."""
     rows = out.get("versions")
     if not isinstance(rows, list):
         return
@@ -358,7 +358,7 @@ def _compose_versions(out: dict[str, Any]) -> None:
 
 
 def _compose_critic_robustness(out: dict[str, Any]) -> None:
-    """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams"""
+    """Fold the ``critic_iterations`` / ``robustness_signals`` item substreams into the ``critic_robustness`` singleton."""
     critic_iters = out.pop("critic_iterations", None)
     rob_signals = out.pop("robustness_signals", None)
     if critic_iters is None and rob_signals is None:
@@ -446,7 +446,7 @@ def _drop_event_rows(out: dict[str, Any]) -> None:
 
 
 def _compose_kernel_journey(out: dict[str, Any]) -> None:
-    """Fold the four kernel-lifecycle item substreams into a single"""
+    """Fold the four kernel-lifecycle item substreams into a single kernel-major ``kernel_journey`` view (discovery -> dispatch -> backend attempts -> e2e), then pop the raw substreams."""
     discovery = out.pop("kernel_discovery", None)
     dispatch = out.pop("kernel_dispatch", None)
     backend = out.pop("kernel_backend_result", None)
@@ -544,7 +544,7 @@ def _kernel_outcome(
     attempts: list[dict[str, Any]],
     e2e: dict[str, Any],
 ) -> str:
-    """Coarse per-kernel outcome: adopted / reverted / attempted / dispatched /"""
+    """Coarse per-kernel outcome: adopted / reverted / attempted / dispatched / skipped / discovered (in lifecycle-descending precedence)."""
     if e2e:
         decision = str(e2e.get("decision") or "").upper()
         validation_tier = str(e2e.get("final_validation_tier") or e2e.get("validation_tier") or "").strip().lower()

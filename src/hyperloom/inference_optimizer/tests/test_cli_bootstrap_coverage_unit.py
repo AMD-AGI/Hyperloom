@@ -184,7 +184,7 @@ def test_seed_applies_new_workload_defaults_when_unset(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Regression for #903: when workload flags are unset (argparse default"""
+    """Regression for #903: when workload flags are unset (argparse default ``None``) and no inherited env is present, SharedState must seed the new fallback defaults (ISL/OSL=1024, CONC=64, TP/EP=1)."""
     _stub_seed_deps(monkeypatch, tmp_path)
     for key in ("ISL", "OSL", "CONC", "TP", "EP"):
         monkeypatch.delenv(key, raising=False)
@@ -245,7 +245,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Without a pinned display name (the common, non-quantized path) the model"""
+    """Without a pinned display name (the common, non-quantized path) the model name is still the plain model-path basename."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -271,7 +271,7 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Regression for #930: the stale guard needs the raw ``--model`` path so an"""
+    """Regression for #930: the stale guard needs the raw ``--model`` path so an HF cache ``models--org--repo/snapshots/<hash>`` launch can recover the repo name; passing only the collapsed identity loses it."""
     captured: dict[str, tuple] = {}
 
     def _spy(*args, **_kwargs):
@@ -300,7 +300,7 @@ def test_seed_passes_raw_model_path_to_model_arch_guard(
 
 
 def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
-    """Regression: ``manifest.json`` ``model_name`` must honor the pinned"""
+    """Regression: ``manifest.json`` ``model_name`` must honor the pinned display name from the quantize prelude, not the collapsed path basename."""
     from hyperloom.inference_optimizer.session import manifest as m
 
     quant_dir = tmp_path / "quantization" / "google-gemma-4-26B-A4B-it" / "quantized"

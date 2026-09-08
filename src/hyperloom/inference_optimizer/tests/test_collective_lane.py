@@ -462,7 +462,7 @@ def test_skip_is_terminal_for_the_analysis_that_produced_it():
 
 
 def test_skip_does_not_block_a_later_analysis():
-    """Nothing clears last_collective, so an unscoped skip would lock the lane"""
+    """Nothing clears last_collective, so an unscoped skip would lock the lane out for the whole session even after a new trace exposes a collective."""
     assert (
         _gate_with_analysis(
             "/run/b/kernel_candidates.json", {"status": "skipped", "analysis_key": "/run/a/kernel_candidates.json"}
@@ -476,7 +476,7 @@ def test_skip_without_an_analysis_key_does_not_block():
 
 
 def test_gate_closed_before_any_trace_analysis():
-    """Candidate selection reads the analysis, so a skip recorded before one"""
+    """Candidate selection reads the analysis, so a skip recorded before one exists would wrongly become terminal."""
     assert _gate(analysis=False) is False
 
 

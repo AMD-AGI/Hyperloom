@@ -16,7 +16,7 @@ def _run(coro):
 
 
 def test_insession_gate_has_no_duplicate_module_defs():
-    """Guard the F811 blind spot: ruff/Pyflakes does NOT flag redefinition of"""
+    """Guard the F811 blind spot: ruff/Pyflakes does NOT flag redefinition of *annotated* module-level functions, so a duplicate (e.g. a bad merge) can silently shadow the real one."""
     import ast
     import collections
 
@@ -358,7 +358,7 @@ def test_stop_blocks_when_correct_but_not_faster(tmp_path, monkeypatch):
 
 
 def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path, monkeypatch):
-    """PORT-mode contract: with correctness_only=True the gate allows a CORRECT"""
+    """PORT-mode contract: with correctness_only=True the gate allows a CORRECT kernel and MUST NOT run the benchmark / perf gate at all."""
     gate, _ = _gate(
         tmp_path,
         correctness_only=True,

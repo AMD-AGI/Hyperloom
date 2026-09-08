@@ -560,7 +560,7 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
 
 
 def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
-    """A subprocess_nonzero baseline attempt records stderr_tail into the"""
+    """A subprocess_nonzero baseline attempt records stderr_tail into the attempts history so the breakdown exporter can surface the raw crash."""
     s = SharedState()
     big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
     s.record_action_attempt(
@@ -768,7 +768,7 @@ def test_baseline_current_best_reuses_recorded_profile_runtime():
 
 
 def test_profile_trace_matches_workload_with_server_args():
-    """Regression (H1): profile_trace_matches_workload() with no explicit target"""
+    """Regression (H1): profile_trace_matches_workload() with no explicit target must compare the recorded profile against the *current-best* runtime identity, not the bare profile_workload_context() (which reports server_args="" and skips the current_best backfill)."""
     state = SharedState(
         framework="vllm",
         precision="fp8",

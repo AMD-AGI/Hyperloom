@@ -932,7 +932,7 @@ def test_materialize_profile_window_clamps_to_skill_floor(
     tmp_path,
     monkeypatch,
 ):
-    """Capture is always the serialization cap (default 128), even for a small"""
+    """Capture is always the serialization cap (default 128), even for a small OSL whose steady floor is far below it (OSL=256, CONC=64 ⇒ floor=4)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -978,7 +978,7 @@ def test_materialize_profile_force_overrides_user_num_prompts(
     tmp_path,
     monkeypatch,
 ):
-    """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an"""
+    """Profile mode must IGNORE caller-supplied NUM_PROMPTS — an under-sized value (skill default `max_concurrency * 1`) would silently empty the trace."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1095,7 +1095,7 @@ def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains"""
+    """Patcher returns True for SGLang ⇒ EXTRA_SGLANG_ARGS gains --enable-shape-discovery-for-cuda-graph-profile."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1115,7 +1115,7 @@ def test_materialize_profile_sglang_omits_shape_discovery_when_patch_fails(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher returns False ⇒ no shape-discovery flag (otherwise"""
+    """Patcher returns False ⇒ no shape-discovery flag (otherwise SGLang argparse errors on the unknown flag)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1306,7 +1306,7 @@ def test_materialize_profile_sglang_skips_shape_discovery_for_gemma2(
     tmp_path,
     monkeypatch,
 ):
-    """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes"""
+    """Gemma2 + patched SGLang must NOT inject shape-discovery (it crashes CUDA-graph capture); --enable-profile-cuda-graph still applies."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1479,7 +1479,7 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
     tmp_path,
     monkeypatch,
 ):
-    """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for"""
+    """HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 keeps shape-discovery on for Gemma2 (escape hatch for debugging the TraceLens root-cause fix)."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1546,7 +1546,7 @@ def test_profile_server_args_sanitizer_drops_torch_compile_flags():
 
 
 def test_profile_server_args_sanitizer_preserves_json_value_quotes():
-    """Regression: embedded JSON values (e.g. --speculative-config) must keep"""
+    """Regression: embedded JSON values (e.g. --speculative-config) must keep their inner double-quotes."""
     spec = '--speculative-config {"method":"deepseek_mtp","num_speculative_tokens":1}'
     assert _sanitize_profile_server_args(spec) == spec
 
@@ -2206,7 +2206,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
-    """TraceLens-patched vLLM writes graph-capture traces next to the"""
+    """TraceLens-patched vLLM writes graph-capture traces next to the benchmark workspace, under the profile task's ``capture_traces`` dir."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2364,7 +2364,7 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
-    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the"""
+    """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2515,7 +2515,7 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkeypatch):
-    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even"""
+    """HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass forces the independent backend even for a text-gen framework (explicit env route wins over the default)."""
     monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "bypass")
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2543,7 +2543,7 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
-    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route"""
+    """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2623,7 +2623,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
-    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only"""
+    """Scriptable (xDiT) params converge by route: --skip-split is TraceLens-only (must NOT reach bypass, which would crash argparse -> degraded), while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2662,7 +2662,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_success(
     session_dir,
     monkeypatch,
 ):
-    """The bypass route surfaces a kernel_journey discovery run labelled"""
+    """The bypass route surfaces a kernel_journey discovery run labelled source="bypass", carrying the real hot kernels."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2719,7 +2719,7 @@ async def test_trace_analyze_handler_omits_top_k_when_not_requested(
     session_dir,
     monkeypatch,
 ):
-    """Without an explicit ``top_k`` the handler must NOT pass"""
+    """Without an explicit ``top_k`` the handler must NOT pass ``--top-k`` so tracelens_analysis.py applies its own large-pool default (candidate-build cap decoupled from the dispatch-side budget)."""
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
     captured: dict = {}
@@ -2774,7 +2774,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_failed(
     session_dir,
     monkeypatch,
 ):
-    """Fail-loud bypass pipeline -> discovery run status=failed with the"""
+    """Fail-loud bypass pipeline -> discovery run status=failed with the error text and an empty hot-kernel list, still labelled source="bypass"."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2813,7 +2813,7 @@ async def test_trace_analyze_handler_records_bypass_discovery_high_idle_empty(
     session_dir,
     monkeypatch,
 ):
-    """High-idle gate suppresses hot kernels but the run still succeeds -> a"""
+    """High-idle gate suppresses hot kernels but the run still succeeds -> a bypass discovery run with status=ok and hot_kernel_count=0."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -2853,7 +2853,7 @@ async def test_trace_analyze_handler_agent_route_stays_tracelens(
     session_dir,
     monkeypatch,
 ):
-    """The LLM/agent route keeps source=\"tracelens\" (regression guard for the"""
+    """The LLM/agent route keeps source="tracelens" (regression guard for the bypass relabel), while the scan still names the route the caller asked for."""
     from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
 
     fake_trace = session_dir / "fake_trace_dir"
@@ -3847,7 +3847,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
 
 # Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
 def test_default_kernel_batch_parallel_matches_full_node():
-    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a"""
+    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a typical ``run_optimization`` batch does NOT serialize behind an asyncio semaphore tighter than Ray's view of the cluster."""
     assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
 
 

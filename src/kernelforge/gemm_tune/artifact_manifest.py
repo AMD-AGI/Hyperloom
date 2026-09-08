@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""TuningArtifactManifest: the provenance + coverage record shipped with a"""
+"""TuningArtifactManifest: the provenance + coverage record shipped with a tuned CSV (P0-A / WP-4)."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def _source_manifest_block(shape_manifest_path: str | Path | None) -> tuple[dict
 
 
 def _coverage_block(manifest: dict | None, results: list) -> dict[str, Any]:
-    """Weighted ShapeCoverageFactor = improved-target GEMM weight / total target"""
+    """Weighted ShapeCoverageFactor = improved-target GEMM weight / total target GEMM weight, using the source manifest's per-(M,N,K) steady-state weights."""
     if manifest is None:
         return {"shape_coverage_factor": None, "note": "no source manifest supplied"}
     shapes = _sm.manifest_to_shapes(manifest, target_only=True)

@@ -654,7 +654,7 @@ Constraints for each proposed fusion:
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
-    """Recover every complete top-level ``{...}`` object from (possibly truncated)"""
+    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings."""
     out: list[dict[str, Any]] = []
     depth = 0
     start = -1

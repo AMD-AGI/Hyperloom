@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Print concise optimizer state and lifecycle status."""
+"""Print concise optimizer state and lifecycle status.
+
+Usage:
+    python src/hyperloom/inference_optimizer/tools/read_optimizer_state.py SESSION_DIR
+"""
 
 from __future__ import annotations
 

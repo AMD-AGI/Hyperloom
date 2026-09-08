@@ -2495,7 +2495,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         result: dict[str, Any],
         kernel_roofline_path: str,
     ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[dict[str, Any]]]":
-        """Build ``(summary, kernel_roofline, reusable_ids, withheld)`` from the"""
+        """Build ``(summary, kernel_roofline, reusable_ids, withheld)`` from the top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar."""
         from ..kernel import _kernel_decisions as _m
 
         hot = result.get("hot_kernels") or []

@@ -553,7 +553,7 @@ def _infera_ssh_node_op(
 
 
 def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
-    """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch"""
+    """Infera apply-tracelens-patch: SSH fan-out the TraceLens SGLang patch set to every GPU pod via ``apply_tracelens_patch_multinode.py --local``."""
     state = _infera_require_state()
     tracelens_root = args.tracelens_root or os.environ.get("TRACELENS_ROOT", "").strip()
     if not tracelens_root:

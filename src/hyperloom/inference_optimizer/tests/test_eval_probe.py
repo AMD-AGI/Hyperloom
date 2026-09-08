@@ -154,7 +154,7 @@ async def _call(probe, obj: _StubTemplateAPI, *, generate: bool = True, cache_ke
 
 
 def test_probe_installs_over_upstream_patches(probe):
-    """The probe wraps rather than replaces, so InferenceX's own"""
+    """The probe wraps rather than replaces, so InferenceX's own parse_generations fix (appended just above it) stays in effect."""
     out = probe.openai_completions.LocalChatCompletion.parse_generations(outputs=_response("stop"))
     assert out == ["upstream"]
 
@@ -175,7 +175,7 @@ def test_trips_and_short_circuits_once_decisive(probe):
 
 
 def test_terminating_model_is_never_short_circuited(probe):
-    """The whole point: a model that emits EOS must be graded normally even"""
+    """The whole point: a model that emits EOS must be graded normally even though some answers legitimately hit the cap."""
     obj = _StubTemplateAPI()
     _feed(probe, "stop", 8)
     _feed(probe, "length", 1)
@@ -192,7 +192,7 @@ def test_loglikelihood_requests_are_never_short_circuited(probe):
 
 
 def test_short_circuit_still_populates_the_harness_cache(probe):
-    """lm-eval reconciles answers against cache_keys; skipping the hook would"""
+    """lm-eval reconciles answers against cache_keys; skipping the hook would desync the run it is supposed to let finish cleanly."""
     obj = _StubTemplateAPI()
     _feed(probe, "length", 8)
     asyncio.run(_call(probe, obj, cache_keys=[("ctx", "kwargs")]))
@@ -200,7 +200,7 @@ def test_short_circuit_still_populates_the_harness_cache(probe):
 
 
 def test_gate_survives_a_fresh_event_loop(probe):
-    """lm-eval calls asyncio.run() once per batch. A semaphore binds to the"""
+    """lm-eval calls asyncio.run() once per batch."""
     obj = _StubTemplateAPI()
     asyncio.run(_call(probe, obj))
     _feed(probe, "length", 8)
@@ -222,7 +222,7 @@ def test_sidecar_records_the_evidence(probe):
 
 
 def test_sidecar_is_written_once(probe):
-    """Every subsequent response would otherwise rewrite it with a diluted"""
+    """Every subsequent response would otherwise rewrite it with a diluted ratio, since short-circuited requests never report a finish_reason."""
     _feed(probe, "length", 8)
     first = (probe.result_dir / EVAL_PROBE_FILENAME).read_text(encoding="utf-8")
     _feed(probe, "length", 20)
@@ -230,7 +230,7 @@ def test_sidecar_is_written_once(probe):
 
 
 def test_probe_can_be_disabled(monkeypatch, tmp_path):
-    """Only the probe's own hooks come off. The bounds shim shares this block and"""
+    """Only the probe's own hooks come off."""
     monkeypatch.setenv("RESULT_DIR", str(tmp_path))
     monkeypatch.setenv("HYPERLOOM_EVAL_PROBE", "0")
     api_models, openai_completions = _install_stub_lm_eval(monkeypatch)
@@ -243,7 +243,7 @@ def test_probe_can_be_disabled(monkeypatch, tmp_path):
 
 
 def test_probe_surfaces_import_failure_when_lm_eval_absent(monkeypatch):
-    """A missing lm-eval must raise, not be swallowed: CPython's"""
+    """A missing lm-eval must raise, not be swallowed: CPython's ``site.execsitecustomize()`` prints it to stderr and keeps the interpreter alive, so the failure is visible in the benchmark log."""
     import pytest
 
     for name in ("lm_eval", "lm_eval.models", "lm_eval.models.api_models"):
@@ -253,7 +253,7 @@ def test_probe_surfaces_import_failure_when_lm_eval_absent(monkeypatch):
 
 
 def test_probe_survives_malformed_responses(probe):
-    """A server that answers with something unexpected must not take the eval"""
+    """A server that answers with something unexpected must not take the eval down with it."""
     obj = _StubTemplateAPI()
     for junk in (None, [], {"choices": "not-a-list"}, {"choices": [None]}, {"usage": "nope"}):
         probe.openai_completions.LocalChatCompletion.parse_generations(outputs=junk)
@@ -261,7 +261,7 @@ def test_probe_survives_malformed_responses(probe):
 
 
 def test_read_eval_probe_finds_a_nested_sidecar(probe, tmp_path):
-    """The baseline double-run evaluates in the warmup round, whose RESULT_DIR"""
+    """The baseline double-run evaluates in the warmup round, whose RESULT_DIR nests under the task workspace."""
     nested = tmp_path / "warmup_round"
     nested.mkdir()
     (nested / EVAL_PROBE_FILENAME).write_text(json.dumps({"reason": "model_not_terminating"}), encoding="utf-8")
@@ -274,7 +274,7 @@ def test_read_eval_probe_finds_a_nested_sidecar(probe, tmp_path):
 
 
 def test_long_answers_below_the_ceiling_do_not_trip(probe):
-    """``finish_reason=length`` alone is not the pathology. lm-eval sizes"""
+    """``finish_reason=length`` alone is not the pathology. lm-eval sizes max_tokens per request from the remaining context, so a truncated-but- terminating model produces capped responses at several different lengths; only the ones piled on the ceiling are evidence of a runaway loop."""
     obj = _StubTemplateAPI()
     for tokens in (1024,) * 4 + (2048,) * 4:
         probe.openai_completions.LocalChatCompletion.parse_generations(outputs=_response("length", tokens))
@@ -283,7 +283,7 @@ def test_long_answers_below_the_ceiling_do_not_trip(probe):
 
 
 def test_length_ratio_zero_falls_back_to_the_default(monkeypatch, tmp_path):
-    """0 is exactly what an operator reaches for to disable the probe. Taken"""
+    """0 is exactly what an operator reaches for to disable the probe."""
     p = _install(
         monkeypatch,
         tmp_path,
@@ -310,7 +310,7 @@ def test_min_samples_below_the_floor_falls_back_to_the_default(monkeypatch, tmp_
 
 
 def test_no_result_dir_keeps_the_sidecar_out_of_the_cwd(monkeypatch, tmp_path):
-    """Without ``$RESULT_DIR`` the cwd is InferenceX's checkout, and writing"""
+    """Without ``$RESULT_DIR`` the cwd is InferenceX's checkout, and writing there is the artifact escape the _EVAL_DEST_* patch exists to prevent."""
     monkeypatch.chdir(tmp_path)
     p = _install(monkeypatch, tmp_path, RESULT_DIR=None, HYPERLOOM_EVAL_PROBE_MIN_SAMPLES="8")
     obj = _StubTemplateAPI()
@@ -320,7 +320,7 @@ def test_no_result_dir_keeps_the_sidecar_out_of_the_cwd(monkeypatch, tmp_path):
 
 
 def test_install_drops_a_stale_sidecar(monkeypatch, tmp_path):
-    """The eval-failure retry reuses ``$RESULT_DIR``, so a sidecar left by the"""
+    """The eval-failure retry reuses ``$RESULT_DIR``, so a sidecar left by the previous attempt would be read as this run's verdict."""
     stale = tmp_path / EVAL_PROBE_FILENAME
     stale.write_text(json.dumps({"reason": "model_not_terminating"}), encoding="utf-8")
 
@@ -330,7 +330,7 @@ def test_install_drops_a_stale_sidecar(monkeypatch, tmp_path):
 
 
 def test_read_eval_probe_prefers_the_newest_sidecar(tmp_path):
-    """``integrate_patch`` searches the grid slot, where sibling variants each"""
+    """``integrate_patch`` searches the grid slot, where sibling variants each own a sidecar, and attempt dirs are hash-named — so path order says nothing about which eval ran last."""
     older = tmp_path / "zzz_first" / EVAL_PROBE_FILENAME
     newer = tmp_path / "aaa_second" / EVAL_PROBE_FILENAME
     for path, hits in ((older, 11), (newer, 22)):
@@ -377,7 +377,7 @@ def test_eval_probe_summary_names_the_kind_and_the_evidence():
 
 
 def test_probe_record_reaches_session_breakdown(tmp_path):
-    """End of the traceability chain: the writeback audit stores the record in"""
+    """End of the traceability chain: the writeback audit stores the record in the attempt's ``extras``, and the collector must carry it into ``session_breakdown.json``."""
     from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_baseline
 
     probe_record = {
@@ -465,7 +465,7 @@ def _payload(env, generate=True, **kwargs):
 
 
 def test_bounds_clamp_max_tokens_with_no_env_set(bounds):
-    """The ceiling cannot depend on the caller remembering to set it: InferenceX"""
+    """The ceiling cannot depend on the caller remembering to set it: InferenceX passes ``max_tokens=min(16384, ctx-4096)`` and both gate arms must share whatever bound applies."""
     assert _payload(bounds, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
 
 
@@ -476,7 +476,7 @@ def test_bounds_env_overrides_the_default(monkeypatch, tmp_path):
 
 
 def test_bounds_never_raise_an_existing_lower_ceiling(bounds):
-    """Clamping is one-directional. A task that asked for less knows something we"""
+    """Clamping is one-directional."""
     assert _payload(bounds, gen_kwargs={"max_tokens": 64})["max_tokens"] == 64
 
 
@@ -489,7 +489,7 @@ def test_bounds_zero_disables_the_clamp(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("raw", ["", "   ", "lots", "4096.5", "-1"])
 def test_bounds_fall_back_to_the_default_when_the_env_is_unusable(monkeypatch, tmp_path, raw):
-    """A typo must not silently mean \"unbounded\" — that is the failure this"""
+    """A typo must not silently mean "unbounded" — that is the failure this exists to prevent."""
     env = _install(monkeypatch, tmp_path, HYPERLOOM_EVAL_PROBE="0", HYPERLOOM_EVAL_MAX_TOKENS=raw)
 
     assert _payload(env, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
@@ -504,7 +504,7 @@ def test_bounds_leave_loglikelihood_payloads_untouched(bounds):
 
 
 def test_bounds_prepend_stop_strings_ahead_of_upstreams(monkeypatch, tmp_path):
-    """Upstream keeps only the first four, so the caller's terminators — the ones"""
+    """Upstream keeps only the first four, so the caller's terminators — the ones derived from the model actually under test — have to go first."""
     env = _install(
         monkeypatch,
         tmp_path,
@@ -525,7 +525,7 @@ def test_bounds_do_not_duplicate_a_stop_string_upstream_already_sent(monkeypatch
 
 
 def test_bounds_summary_reports_how_often_the_ceiling_was_hit(bounds):
-    """Truncation is only defensible while it is rare, so the run has to say how"""
+    """Truncation is only defensible while it is rare, so the run has to say how rare it was: too low a ceiling depresses both arms' scores and nothing else would show it."""
     cls = bounds.cls
     cls.parse_generations(outputs=[{"choices": [{"finish_reason": "length"}, {"finish_reason": "stop"}]}])
     cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}])
@@ -552,7 +552,7 @@ def test_bounds_counting_survives_a_response_it_cannot_read(bounds):
 
 
 def test_bounds_and_probe_coexist(probe):
-    """Both wrap ``parse_generations``; the chain has to reach upstream's, and"""
+    """Both wrap ``parse_generations``; the chain has to reach upstream's, and the probe still has to trip."""
     assert probe.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}]) == ["upstream"]
     assert _payload(probe, gen_kwargs={"max_tokens": 16384})["max_tokens"] == 4096
 
@@ -567,7 +567,7 @@ def _derive(monkeypatch, tmp_path, **kwargs):
 
 
 def test_derives_every_terminator_the_model_declares(monkeypatch, tmp_path):
-    """The gap this closes: eos_token is <|im_end|> alone, while the model stops"""
+    """The gap this closes: eos_token is <|im_end|> alone, while the model stops on <|endoftext|> too."""
     payload = _payload(_derive(monkeypatch, tmp_path), gen_kwargs={"until": ["Question:"]})
 
     assert payload["stop_token_ids"] == [151645, 151643]
@@ -575,7 +575,7 @@ def test_derives_every_terminator_the_model_declares(monkeypatch, tmp_path):
 
 
 def test_derived_ids_do_not_displace_the_tasks_own_stop_list(monkeypatch, tmp_path):
-    """Upstream keeps only 4 stop strings and the task's list is what its answer"""
+    """Upstream keeps only 4 stop strings and the task's list is what its answer extraction depends on, so the derived strings yield to it. stop_token_ids has no such limit, which is why nothing is actually lost on vLLM/SGLang."""
     payload = _payload(
         _derive(monkeypatch, tmp_path),
         gen_kwargs={"until": ["Question:", "\n\n", "Q:", "A:"]},
@@ -600,7 +600,7 @@ def test_operator_stop_strings_outrank_derived_ones(monkeypatch, tmp_path):
 
 
 def test_falls_back_to_tokenizer_eos_when_generation_config_is_absent(monkeypatch, tmp_path):
-    """generation_config is optional; without it there are no ids to send, but"""
+    """generation_config is optional; without it there are no ids to send, but the one terminator tokenizer_config names is still worth sending."""
     payload = _payload(_derive(monkeypatch, tmp_path, generation=None), gen_kwargs={"until": ["Q:"]})
 
     assert "stop_token_ids" not in payload
@@ -642,7 +642,7 @@ def test_derives_nothing_when_model_path_is_unset(bounds):
     ],
 )
 def test_unreadable_or_odd_metadata_never_breaks_the_eval(monkeypatch, tmp_path, generation, tokenizer):
-    """Metadata is not a contract we control, so every shape has to degrade to"""
+    """Metadata is not a contract we control, so every shape has to degrade to 'run as before' rather than take the eval down."""
     env = _derive(monkeypatch, tmp_path, generation=generation, tokenizer=tokenizer)
 
     payload = _payload(env, gen_kwargs={"until": ["Q:"], "max_tokens": 16384})
@@ -661,7 +661,7 @@ def test_a_single_eos_token_id_is_accepted(monkeypatch, tmp_path):
 
 
 def test_derivation_can_be_switched_off(monkeypatch, tmp_path):
-    """Escape hatch for reproducing an upstream number, or for a server that"""
+    """Escape hatch for reproducing an upstream number, or for a server that rejects stop_token_ids."""
     model_dir = _write_model_dir(tmp_path)
     env = _install(
         monkeypatch,
@@ -685,7 +685,7 @@ def test_derived_terminators_leave_loglikelihood_payloads_untouched(monkeypatch,
 
 
 def test_summary_records_the_terminators_the_run_actually_used(monkeypatch, tmp_path):
-    """A stored score is only comparable against another run under the same"""
+    """A stored score is only comparable against another run under the same terminators, so the run has to state them."""
     env = _derive(monkeypatch, tmp_path)
     _payload(env, gen_kwargs={"until": ["Q:"]})
     env.cls.parse_generations(outputs=[{"choices": [{"finish_reason": "stop"}]}])
@@ -697,7 +697,7 @@ def test_summary_records_the_terminators_the_run_actually_used(monkeypatch, tmp_
 
 
 def test_an_uncached_repo_id_derives_nothing_rather_than_downloading(monkeypatch, tmp_path):
-    """MODEL_PATH may be a repo id. Resolution is cache-only by design; the eval"""
+    """MODEL_PATH may be a repo id."""
     env = _install(
         monkeypatch,
         tmp_path,

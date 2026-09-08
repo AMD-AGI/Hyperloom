@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Covers the LLM-transport stability env helper and the process-group kill in"""
+"""Covers the LLM-transport stability env helper and the process-group kill in ``_run_subprocess`` that reaps a hung grandchild instead of orphaning it."""
 
 from __future__ import annotations
 
@@ -134,7 +134,7 @@ def test_a_tool_is_named_after_the_script_it_runs():
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group kill is POSIX-only")
 async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
-    """A timed-out child that spawned a long-lived grandchild must have the"""
+    """A timed-out child that spawned a long-lived grandchild must have the grandchild reaped too (process-group kill), not orphaned."""
     pidfile = tmp_path / "grandchild.pid"
     # Parent spawns a grandchild `sleep 300`, records its pid, then blocks.
     script = (

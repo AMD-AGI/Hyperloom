@@ -68,7 +68,7 @@ def test_a_settled_verdict_is_not_revived_to_pending(verdict: str) -> None:
 
 @pytest.mark.parametrize("verdict", _VERDICTS)
 def test_a_settled_verdict_keeps_the_micro_it_was_judged_on(verdict: str) -> None:
-    """evict_terminal ranks post-mortem retention by micro; a settled record's"""
+    """evict_terminal ranks post-mortem retention by micro; a settled record's number is evidence for its verdict, not a slot for a fresh measurement."""
     state, integration_id = _settled(verdict, micro=1.2)
     kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
     assert state.pending_kernel_integrations[integration_id]["micro_speedup"] == 1.2
@@ -91,7 +91,7 @@ def test_re_offering_a_settled_verdict_is_logged(verdict: str, caplog: Any) -> N
 
 @pytest.mark.parametrize("verdict", _VERDICTS)
 def test_a_re_offered_verdict_survives_ten_cycles_as_a_verdict(verdict: str, monkeypatch: Any) -> None:
-    """A verdict is stable across macro cycles: repeated re-offers of the same"""
+    """A verdict is stable across macro cycles: repeated re-offers of the same recipe neither change its status nor add a second record for it."""
     monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "1")
     state, integration_id = _settled(verdict, micro=1.0)
     for _ in range(10):
@@ -103,7 +103,7 @@ def test_a_re_offered_verdict_survives_ten_cycles_as_a_verdict(verdict: str, mon
 
 @pytest.mark.parametrize("verdict", _VERDICTS)
 def test_a_re_offered_verdict_is_still_reaped_once_over_the_cap(verdict: str, monkeypatch: Any) -> None:
-    """Keeping the verdict keeps the record eligible for the queue's only"""
+    """Keeping the verdict keeps the record eligible for the queue's only deletion point, so a re-offered sibling is still reaped like any terminal."""
     monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "1")
     state, integration_id = _settled(verdict, micro=1.0)
     for _ in range(10):
@@ -139,7 +139,7 @@ def test_a_revived_dispatch_failure_reaches_the_drain_again() -> None:
 
 
 def test_a_settled_verdict_is_held_back_by_the_pending_gate() -> None:
-    """Only the status gate is under test here; the permanent"""
+    """Only the status gate is under test here; the permanent ``kernel_integrate_attempts`` ledger is what really carries idempotency."""
     state, _ = _settled("rejected")
     kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
     assert [str(row["integration_id"]) for row in kd.pending_kernel_integration_records(state)] == []

@@ -952,7 +952,7 @@ class KernelValidationRunner(Protocol):
 
 
 def classify_compile_error(error: str, recipe: Optional[Recipe] = None) -> str:
-    """Map a compile/import error to a crisp, reusable lesson (mirrors the"""
+    """Map a compile/import error to a crisp, reusable lesson (mirrors the forge-loop experience ledger's ``_CONSTRAINT_RULES``)."""
     e = (error or "").lower()
     if any(m in e for m in _CUDA_ONLY_MARKERS):
         return (

@@ -62,7 +62,7 @@ def test_tracks_the_baseline_derivation(monkeypatch):
 
 
 def test_persisted_benchmark_mode_raises_without_the_env_var(monkeypatch):
-    """A re-baseline driven from a subprocess that never inherited"""
+    """A re-baseline driven from a subprocess that never inherited ``HYPERLOOM_AGENTX`` must still get the raise from the session's persisted ``benchmark_mode`` -- otherwise it reproduces the exact mid-warmup kill this function exists to prevent."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv("AGENTX_DURATION", "3600")
     monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "28800")

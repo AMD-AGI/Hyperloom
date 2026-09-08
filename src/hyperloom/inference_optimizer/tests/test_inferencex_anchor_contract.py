@@ -152,7 +152,7 @@ def load_record() -> dict:
 
 
 def test_recorded_ref_matches_the_pin_the_code_installs():
-    """Bumping INFERENCEX_REF is exactly when an anchor silently rots, so the"""
+    """Bumping INFERENCEX_REF is exactly when an anchor silently rots, so the bump cannot be allowed to pass without someone re-verifying."""
     record = load_record()
 
     assert record["ref"] == _INFERENCEX_REF_DEFAULT, (
@@ -173,7 +173,7 @@ def test_recorded_fingerprint_matches_the_current_anchors():
 
 
 def test_record_covers_every_anchor_in_the_contract():
-    """A newly added patch must be verified against upstream too, not just"""
+    """A newly added patch must be verified against upstream too, not just inherit the previous record's silence."""
     record = load_record()
 
     recorded = {name for spec in record["files"].values() for name in spec["anchors"]}
@@ -181,7 +181,7 @@ def test_record_covers_every_anchor_in_the_contract():
 
 
 def test_every_recorded_anchor_matched_exactly_one_site():
-    """One site is the whole contract: zero means the patch is inert, and more"""
+    """One site is the whole contract: zero means the patch is inert, and more than one means the file drifted into a shape the patcher never handled."""
     record = load_record()
 
     hits = {name: n for spec in record["files"].values() for name, n in spec["anchors"].items()}
@@ -203,7 +203,7 @@ def test_record_covers_the_magpie_patch():
 
 @pytest.mark.parametrize("rel_path", sorted(anchors_by_file()))
 def test_pinned_upstream_still_matches_every_anchor(rel_path):
-    """The layer that actually re-verifies. Skipped without access to the"""
+    """The layer that actually re-verifies."""
     record = load_record()
     text = fetch_pinned_file(rel_path, record["ref"])
     if text is None:
@@ -220,7 +220,7 @@ def test_pinned_upstream_still_matches_every_anchor(rel_path):
 
 
 def test_recorded_probe_target_is_the_path_the_patcher_appends_to():
-    """The probe has no anchor to rot, but it does need this file to exist: if"""
+    """The probe has no anchor to rot, but it does need this file to exist: if upstream moves it the patch degrades to a warning and the eval runs unbounded again -- the exact failure the probe was written to stop."""
     record = load_record()
 
     assert record["probe_target"]["path"] == PROBE_TARGET_PATH, (

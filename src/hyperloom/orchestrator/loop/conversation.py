@@ -799,7 +799,7 @@ class ConversationCollaborator:
         return "\n".join(lines)
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
-        """Return ``(direction, pct)`` for the most-saturated roofline direction"""
+        """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
         from ..kernel.roofline_snapshot import dominant_direction
 
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []

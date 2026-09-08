@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Specialist dispatch profile — the four orthogonal dials that parameterise a"""
+"""Specialist dispatch profile — the four orthogonal dials that parameterise a single ``specialist`` worker."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def _infer_scope(p: dict[str, Any]) -> str:
 
 
 def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
-    """True when a GPU specialist should lease the *whole machine* (time-shared"""
+    """True when a GPU specialist should lease the *whole machine* (time-shared with serving via ``gpu_research_lane``) rather than the serving-disjoint ``gpu_specialist_pool``."""
     p = params or {}
     if bool(p.get("framework_agent_authoring")):
         return True
@@ -95,7 +95,7 @@ def uses_whole_machine_gpu_lane(params: dict[str, Any] | None) -> bool:
 
 
 def holds_serving_slot(params: dict[str, Any] | None) -> bool:
-    """True when a GPU specialist must hold the whole-machine ``serving_slot``"""
+    """True when a GPU specialist must hold the whole-machine ``serving_slot`` Ray resource (mutually exclusive with production serving)."""
     return resolve_specialist_profile(params or {}).reserves_benchmark_lane
 
 

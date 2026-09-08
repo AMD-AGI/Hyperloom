@@ -139,7 +139,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
-    """A raised executor exception must not collapse into the generic"""
+    """A raised executor exception must not collapse into the generic unknown_error gap bucket -- error_class carries the exception's own class name."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -409,7 +409,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     session_dir,
     monkeypatch,
 ):
-    """A consecutive BackendError streak promotes per-call ``backend_error``"""
+    """A consecutive BackendError streak promotes per-call ``backend_error`` events into a single ``backend_unhealthy`` observation, fired once."""
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
         "3",
@@ -612,7 +612,7 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 @pytest.mark.asyncio
 async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
-    """When idempotency_key is under params, Coordinator treats it as the"""
+    """When idempotency_key is under params, Coordinator treats it as the delegate key and removes it from executor params."""
     delegate = Intent(
         type=IntentType.DELEGATE,
         payload={
@@ -745,7 +745,7 @@ async def test_explore_not_denied_before_profile(session_dir):
 async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
-    """Actions must NOT be denied when ``last_trace_analyze`` is stale (the"""
+    """Actions must NOT be denied when ``last_trace_analyze`` is stale (the action-layer ``trace_analyze`` hard-gate was removed)."""
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={
@@ -1755,7 +1755,7 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
 async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
     session_dir,
 ):
-    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot"""
+    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot eager fallback flag through the real coordinator failure handler."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1787,7 +1787,7 @@ async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
 async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
     session_dir,
 ):
-    """Executor consumption must clear Coordinator's live state too, or a later"""
+    """Executor consumption must clear Coordinator's live state too, or a later coordinator save re-persists stale True and makes the one-shot eager fallback sticky for all later baseline retries."""
     from hyperloom.orchestrator.actions.executors.baseline import (
         BaselineExecutor,
     )
@@ -1824,7 +1824,7 @@ async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
 async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted(
     session_dir,
 ):
-    """Resume case: with an existing baseline (tput > 0) the coordinator must"""
+    """Resume case: with an existing baseline (tput > 0) the coordinator must NOT arm the eager fallback on a later cuda-graph capture failure."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:

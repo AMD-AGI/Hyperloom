@@ -300,7 +300,7 @@ class TaskRegistry:
         now_unix: float | None = None,
         reason: str = "lease_expired",
     ) -> list[str]:
-        """Fail running tasks whose execution lease (``lease_ttl_sec`` since"""
+        """Fail running tasks whose execution lease (``lease_ttl_sec`` since ``updated_at``) has expired (R6 watchdog / cycle soft-restart cleanup)."""
         import time as _time
 
         now = float(now_unix if now_unix is not None else _time.time())

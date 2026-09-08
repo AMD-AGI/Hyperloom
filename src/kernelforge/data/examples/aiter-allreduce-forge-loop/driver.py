@@ -109,7 +109,7 @@ def _suite_tp4_thresholds(dtype: str = "bf16") -> list[Case]:
 
 
 def _suite_tp4_wide(dtype: str = "bf16") -> list[Case]:
-    """Wider case set that also scores the kernels themselves, not just the"""
+    """Wider case set that also scores the kernels themselves, not just the crossover threshold."""
     cases: list[Case] = []
     # 16-32 KiB: always 1-stage. Sensitive to the 1-stage kernel, not the cut.
     for rows in (1, 2):

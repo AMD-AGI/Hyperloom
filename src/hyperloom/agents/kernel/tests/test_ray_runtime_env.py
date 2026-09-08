@@ -74,7 +74,7 @@ def test_explicit_anthropic_key_stays_on_anthropic_side(monkeypatch):
 
 
 def test_split_gateway_leaves_geak_aliases_to_the_operator(monkeypatch):
-    """Split deploy: the generic OpenAI-protocol aliases derive from the OpenAI"""
+    """Split deploy: the generic OpenAI-protocol aliases derive from the OpenAI key, while the GEAK aliases stay unset for either side to claim."""
     _clear(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
@@ -107,7 +107,7 @@ def test_explicit_geak_aliases_are_forwarded_verbatim(monkeypatch):
 
 
 def test_anthropic_only_leaves_openai_side_unset(monkeypatch):
-    """Anthropic-only entry: the OpenAI-protocol aliases stay unconfigured. GEAK"""
+    """Anthropic-only entry: the OpenAI-protocol aliases stay unconfigured."""
     _clear(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")

@@ -30,7 +30,7 @@ def test_name_mapping_case_insensitive():
 
 
 def test_name_mapping_canonical_names_starting_with_vendor_token():
-    """Canonical names beginning with a vendor-like token must not be mangled"""
+    """Canonical names beginning with a vendor-like token must not be mangled by the prefix strip (regression: DeepSeek / Qwen mapped to None)."""
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
     assert to_inferencex_name("DeepSeek-R1-0528") == "DeepSeek-R1-0528"
@@ -164,7 +164,7 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
 
 
 def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeypatch):
-    """A disaggregated / multinode row with inflated per-GPU throughput must not"""
+    """A disaggregated / multinode row with inflated per-GPU throughput must not be promoted to ``best`` — only single-node aggregated rows are comparable."""
     rows = _make_rows()
     disagg = json.loads(json.dumps(_SAMPLE_ROW))
     disagg["disagg"] = True
@@ -190,7 +190,7 @@ def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeyp
 
 
 def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
-    """On success, a measured ``competitor_target.json`` (source = API URL) is"""
+    """On success, a measured ``competitor_target.json`` (source = API URL) is written so the EXPLORE advisory gap is driven by real InferenceX data."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
@@ -348,7 +348,7 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
 
 
 def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
-    """A pre-existing (e.g. scout-authored) competitor_target.json must be"""
+    """A pre-existing (e.g. scout-authored) competitor_target.json must be dropped when analyze() ends in no_match, so the advisory feed never reads a non-API source."""
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 
@@ -381,7 +381,7 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
 
 
 def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monkeypatch):
-    """When measured advisory write fails, any pre-existing competitor_target.json"""
+    """When measured advisory write fails, any pre-existing competitor_target.json must be removed so the EXPLORE gap block never reads a non-API source."""
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the session manifest writer (provenance helpers, image"""
+"""Unit tests for the session manifest writer (provenance helpers, image detection, objective derivation, and the atomic write/load round-trip)."""
 
 from __future__ import annotations
 
@@ -271,7 +271,7 @@ def test_build_manifest_with_args(monkeypatch):
 
 
 def test_build_manifest_shared_provenance_fields(monkeypatch):
-    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0"""
+    """Schema v4 carries gfx/EP/graph-mode/server-args from the shared WP-0 provenance builder (kept in lockstep with the TraceShapeManifest)."""
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)
@@ -296,7 +296,7 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
 
 
 def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tmp_path):
-    """``--framework-env isolated`` is the default for vLLM, so the framework is"""
+    """``--framework-env isolated`` is the default for vLLM, so the framework is installed where the orchestrator's interpreter cannot see it."""
     monkeypatch.setattr(mf, "_git_revision", lambda: "rev1")
     monkeypatch.setattr(mf, "_build_dependencies", lambda: {})
     monkeypatch.setattr(mf, "_detect_image", lambda: None)

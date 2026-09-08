@@ -149,7 +149,7 @@ vllm serve $MODEL --trust-remote-code
 
 
 def test_parse_env_tokenizer_knob_is_not_a_credential(tmp_path):
-    """The TOKEN fragment must not swallow TOKENIZERS_PARALLELISM, and the"""
+    """The TOKEN fragment must not swallow TOKENIZERS_PARALLELISM, and the exemption must not turn TOKENIZER into a way past the fragment rule."""
     text = """\
 export TOKENIZERS_PARALLELISM=false
 export HF_TOKEN=secret

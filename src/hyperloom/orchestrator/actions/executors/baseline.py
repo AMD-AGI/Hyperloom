@@ -447,7 +447,7 @@ def _classify_subprocess_error(
     elapsed_sec: float,
     stderr_tail: str,
 ) -> str:
-    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg"""
+    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg validation error, else 'subprocess_nonzero'."""
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
@@ -2374,7 +2374,7 @@ class BaselineExecutor:
         *,
         expected_handoff: bool = False,
     ) -> float:
-        """Record a salvaged sibling accuracy, publishing it as the gate"""
+        """Record a salvaged sibling accuracy, publishing it as the gate reference only when it can serve as one."""
         from ._accuracy_gate import accuracy_meets_floor
 
         acc_val = float(salvaged["accuracy"])
@@ -3267,7 +3267,7 @@ class BaselineExecutor:
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort teardown of a persistent server left by the"""
+        """Best-effort teardown of a persistent server left by the double-run rounds."""
         _lifecycle.teardown_lifecycle_server(
             pid_dir=pid_dir,
             framework=framework,

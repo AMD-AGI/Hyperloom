@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""P0 acceptance smoke for Ray-managed GPU execution."""
+"""P0 acceptance smoke for Ray-managed GPU execution.
+
+Demonstrates the make-or-break invariant on a real Ray cluster:
+
+  1. A ServingActor holding num_gpus occupies the GPUs while alive.
+  2. A second GPU actor requesting a GPU is *pending* (queued) until the
+     serving actor releases — proving Ray serializes GPU contention.
+  3. Killing the serving actor reaps its subprocess tree (PR_SET_PDEATHSIG) —
+     no detached GPU process escapes the lease.
+
+Runs against an already-running Ray cluster (does not start/stop one). Uses a
+harmless ``sleep`` as the "GPU process" so no real model is loaded — this
+validates Ray resource accounting + process lifetime, not throughput.
+
+Usage:  python scripts/ray_exec_p0_smoke.py [--gpus N]
+Exit 0 = all invariants held.
+"""
 
 from __future__ import annotations
 

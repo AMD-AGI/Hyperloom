@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark result parsing shared by Magpie-backed executors, plus post-run"""
+"""Benchmark result parsing shared by Magpie-backed executors, plus post-run artifact harvesting and salvage helpers."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def _materialize_rescue_into_workspace(
 
 
 def _env_derived_leak_roots() -> list[Path]:
-    """Leak roots derived from the runtime env: the InferenceX checkout"""
+    """Leak roots derived from the runtime env: the InferenceX checkout (``$INFERENCEX_PATH``), where ``append_lm_eval_summary``'s ``mv ./`` lands, plus ``$RESULT_DIR`` when an override routed results outside the workspace."""
     out: list[Path] = []
     for env_key in ("INFERENCEX_PATH", "RESULT_DIR"):
         val = (os.environ.get(env_key) or "").strip()

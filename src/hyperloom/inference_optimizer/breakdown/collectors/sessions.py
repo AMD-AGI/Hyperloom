@@ -775,7 +775,7 @@ def _reconstruct_baseline_attempts(
     session_dir: Path,
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Walk ``<sd>/runs/baseline/<hash>/**/benchmark_report.json`` and"""
+    """Walk ``<sd>/runs/baseline/<hash>/**/benchmark_report.json`` and synthesize :class:`BaselineAttemptSummary` rows for each."""
     root = session_dir / "runs" / "baseline"
     if not root.exists():
         return []

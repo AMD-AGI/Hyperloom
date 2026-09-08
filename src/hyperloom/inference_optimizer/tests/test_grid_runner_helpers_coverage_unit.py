@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Supplemental coverage for _grid_runner pure helpers: compatibility filter"""
+"""Supplemental coverage for _grid_runner pure helpers: compatibility filter model-class drop, runtime override env branches, report parsing, and per-variant yaml env injection."""
 
 from __future__ import annotations
 

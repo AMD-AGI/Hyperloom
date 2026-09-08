@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``)"""
+"""Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``) and unified-diff parsing (``_audit_common``)."""
 
 from __future__ import annotations
 

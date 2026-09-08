@@ -483,7 +483,8 @@ class CodexBackend:
             role_model = resolve_codex_model(role.model or spec.model)
             effort = role.reasoning_effort or spec.reasoning_effort
             effort = resolve_codex_reasoning_effort(effort)
-            # config.toml spells full access with the warning in the name.
+            # Derive confinement only from the role. Parent bypass removes OS isolation, but roles have no tool
+            # allowlist, so inheriting it here could silently give a read-only reviewer write access.
             sandbox_mode = "workspace-write" if role.writable else "read-only"
             role_path = (roles_dir / f"{role_name}.toml").resolve()
             role_path.write_text(

@@ -148,7 +148,7 @@ def _run_capturing_variant_notes(
 
 
 class TestVariantBoundaryReportsEveryOutcome:
-    """``_report_finished_variant`` fires on every variant outcome, including"""
+    """``_report_finished_variant`` fires on every variant outcome, including the multi-node ``mn_server_restart_failed`` path that used to leave before reaching it."""
 
     def test_mn_server_restart_failed_reaches_the_variant_boundary(self, tmp_path, monkeypatch):
         """A variant whose remote server never came back still ends its own row."""
@@ -205,7 +205,7 @@ class TestVariantBoundaryReportsEveryOutcome:
 
 
 class TestKeepGoingAsymmetry:
-    """The break gates are keyed on ``rc != 0``: an ``rc==0`` failure (invalid"""
+    """The break gates are keyed on ``rc != 0``: an ``rc==0`` failure (invalid measurement, or no workspace) ALWAYS continues to the next variant even when ``keep_going_on_failure=False``; only an ``rc != 0`` failure breaks."""
 
     def _run(self, run_side_effect, base, out):
         with patch(
@@ -426,7 +426,7 @@ class TestAutoWarmupTeardown:
         assert teardown_calls[0]["framework"] == "sglang"
 
     def test_warmup_round_timeout_tears_down_once(self, tmp_path, monkeypatch):
-        """Companion path: the warmup round itself times out (its own teardown"""
+        """Companion path: the warmup round itself times out (its own teardown branch, before the measured round is ever reached)."""
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)

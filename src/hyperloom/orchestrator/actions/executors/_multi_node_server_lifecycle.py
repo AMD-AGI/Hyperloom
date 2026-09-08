@@ -676,7 +676,7 @@ def _models_empty_too_long(
 
 
 def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
-    """Best-effort: True when worker ``ip``'s server log shows a persistent"""
+    """Best-effort: True when worker ``ip``'s server log shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
     import re as _re
 
     if not shared_dir:
@@ -695,7 +695,7 @@ def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
 
 
 def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
-    """Best-effort: return a short reason when worker ``ip``'s server log shows a"""
+    """Best-effort: return a short reason when worker ``ip``'s server log shows a NON-RECOVERABLE startup failure (so /health will never flip), else None."""
     import re as _re
 
     if not shared_dir:
@@ -731,7 +731,7 @@ def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
 
 
 async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) -> None:
-    """Wait for every prefill/decode worker's own /health to return 200 before"""
+    """Wait for every prefill/decode worker's own /health to return 200 before the frontend serving probe runs."""
     import time as _t
 
     try:
@@ -858,7 +858,7 @@ def _shared_worker_log_tail(ip: str, max_bytes: int = 2_000_000) -> str | None:
 
 
 def _collect_worker_server_logs(state: dict, reason: str) -> None:
-    """Best-effort: capture each prefill/decode pod sglang server log into"""
+    """Best-effort: capture each prefill/decode pod sglang server log into ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/server_logs`` when a restart fails its health/serving probe, so a 503 / KV handoff / cold-JIT failure leaves a post-mortem after the pods are torn down."""
     import time as _t
 
     sess = (
@@ -1166,7 +1166,7 @@ async def _wait_for_published_service_ready_async(
     timeout_s: int = 300,
     poll_every_s: int = 10,
 ) -> None:
-    """Gate on the published ``service_url`` the benchmark dials, not only the"""
+    """Gate on the published ``service_url`` the benchmark dials, not only the reachable address :func:`_wait_for_server_health_async` proves."""
     import time as _time
 
     if timeout_s <= 0:

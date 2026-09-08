@@ -1029,7 +1029,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_revert_patch(args: argparse.Namespace) -> int:
-    """Fan out a kernel patch revert across the pods that originally"""
+    """Fan out a kernel patch revert across the pods that originally received it."""
     if _load_state().get("backend") == "infera":
         return _infera_revert_patch(args)
     state = _load_state()

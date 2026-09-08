@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Tests for the canonical analysis.md renderer (_analysis_md) and the report"""
+"""Tests for the canonical analysis.md renderer (_analysis_md) and the report structure it guarantees for the bypass route that consumes it."""
 
 from __future__ import annotations
 

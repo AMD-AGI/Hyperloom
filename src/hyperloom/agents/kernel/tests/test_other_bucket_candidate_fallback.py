@@ -235,7 +235,7 @@ def test_synthetic_analysis_md_missing_high_time_op_is_recovered(tmp_path):
 
 
 def test_recovered_other_bucket_kernel_routes_to_geak(tmp_path, monkeypatch):
-    """A recovered raw candidate (source_file unset) flows through"""
+    """A recovered raw candidate (source_file unset) flows through _finalize_candidates -> classify_patchability and a Triton kernel under /sgl-workspace/sglang/ is marked reusable_native_kernel=True (routable to GEAK)."""
     _write(
         tmp_path / "ops_summary.csv",
         _ops_summary_csv("fused_moe_kernel,other,6700.0\naten::mm,GEMM,3300.0\n"),
@@ -342,7 +342,7 @@ def test_clean_category_label_swallows_oversized_literal():
 
 
 def test_recover_moe_fused_real_schema(tmp_path):
-    """The dominant MoE_fused row (67% GPU time) is recovered from the REAL"""
+    """The dominant MoE_fused row (67% GPU time) is recovered from the REAL ops_summary.csv schema even though it is NOT an "other"-bucket op."""
     _write(tmp_path / "ops_summary.csv", _real_ops_summary_csv())
     # analysis.md surfaced the GEMM; the 67% MoE_fused kernel had no block.
     recovered = tla.recover_other_bucket_candidates(
@@ -358,7 +358,7 @@ def test_recover_moe_fused_real_schema(tmp_path):
 
 
 def test_compound_subwindow_keywords_extracts_function():
-    """The embedded function symbol is recoverable from the profiler-wrapped"""
+    """The embedded function symbol is recoverable from the profiler-wrapped op name so source resolution can grep for it."""
     windows = tla._compound_subwindow_keywords(_REAL_MOE_NAME)
     assert "invoke_fused_moe_kernel" in windows
     # The full compound token (which never appears verbatim in source) is not the only keyword we try.
@@ -381,7 +381,7 @@ def _make_fake_sglang_tree(root: Path) -> Path:
 
 
 def test_locate_source_resolves_profiler_wrapped_name(tmp_path, monkeypatch):
-    """locate_source_via_grep resolves a profiler-wrapped op name to its kernel"""
+    """locate_source_via_grep resolves a profiler-wrapped op name to its kernel source via trailing sub-window keywords (hermetic — uses a fake source tree)."""
     src = _make_fake_sglang_tree(tmp_path / "src")
     monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "src"),))
     tla._GREP_CACHE.clear()
@@ -390,7 +390,7 @@ def test_locate_source_resolves_profiler_wrapped_name(tmp_path, monkeypatch):
 
 
 def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
-    """End-to-end (hermetic): real-schema MoE_fused row -> recovered ->"""
+    """End-to-end (hermetic): real-schema MoE_fused row -> recovered -> _finalize_candidates -> source resolved -> reusable_native_kernel=True."""
     _write(tmp_path / "ops_summary.csv", _real_ops_summary_csv())
     src = _make_fake_sglang_tree(tmp_path / "src")
     fake_root = str(tmp_path / "src") + "/"

@@ -45,7 +45,7 @@ class GpuLeakConfig:
 
 
 class GpuLeakDetector:
-    """Stateful per-tick rule emitting ``gpu_memory_leaked``; the counter resets on any"""
+    """Stateful per-tick rule emitting ``gpu_memory_leaked``; the counter resets on any non-matching tick so a one-tick cold-start blip can't accumulate a false positive."""
 
     def __init__(
         self,

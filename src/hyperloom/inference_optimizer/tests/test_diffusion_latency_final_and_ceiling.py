@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the scriptable/diffusion (xDiT) latency-domain surfacing."""
+"""Cover xDiT latency metrics across registry, roofline, final reports, and state backfill."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the predicted-gain calibration, the min-gain gate, source-hint"""
+"""Tests for the predicted-gain calibration, the min-gain gate, source-hint confirmation, already-fused detection, and the newly added patterns."""
 
 from __future__ import annotations
 

@@ -410,7 +410,7 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
 
 
 def _lifecycle_paths(payload: Any) -> dict[str, str]:
-    """Extract present, non-empty path-like fields from a kernel handler"""
+    """Extract present, non-empty path-like fields from a kernel handler payload or result dict."""
     if not isinstance(payload, dict):
         return {}
     out: dict[str, str] = {}

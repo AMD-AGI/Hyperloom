@@ -137,7 +137,7 @@ def test_only_transient_transport_failures_are_retried(error, expected):
 
 
 def test_a_wrapped_transport_error_is_read_through_the_cause_chain():
-    """Backends flatten the transport error into a message of their own, so the"""
+    """Backends flatten the transport error into a message of their own, so the type that decides retryability is the ``__cause__``."""
     cause = ConnectionResetError("connection reset by peer")
     wrapped = RuntimeError("Codex SDK execution failed: [Errno 104]")
     wrapped.__cause__ = cause
@@ -146,7 +146,7 @@ def test_a_wrapped_transport_error_is_read_through_the_cause_chain():
 
 
 def test_a_safety_stop_stays_terminal_even_when_wrapped():
-    """A rollback-triggering safety stop must never be retried, however it is"""
+    """A rollback-triggering safety stop must never be retried, however it is reported: retrying it re-runs the session that violated the workspace."""
     wrapped = RuntimeError("connection reset")  # would otherwise look transient
     wrapped.__cause__ = _FakeSafetyError("Codex read-only resume changed the workspace")
 
@@ -202,7 +202,7 @@ def test_the_handle_is_read_through_the_cause_chain():
 
 
 def test_the_resume_chain_stops_at_its_deadline():
-    """The resume budget does not bound wall clock: each attempt may spend a full"""
+    """The resume budget does not bound wall clock: each attempt may spend a full turn timeout, so an outage outliving the budget would hold the campaign."""
     # First read anchors the start; every later read is past the deadline.
     reads = iter([0.0])
     clock = lambda: next(reads, 5000.0)  # noqa: E731 - one-line fake clock

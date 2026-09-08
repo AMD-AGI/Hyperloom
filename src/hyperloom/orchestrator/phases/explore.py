@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Configuration arm: macro-cycle strategy, specialist fan-out/retry, gap"""
+"""Configuration arm: macro-cycle strategy, specialist fan-out/retry, gap tracking, and autosubmit of specialist patches / framework configs."""
 
 from __future__ import annotations
 from hashlib import sha1
@@ -86,7 +86,7 @@ def _forward_integrate_source(
 
 
 class ExplorePhase(CoordinatorCollaborator):
-    """The configuration arm of the OPTIMIZE phase: server-arg / env grids, the"""
+    """The configuration arm of the OPTIMIZE phase: server-arg / env grids, the specialist fan-out that sources them, and the macro-cycle machinery that reopens a cycle."""
 
     def _negative_ledger_domain_counts(self, *, recent_cycles: int = 3) -> dict[str, int]:
         """Summarise recent negative explore-ledger pressure by specialist domain."""
@@ -443,7 +443,7 @@ class ExplorePhase(CoordinatorCollaborator):
                 )
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
-        """Force-dispatch a domain specialist for a domain untouched for too many"""
+        """Force-dispatch a domain specialist for a domain untouched for too many config-arm rounds that still has an open gap in the gaps[] ledger."""
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return None
@@ -560,7 +560,7 @@ class ExplorePhase(CoordinatorCollaborator):
         intent: Intent,
         params: dict[str, Any],
     ) -> None:
-        """Fan a specialist delegate carrying ``params.tasks=[...]`` into N"""
+        """Fan a specialist delegate carrying ``params.tasks=[...]`` into N standard free-form specialist dispatches (scope=freeform, lane=cpu, mode=research defaults)."""
         tasks = params.get("tasks") or []
         shared = {k: v for k, v in params.items() if k != "tasks"}
         base_key = str(intent.payload.get("idempotency_key") or "").strip()
@@ -1227,7 +1227,7 @@ class ExplorePhase(CoordinatorCollaborator):
         domain: str,
         proposals: list[Any],
     ) -> None:
-        """Multi-node bridge: turn a specialist ``proposal_set`` into a"""
+        """Multi-node bridge: turn a specialist ``proposal_set`` into a benchmarked ``explore`` task automatically."""
         # Framework config-generation specialists own their proposal_set; skip.
         if bool((getattr(task, "params", None) or {}).get("framework_config_generation")):
             return

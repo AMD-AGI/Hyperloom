@@ -575,7 +575,7 @@ def _setup_worktree(
     worktree_path: Path,
     branch: str,
 ) -> tuple[Path | None, str]:
-    """Create a fresh git worktree at ``worktree_path`` branched off"""
+    """Create a fresh git worktree at ``worktree_path`` branched off ``base``'s HEAD."""
     if worktree_path.exists():
         # Resume / retry: reuse an existing worktree.
         log.warning(

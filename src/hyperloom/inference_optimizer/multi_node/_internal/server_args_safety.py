@@ -38,7 +38,8 @@ _DENIED_FLAG_SUFFIXES: tuple[str, ...] = (
     "-path",
 )
 
-# Legitimate optimization knobs that happen to end with a denied suffix.
+# Legitimate tuning flags ending in a denied suffix. Explicit denies still win, and only the name is exempt: values
+# remain subject to _unsafe_path_value_reason so this cannot reopen filesystem or model injection.
 _SUFFIX_EXEMPT_CLI_FLAGS: frozenset[str] = frozenset(
     {
         "--speculative-draft-model-path",

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase-independent internal task handler: research-scout, static-recon, and"""
+"""Phase-independent internal task handler: research-scout, static-recon, and trajectory-reviewer auto-enqueue helpers used across multiple phases."""
 
 from __future__ import annotations
 import logging as _logging
@@ -228,7 +228,7 @@ class InternalTasksPhase(PhaseHandler):
             log.exception("static-recon: PRELUDE dispatch failed")
 
     async def _maybe_enqueue_trajectory_reviewer(self) -> None:
-        """On a plateau, dispatch a Coordinator-owned readonly specialist seeded"""
+        """On a plateau, dispatch a Coordinator-owned readonly specialist seeded with the deterministic trajectory digest to propose fresh directions."""
         if os.getenv(
             "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW",
             "1",

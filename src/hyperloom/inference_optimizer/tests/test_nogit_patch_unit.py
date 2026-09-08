@@ -200,7 +200,7 @@ PATCH_B = """\
 
 
 def test_backup_names_unique_across_patches_same_basename(tmp_path):
-    """Two patches touching a file with the same basename must not overwrite each"""
+    """Two patches touching a file with the same basename must not overwrite each other's backup when seq_offset is maintained across calls."""
     target = tmp_path / "common.py"
     target.write_text("original_a\n", encoding="utf-8")
 
@@ -343,7 +343,7 @@ def test_rename_patch_tracked_as_two_records(tmp_path):
 
 
 def test_apply_feedback_dry_run_failure_returns_fourth_item(tmp_path, monkeypatch):
-    """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with"""
+    """When all dry-run levels fail, _apply_patch_no_git returns a 4-tuple with an ApplyFeedback carrying the accumulated per-level stderr."""
     import subprocess as _sp
 
     patch_file = tmp_path / "bad.patch"
@@ -608,7 +608,7 @@ def test_apply_backup_failure_returns_error(tmp_path, monkeypatch):
 
 
 def test_apply_real_failure_collects_rej(tmp_path):
-    """When dry-run passes for a level but the real apply fails, we surface a"""
+    """When dry-run passes for a level but the real apply fails, we surface a nogit ApplyFeedback (with any .rej content) rather than raising."""
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -938,7 +938,7 @@ def test_modification_backup_failure_returns_error(tmp_path, monkeypatch):
 
 
 def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
-    """When the real apply fails AND source-context extraction throws, feedback"""
+    """When the real apply fails AND source-context extraction throws, feedback still returns with empty source_context (real-apply exception branch)."""
 
     target = tmp_path / "target.py"
     target.write_text("original\n", encoding="utf-8")
@@ -970,7 +970,7 @@ def test_real_apply_fail_source_context_exception_swallowed(tmp_path, monkeypatc
 
 
 def test_dry_run_fail_source_context_exception_swallowed(tmp_path, monkeypatch):
-    """If reading source context throws on total dry-run failure, feedback still"""
+    """If reading source context throws on total dry-run failure, feedback still returns with an empty source_context (exception branch)."""
 
     patch_file = tmp_path / "bad.patch"
     patch_file.write_text(SIMPLE_DIFF, encoding="utf-8")

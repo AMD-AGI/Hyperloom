@@ -132,7 +132,7 @@ def test_sentinel_match_is_case_insensitive(tmp_path, monkeypatch):
 
 
 def test_sentinel_pass_through_is_logged(tmp_path, monkeypatch, caplog):
-    """A sentinel-driven accept must be visible in logs, not indistinguishable"""
+    """A sentinel-driven accept must be visible in logs, not indistinguishable from a normal accept -- previously this branch returned silently."""
     _framework_tree(tmp_path, monkeypatch)
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.policy.gate"):
         _gate(tmp_path).validate_intent("orchestration", _dispatch_intent("Not found"))

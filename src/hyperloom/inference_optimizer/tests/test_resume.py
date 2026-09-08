@@ -663,7 +663,7 @@ class TestTracelensRootEnvCorrection:
         assert _os.environ["TRACELENS_ROOT"] == str(inherited)
 
     def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch):
-        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the"""
+        """MAGPIE_PATH is out of scope: a merely-existing non-checkout dir in the env file must NOT be promoted to an explicit MAGPIE_PATH override."""
         runtime = tmp_path / "runtime"
         runtime.mkdir()
         magpie_dir = tmp_path / "not-a-magpie-checkout"

@@ -196,7 +196,7 @@ async def test_each_further_failure_earns_its_own_attempt(coord: Coordinator):
 
 @pytest.mark.asyncio
 async def test_a_roofline_that_worked_is_never_re_run(coord: Coordinator):
-    """The streak resets to zero on a successful snapshot, so success collapses"""
+    """The streak resets to zero on a successful snapshot, so success collapses back onto the original key and stays idempotent across resumes."""
     coord.shared_state.roofline_failure_streak = 0
     first = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
     second = await coord._enqueue_internal_analysis_task(reason="prelude_initial")
@@ -234,7 +234,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
     named_state: str,
     reopens: bool,
 ):
-    """The gate exists so two rooflines never run at once, so it must hold for"""
+    """The gate exists so two rooflines never run at once, so it must hold for every live state and release for every finished one."""
     state = coord.shared_state
     state.baseline_tput = 100.0
     state.cumulative_gain_validated = 50.0
@@ -257,7 +257,7 @@ async def test_watermark_gate_reopens_exactly_when_the_roofline_it_names_finishe
 
 
 def test_watermark_stops_re_arming_once_retries_are_spent(coord: Coordinator):
-    """A roofline leg costs the better part of an hour, so a collector that is"""
+    """A roofline leg costs the better part of an hour, so a collector that is broken rather than flaky must not be allowed to spend the session on it."""
     from hyperloom.orchestrator.loop.coordinator_helpers import (
         _MAX_ROOFLINE_FAILURE_RETRIES,
     )

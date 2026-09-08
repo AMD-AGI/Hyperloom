@@ -117,7 +117,7 @@ async def test_needs_review_with_evidence_reauthors_once(coord: Coordinator) -> 
 
 @pytest.mark.asyncio
 async def test_reauthor_guard_caps_and_suffixes(coord: Coordinator) -> None:
-    """The first 3 needs_review verdicts re-author with incrementing"""
+    """The first 3 needs_review verdicts re-author with incrementing ``reauthor:{n}`` idempotency suffixes; the 4th hits the cap and does not re-author."""
     from types import SimpleNamespace
     from hyperloom.orchestrator.loop.coordinator import _AUTHORED_LANE_MAX_ATTEMPTS
 
@@ -193,7 +193,7 @@ async def test_reauthor_skipped_when_candidate_already_materializing(
 async def test_authoring_integrate_patch_reauthors_and_records_old_task(
     coord: Coordinator,
 ) -> None:
-    """An authored-patch integrate_patch sent back for evidence re-authors via"""
+    """An authored-patch integrate_patch sent back for evidence re-authors via the originating specialist; the observation carries old + new task ids."""
     from types import SimpleNamespace
 
     calls = _record_reauthor_calls(coord)

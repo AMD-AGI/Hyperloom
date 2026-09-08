@@ -294,7 +294,7 @@ def _installed(venv_root, name: str, version: str) -> str:
 
 
 def test_a_framework_in_its_own_venv_is_still_versioned(tmp_path):
-    """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel"""
+    """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel pins its own torch."""
     python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
     fp = _prov.detect_stack_fingerprint(
         {"HYPERLOOM_RESOLVED_FRAMEWORK": "vllm", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": python_exe}, probe=True

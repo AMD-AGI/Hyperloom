@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``materialize_config_with_envs``: golden snapshots of"""
+"""Behavior-lock tests for ``materialize_config_with_envs``: golden snapshots of the real materialized YAML, plus RUN_EVAL warn-once and unset/extra_envs restore."""
 
 from __future__ import annotations
 

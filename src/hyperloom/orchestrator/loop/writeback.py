@@ -2279,7 +2279,7 @@ class WritebackCollaborator:
             )
 
     def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
-        """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the"""
+        """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the session-wide seen-set, de-duped across the session."""
         block = done_payload.get("research")
         if not isinstance(block, dict):
             return
@@ -5005,7 +5005,7 @@ class WritebackCollaborator:
         return {"task_id": task.task_id, "existing": bool(existing)}
 
     async def _validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        """2a fallback - validate the geak win by REPLAYING it through"""
+        """2a fallback - validate the geak win by REPLAYING it through GEAK's own ``bench_e2e.sh`` (the harness that produced the headline result), so the optimized config engages BY CONSTRUCTION regardless of winner kind (tuned-config / kernel / overlay / flag)."""
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}

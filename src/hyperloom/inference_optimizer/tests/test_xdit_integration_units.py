@@ -334,7 +334,7 @@ class TestLifecycleScriptableSkip:
 
 
 class TestRooflineSnapshotUnits:
-    """The roofline snapshot table renders the achieved primary metric in the"""
+    """The roofline snapshot table renders the achieved primary metric in the framework-correct unit (serving tok/s vs scriptable per-image ms)."""
 
     def test_fmt_tput_serving_tok_s(self):
         from hyperloom.orchestrator.kernel import roofline_snapshot as rs
@@ -369,7 +369,7 @@ class TestRooflineSnapshotUnits:
         assert "decode memory-roofline ceiling" not in table
 
     def test_snapshot_carries_latency_siblings_and_within(self):
-        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and"""
+        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
         from hyperloom.orchestrator.kernel import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
@@ -426,7 +426,7 @@ class TestRooflineSnapshotUnits:
 
 
 class TestScriptableLatencyRooflineSidecar:
-    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when"""
+    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
 
     def _make_state(self, tmp_path):
         from hyperloom.orchestrator.state.shared_state import SharedState
@@ -525,7 +525,7 @@ class TestHyperloomArchSpec:
 
 
 class TestValidateTraceStructureScriptable:
-    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are"""
+    """For scriptable (xDiT) traces, the LLM/InferenceX structure checks are skipped; only the zero-ops (repeat=0 empty window) health signal applies."""
 
     def _write_trace(self, trace_dir, *, with_kernels: bool, with_annotations: bool = False) -> None:
         import gzip

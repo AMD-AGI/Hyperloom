@@ -47,7 +47,7 @@ def test_version_specifier_stripped_from_default_import_name():
 
 
 def test_url_spec_without_an_import_name_is_rejected():
-    """No import name can be derived from a URL, and guessing would mean the"""
+    """No import name can be derived from a URL, and guessing would mean the probe never resolves and the package reinstalls on every single run."""
     reqs, _, invalid = fd.parse_manifest("git+https://host/repo.git\n")
     assert reqs == []
     assert invalid == ["git+https://host/repo.git"]

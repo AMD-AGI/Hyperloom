@@ -59,7 +59,7 @@ def test_pick_worktree_base_prefers_the_framework_under_optimisation(tmp_path: P
 def test_pick_worktree_base_ignores_a_preferred_root_that_is_not_a_checkout(
     tmp_path: Path,
 ) -> None:
-    """A framework that is pip-installed rather than checked out must not"""
+    """A framework that is pip-installed rather than checked out must not disable isolation; the allowlist order still supplies a usable base."""
     other = tmp_path / "aiter"
     other.mkdir()
     (other / ".git").mkdir()

@@ -296,7 +296,7 @@ def _patch_for(rel_path: str) -> str:
 
 
 def _root_resolution_repos(tmp_path: Path, monkeypatch):
-    """The live layout: an unrelated repo heading the allowlist, and the"""
+    """The live layout: an unrelated repo heading the allowlist, and the session's own framework tree further down it."""
     unrelated = tmp_path / "aiter"
     (unrelated / "csrc").mkdir(parents=True)
     (unrelated / "csrc" / "kernel.cpp").write_text("old\n")
@@ -339,7 +339,7 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
     tmp_path: Path,
     monkeypatch,
 ):
-    """The session root is a fallback, not an override: a patch set that does"""
+    """The session root is a fallback, not an override: a patch set that does resolve must keep going to the tree that actually holds it."""
     unrelated, session = _root_resolution_repos(tmp_path, monkeypatch)
     patch = tmp_path / "kernel.patch"
     patch.write_text(_patch_for("csrc/kernel.cpp"))
@@ -351,7 +351,7 @@ def test_target_aware_match_still_wins_when_one_tree_holds_everything(
 
 
 def test_session_framework_root_is_named_not_guessed(tmp_path: Path, monkeypatch):
-    """``resolve_session_framework_root`` answers \"which tree is this session"""
+    """``resolve_session_framework_root`` answers "which tree is this session optimising", which is a different question from "what may be edited"."""
     from hyperloom.orchestrator.framework.paths import (
         _scriptable_frameworks,
         resolve_session_framework_root,
@@ -472,7 +472,7 @@ async def test_executor_apply_failure_rolls_back(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
-    """A patch targeting a file absent from the framework tree is rejected by"""
+    """A patch targeting a file absent from the framework tree is rejected by the preflight with ``patch_target_missing`` before any ``git apply`` runs."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -503,7 +503,7 @@ async def test_executor_missing_target_preflight_short_circuits(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
-    """Multi-node: the executor must SKIP neutrally (status='skipped', NOT"""
+    """Multi-node: the executor must SKIP neutrally (status='skipped', NOT 'failed') without applying to the sandbox — a sandbox-only apply would not affect pod-side serving."""
     from hyperloom.orchestrator.actions.executors import (
         _multi_node_env as mne,
     )
@@ -545,7 +545,7 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypatch):
-    """Single-node (is_multi_node False): the guard must NOT fire — the"""
+    """Single-node (is_multi_node False): the guard must NOT fire — the executor proceeds to the normal apply path bit-for-bit."""
     from hyperloom.orchestrator.actions.executors import (
         _multi_node_env as mne,
     )
@@ -1434,7 +1434,7 @@ def test_derive_lane_perf_explore():
 
 @pytest.mark.asyncio
 async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
-    """phase-3 §3.1: the patch benchmark forwards a serving lease to run_grid"""
+    """phase-3 §3.1: the patch benchmark forwards a serving lease to run_grid and closes it, so it serializes on the whole-machine serving_slot instead of colliding with a concurrent GPU-specialist server (the observed ``reverted_smoke_fail`` root cause)."""
     from unittest.mock import MagicMock, patch
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
@@ -1525,7 +1525,7 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monkeypatch):
-    """TOCTOU regression: when a task was queued at baseline tput/args, but an"""
+    """TOCTOU regression: when a task was queued at baseline tput/args, but an Explore KEEP advanced current_best before execution, bench must use the live stack top and REVERT if the measured tput sits below it."""
     from types import SimpleNamespace
     from unittest.mock import patch
 

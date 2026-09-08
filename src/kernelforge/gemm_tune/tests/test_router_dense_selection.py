@@ -126,7 +126,7 @@ class TestQuantizedModelsStillTuneBf16Dense:
         assert "sglang_dense_bf16" not in names
 
     def test_dense_fp8_with_only_lm_head_excluded_gets_a_bf16_fallback(self):
-        """No non-lm_head exclusion means the config gives no positive signal for"""
+        """No non-lm_head exclusion means the config gives no positive signal for a bf16 dense pass, so it is not selected to run unconditionally."""
         profile = _mxfp4_moe_profile(
             is_moe=False,
             num_experts=0,

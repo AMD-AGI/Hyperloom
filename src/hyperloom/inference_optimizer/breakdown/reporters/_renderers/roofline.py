@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Roofline comparison renderer — the baseline-vs-latest comparison built from"""
+"""Roofline comparison renderer — the baseline-vs-latest comparison built from ``state.roofline_snapshots``."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _delta_block(delta: dict[str, Any] | None) -> str:
 
 @register_renderer("roofline")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the roofline-comparison section (one block per collected"""
+    """Render the roofline-comparison section (one block per collected comparison; the collector emits at most one)."""
     entries_raw = breakdown.get("roofline")
     entries: list[dict[str, Any]] = entries_raw if isinstance(entries_raw, list) else []
     if not entries:

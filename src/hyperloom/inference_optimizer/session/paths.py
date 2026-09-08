@@ -86,7 +86,7 @@ def default_workspace_root() -> Path:
 
 
 def workspace_root() -> Path:
-    """Operator-facing workspace root: ``$USER_DATA_PATH`` (else"""
+    """Operator-facing workspace root: ``$USER_DATA_PATH`` (else ``DEFAULT_SESSION_DIR``), regardless of layout mode."""
     global _WARNED_NO_USER_DATA
     user_data = (os.environ.get(ENV_USER_DATA_PATH) or "").strip()
     if user_data:
@@ -106,7 +106,7 @@ def workspace_root() -> Path:
 
 
 def _sanitize_model_basename(model_name: str | os.PathLike[str]) -> str:
-    """Reduce ``model_name`` (path, HF id, or Path) to a filename-safe"""
+    """Reduce ``model_name`` (path, HF id, or Path) to a filename-safe basename (trailing path component)."""
     stem = ("" if model_name is None else str(model_name)).strip()
     if not stem:
         return "session"
@@ -126,7 +126,7 @@ def session_dir() -> Path:
 
 
 def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
-    """Create the session directory + per-session + workspace-shared"""
+    """Create the session directory + per-session + workspace-shared skeletons."""
     ws = workspace_root()
     ws.mkdir(parents=True, exist_ok=True)
     for sub in _WORKSPACE_SKELETON:
@@ -178,7 +178,7 @@ def asset_prompt_references_dir() -> Path:
 
 # Workspace-/session-scoped artefact helpers.
 def runtime_dir() -> Path:
-    """``<workspace_root>/runtime/`` — workspace-shared writable runtime"""
+    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (kernel-agent env file, GEAK litellm config)."""
     return workspace_root() / "runtime"
 
 
@@ -200,7 +200,7 @@ def _dir_mtime(p: Path) -> float:
 
 
 def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
-    """Resolve a dependency checkout, bridging install.sh's per-revision"""
+    """Resolve a dependency checkout, bridging install.sh's per-revision ``<name>@<sha>`` layout to runtime callers."""
     if env_var:
         override = os.environ.get(env_var)
         if override:
@@ -213,12 +213,12 @@ def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
 
 
 def magpie_dir() -> Path:
-    """Magpie checkout root, via :func:`resolve_dep_dir` (``$MAGPIE_PATH`` else"""
+    """Magpie checkout root, via :func:`resolve_dep_dir` (``$MAGPIE_PATH`` else newest ``Magpie@<sha>`` else bare — Magpie is pip-installed, so bare is the common case)."""
     return resolve_dep_dir("Magpie", "MAGPIE_PATH")
 
 
 def tracelens_root() -> Path:
-    """TraceLens checkout root, via :func:`resolve_dep_dir` (``$TRACELENS_ROOT``"""
+    """TraceLens checkout root, via :func:`resolve_dep_dir` (``$TRACELENS_ROOT`` else newest ``TraceLens@<sha>`` else bare)."""
     return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
 
 
@@ -232,7 +232,7 @@ def is_path_within(path: Path, root: Path) -> bool:
 
 
 def mn_profile_trace_root() -> Path:
-    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared"""
+    """``<workspace_root>/profile-traces/`` — multi-node torch profile shared root (``<rayjob_id>/torch_trace/`` per provision)."""
     return workspace_root() / "profile-traces"
 
 

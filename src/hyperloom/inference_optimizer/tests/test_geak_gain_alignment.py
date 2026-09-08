@@ -163,7 +163,7 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
 
 @pytest.mark.asyncio
 async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED"""
+    """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED throughput (not a self-reported speedup), and it lifts current_best + optimization_stack the same way the orchestrator (2b) path does."""
     base = 2844.209
     measured = base * 1.088  # what the GEAK-harness replay actually measured
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -497,7 +497,7 @@ def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:
 
 
 def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
-    """`_record_geak_candidate` stores an audit-only pending candidate and"""
+    """`_record_geak_candidate` stores an audit-only pending candidate and leaves current_best / optimization_stack / the gain ledger untouched."""
     base = 2844.209
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
     before_best = dict(coord.shared_state.current_best)
@@ -518,7 +518,7 @@ def test_record_candidate_writes_pending_not_headline(tmp_path: Path) -> None:
 
 
 def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None:
-    """`_promote_geak_from_candidate` lifts the headline from a MEASURED"""
+    """`_promote_geak_from_candidate` lifts the headline from a MEASURED tput (never the self-reported number) and clears the pending candidate."""
     base = 2844.209
     measured = 3270.0
     coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
@@ -672,7 +672,7 @@ def test_unproven_overlay_leaves_the_full_delta_to_the_route(tmp_path: Path) -> 
 
 
 def test_report_shows_pending_candidate_excluded_from_headline() -> None:
-    """A pending GEAK candidate renders as an audit note + warning and is"""
+    """A pending GEAK candidate renders as an audit note + warning and is NOT presented as a validated headline gain."""
     bd = {
         "session": {"image": ""},
         "baseline": {"throughput_tok_s_per_gpu": 2844.2},
@@ -697,7 +697,7 @@ def test_report_shows_pending_candidate_excluded_from_headline() -> None:
 
 @pytest.mark.asyncio
 async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None:
-    """GEAK returned no kernel/head/overlay/patch AND its accepted_config equals"""
+    """GEAK returned no kernel/head/overlay/patch AND its accepted_config equals the pre-KERNEL current_best (pure passthrough)."""
     base, current_best, measured = 8668.5946, 8900.0, 9025.191
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
@@ -740,7 +740,7 @@ async def test_2b_no_material_candidate_does_not_promote(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
-    """GEAK shipped no overlay/patch/kernel list, but its accepted_config adds a"""
+    """GEAK shipped no overlay/patch/kernel list, but its accepted_config adds a new flag vs the pre-KERNEL current_best (a kernel enabled via a config switch)."""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
@@ -786,7 +786,7 @@ async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_2b_empty_result_without_prior_geak_e2e_does_not_promote(tmp_path: Path) -> None:
-    """A validated 2b decision with an EMPTY geak_result and NO pre-existing"""
+    """A validated 2b decision with an EMPTY geak_result and NO pre-existing geak_e2e stack entry has no material to validate: it is same-config noise (geak_result lost / never populated), so it must NOT promote."""
     base, current_best, measured = 8668.5946, 8900.0, 9025.191
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.optimization_stack = [
@@ -890,7 +890,7 @@ def test_geak_result_has_material_boundaries(result, prev_flags, prev_envs, expe
 
 @pytest.mark.asyncio
 async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -> None:
-    """A passthrough 2b drop must REVERT a provisional kernel_journey KEEP and"""
+    """A passthrough 2b drop must REVERT a provisional kernel_journey KEEP and tag it with the no-material reason (not the beat-current_best reason)."""
     base, current_best, measured = 8668.5946, 8900.0, 9025.191
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.current_best["extra_server_args"] = "--max-num-batched-tokens 24576"
@@ -959,7 +959,7 @@ async def test_2b_no_material_reverts_provisional_journey_keep(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path) -> None:
-    """Resume revalidation: geak_result was lost (empty) but a geak_e2e stack"""
+    """Resume revalidation: geak_result was lost (empty) but a geak_e2e stack entry already recorded the win."""
     base, current_best, measured = 8668.5946, 8900.0, 9600.0
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": current_best}]
@@ -986,7 +986,7 @@ async def test_2b_empty_result_with_prior_geak_e2e_still_promotes(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_2b_resume_reverify_of_promoted_geak_win_still_promotes(tmp_path: Path) -> None:
-    """Regression: a resume revalidation of an ALREADY-promoted GEAK win must"""
+    """Regression: a resume revalidation of an ALREADY-promoted GEAK win must not be judged no_material."""
     base, measured = 8668.5946, 9800.0
     current_best = 9600.0  # current_best already holds the promoted GEAK win
     coord = _coord(tmp_path, baseline=base, best_tput=current_best)

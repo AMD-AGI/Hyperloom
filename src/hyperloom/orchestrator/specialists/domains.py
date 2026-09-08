@@ -215,7 +215,7 @@ _ANCHOR_TO_DOMAIN: dict[str, "SpecialistDomain"] = _anchor_to_domain_map()
 
 
 def domain_for_tag(tag: str) -> "SpecialistDomain | None":
-    """Return a representative catalogue entry for a knowledge-domain"""
+    """Return a representative catalogue entry for a knowledge-domain tag (matched first by ``kb_anchor``, then by ``key``)."""
     t = (tag or "").strip()
     if not t:
         return None

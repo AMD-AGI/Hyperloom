@@ -545,7 +545,7 @@ def test_eval_dest_patch_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_baseline_after_materialize_applies_eval_dest_patch(tmp_path, monkeypatch):
-    """BaselineExecutor's base hook (not just ProfileExecutor) must apply the"""
+    """BaselineExecutor's base hook (not just ProfileExecutor) must apply the eval-dest redirect, so a pure baseline run's ``mv ./`` writes results into $RESULT_DIR instead of the process cwd (the local-disk InferenceX mirror)."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
@@ -642,7 +642,7 @@ def test_eval_start_patch_is_idempotent(tmp_path, monkeypatch):
 
 
 def test_baseline_after_materialize_applies_eval_start_patch(tmp_path, monkeypatch):
-    """The eval-start marker is what keeps the explore overtime kill scoped to"""
+    """The eval-start marker is what keeps the explore overtime kill scoped to the throughput phase, so the baseline hook must install it too."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
@@ -687,7 +687,7 @@ def _write_eval_probe_target(root: Path) -> Path:
 
 
 def test_eval_probe_appends_to_sitecustomize_py(tmp_path, monkeypatch):
-    """Probe must be appended AFTER InferenceX's own patches so _hl_prev_parse"""
+    """Probe must be appended AFTER InferenceX's own patches so _hl_prev_parse captures the upstream _parse_generations, not the stock lm_eval default."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
         ensure_eval_probe_patched,
     )
@@ -706,7 +706,7 @@ def test_eval_probe_appends_to_sitecustomize_py(tmp_path, monkeypatch):
 
 
 def test_eval_probe_emits_valid_python(tmp_path, monkeypatch):
-    """_EVAL_PROBE_PY is a string constant never seen by the linter — compile it"""
+    """_EVAL_PROBE_PY is a string constant never seen by the linter — compile it here and verify the result is syntactically valid Python."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
         _EVAL_PROBE_PY,
         ensure_eval_probe_patched,
@@ -850,7 +850,7 @@ def test_eval_probe_is_concurrency_safe(tmp_path, monkeypatch):
 
 
 def test_baseline_after_materialize_applies_eval_probe(tmp_path, monkeypatch):
-    """baseline._after_materialize_config must apply the probe patch before"""
+    """baseline._after_materialize_config must apply the probe patch before launching: a non-terminating model there stops the whole run."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
@@ -898,7 +898,7 @@ def test_verify_patch_anchors_finds_every_anchor_on_a_pristine_checkout(tmp_path
 
 
 def test_verify_patch_anchors_omits_files_that_do_not_exist(tmp_path, monkeypatch):
-    """A tree with no benchmark_serving.py has nothing to patch there, which the"""
+    """A tree with no benchmark_serving.py has nothing to patch there, which the ensure_* functions already treat as a skip rather than a failure."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import verify_patch_anchors
 
     _write_full_lib(tmp_path)
@@ -908,7 +908,7 @@ def test_verify_patch_anchors_omits_files_that_do_not_exist(tmp_path, monkeypatc
 
 
 def test_failed_patch_anchors_flags_text_upstream_rewrote(tmp_path, monkeypatch):
-    """The regression this exists to catch: upstream rewrites the line without"""
+    """The regression this exists to catch: upstream rewrites the line without changing its meaning, so the patch stops applying and nothing says so."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import failed_patch_anchors
 
     lib = _write_full_lib(tmp_path)
@@ -926,7 +926,7 @@ def test_failed_patch_anchors_flags_text_upstream_rewrote(tmp_path, monkeypatch)
 
 
 def test_failed_patch_anchors_flags_an_anchor_that_matches_twice(tmp_path, monkeypatch):
-    """Every patch here rewrites one site, so an ambiguous anchor means the file"""
+    """Every patch here rewrites one site, so an ambiguous anchor means the file drifted into a shape the patcher was never written for."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import failed_patch_anchors
 
     lib = _write_full_lib(tmp_path)
@@ -958,7 +958,7 @@ def test_verify_patch_anchors_accepts_an_already_patched_file(tmp_path, monkeypa
 
 
 def test_baseline_hook_fails_loudly_when_an_eval_critical_anchor_rots(tmp_path, monkeypatch):
-    """Without eval_dest the results file lands in the benchmark's cwd, where the"""
+    """Without eval_dest the results file lands in the benchmark's cwd, where the accuracy parser never looks, so the gate would see no score at all."""
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     ix_root = tmp_path / "InferenceX@deadbeef"
@@ -979,7 +979,7 @@ def test_baseline_hook_fails_loudly_when_an_eval_critical_anchor_rots(tmp_path, 
 
 
 def test_baseline_hook_proceeds_when_only_a_non_critical_anchor_rots(tmp_path, monkeypatch):
-    """eval_start is a log breadcrumb for the soft-deadline watcher: worth"""
+    """eval_start is a log breadcrumb for the soft-deadline watcher: worth reporting, never worth aborting a run for."""
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     ix_root = tmp_path / "InferenceX@deadbeef"
@@ -998,7 +998,7 @@ def test_baseline_hook_proceeds_when_only_a_non_critical_anchor_rots(tmp_path, m
 
 
 def test_baseline_hook_ignores_anchors_it_does_not_own(tmp_path, monkeypatch):
-    """ProfileExecutor replaces this hook entirely and validates NUM_PROMPTS"""
+    """ProfileExecutor replaces this hook entirely and validates NUM_PROMPTS itself, so a rotted num_prompts anchor must not fail a baseline."""
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     ix_root = tmp_path / "InferenceX@deadbeef"

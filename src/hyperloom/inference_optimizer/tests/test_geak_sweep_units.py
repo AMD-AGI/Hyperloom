@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers"""
+"""Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers it shares with the native concurrency sweep."""
 
 from __future__ import annotations
 
@@ -264,7 +264,7 @@ def test_backend_results_dir_keyed_and_single_subdir(tmp_path: Path) -> None:
 
 
 def test_coerce_extra_envs_skips_malformed_tokens() -> None:
-    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the"""
+    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the shell-string and token-list shapes rather than emitting junk keys."""
     # Shell-string shape: leading separator -> empty token; ``=v`` -> empty key.
     assert coerce_extra_envs("; =v FOO=1") == {"FOO": "1"}
     # Token-list shape: dict item with a None key, a token without ``=``, a non-string item, and an empty-key ``=v``
@@ -273,7 +273,7 @@ def test_coerce_extra_envs_skips_malformed_tokens() -> None:
 
 
 def test_parse_server_arg_value_falls_back_on_unbalanced_quotes() -> None:
-    """The GEAK handoff recovers a flag value even when the server-args string is"""
+    """The GEAK handoff recovers a flag value even when the server-args string is not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
     got = _parse_server_arg_value('--max-model-len 4096 "unbalanced', "--max-model-len")
     assert got == "4096"
     # ``--flag=value`` form is also handled.

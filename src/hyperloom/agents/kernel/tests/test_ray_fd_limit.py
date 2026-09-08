@@ -44,7 +44,7 @@ class _FakeResource:
         self._events = events
 
     def _exceeds_hard(self, value: int) -> bool:
-        """True when ``value`` is above the current hard cap, treating"""
+        """True when ``value`` is above the current hard cap, treating ``RLIM_INFINITY`` (-1) as +infinity on either side."""
         if self._hard == self.RLIM_INFINITY:
             return False
         if value == self.RLIM_INFINITY:
@@ -167,7 +167,7 @@ def test_ensure_fd_limit_clamps_to_low_hard_limit_and_warns(monkeypatch):
 
 
 def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeypatch):
-    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as \"no"""
+    """An unlimited hard cap (RLIM_INFINITY = -1) must be treated as "no ceiling": raise soft to exactly ``min_soft`` (NOT min(min_soft, -1) = -1) and emit NO warning."""
     events: list = []
     fake = _FakeResource(soft=1024, hard=_FakeResource.RLIM_INFINITY, events=events)
     monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
@@ -189,7 +189,7 @@ def test_ensure_fd_limit_unlimited_hard_targets_min_soft_without_warning(monkeyp
 
 
 def test_ensure_fd_limit_unlimited_soft_is_noop(monkeypatch):
-    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated"""
+    """An already-unlimited soft limit (RLIM_INFINITY = -1) must be treated as already-sufficient: no setrlimit, no warning."""
     events: list = []
     fake = _FakeResource(
         soft=_FakeResource.RLIM_INFINITY,

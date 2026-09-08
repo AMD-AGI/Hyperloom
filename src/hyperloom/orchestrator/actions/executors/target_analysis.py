@@ -55,7 +55,7 @@ class TargetAnalysisExecutor:
             self.session_dir = None
 
     def _resolve_session_dir(self, ctx: RunnerContext) -> Path | None:
-        """Resolve session_dir: ``ctx.extra[\"session_dir\"]`` >"""
+        """Resolve session_dir: ``ctx.extra["session_dir"]`` > ``task.params["session_dir"]`` > constructor arg > ``paths.session_dir()``; ``None`` when nothing resolves."""
         extra = getattr(ctx, "extra", None) or {}
         cand = extra.get("session_dir")
         if cand:

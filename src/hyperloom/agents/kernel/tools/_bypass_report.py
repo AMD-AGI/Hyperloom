@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Build downstream artifacts (candidates / summary / kernel_roofline) for the"""
+"""Build downstream artifacts (candidates / summary / kernel_roofline) for the bypass analysis backend from the classified device-kernel aggregates."""
 
 from __future__ import annotations
 

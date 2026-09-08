@@ -53,7 +53,7 @@ def test_kernel_pct_key_is_canonical_phase_name() -> None:
     ["--max-minutes-framework-pct", "--phase-budget-framework-pct"],
 )
 def test_framework_pct_override_reaches_framework_agent(flag: str) -> None:
-    """FRAMEWORK_AGENT is a budgeted phase, so both flag spellings must parse"""
+    """FRAMEWORK_AGENT is a budgeted phase, so both flag spellings must parse and survive normalize_budget_pct as FRAMEWORK_AGENT."""
     args = _parse_optimize([flag, "0.42"])
     raw = cli._build_phase_budget_pct(args)
     assert raw.get(PHASE_FRAMEWORK_AGENT) == pytest.approx(0.42)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_ExploreStateMixin`` — explore / gap / specialist-ledger mutators for"""
+"""``_ExploreStateMixin`` — explore / gap / specialist-ledger mutators for :class:`..shared_state.SharedState`."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class _ExploreStateMixin:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
     def bump_domain_round_counters(self) -> None:
-        """Increment both per-anchor round counters for every knowledge-domain"""
+        """Increment both per-anchor round counters for every knowledge-domain anchor."""
         from ...specialists.domains import KNOWLEDGE_DOMAIN_TAGS
 
         for anchor in KNOWLEDGE_DOMAIN_TAGS:
@@ -100,7 +100,7 @@ class _ExploreStateMixin:
         specialist_threshold: int,
         keep_threshold: int,
     ) -> list[str]:
-        """Return anchors whose ``rounds_since_last_specialist`` ≥"""
+        """Return anchors whose ``rounds_since_last_specialist`` ≥ ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥ ``keep_threshold``."""
         anchors = set(self.rounds_since_last_specialist) | set(self.rounds_since_last_keep)
         hits: list[tuple[int, str]] = []
         for anchor in anchors:
@@ -112,7 +112,7 @@ class _ExploreStateMixin:
         return [anchor for _, anchor in hits]
 
     def best_gap_for_anchor(self, anchor: str) -> str:
-        """Return the canonical_id of the most actionable open gap whose"""
+        """Return the canonical_id of the most actionable open gap whose ``domain_hint`` resolves to ``anchor`` (or ``""`` when none)."""
         target = self._anchor_for(anchor)
         if not target:
             return ""

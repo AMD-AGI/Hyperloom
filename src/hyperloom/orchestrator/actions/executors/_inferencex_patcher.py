@@ -466,7 +466,7 @@ def _resolve_inferencex_files(
 def _resolve_benchmark_lib_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every existing ``<root>/benchmarks/benchmark_lib.sh`` to patch"""
+    """Return every existing ``<root>/benchmarks/benchmark_lib.sh`` to patch (one per :func:`_discover_inferencex_roots` root)."""
     return _resolve_inferencex_files(inferencex_path, "benchmarks", "benchmark_lib.sh")
 
 
@@ -484,7 +484,7 @@ def _apply_line_replacement_atomic(
     missing_msg: str,
     success_msg: str,
 ) -> bool:
-    """Replace a single exact ``legacy`` line with ``patched_line`` in ``src``"""
+    """Replace a single exact ``legacy`` line with ``patched_line`` in ``src`` via temp-file + atomic rename so a crash mid-write cannot leave a corrupt file."""
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
@@ -579,7 +579,7 @@ def ensure_benchmark_lib_patched(
 def _resolve_benchmark_serving_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
-    """Return every existing"""
+    """Return every existing ``<root>/utils/bench_serving/benchmark_serving.py`` to patch (one per :func:`_discover_inferencex_roots` root, including Magpie's bundled copy)."""
     return _resolve_inferencex_files(inferencex_path, "utils", "bench_serving", "benchmark_serving.py")
 
 
@@ -591,7 +591,7 @@ def _is_benchmark_serving_patched(src: Path) -> bool:
 def ensure_benchmark_serving_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure InferenceX ``benchmark_serving.py`` reads ``PROFILE_EXTRA_BODY``"""
+    """Ensure InferenceX ``benchmark_serving.py`` reads ``PROFILE_EXTRA_BODY`` on ``/start_profile``."""
     return _ensure_patched(
         _resolve_benchmark_serving_paths(inferencex_path),
         _is_benchmark_serving_patched,
@@ -630,14 +630,14 @@ def ensure_benchmark_serving_patched(
 
 
 def _is_eval_dest_patched(src: Path) -> bool:
-    """Return whether ``benchmark_lib.sh`` already redirects eval artifacts to"""
+    """Return whether ``benchmark_lib.sh`` already redirects eval artifacts to ``$RESULT_DIR`` (the eval-dest sentinel is present)."""
     return file_contains_sentinel(src, _EVAL_DEST_SENTINEL, log, "_inferencex_patcher")
 
 
 def ensure_benchmark_lib_eval_dest_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
-    """Ensure ``append_lm_eval_summary`` moves eval artifacts to ``$RESULT_DIR``"""
+    """Ensure ``append_lm_eval_summary`` moves eval artifacts to ``$RESULT_DIR`` instead of the process cwd (the InferenceX checkout)."""
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_eval_dest_patched,

@@ -123,7 +123,7 @@ def _section_phase_semantics(
     kernel_enabled: bool,
     framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
-    """Render the per-phase LLM-proposable action contract (current phase"""
+    """Render the per-phase LLM-proposable action contract (current phase injected dynamically by the Coordinator)."""
     from ..phases.machine_state import render_phase_action_bullets
 
     # phase name -> the flag that disabled it (None => always enabled).

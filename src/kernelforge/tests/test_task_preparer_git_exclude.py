@@ -58,7 +58,7 @@ def test_prepass_add_excludes_forge_experiments(tmp_path):
 
 
 def test_plain_add_all_would_have_included_forge_experiments(tmp_path):
-    """Guard: proves the exclusion is load-bearing -- a plain ``add -A`` DOES"""
+    """Guard: proves the exclusion is load-bearing -- a plain ``add -A`` DOES stage forge_experiments, so the pathspec is what prevents the leak."""
     repo = tmp_path / "ws"
     repo.mkdir()
     _init_repo(repo)

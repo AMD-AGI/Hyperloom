@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Source-files manifest renderer — what files this breakdown was"""
+"""Source-files manifest renderer — what files this breakdown was built from."""
 
 from __future__ import annotations
 

@@ -120,7 +120,7 @@ def test_missing_integrate_decision_is_not_an_adoption() -> None:
 
 
 def test_adopted_patch_is_not_undone_by_a_reverted_sibling() -> None:
-    """``kernel_integrate_attempts`` is keyed by kernel|patch|args, so one"""
+    """``kernel_integrate_attempts`` is keyed by kernel|patch|args, so one kernel holds several rows."""
     state = {
         "kernel_integrate_attempts": {
             # Ordered so the REVERT is visited last: overwriting loses the KEEP.

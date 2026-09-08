@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""force_candidate wiring: run_aiter_dense_tuner must set TuneResult.candidate"""
+"""force_candidate wiring: run_aiter_dense_tuner must set TuneResult.candidate from the deployed CSV's split-K content, so a split-K artifact is still promoted to e2e even when the microbench reports no improvement."""
 
 from __future__ import annotations
 

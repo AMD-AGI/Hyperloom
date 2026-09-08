@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``multi_node/scripts`` launch and kill helpers, plus the"""
+"""Unit tests for ``multi_node/scripts`` launch and kill helpers, plus the Infera SSH fan-out helpers, the mn CLI kernel-op routing, ``_multi_node_env`` and the shell-quoting / credential hardening of the rendered entrypoints."""
 
 from __future__ import annotations
 
@@ -1314,7 +1314,7 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
 
 
 def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
-    """SWSPLAT-42404: a shell-metacharacter model must be shlex-quoted into the"""
+    """SWSPLAT-42404: a shell-metacharacter model must be shlex-quoted into the head-pod launch entrypoint (single argv token, no command injection)."""
     import shlex
 
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -1335,7 +1335,7 @@ def test_restart_entrypoint_shlex_quotes_model(monkeypatch):
 
 
 def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
-    """A shell-metacharacter extra_args must not inject a second command into"""
+    """A shell-metacharacter extra_args must not inject a second command into the restart entrypoint; the `;` stays inside a quoted argv token."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")
@@ -1354,7 +1354,7 @@ def test_restart_entrypoint_neutralizes_malicious_extra_args(monkeypatch):
 
 
 def test_restart_entrypoint_preserves_legit_multi_token_extra_args(monkeypatch):
-    """Legitimate multi-token extra_args survive unchanged (no functional"""
+    """Legitimate multi-token extra_args survive unchanged (no functional regression from the shell-safe re-quoting)."""
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     monkeypatch.setattr(mn_cli, "_read_pod_script", lambda name: f"# {name}\n")

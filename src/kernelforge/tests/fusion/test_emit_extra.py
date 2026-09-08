@@ -50,7 +50,7 @@ def test_is_fused_module_name_excludes_lookalikes():
 
 
 def test_export_nongit_patch_is_git_apply_compatible(tmp_path):
-    """The difflib-generated patch must apply cleanly with `git apply` (what"""
+    """The difflib-generated patch must apply cleanly with `git apply` (what Hyperloom uses at integrate)."""
     repo, src, out = _nongit_pkg(tmp_path)
     pristine_text = src.read_text()
     src.write_text(
@@ -71,7 +71,7 @@ def test_export_nongit_patch_is_git_apply_compatible(tmp_path):
 
 
 def test_export_nongit_sets_repo_root(tmp_path):
-    """The manifest must carry the repo_root the patch paths are relative to, so"""
+    """The manifest must carry the repo_root the patch paths are relative to, so Hyperloom applies against the SAME root (site-packages, not a git toplevel)."""
     repo, src, out = _nongit_pkg(tmp_path)
     src.write_text("FUSED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
     arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
@@ -81,7 +81,7 @@ def test_export_nongit_sets_repo_root(tmp_path):
 
 
 def test_snapshot_returns_empty_when_main_source_fails(tmp_path, monkeypatch):
-    """#8: if the MAIN source snapshot fails, return \"\" so export does not treat the"""
+    """#8: if the MAIN source snapshot fails, return "" so export does not treat the edited source as a brand-new file."""
     from kernelforge.fusion import command as cli
 
     repo, src, out = _nongit_pkg(tmp_path)
@@ -141,7 +141,7 @@ def test_export_nongit_without_snapshot_returns_empty(tmp_path):
 
 
 def test_export_nongit_ignores_unchanged_preexisting_fused_sibling(tmp_path):
-    """A pre-existing framework file matching *fusion*/*_fused* (snapshotted, unchanged)"""
+    """A pre-existing framework file matching *fusion*/*_fused* (snapshotted, unchanged) must NOT be emitted as a new file nor deleted by restore."""
     repo, src, out = _nongit_pkg(tmp_path)
     sibling = repo / "models" / "other_fusion.py"
     sibling_text = "PRE_EXISTING = 1\n"
@@ -234,7 +234,7 @@ def test_restore_removes_untracked_and_prunes_dirs(tmp_path):
 
 
 def test_export_nongit_honors_custom_patch_name(tmp_path):
-    """A per-sibling ``patch_name`` writes ``out/<patch_name>`` and NOT the legacy"""
+    """A per-sibling ``patch_name`` writes ``out/<patch_name>`` and NOT the legacy ``fusion.patch``, so N keepers exported into one dir do not clobber each other."""
     repo, src, out = _nongit_pkg(tmp_path)
     src.write_text("FUSED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
     arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"), patch_name="fusion_0.patch")
@@ -244,7 +244,7 @@ def test_export_nongit_honors_custom_patch_name(tmp_path):
 
 
 def test_export_nongit_two_siblings_do_not_overwrite(tmp_path):
-    """Exporting two recipes into the same out dir under distinct names keeps both"""
+    """Exporting two recipes into the same out dir under distinct names keeps both patch files intact (the multi-patch nomination invariant)."""
     repo, src, out = _nongit_pkg(tmp_path)
     # sibling 0 edits the main source
     src.write_text("A = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
@@ -305,7 +305,7 @@ def test_export_nongit_scopes_to_this_recipes_fused_module(tmp_path):
 
 
 def test_export_nongit_without_fused_module_still_discovers_by_name(tmp_path):
-    """Salvage / compile-pass callers have no recipe in hand, so the name-based"""
+    """Salvage / compile-pass callers have no recipe in hand, so the name-based discovery has to stay for them."""
     repo, src, out = _nongit_pkg(tmp_path)
     new_mod = repo / "models" / "qwen3_fused_kernel.py"
     new_mod.write_text("def fused(): return 1\n", encoding="utf-8")

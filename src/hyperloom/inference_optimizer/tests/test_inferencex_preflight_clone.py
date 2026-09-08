@@ -70,7 +70,7 @@ def test_clone_inferencex_failure_returns_none(tmp_path, monkeypatch):
 
 
 def test_clone_inferencex_removes_partial_dir_on_failure(tmp_path, monkeypatch):
-    """A bare ``git init`` that then fails to fetch leaves a stub dir; the"""
+    """A bare ``git init`` that then fails to fetch leaves a stub dir; the clone must delete it so a later preflight does not mistake the stub for a valid checkout and skip re-cloning."""
     monkeypatch.setenv("INFERENCEX_REF", "a" * 40)
     dest = tmp_path / "InferenceX"
 
@@ -89,7 +89,7 @@ def test_clone_inferencex_removes_partial_dir_on_failure(tmp_path, monkeypatch):
 
 
 def test_clone_inferencex_rejects_checkout_without_marker(tmp_path, monkeypatch):
-    """git reports success but the tree lacks benchmarks/benchmark_lib.sh →"""
+    """git reports success but the tree lacks benchmarks/benchmark_lib.sh → treat as failure and clean up, never return a half-checkout."""
     monkeypatch.setenv("INFERENCEX_REF", "main")
     dest = tmp_path / "InferenceX"
 
@@ -117,7 +117,7 @@ def test_inferencex_checkout_ok_requires_benchmark_lib(tmp_path):
 
 
 def test_preflight_detects_checkout_via_validity_not_isdir():
-    """Detection and post-clone guards must use the validity helper, not a"""
+    """Detection and post-clone guards must use the validity helper, not a bare ``is_dir()`` that would accept a half-cloned stub."""
     # _preflight and its InferenceX detection loop live in cli/preflight.py, not cli/__init__.py.
     src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     assert "_inferencex_checkout_ok(candidate)" in src
@@ -133,7 +133,7 @@ def test_detection_candidates_exclude_wekafs_host_mounts():
 
 
 def test_validated_inferencex_path_overwrites_env_not_setdefault():
-    """A stale/broken INFERENCEX_PATH that triggers the clone must be"""
+    """A stale/broken INFERENCEX_PATH that triggers the clone must be overwritten with the validated path."""
     src = Path(cli_preflight.__file__).read_text(encoding="utf-8")
     # The final export must be an unconditional assignment, never setdefault.
     assert 'os.environ["INFERENCEX_PATH"] = inferencex_path' in src
@@ -181,7 +181,7 @@ def test_short_pin_matches_a_full_head(tmp_path, monkeypatch):
 
 
 def test_unreadable_head_is_tolerated(tmp_path, monkeypatch):
-    """A tarball drop with no .git works today; do not reject it over metadata"""
+    """A tarball drop with no .git works today; do not reject it over metadata we only just started asking for."""
     _at(monkeypatch, "")
     assert cli_preflight._inferencex_checkout_ok(_checkout(tmp_path), ref=_PIN) is True
 

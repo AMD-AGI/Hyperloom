@@ -105,7 +105,7 @@ def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytes
 def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Skipping the gate is a WARNING, not a silent INFO: a later completed=0"""
+    """Skipping the gate is a WARNING, not a silent INFO: a later completed=0 must be traceable back to this skip (the #1060 'surface it' discipline)."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [socket.gaierror(-2, "Name or service not known")])

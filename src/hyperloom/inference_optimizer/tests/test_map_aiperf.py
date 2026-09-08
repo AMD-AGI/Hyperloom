@@ -91,7 +91,7 @@ def test_map_total_tput_fallback_from_in_plus_out():
 
 
 def test_intvty_p90_is_zero_when_export_has_only_avg():
-    """An export where e2e_output_token_throughput carries no p90 must not"""
+    """An export where e2e_output_token_throughput carries no p90 must not silently produce the mean as the graded interactivity value."""
     s = _sample()
     # Replace the full metric with avg-only (as a throughput metric may appear).
     s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
@@ -158,7 +158,7 @@ def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
 
 
 def test_vendored_asset_fallback_matches_package(monkeypatch):
-    """The deployed asset vendors a fallback map_aiperf for when the package is"""
+    """The deployed asset vendors a fallback map_aiperf for when the package is not importable; guard it against drifting from the package implementation."""
     import importlib.util
     import sys
 

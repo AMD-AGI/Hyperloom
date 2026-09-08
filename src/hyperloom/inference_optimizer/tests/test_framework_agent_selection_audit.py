@@ -370,7 +370,7 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
-    """Regression: a config-lever ENABLEMENT deliverable must carry the"""
+    """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
     done = {
         "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
         # NEW setup command proposed by the specialist in this deliverable.
@@ -389,7 +389,7 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coordinator) -> None:
-    """An enablement deliverable with NO config levers (setup-only stack upgrade)"""
+    """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
     await coord._maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)

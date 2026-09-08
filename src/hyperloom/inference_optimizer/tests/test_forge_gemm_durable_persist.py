@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""forge GEMM tuned-CSV durability: KEEP must persist the CSV into the serving"""
+"""forge GEMM tuned-CSV durability: KEEP must persist the CSV into the serving aiter config dir + snapshot it (recipe-portable), not reference the ephemeral tuner workspace path."""
 
 from __future__ import annotations
 

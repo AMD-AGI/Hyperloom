@@ -112,7 +112,7 @@ def seed_kernel_keep(
 
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
-    """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the"""
+    """A fresh session dir under an isolated ``USER_DATA_PATH``, seeded with the ``no_target_gpu_configured`` target-analysis marker."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     sd = make_session_dir()
     seed_target_analysis_marker(sd)

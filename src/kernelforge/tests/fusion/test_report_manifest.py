@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``build_manifest`` carries the nomination envelope, and the combine path stays"""
+"""``build_manifest`` carries the nomination envelope, and the combine path stays byte-identical to the pre-multi-patch shape."""
 
 from __future__ import annotations
 

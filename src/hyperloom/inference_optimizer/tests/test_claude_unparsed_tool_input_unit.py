@@ -199,7 +199,7 @@ def _registered_emit_intent_tool() -> Any:
     ids=["native", "wrapper", "native-with-wrapper", "junk", "wrapper-with-junk"],
 )
 async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], accepted: bool) -> None:
-    """The declared schema gates the call before the handler ever runs, so a"""
+    """The declared schema gates the call before the handler ever runs, so a shape the handler accepts but the schema rejects can never land."""
     jsonschema = pytest.importorskip("jsonschema")
     tool = _registered_emit_intent_tool()
 
@@ -233,7 +233,7 @@ async def test_handler_reports_malformed_wrapped_raw() -> None:
 
 
 def test_registered_schema_offers_both_shapes() -> None:
-    """The declared schema is what the model reads, so the wrapper alternative"""
+    """The declared schema is what the model reads, so the wrapper alternative has to survive into it and say it is internal."""
     schema = _registered_emit_intent_tool().input_schema
     assert {"required": ["intent_type", "payload"]} in schema["anyOf"]
     assert {"required": ["__unparsedToolInput"]} in schema["anyOf"]

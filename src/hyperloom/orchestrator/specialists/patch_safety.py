@@ -306,7 +306,7 @@ ADVISE_VERDICT: str = "advise"
 
 @dataclass(frozen=True)
 class CrossDomainRule:
-    """One review rule injected into the Critic prompt when a proposal is"""
+    """One review rule injected into the Critic prompt when a proposal is cross-domain (``scope == 'domains'``)."""
 
     rule_id: str
     description: str

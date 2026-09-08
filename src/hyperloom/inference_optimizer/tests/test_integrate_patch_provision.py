@@ -79,7 +79,7 @@ def _executor(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _neutralize_disk_preflight(monkeypatch):
-    """Stop the real disk_preflight from leaking the runner's free-space into"""
+    """Stop the real disk_preflight from leaking the runner's free-space into these tests."""
     import hyperloom.agents.framework.isolation as iso
 
     monkeypatch.setattr(iso, "disk_preflight", lambda *_a, **_k: None)

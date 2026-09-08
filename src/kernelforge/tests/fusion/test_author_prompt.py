@@ -58,7 +58,7 @@ def test_integration_candidate_benchmarks_existing_operator_before_authoring():
 
 
 def test_integration_candidate_demands_recorded_parity_evidence():
-    """An integrated operator is third-party code whose numerics were never"""
+    """An integrated operator is third-party code whose numerics were never checked against this model's eager path."""
     r = _recipe()
     r["candidate_kind"] = "integration"
     r["existing_operator"] = "gemm_a16w16_gated"

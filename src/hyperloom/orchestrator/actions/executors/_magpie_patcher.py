@@ -278,7 +278,7 @@ def _resolve_inferencex_benchmark_lib(
 
 
 def _strip_eval_concurrency_flag(text: str) -> str | None:
-    """Return ``text`` with the redundant ``--concurrent-requests <CONC>`` flag"""
+    """Return ``text`` with the redundant ``--concurrent-requests <CONC>`` flag removed, or ``None`` when nothing needed changing."""
     if _EVAL_CONCURRENCY_FLAG_MARKER not in text:
         return None
     patched = _EVAL_CONCURRENCY_FLAG_RE.sub("", text)
@@ -289,7 +289,7 @@ def _strip_eval_concurrency_flag(text: str) -> str | None:
 
 
 def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
-    """Strip the redundant ``--concurrent-requests`` eval flag from every"""
+    """Strip the redundant ``--concurrent-requests`` eval flag from every generic Magpie benchmark script under ``scripts_dir``."""
     ok = True
     for script in sorted(scripts_dir.glob("*.sh")):
         # ``benchmark_lib.sh`` is the shared library, not a caller script: it legitimately references
@@ -346,7 +346,7 @@ def _extract_run_lm_eval_region(text: str) -> tuple[int, int] | None:
 
 
 def _patch_merged_case_parser(text: str) -> str | None:
-    """Splice a ``--concurrent-requests`` case before the merged-case parser's"""
+    """Splice a ``--concurrent-requests`` case before the merged-case parser's ``*)`` catch-all, or return ``None`` when that catch-all is not found inside the ``run_lm_eval`` body."""
     region = _extract_run_lm_eval_region(text)
     if region is None:
         return None
@@ -364,7 +364,7 @@ def _patch_merged_case_parser(text: str) -> str | None:
 
 
 def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
-    """Teach InferenceX's ``benchmark_lib.sh::run_lm_eval`` to accept the"""
+    """Teach InferenceX's ``benchmark_lib.sh::run_lm_eval`` to accept the ``--concurrent-requests`` flag instead of aborting on ``Unknown parameter``."""
     try:
         original = benchmark_lib.read_text(encoding="utf-8")
     except OSError as e:
@@ -418,7 +418,7 @@ def _apply_eval_concurrency_fixes(
     magpie_dir: Path | str | None,
     inferencex_dir: Path | str | None,
 ) -> bool:
-    """Apply every eval-concurrency compatibility fix, independent of the"""
+    """Apply every eval-concurrency compatibility fix, independent of the ``benchmarker.py`` atomic-copy patch."""
     ok = True
     scanned: set[Path] = set()
     for scripts_dir in (
@@ -534,7 +534,7 @@ def _is_patched(src: Path) -> bool:
 
 
 def _extract_prepare_region(text: str) -> str:
-    """Return the source slice covering the ``_prepare_benchmark_scripts``"""
+    """Return the source slice covering the ``_prepare_benchmark_scripts`` method body, or ``""`` when the header is absent."""
     start = text.find(_PREPARE_METHOD_MARKER)
     if start == -1:
         return ""
@@ -554,7 +554,7 @@ def _extract_prepare_region(text: str) -> str:
 
 
 def _upstream_is_already_atomic(text: str) -> bool:
-    """True when installed Magpie already copies scripts atomically (#C1 patch"""
+    """True when installed Magpie already copies scripts atomically (#C1 patch redundant)."""
     if _UPSTREAM_ATOMIC_HELPER in text:
         return True
     region = _extract_prepare_region(text)
@@ -605,7 +605,7 @@ def atomic_write_text(
 
 
 def _apply_patch_atomic_reason(src: Path) -> str:
-    """Rewrite ``src`` via temp-file + atomic rename so a crash mid-write"""
+    """Rewrite ``src`` via temp-file + atomic rename so a crash mid-write cannot leave a corrupt ``benchmarker.py``, returning a classified reason."""
     try:
         original = src.read_text(encoding="utf-8")
     except OSError as e:
@@ -832,7 +832,7 @@ class MagpiePatchStatus:
 
     @property
     def atomic_genuine_failure(self) -> bool:
-        """True when ``atomic_ok`` is False for a real reason (unrecognized"""
+        """True when ``atomic_ok`` is False for a real reason (unrecognized shape / I/O error) — i.e. the script-tearing race is NOT mitigated, as opposed to a benign no-op."""
         return self.atomic_reason in _ATOMIC_REASONS_GENUINE_FAILURE
 
 
@@ -919,7 +919,7 @@ def magpie_scripts_patch_status(
 def ensure_magpie_atomic_scripts_patch(
     magpie_dir: Path | str | None = None,
 ) -> bool:
-    """Ensure installed Magpie's ``_prepare_benchmark_scripts`` copies each"""
+    """Ensure installed Magpie's ``_prepare_benchmark_scripts`` copies each script atomically (via ``os.replace``)."""
     return magpie_scripts_patch_status(magpie_dir).atomic_ok
 
 

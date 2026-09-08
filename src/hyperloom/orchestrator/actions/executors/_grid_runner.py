@@ -277,7 +277,7 @@ _AITER_SHARED_EXPERT_PROBE_SCRIPT = (
 
 
 def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
-    """Return a drop reason if the installed vLLM build can't honour the aiter"""
+    """Return a drop reason if the installed vLLM build can't honour the aiter shared-expert fusion flag, else ``None``."""
     cached = _CAP_PROBE_CACHE.get("vllm", _UNSET)
     if cached is not _UNSET:
         return cached  # type: ignore[return-value]
@@ -310,7 +310,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return a drop reason if a variant sets an env flag the installed"""
+    """Return a drop reason if a variant sets an env flag the installed framework build cannot honour, else ``None``."""
     fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     if fw != "vllm":
         return None
@@ -912,7 +912,7 @@ def _resolve_mn_effective_server_args(
     base_extra_args: str,
     base_args_mode: str,
 ) -> str:
-    """Resolve the multi-node server args for a variant restart; prefer the"""
+    """Resolve the multi-node server args for a variant restart; prefer the materialized variant YAML, falling back to a recompose from the base YAML."""
     try:
         with cfg_path.open(encoding="utf-8") as _f:
             _variant_cfg = yaml.safe_load(_f) or {}

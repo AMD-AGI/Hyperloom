@@ -585,7 +585,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_repo(self, tmp_path):
-        """Repro: fusion patch against a NON-git repo_root (e.g. vLLM installed"""
+        """Repro: fusion patch against a NON-git repo_root (e.g. vLLM installed under site-packages/dist-packages)."""
         repo = tmp_path / "site-packages"
         (repo / "vllm" / "model_executor" / "models").mkdir(parents=True)
         target = repo / "vllm" / "model_executor" / "models" / "qwen3.py"
@@ -642,7 +642,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "vllm" / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
-        """A created file whose ``+++`` line carries a tab-suffixed timestamp"""
+        """A created file whose ``+++`` line carries a tab-suffixed timestamp must still be recognized as a create on a NON-git root."""
         repo = tmp_path / "site-packages"
         (repo / "vllm").mkdir(parents=True)
         (repo / "vllm" / "existing.py").write_text("old = 1\n", encoding="utf-8")
@@ -676,7 +676,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "vllm" / "fused_new.py").read_text(encoding="utf-8") == "created = 3\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_quoted(self, tmp_path):
-        """A created file whose header path is C-quoted (git quotes paths with"""
+        """A created file whose header path is C-quoted (git quotes paths with spaces) must be recognized as a create via the shared ``parse_patch_manifest`` normalization, not pre-seeded, and produced by ``git apply``."""
         repo = tmp_path / "site-packages"
         (repo / "vllm").mkdir(parents=True)
         # NOTE: deliberately NOT a git repo -- mirrors dist-packages.
@@ -702,7 +702,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "vllm" / "fused new.py").read_text(encoding="utf-8") == "created = 1\n"
 
     def test_materialize_unified_patch_snapshot_modify_base_missing_raises(self, tmp_path):
-        """A modify whose base is neither in git HEAD nor on disk must fail with"""
+        """A modify whose base is neither in git HEAD nor on disk must fail with a precise error instead of the opaque ``git apply`` "No such file or directory"."""
         repo = tmp_path / "site-packages"
         repo.mkdir(parents=True)
         # NOTE: NOT a git repo, and the target file does not exist on disk.
@@ -1690,7 +1690,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(self, tmp_path, monkeypatch):
-        """One tuner crashed, another delivered: forge reports ``candidate``, so"""
+        """One tuner crashed, another delivered: forge reports ``candidate``, so the env is measured and the crash is still named."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), ""))
@@ -1725,7 +1725,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_a_malformed_tuners_run_does_not_break_the_run(self, tmp_path, monkeypatch):
-        """``tuners_run`` is forge's JSON and may be any shape; lifting a reason"""
+        """``tuners_run`` is forge's JSON and may be any shape; lifting a reason out of it must not turn a run that happened into a reported crash."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
 
@@ -1809,7 +1809,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
-        """The values must come from the log, not from the config: a"""
+        """The values must come from the log, not from the config: a config-derived key is what aiter would never look up."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
@@ -3032,7 +3032,7 @@ class TestEnrichCandidate:
 
 
 class TestReusableSourceRootsAtom:
-    """atom layout prefixes participate in cross-task kernel reuse"""
+    """atom layout prefixes participate in cross-task kernel reuse alongside aiter/sglang/vllm."""
 
     def test_includes_atom_editable_path(self):
         # The matcher lowercases its source-file input, so the stored prefix is lowercase ``/app/atom/atom/``.
@@ -4932,7 +4932,7 @@ class TestRunGemmTuningHandler:
         ],
     )
     def test_extract_gemm_shapes_matches_dtype_aliases(self, tmp_path, precision, traced):
-        """A precision and a traced token spell the same dtype many ways; exact"""
+        """A precision and a traced token spell the same dtype many ways; exact string matching would drop shapes that do belong to the tuned family."""
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -4957,7 +4957,7 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
     def test_extract_gemm_shapes_keeps_the_highest_call_count(self, tmp_path):
-        """The same (M,N,K) can be reported by several kernels; the hot sighting"""
+        """The same (M,N,K) can be reported by several kernels; the hot sighting must win, otherwise a rare first one buries the real decode hotspot."""
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -5020,7 +5020,7 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
     def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(self, tmp_path):
-        """A pre-rendered shapes artifact carries no dtype, so it must not win"""
+        """A pre-rendered shapes artifact carries no dtype, so it must not win over candidates that were actually scoped to the tuned precision."""
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         artifact = tmp_path / "shapes.json"  # recorded from the BF16 head
@@ -5257,7 +5257,7 @@ class TestTracelensRootResolution:
 
 
 class TestBuildTraceAnalyzeCmd:
-    """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable)"""
+    """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
 
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)

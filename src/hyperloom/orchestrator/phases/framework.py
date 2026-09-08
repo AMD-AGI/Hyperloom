@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK_AGENT phase handler: candidate discovery/ranking/audit, authoring"""
+"""FRAMEWORK_AGENT phase handler: candidate discovery/ranking/audit, authoring specialist dispatch, enablement repair, and Critic-review submission/reauthor."""
 
 from __future__ import annotations
 import logging as _logging
@@ -40,7 +40,7 @@ FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
 class FrameworkPhase(CoordinatorCollaborator):
-    """The source arm of the OPTIMIZE phase: upstream candidates, authored"""
+    """The source arm of the OPTIMIZE phase: upstream candidates, authored patches, and the enablement hand-off."""
 
     # Marker for the candidate-free local-exploration arm (a synthetic "candidate" whose id is ``local_explore:<n>``):
     # the ranker may pick it, and it routes to a write-capable authoring specialist instead of a PR.

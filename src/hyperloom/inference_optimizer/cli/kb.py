@@ -284,7 +284,7 @@ def _bootstrap_recipe_kb(
     manifest: dict[str, Any],
     resume: bool,
 ):
-    """Boot the recipe-snapshot KB integration, run the T0 anchor, and return"""
+    """Boot the recipe-snapshot KB integration, run the T0 anchor, and return the dispatcher."""
     if bool(getattr(args, "degraded_kb", False)):
         print("Recipe KB       : DISABLED (--degraded-kb)")
         return None
@@ -376,7 +376,7 @@ def _bootstrap_knowledge_plane(
     recipe_kb_client: Any = None,
     session_dir: Path | None = None,
 ) -> "KnowledgePlane":
-    """Construct the :class:`KnowledgePlane` facade. Wires the PR Monitor MCP"""
+    """Construct the :class:`KnowledgePlane` facade."""
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
     from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
     from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient

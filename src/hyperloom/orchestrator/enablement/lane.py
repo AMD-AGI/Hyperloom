@@ -26,7 +26,7 @@ class EnablementLane(CoordinatorCollaborator):
     """Owns one enablement round: admit, track in-flight, re-arm on outcome."""
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
-        """Dispatch an enablement_specialist when a baseline cannot launch or its"""
+        """Dispatch an enablement_specialist when a baseline cannot launch or its accuracy eval fails."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed, launch_enablement_allowed
 
         state = self.shared_state
@@ -236,7 +236,7 @@ class EnablementLane(CoordinatorCollaborator):
             state.baseline_total_failures = 0
 
         def _stack_kept_runtime() -> None:
-            """Persist the KEEP'd attempt runtime + localization manifest so they"""
+            """Persist the KEEP'd attempt runtime + localization manifest so they survive rearm."""
             action = res.get("enablement_kept_stack_action")
             if isinstance(action, dict) and action:
                 state.enablement.kept_stack_action = action

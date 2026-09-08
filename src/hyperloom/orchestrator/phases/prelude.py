@@ -2148,7 +2148,7 @@ class PreludePhase(PhaseHandler):
             )
 
     def _analysis_attempt_suffix(self, kind: str) -> str:
-        """Idempotency-key suffix separating a re-armed roofline retry from the"""
+        """Idempotency-key suffix separating a re-armed roofline retry from the attempt that failed."""
         if kind != "roofline":
             return ""
         try:

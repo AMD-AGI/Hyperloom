@@ -224,7 +224,7 @@ async def test_a_child_in_a_subdirectory_is_reaped_too(tmp_path, spawn):
 
 
 async def test_a_child_outside_the_workspace_is_left_running(tmp_path, spawn):
-    """A session's deadline is not a machine-wide kill switch: the sibling lanes"""
+    """A session's deadline is not a machine-wide kill switch: the sibling lanes benching from their own copies have to survive it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     elsewhere = tmp_path / "elsewhere"

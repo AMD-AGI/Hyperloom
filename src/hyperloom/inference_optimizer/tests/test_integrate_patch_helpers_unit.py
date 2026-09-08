@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for integrate_patch helper functions: framework-root"""
+"""Branch coverage for integrate_patch helper functions: framework-root resolution, git apply / reverse / checkout spawn-failure handling, patch-path resolution, and the best-effort revert fallback chain."""
 
 from __future__ import annotations
 

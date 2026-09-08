@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic trajectory review — synthesise candidate directions from the"""
+"""Deterministic trajectory review — synthesise candidate directions from the whole optimization lineage when the search stalls."""
 
 from __future__ import annotations
 

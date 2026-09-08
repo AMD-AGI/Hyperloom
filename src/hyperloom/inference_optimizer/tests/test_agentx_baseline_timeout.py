@@ -79,7 +79,7 @@ def test_overhead_budget_is_tunable(monkeypatch):
 
 
 def test_default_overhead_warns_it_may_not_fit_every_model(monkeypatch, caplog):
-    """A raw aiperf run against Kimi-K3 (conc=64) measured warmup alone taking"""
+    """A raw aiperf run against Kimi-K3 (conc=64) measured warmup alone taking ~12075s -- longer than this whole default cap."""
     _clear(monkeypatch)
     with caplog.at_level("WARNING"):
         agentx_baseline_timeout_sec()
@@ -197,7 +197,7 @@ def test_an_unusable_conc_leaves_the_derivation_alone(monkeypatch, bad):
 
 
 def test_the_floor_never_shrinks_a_cap(monkeypatch):
-    """Whatever CONC says, the cap may only grow -- an under-sized cap kills a"""
+    """Whatever CONC says, the cap may only grow -- an under-sized cap kills a round that would have finished, while an over-sized one costs a longer wait on a round that was hung anyway."""
     _clear(monkeypatch)
     base = agentx_baseline_timeout_sec()
     for conc in (1, 2, 4, 8, 9, 16, 24, 32, 64, 128):
@@ -369,7 +369,7 @@ def test_the_anchor_defaults_to_the_repo_measurement(monkeypatch):
 
 @pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
 def test_an_unusable_anchor_disables_scaling_rather_than_dividing_by_it(monkeypatch, bad):
-    """A zero or garbage anchor must not reach the division -- and must not be"""
+    """A zero or garbage anchor must not reach the division -- and must not be quietly replaced by the default either."""
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")

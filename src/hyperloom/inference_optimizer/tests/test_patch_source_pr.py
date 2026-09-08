@@ -65,7 +65,7 @@ def _init_repo_with_pr_branch(path: Path, *, pr_ref: str = "pr-head") -> str:
 
 
 def test_fetch_diff_to_path_rejects_file_url(tmp_path: Path):
-    """A ``file://`` diff_url must not be fetched: the URL reaches us from a"""
+    """A ``file://`` diff_url must not be fetched: the URL reaches us from a remote KB/API response, so honouring it would read the local filesystem."""
     src = tmp_path / "secret.patch"
     src.write_text(_VALID_PATCH, encoding="utf-8")
     dest = tmp_path / "out" / "got.patch"
@@ -127,7 +127,7 @@ def test_materialize_explicit_patches_are_used_verbatim(tmp_path: Path):
 
 
 def test_materialize_refuses_to_bench_when_every_explicit_patch_is_missing(tmp_path: Path):
-    """An empty patch list would bench the unpatched tree and report the"""
+    """An empty patch list would bench the unpatched tree and report the baseline as the candidate's verdict, so it must be a terminal result."""
     out = materialize_candidate_patches(
         candidate={},
         params={"patches": [str(tmp_path / "gone.patch")]},

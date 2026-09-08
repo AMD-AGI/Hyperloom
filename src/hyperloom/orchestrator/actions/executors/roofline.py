@@ -112,7 +112,7 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
 
 
 def _trace_is_high_idle(ta_result: dict[str, Any]) -> bool:
-    """Whether trace_analyze flagged the profiled step as host-bound (high GPU"""
+    """Whether trace_analyze flagged the profiled step as host-bound (high GPU idle), i.e. carries a ``high_gpu_idle_pct`` trace-health warning."""
     if not isinstance(ta_result, dict):
         return False
     for w in ta_result.get("trace_health_warnings") or []:
@@ -212,7 +212,7 @@ def _failed(
 
 
 def _profile_err_text(profile_result: Any) -> str:
-    """Flatten a profile result's error fields into one blob for cuda-graph"""
+    """Flatten a profile result's error fields into one blob for cuda-graph capture-failure detection."""
     if not isinstance(profile_result, dict):
         return ""
     parts = [str(profile_result.get(k) or "") for k in ("error", "error_class", "error_excerpt", "stderr_tail")]
@@ -1192,7 +1192,7 @@ class RooflineExecutor:
         return Path(sd) if sd else Path(".")
 
     def _resolve_framework(self, ctx: RunnerContext) -> str:
-        """Resolve the active framework: task params > FRAMEWORK env >"""
+        """Resolve the active framework: task params > FRAMEWORK env > shared_state.framework."""
         params = ctx.task.params or {}
         fw = str(params.get("framework") or "").strip()
         if fw:

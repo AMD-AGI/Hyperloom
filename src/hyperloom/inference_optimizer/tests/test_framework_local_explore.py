@@ -194,7 +194,7 @@ def test_a_candidate_whose_specialist_failed_is_dispatched_again(tmp_path: Path)
 
 
 def test_a_candidate_that_keeps_failing_is_left_for_the_phase_to_replace(tmp_path: Path):
-    """Retrying is bounded: a candidate that cannot author is not worth the"""
+    """Retrying is bounded: a candidate that cannot author is not worth the wall clock the framework budget is there to spend."""
     from hyperloom.orchestrator.phases.framework import _LOCAL_EXPLORE_MAX_ATTEMPTS
 
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
@@ -315,7 +315,7 @@ def test_forward_enablement_carriers_boot_origin_noop():
 # --------------------------------------------------------------------------- # Stage-3 guard: local_explore gap is
 # registered and has a real canonical id --------------------------------------------------------------------------- #
 def test_pseudo_candidate_gap_canonical_id_is_not_literal_local_explore():
-    """The pseudo-candidate must carry a per-candidate gap id, not the old"""
+    """The pseudo-candidate must carry a per-candidate gap id, not the old literal 'local_explore' string that prevented find_gap from matching."""
     stub = _Stub(Path("/tmp/t"), authoring=True, local_explore=True)
     pseudo = stub._make_local_explore_pseudo_candidate()
     assert pseudo is not None

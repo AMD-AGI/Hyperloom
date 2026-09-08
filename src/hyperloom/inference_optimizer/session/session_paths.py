@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-session path helpers — single source of truth for every path *inside*"""
+"""Per-session path helpers — single source of truth for every path *inside* a session directory (``paths.py`` owns *where* the session lives)."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ _MAX_RUNS_DIR_ATTEMPTS: int = 200
 
 
 def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
-    """Create a fresh :func:`runs_dir` workspace, suffixing ``-2``, ``-3``, …"""
+    """Create a fresh :func:`runs_dir` workspace, suffixing ``-2``, ``-3``, … when earlier attempts already claimed the name."""
     base = runs_dir(session_dir, action, task_id)
     for suffix in range(1, _MAX_RUNS_DIR_ATTEMPTS + 1):
         candidate = base if suffix == 1 else base.with_name(f"{base.name}-{suffix}")
@@ -104,25 +104,25 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
 
 
 def kernel_agent_runs_root(session_dir: Path) -> Path:
-    """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation"""
+    """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation kernel-agent run dirs (keyed by tool-invocation session id beneath it)."""
     return Path(session_dir) / "kernel-agent" / "runs"
 
 
 def kernel_agent_runs_dir(session_dir: Path, session_id: str) -> Path:
-    """``<sd>/kernel-agent/runs/<session_id>/`` — per-tool-invocation"""
+    """``<sd>/kernel-agent/runs/<session_id>/`` — per-tool-invocation kernel-agent output (logs, status JSON, optimization_attempts.jsonl, TraceLens analysis)."""
     sid = _validate_id_component(session_id, field="kernel_agent_runs_dir.session_id")
     return kernel_agent_runs_root(session_dir) / sid
 
 
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
-    """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the"""
+    """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the original source backup + applied patch (REVERT restores from backup)."""
     kid = _validate_id_component(kernel_id, field="patches_dir.kernel_id")
     return Path(session_dir) / "patches" / kid
 
 
 # Session-breakdown record fragments (recorder write-side spool).
 def breakdown_parts_dir(session_dir: Path) -> Path:
-    """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record"""
+    """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record fragments."""
     return Path(session_dir) / "runtime" / "breakdown" / "parts"
 
 
@@ -170,52 +170,52 @@ def trace_dir(session_dir: Path) -> Path:
 
 
 def llm_calls_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every"""
+    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.orchestrator.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist / critic)."""
     return trace_dir(session_dir) / "llm_calls.jsonl"
 
 
 def trace_ext_dir(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/ext/`` — parent of every out-of-process child's"""
+    """``<sd>/reports/trace/ext/`` — parent of every out-of-process child's own ``<component>-<pid>.jsonl`` shard."""
     return trace_dir(session_dir) / "ext"
 
 
 def decision_trace_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining"""
+    """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining every decision to its LLM token spend along the phase→tick timeline."""
     return trace_dir(session_dir) / "decision_trace.jsonl"
 
 
 def proposal_task_map_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/proposal_task_map.jsonl`` — append-only map of"""
+    """``<sd>/reports/trace/proposal_task_map.jsonl`` — append-only map of ``{proposal_msg_id -> task_id}`` stamped when an approved proposal is materialized into a task."""
     return trace_dir(session_dir) / "proposal_task_map.jsonl"
 
 
 def forge_steps_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/forge_steps.jsonl`` — append-only audit of the"""
+    """``<sd>/reports/trace/forge_steps.jsonl`` — append-only audit of the Kernel-Forge autonomous loop's key steps (per-iteration rationale / validation / bench / keep-revert + a run summary), recovered from the forge kernel-backend stdout."""
     return trace_dir(session_dir) / "forge_steps.jsonl"
 
 
 def gemm_tuning_steps_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/gemm_tuning.jsonl`` — append-only audit of each"""
+    """``<sd>/reports/trace/gemm_tuning.jsonl`` — append-only audit of each GEMM-tuning run (forge / geak), one row per dispatched run carrying the tuning ``engine``, micro-decision, best speedup and per-tuner summary."""
     return trace_dir(session_dir) / "gemm_tuning.jsonl"
 
 
 def specialist_intel_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the"""
+    """``<sd>/reports/trace/specialist_intel.jsonl`` — append-only audit of the intel/tool calls each specialist made (WebSearch / WebFetch / pr_monitor / recipe_kb / Read / Grep / ...), recovered from the subprocess stream-json log."""
     return trace_dir(session_dir) / "specialist_intel.jsonl"
 
 
 def conversations_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/conversations.jsonl`` — append-only record of the"""
+    """``<sd>/reports/trace/conversations.jsonl`` — append-only record of the full prompt + completion text for every in-process LLM call."""
     return trace_dir(session_dir) / "conversations.jsonl"
 
 
 def research_hints_md(session_dir: Path) -> Path:
-    """``<sd>/research_hints.md`` — human-readable proven-prior hints"""
+    """``<sd>/research_hints.md`` — human-readable proven-prior hints collected by the research scout."""
     return Path(session_dir) / "research_hints.md"
 
 
 def research_hints_json(session_dir: Path) -> Path:
-    """``<sd>/research_hints.json`` — structured mirror of the research"""
+    """``<sd>/research_hints.json`` — structured mirror of the research hints (machine-readable; advisory gap-scoring reads this)."""
     return Path(session_dir) / "research_hints.json"
 
 
@@ -251,7 +251,7 @@ def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
 
 
 def competitor_target_json(session_dir: Path) -> Path:
-    """``<sd>/competitor_target.json`` — LLM-authored competitor target"""
+    """``<sd>/competitor_target.json`` — LLM-authored competitor target numbers (each per-concurrency entry carries its own source)."""
     return Path(session_dir) / "competitor_target.json"
 
 
@@ -312,7 +312,7 @@ def recipe_kb_lessons_json(session_dir: Path) -> Path:
 
 
 def recipe_kb_pending_ndjson(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_pending.ndjson`` — legacy async KB write"""
+    """``<sd>/runtime/recipe_kb/.kb_pending.ndjson`` — legacy async KB write queue."""
     return recipe_kb_dir(session_dir) / ".kb_pending.ndjson"
 
 
@@ -327,7 +327,7 @@ def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
 
 
 def recipe_kb_audit_jsonl(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — reserved append-only audit"""
+    """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — reserved append-only audit slot for Recipe KB CLI invocations; no producer writes it today and no breakdown section reads it (the former ``kb_provenance`` audit counts were dropped in the V5→V6 migration)."""
     return recipe_kb_dir(session_dir) / ".kb_audit.jsonl"
 
 
@@ -338,12 +338,12 @@ def recipe_snapshot_dir(session_dir: Path) -> Path:
 
 
 def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only audit of"""
+    """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only audit of local Recipe operations and remote KB Store publish attempts."""
     return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
 
 
 def pr_monitor_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor"""
+    """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor reachability snapshot."""
     return recipe_kb_dir(session_dir) / ".pr_monitor_status.json"
 
 
@@ -353,7 +353,7 @@ def recipe_kb_flusher_pid(session_dir: Path) -> Path:
 
 
 def recipe_kb_flusher_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.kb_flusher_status.json`` — boot-time flusher"""
+    """``<sd>/runtime/recipe_kb/.kb_flusher_status.json`` — boot-time flusher spawn decision."""
     return recipe_kb_dir(session_dir) / ".kb_flusher_status.json"
 
 
@@ -383,7 +383,7 @@ def _prune_old_workdirs(root: Path, *, keep: int) -> None:
 
 
 def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep: int) -> Path:
-    """Allocate (and create) ``<sd>/<subdir>/<turn_idx:06d>/`` for a subprocess"""
+    """Allocate (and create) ``<sd>/<subdir>/<turn_idx:06d>/`` for a subprocess agent's per-turn scratch, pruning stale turn dirs down to the newest *keep*."""
     root = Path(session_dir) / subdir
     root.mkdir(parents=True, exist_ok=True)
     _prune_old_workdirs(root, keep=keep)

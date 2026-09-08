@@ -37,7 +37,7 @@ class SupervisionMonitor:
         self.last_attempt_iter = iteration
 
     def mark_intervened(self, iteration: int) -> None:
-        """Record that an intervention just happened (resets the streak so the"""
+        """Record that an intervention just happened (resets the streak so the new directions get a fair chance before the next trigger)."""
         self.intervention_count += 1
         self.last_intervention_iter = iteration
         self.last_attempt_iter = iteration

@@ -1007,7 +1007,7 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
 
 
 def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
-    """The Critic is told to reply with *exactly* this schema, and the"""
+    """The Critic is told to reply with *exactly* this schema, and the Coordinator holds a reject to the verdict its cited rule declared by reading `failure_reason_code`."""
     schema, _, rules = _REVIEW_OUTPUT_INSTRUCTIONS.partition("Rules (mirror")
 
     assert '"failure_reason_code"' in schema
@@ -1065,7 +1065,7 @@ async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
-    """Delivered as data so the Critic's field list stays identical to the one"""
+    """Delivered as data so the Critic's field list stays identical to the one the runner strips, and so a format slip is advisory rather than a reject that costs the round every proposal in the set."""
     constraints = await _review_constraints_sent_for("specialist", fake_critic_root, fake_session_dir)
 
     rule = constraints["quantitative_claim_rule"]
@@ -1078,7 +1078,7 @@ async def test_a_review_the_rule_cannot_apply_to_is_not_handed_the_rule(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
-    """The rule is about ``proposal_set[*]``, which a ``baseline`` proposal has"""
+    """The rule is about ``proposal_set[*]``, which a ``baseline`` proposal has no room for."""
     constraints = await _review_constraints_sent_for("baseline", fake_critic_root, fake_session_dir)
 
     assert "quantitative_claim_rule" not in constraints
@@ -1855,7 +1855,7 @@ async def test_truncated_review_is_retried_with_a_bigger_cap(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Re-asking under the same cap would truncate at the same byte, so the"""
+    """Re-asking under the same cap would truncate at the same byte, so the retry only earns its keep by raising the ceiling."""
     complete = _anthropic_review_result(
         '{"review_verdicts": [{"target_proposal_msg_id": "p1", '
         '"verdict": "approve", "source": "critic", "reasoning": "ok"}]}'
@@ -1886,7 +1886,7 @@ async def test_review_truncated_twice_fails_the_turn(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Verdicts that never arrive must not be reported as verdicts that say"""
+    """Verdicts that never arrive must not be reported as verdicts that say nothing: the loop would keep re-asking the question it already can't answer, and nothing on the record would say why."""
     backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -1910,7 +1910,7 @@ async def test_rejected_retry_still_reports_the_truncation(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A model whose own output limit sits below the doubled cap rejects the"""
+    """A model whose own output limit sits below the doubled cap rejects the retry."""
     backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -1939,7 +1939,7 @@ async def test_unparseable_review_is_not_retried(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A reply that ended on its own terms is a formatting failure, not a"""
+    """A reply that ended on its own terms is a formatting failure, not a budget one, so a second call at a bigger cap buys nothing."""
     backend, fake_completion = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -1960,7 +1960,7 @@ async def test_max_completion_tokens_env_override_raises_the_cap(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A deployment can move the cap to fit its model without a code change —"""
+    """A deployment can move the cap to fit its model without a code change — the knob this incident had no way to turn."""
     monkeypatch.setenv("CRITIC_AGENT_MAX_COMPLETION_TOKENS", "64000")
     review_json = (
         '{"review_verdicts": [{"target_proposal_msg_id": "p1", '
@@ -2005,7 +2005,7 @@ async def test_anthropic_protocol_traces_a_failed_completion(
     fake_session_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A transport failure reaches the caller as LLMCallFailed, keeping its"""
+    """A transport failure reaches the caller as LLMCallFailed, keeping its detail, and costs exactly one trace row."""
     backend, _ = _make_anthropic_backend(
         fake_critic_root,
         fake_session_dir,
@@ -2085,7 +2085,7 @@ def test_anthropic_protocol_builds_no_review_client(
 
 @pytest.mark.asyncio
 async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypatch):
-    """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code"""
+    """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code counts the model's own message as a turn, so 1 trips before any output."""
     from hyperloom.orchestrator.roles import claude as claude_mod
 
     seen: dict[str, int] = {}
@@ -2113,7 +2113,7 @@ def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
 
 
 def test_accumulate_anthropic_usage_keeps_cache_counters_in_their_own_columns():
-    """The judge bundle repeats across turns, so most of the input side arrives"""
+    """The judge bundle repeats across turns, so most of the input side arrives as cache reads."""
     acc = {"input_tokens": 0, "output_tokens": 0}
     CriticAgentBackend._accumulate_anthropic_usage(
         acc,

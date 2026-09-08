@@ -523,7 +523,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 @pytest.mark.asyncio
 async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner, tmp_path):
-    """A high-risk serving variant that clears throughput but yields no accuracy"""
+    """A high-risk serving variant that clears throughput but yields no accuracy verdict used to skip the gate (throughput-only fallback)."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -1137,7 +1137,7 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     tmp_path,
     monkeypatch,
 ):
-    """The overtime deadline is anchored on a throughput-only baseline, so the"""
+    """The overtime deadline is anchored on a throughput-only baseline, so the rounds it gates must measure throughput only."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1192,7 +1192,7 @@ async def test_explore_cold_decision_keeps_eval(
     tmp_path,
     monkeypatch,
 ):
-    """Without server_lifecycle reuse there is no warmup round whose eval the"""
+    """Without server_lifecycle reuse there is no warmup round whose eval the decision round could fall back on, so it must run its own accuracy gate."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -2256,7 +2256,7 @@ async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_explore_call_skips_reap_under_pytest(tmp_path):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is"""
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
     executor = ExploreExecutor(session_dir=tmp_path)
     ctx = _missing_config_ctx(tmp_path)
 

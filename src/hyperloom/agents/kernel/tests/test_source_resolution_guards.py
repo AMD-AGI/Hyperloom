@@ -213,7 +213,7 @@ def test_csrc_sibling_cannot_outrank_the_routable_python_source():
 
 
 def test_windows_separators_are_not_mistaken_for_placeholders():
-    """A backslash path is still a path; is_torch_dispatch_shim_source"""
+    """A backslash path is still a path; is_torch_dispatch_shim_source normalizes the same way."""
     assert tl.looks_like_source_path(r"C:\repo\pkg\kernels\moe.py")
     item = {"name": "k", "source_file": r"C:\repo\pkg\kernels\moe.py"}
     assert tl.reject_non_path_source(item) is False
@@ -246,7 +246,7 @@ def test_real_path_is_not_flagged_as_rejected():
 
 
 def test_path_shaped_but_absent_file_is_kept_and_flagged(tmp_path):
-    """Keyed on shape, not presence: the analysis host need not own the"""
+    """Keyed on shape, not presence: the analysis host need not own the serving container's filesystem."""
     missing = str(tmp_path / "does_not_exist.py")
     item = {"name": "k", "source_file": missing, "kernel_repo": "", "source_type": "python"}
     tl._stamp_candidate_metadata(item, None)
@@ -321,7 +321,7 @@ def test_absolute_launcher_path_is_returned_unchanged():
 
 
 def test_unresolvable_relative_path_is_left_alone(monkeypatch, tmp_path):
-    """Never fabricate: an unjoinable path stays as-is rather than becoming"""
+    """Never fabricate: an unjoinable path stays as-is rather than becoming a plausible-looking path that does not exist."""
     monkeypatch.setattr(tl, "_PACKAGE_INNER_ROOTS", (str(tmp_path / "nope" / "nope"),))
     assert tl.absolutize_launcher_path("pkg/mod.py") == "pkg/mod.py"
 

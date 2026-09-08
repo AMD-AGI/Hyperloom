@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the data-provenance and kernel-lifecycle breakdown"""
+"""Unit tests for the data-provenance and kernel-lifecycle breakdown renderers."""
 
 from __future__ import annotations
 

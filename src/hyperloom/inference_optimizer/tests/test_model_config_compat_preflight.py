@@ -160,7 +160,7 @@ def test_detect_missing_tokenizer_blocks(tmp_path):
 
 
 def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
-    """xDiT (scriptable) is a server-less image workload that never loads a HF"""
+    """xDiT (scriptable) is a server-less image workload that never loads a HF tokenizer, so a missing-tokenizer config.json must NOT block it."""
     m = tmp_path / "xdit_no_tok"
     _write_config(
         m,
@@ -172,7 +172,7 @@ def test_detect_missing_tokenizer_skipped_for_scriptable_xdit(tmp_path):
 
 
 def test_detect_missing_tokenizer_still_blocks_serving_framework(tmp_path):
-    """Regression guard: the skip is scoped to scriptable — an explicit serving"""
+    """Regression guard: the skip is scoped to scriptable — an explicit serving framework (sglang) must still block a missing-tokenizer checkpoint."""
     m = tmp_path / "sglang_no_tok"
     _write_config(
         m,
@@ -1390,7 +1390,7 @@ def test_declared_standard_quant_with_scales_index_not_blocked(tmp_path):
 
 
 def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypatch):
-    """A repo-id must be resolved to its local cache dir before the waterfall so"""
+    """A repo-id must be resolved to its local cache dir before the waterfall so disk-reading detectors receive a real directory instead of the bare repo-id (which Path().is_dir() would reject, silently skipping the check)."""
     local_dir = tmp_path / "cache" / "models--org--repo"
     local_dir.mkdir(parents=True)
     monkeypatch.setattr(
@@ -1410,7 +1410,7 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
 
 
 def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
-    """An unresolvable model path (e.g. an uncached repo-id) falls back to the"""
+    """An unresolvable model path (e.g. an uncached repo-id) falls back to the raw string so behaviour is unchanged from before the resolver."""
     monkeypatch.setattr(cli_model_gate, "resolve_local_model_dir", lambda mp: None)
     seen: dict[str, str] = {}
 

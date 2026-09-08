@@ -607,7 +607,7 @@ def _finalize(
         m_events = [e for e in m_events if ws <= e[1] < we]
 
     def _clip(a: float, b: float) -> tuple[float, float] | None:
-        """Clip an interval to the steady window so occupancy math (busy/idle)"""
+        """Clip an interval to the steady window so occupancy math (busy/idle) stays within the window span."""
         if window is None:
             return (a, b)
         lo, hi = max(ws, a), min(we, b)

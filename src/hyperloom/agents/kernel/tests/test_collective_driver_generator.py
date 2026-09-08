@@ -329,7 +329,7 @@ def test_driver_self_launches_under_torchrun(tmp_path):
 
 
 def test_driver_refuses_to_oversubscribe_gpus(tmp_path):
-    """Two ranks on one device would measure intra-device copies, and the"""
+    """Two ranks on one device would measure intra-device copies, and the resulting 'speedup' would not transfer to the real multi-GPU path."""
     driver, _ = _gen(tmp_path)
     assert "visible < WORLD_SIZE" in driver
     assert "world_size > visible" in driver

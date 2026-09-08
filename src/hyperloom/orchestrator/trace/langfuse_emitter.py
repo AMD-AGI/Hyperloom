@@ -151,7 +151,7 @@ def _start_obs(parent: Any, **kwargs: Any) -> Any:
 
 
 def _end_time_wants_int(obs: Any) -> bool:
-    """Whether this SDK's ``end(end_time=...)`` wants integer ns (v4) vs a"""
+    """Whether this SDK's ``end(end_time=...)`` wants integer ns (v4) vs a datetime (v2/v3), decided by inspecting the parameter annotation."""
     try:
         import inspect
 
@@ -184,7 +184,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
 
 
 def _otel_attr_value(v: Any) -> Any:
-    """Coerce a metadata value into an OTEL-acceptable attribute, or None to"""
+    """Coerce a metadata value into an OTEL-acceptable attribute, or None to skip it."""
     if v is None:
         return None
     if isinstance(v, (str, bool, int, float)):
@@ -397,7 +397,7 @@ class LangfuseEmitter:
         return span
 
     def _ensure_agent_span(self, phase: str, agent: str, start: Any) -> Any:
-        """Get-or-create the per-(phase, agent) span. This is the 'which agent"""
+        """Get-or-create the per-(phase, agent) span."""
         key = (phase, agent)
         span = self._agent_spans.get(key)
         if span is None:

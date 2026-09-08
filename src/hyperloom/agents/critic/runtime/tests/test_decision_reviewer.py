@@ -420,7 +420,7 @@ def _verdict_intent_for(intents: list[dict], target: str) -> dict:
 
 
 def test_commit_review_carries_the_cited_rule_into_the_intent(reviewer):
-    """The Coordinator holds a reject to the verdict its rule declared, and it"""
+    """The Coordinator holds a reject to the verdict its rule declared, and it can only do that if the code the Critic cited survives the commit path."""
     rev, _kb, sm = reviewer
     rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS, "sess_code"))
     review = {

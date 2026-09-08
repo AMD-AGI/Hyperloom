@@ -2,7 +2,72 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Backfill one hyperloom session's trace JSONL into Langfuse (offline)."""
+"""Backfill one hyperloom session's trace JSONL into Langfuse (offline).
+
+Sibling of the *live* emitter
+(:mod:`hyperloom.orchestrator.trace.langfuse_emitter`): the live
+path mirrors calls into Langfuse while a run is in flight, this CLI replays
+one finished session's ``reports/trace/`` after the fact. Both share the same
+projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`), so the spans
+this CLI does emit are shaped like the live ones. Not replayed here: ext token
+shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
+GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
+
+Mapping (trace -> phase span -> agent span -> generation)::
+
+    Trace                 = one session
+      phase span          = PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...
+        agent span        = component (orchestration / kernel_agent /
+                            specialist / critic / geak / forge /
+                            proposal_scorer / ...)
+          Generation      = one LLM call (llm_calls.jsonl; prompt/response
+                            paired from conversations.jsonl when available)
+      Score               = one decision (decision_trace.jsonl), attached to
+                            the agent span that produced it (trace-level
+                            fallback). Projected by
+                            ``langfuse_mapping.decision_to_scores``:
+                              - decision_outcome (CATEGORICAL:
+                                KEEP/REVERT/no_promote/skipped)
+                              - gain_pct / predicted_gain_pct /
+                                proposal_score (NUMERIC) when present
+
+Source files (under the session dir)
+-------------------------------------
+* ``reports/trace/llm_calls.jsonl``      -- every LLM call (model + token
+                            usage + phase).
+* ``reports/trace/conversations.jsonl``  -- prompt+response text for the
+                            subset that recorded it; paired by
+                            :func:`langfuse_mapping.pair_key`.
+* ``reports/trace/decision_trace.jsonl`` -- per-action
+                            KEEP/REVERT/no_promote/skipped + gain_pct.
+* ``runtime/recipe_snapshot/.audit.jsonl`` -- recipe-KB read/write audit rows
+                            (rendered as the ``agent:recipe_kb`` span subtree).
+* ``manifest.json``                      -- trace-level metadata +
+                            claw_session_id.
+
+Usage
+-----
+::
+
+    # Dry run: parse + print the plan, no SDK / no network needed.
+    python -m hyperloom.inference_optimizer.tools.backfill_langfuse \\
+        --session-dir <SD> --dry-run
+
+    # Real backfill (needs the langfuse SDK + env keys).
+    export LANGFUSE_HOST=https://langfuse.<your-domain>
+    export LANGFUSE_PUBLIC_KEY=pk-...
+    export LANGFUSE_SECRET_KEY=sk-...
+    python -m hyperloom.inference_optimizer.tools.backfill_langfuse --session-dir <SD>
+
+Notes
+-----
+* Correlation: ``trace_id`` and the Langfuse ``session_id`` grouping are
+  derived from ``claw_session_id`` (fallback the internal session id), so a
+  re-run, the live emitter, and this backfill of one PrimusClaw session all
+  update the same trace rather than duplicating it.
+* Historical backfill preserves original timestamps via explicit
+  ``start_time`` / ``end_time`` on every observation.
+"""
 
 from __future__ import annotations
 

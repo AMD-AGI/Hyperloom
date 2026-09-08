@@ -85,7 +85,7 @@ def test_input_reaches_the_command(tmp_path):
 
 
 def test_a_wedged_command_is_bounded_by_the_timeout(tmp_path):
-    """The sync path takes the group down too: subprocess.run would kill git"""
+    """The sync path takes the group down too: subprocess.run would kill git and leave whatever an alias started holding the pipes it inherited."""
     root = _repo(tmp_path)
     marker = f"forge-sync-{uuid.uuid4().hex[:12]}"
 
@@ -139,7 +139,7 @@ async def test_a_cancelled_await_takes_the_git_process_with_it(tmp_path):
 
 
 async def test_a_wedged_await_is_bounded_too(tmp_path):
-    """``asyncio.TimeoutError`` names the right class on every version: before"""
+    """``asyncio.TimeoutError`` names the right class on every version: before 3.11 it is not the builtin one, which is what let a timeout slip past the kill on 3.10."""
     root = _repo(tmp_path)
     marker = f"forge-wedged-{uuid.uuid4().hex[:12]}"
 
@@ -150,7 +150,7 @@ async def test_a_wedged_await_is_bounded_too(tmp_path):
 
 
 def test_a_replaced_file_keeps_the_permissions_it_had(tmp_path):
-    """The temp file is created owner-only; a replaced driver must not come back"""
+    """The temp file is created owner-only; a replaced driver must not come back less readable than the one it replaced."""
     from kernelforge.durable_io import atomic_write_bytes
 
     driver = tmp_path / "forge_driver.py"

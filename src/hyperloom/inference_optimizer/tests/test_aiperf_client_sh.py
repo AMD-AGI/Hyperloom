@@ -363,7 +363,7 @@ def test_framework_sglang_delegates_to_sglang_builtin(tmp_path):
 
 
 def test_missing_framework_fail_loud(tmp_path):
-    """FRAMEWORK unset must fail loud (exit 2), never silently boot the vllm"""
+    """FRAMEWORK unset must fail loud (exit 2), never silently boot the vllm builtin — the switch always injects FRAMEWORK from benchmark.framework."""
     bench, bind, res = _sandbox(tmp_path)  # vllm_mi300x.sh present
     r = _run(bench, bind, res, tmp_path, FRAMEWORK="")
     assert r.returncode == 2
@@ -450,7 +450,7 @@ def test_unsafe_override_can_be_forced_at_full_duration(tmp_path):
 
 
 def test_realtime_metrics_survive_the_scrub(tmp_path):
-    """Without this env the rolling stats block is skipped and"""
+    """Without this env the rolling stats block is skipped and ``--stats-interval`` is inert -- a 60-minute window emits nothing until it ends, so a merely slow run looks identical to a wedged one."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AIPERF_UI_REALTIME_METRICS_ENABLED="false")
     assert r.returncode == 0, r.stderr
@@ -498,7 +498,7 @@ def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
 
 @pytest.mark.parametrize("env", [{"PROFILE_EXTRA_BODY": "{}"}, {}])
 def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
-    """vLLM carries its bounds on --profiler-config; an empty body must not be"""
+    """vLLM carries its bounds on --profiler-config; an empty body must not be posted as one, or the endpoint gets a meaningless payload."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run_profile(bench, bind, res, tmp_path, **env)
     assert r.returncode == 0, r.stderr

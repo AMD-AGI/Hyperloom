@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState`"""
+"""``_RenderMixin`` — prompt-facing renderers for :class:`..shared_state.SharedState` (mission / phase / warm-start / search-ledger blocks)."""
 
 from __future__ import annotations
 

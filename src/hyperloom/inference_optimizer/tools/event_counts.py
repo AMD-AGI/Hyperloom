@@ -2,7 +2,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Print action / proposal / kernel counts from a session's coordinator.db."""
+"""Print action / proposal / kernel counts from a session's coordinator.db.
+
+Usage:
+    event_counts.py [SESSION_DIR] [--all] [--limit N]
+
+SESSION_DIR defaults to $INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR (the per-run
+pin set by the launcher), else $USER_DATA_PATH, else /workspace/hyperloom. The
+latter two are the workspace root, not a per-session dir, so they will normally
+not contain storage/coordinator.db — pass SESSION_DIR explicitly in that case.
+Reads the last 500 events by default; pass ``--all`` for full history or
+``--limit N`` for a custom window.
+"""
 
 from __future__ import annotations
 

@@ -298,7 +298,7 @@ def test_eval_failure_triggers_run_eval_false_retry(tmp_path):
 
 
 def test_eval_crash_routes_to_enablement_no_salvage(tmp_path, monkeypatch):
-    """flag on + single-node: an eval crash is stamped as an eval-failure"""
+    """flag on + single-node: an eval crash is stamped as an eval-failure contract with no RUN_EVAL=false salvage retry."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
     base = tmp_path / "base.yaml"
     _write_yaml(base)
@@ -384,7 +384,7 @@ def _make_baseline_ctx(params: dict, shared_state) -> SimpleNamespace:
 
 # --- baseline accuracy missing -> stop the whole run -----------------------
 def test_baseline_missing_accuracy_stops_run(tmp_path):
-    """Serving baseline with eval expected but no accuracy result -> the run"""
+    """Serving baseline with eval expected but no accuracy result -> the run halts with ``stop_reason=baseline_accuracy_failed`` (broken setup)."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     base = tmp_path / "base.yaml"
@@ -874,7 +874,7 @@ def test_eval_enablement_zero_accuracy_below_floor(monkeypatch):
 
 
 def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
-    """A tripped probe changes what a ~0 score means: the eval was cut short"""
+    """A tripped probe changes what a ~0 score means: the eval was cut short because the model never stopped generating, not because it answered and got them wrong."""
     result = {
         "status": "succeeded",
         "accuracy": 0.0,
@@ -982,7 +982,7 @@ def test_after_materialize_applies_eval_concurrency_compat(tmp_path):
 
 
 def test_after_materialize_fails_loudly_when_flag_unpatchable(tmp_path):
-    """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the"""
+    """Fail LOUDLY, never warn-and-continue: an unstrippable flag guarantees the benchmark aborts in run_lm_eval, so short-circuit before the server boots."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
@@ -1027,7 +1027,7 @@ def test_after_materialize_skips_compat_gate_when_eval_disabled(tmp_path):
 
 
 def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
-    """An exception from the patcher must surface as the same loud failure, not"""
+    """An exception from the patcher must surface as the same loud failure, not as a silent 'best-effort skip'."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     cfg = _materialized_cfg(tmp_path, run_eval="true", inferencex_path=str(ix))
@@ -1044,7 +1044,7 @@ def test_after_materialize_compat_exception_is_not_swallowed(tmp_path):
 
 
 def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
-    """No mocks on the patcher: a real flagged sglang_mi355x.sh under"""
+    """No mocks on the patcher: a real flagged sglang_mi355x.sh under $MAGPIE_PATH is scrubbed, and the real benchmark_lib.sh parser is taught to tolerate the flag, when the baseline materializes its config."""
     magpie = tmp_path / "site-packages"
     mbench = magpie / "Magpie" / "scripts" / "benchmark"
     mbench.mkdir(parents=True)
@@ -1088,7 +1088,7 @@ def test_end_to_end_flagged_script_is_scrubbed_before_launch(tmp_path):
 
 
 def test_end_to_end_live_flag_blocks_launch_without_mocks(tmp_path):
-    """Unmocked: a genuinely unremovable ``run_eval --concurrent-requests``"""
+    """Unmocked: a genuinely unremovable ``run_eval --concurrent-requests`` (unrecognised value shape, and a benchmark_lib.sh whose parser cannot be taught to absorb it) short-circuits the baseline before the server boots."""
     magpie = tmp_path / "site-packages"
     mbench = magpie / "Magpie" / "scripts" / "benchmark"
     mbench.mkdir(parents=True)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the idempotent, atomic Magpie ``benchmarker.py`` patcher"""
+"""Unit tests for the idempotent, atomic Magpie ``benchmarker.py`` patcher (path resolution, sentinel/legacy detection, upstream-atomic awareness, and the classified atomic-reason outcomes)."""
 
 from __future__ import annotations
 
@@ -450,7 +450,7 @@ def test_eval_flag_stripped_from_inferencex_dir(tmp_path):
 
 
 def test_eval_concurrency_fixes_idempotent(tmp_path):
-    """Regression: a 2nd pass must stay ok. The parser patch leaves a legit"""
+    """Regression: a 2nd pass must stay ok."""
     _make_inferencex(tmp_path)
     assert mp._apply_eval_concurrency_fixes(None, tmp_path) is True
     # Second pass: benchmark_lib.sh now carries the parser sentinel + flag.
@@ -529,7 +529,7 @@ def _make_sitepackages_magpie(root: Path) -> Path:
 
 
 def test_ensure_eval_concurrency_compat_strips_sglang_mi355x(tmp_path):
-    """The public run-time entry point removes the flag from the Magpie tree"""
+    """The public run-time entry point removes the flag from the Magpie tree Magpie re-copies from, so the executed copy is clean."""
     magpie = _make_sitepackages_magpie(tmp_path / "site-packages")
     ix = _make_inferencex(tmp_path / "ix", vllm=None)
 
@@ -545,7 +545,7 @@ def test_ensure_eval_concurrency_compat_strips_sglang_mi355x(tmp_path):
 
 
 def test_ensure_eval_concurrency_compat_makes_run_lm_eval_tolerant(tmp_path):
-    """Belt for Magpie's run-time re-copy: even if a flagged script slips into"""
+    """Belt for Magpie's run-time re-copy: even if a flagged script slips into ``<inferencex>/benchmarks/``, ``run_lm_eval`` must not abort on it."""
     ix = _make_inferencex(tmp_path / "ix", vllm=None)
 
     assert mp.ensure_eval_concurrency_compat(None, str(ix)) is True
@@ -589,7 +589,7 @@ def test_ensure_eval_concurrency_compat_idempotent(tmp_path):
 
 
 def test_ensure_eval_concurrency_compat_reports_unstrippable(tmp_path):
-    """An unrecognised flag shape must report False (callers fail loudly), not"""
+    """An unrecognised flag shape must report False (callers fail loudly), not silently leave a fatal flag live."""
     magpie = tmp_path / "site-packages"
     bench = magpie / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True, exist_ok=True)
@@ -639,7 +639,7 @@ def test_live_flag_scan_ignores_env_prefixed_patched_form(tmp_path):
 
 
 def test_compat_true_when_only_the_belt_fails(tmp_path):
-    """Regression: a reduced / already-fixed benchmark_lib.sh whose parser block"""
+    """Regression: a reduced / already-fixed benchmark_lib.sh whose parser block is unrecognised must NOT be reported as blocking."""
     ix = tmp_path / "ix"
     (ix / "benchmarks").mkdir(parents=True)
     (ix / "benchmarks" / "benchmark_lib.sh").write_text("run_lm_eval() { : ; }\n", encoding="utf-8")
@@ -648,7 +648,7 @@ def test_compat_true_when_only_the_belt_fails(tmp_path):
 
 
 def test_compat_true_when_parser_absorbs_an_unstrippable_flag(tmp_path):
-    """A flag shape the strip cannot rewrite is harmless once run_lm_eval parses"""
+    """A flag shape the strip cannot rewrite is harmless once run_lm_eval parses it — the belt is doing its job, so do not block the run."""
     magpie = tmp_path / "site-packages"
     bench = magpie / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True)
@@ -666,7 +666,7 @@ def test_compat_true_when_parser_absorbs_an_unstrippable_flag(tmp_path):
 
 
 def test_compat_false_when_an_unstrippable_flag_meets_a_strict_parser(tmp_path):
-    """The one genuinely fatal state: a caller still passes the flag AND"""
+    """The one genuinely fatal state: a caller still passes the flag AND run_lm_eval still rejects it."""
     magpie = tmp_path / "site-packages"
     bench = magpie / "Magpie" / "scripts" / "benchmark"
     bench.mkdir(parents=True)
@@ -809,7 +809,7 @@ def test_merged_case_env_only_ix_is_not_a_false_positive(tmp_path):
 
 
 def test_unpatchable_parser_without_live_flag_is_not_fatal(tmp_path):
-    """Narrowed judgement: even a parser we cannot teach must not fail install"""
+    """Narrowed judgement: even a parser we cannot teach must not fail install when no caller passes the flag (aligns install-time with run-time)."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)
@@ -859,7 +859,7 @@ _BENCHMARK_LIB_MULTI_CATCHALL = (
 
 
 def test_merged_case_patch_lands_inside_run_lm_eval_only(tmp_path):
-    """Regression for the mis-patch bug: with earlier functions sharing the same"""
+    """Regression for the mis-patch bug: with earlier functions sharing the same ``*)`` catch-all, the flag case must be spliced into run_lm_eval, not the first matching catch-all in the file."""
     lib = tmp_path / "benchmark_lib.sh"
     lib.write_text(_BENCHMARK_LIB_MULTI_CATCHALL, encoding="utf-8")
 
@@ -885,7 +885,7 @@ def test_merged_case_patch_lands_inside_run_lm_eval_only(tmp_path):
 
 
 def test_tolerance_not_fooled_by_outer_catchall_sentinel(tmp_path):
-    """A sentinel/flag that lives OUTSIDE run_lm_eval must not be read as"""
+    """A sentinel/flag that lives OUTSIDE run_lm_eval must not be read as run_lm_eval tolerating the flag (guards the fatal path)."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)
@@ -926,7 +926,7 @@ def test_real_pinned_benchmark_lib_patches_run_lm_eval(tmp_path):
 
 
 def test_unpatchable_parser_with_live_flag_stays_fatal(tmp_path):
-    """The narrowed judgement must still fail when a live flag really survives"""
+    """The narrowed judgement must still fail when a live flag really survives an unteachable parser (no false negative)."""
     ix = tmp_path / "ix"
     bench = ix / "benchmarks"
     bench.mkdir(parents=True)

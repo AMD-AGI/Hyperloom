@@ -109,7 +109,7 @@ def test_stamp_empty_key_is_noop(tmp_path: Path):
 
 
 def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
-    """An upstream-PR task settling ``status=\"failed\"`` routes to"""
+    """An upstream-PR task settling ``status="failed"`` routes to ``_handle_unpromotable_result`` and must be stamped no_result_failed."""
     coord = _MiniCoord(tmp_path)
     task = SimpleNamespace(
         kind="integrate_patch",

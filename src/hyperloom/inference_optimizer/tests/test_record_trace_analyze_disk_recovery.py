@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``record_trace_analyze`` recovers a thin TraceLens envelope from the on-disk"""
+"""``record_trace_analyze`` recovers a thin TraceLens envelope from the on-disk kernel-roofline report."""
 
 from __future__ import annotations
 

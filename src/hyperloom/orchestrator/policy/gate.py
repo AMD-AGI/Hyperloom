@@ -1085,7 +1085,7 @@ class PolicyGate:
         self._validate_specialist_gpu_request(params)
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
-        """Validate a specialist's optional GPU request against the GPU"""
+        """Validate a specialist's optional GPU request against the GPU specialist-pool ceiling."""
         needs_gpu_raw = params.get("needs_gpu", False)
         if isinstance(needs_gpu_raw, str):
             needs_gpu = needs_gpu_raw.strip().lower() in (
@@ -1226,7 +1226,7 @@ class PolicyGate:
         self,
         params: dict[str, Any],
     ) -> None:
-        """Lightweight mechanical sanity gate for ``scope='freeform'``"""
+        """Lightweight mechanical sanity gate for ``scope='freeform'`` specialists."""
         # Freeform applies the same max_turns contract as domain dispatches.
         validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
         self._validate_specialist_gpu_request(params)

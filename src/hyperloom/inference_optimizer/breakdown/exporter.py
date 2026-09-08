@@ -592,7 +592,7 @@ def _load_assembled(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Assemble recorder fragments into ``{section: value}`` (empty on opt-out"""
+    """Assemble recorder fragments into ``{section: value}`` (empty on opt-out or when no fragments exist)."""
     disabled = os.environ.get(
         "INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER",
         "",

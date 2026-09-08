@@ -680,7 +680,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
 
 
 def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
-    """install_baremetal.sh rejects a mispaired config during setup, like the CLI"""
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI preflight and the other two installers."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
@@ -818,7 +818,7 @@ def test_baremetal_setup_accepts_oauth_only_without_mirroring_it(tmp_path: Path)
 
 
 def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Path):
-    """Mirrors the CLI: both keys imply their own official endpoint, so neither"""
+    """Mirrors the CLI: both keys imply their own official endpoint, so neither borrows the other's and the pair is legal."""
     script_paths = [
         (
             "install",
@@ -866,7 +866,7 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
 
 
 def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_path: Path):
-    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its"""
+    """An explicit ANTHROPIC_BASE_URL keeps flagging an OpenAI key that lost its own base URL."""
     script_paths = [
         (
             "install",
@@ -1373,7 +1373,7 @@ _SYNC_BODY_SOFT = f"{_SYNC_BODY} || true"
 
 
 def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
-    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is"""
+    """torch/lib copies carry DT_RPATH=$ORIGIN, so a /opt/rocm-only overlay is invisible to torch.profiler and decode traces stay empty."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=_SYNC_BODY,
@@ -1390,7 +1390,7 @@ def test_baremetal_hotfix_syncs_resolved_libs_into_torch_lib(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
-    """Re-running used to re-copy unconditionally and stamp a fresh backup dir"""
+    """Re-running used to re-copy unconditionally and stamp a fresh backup dir holding the already-hotfixed copy, piling large .so files into site-packages."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=f"{_SYNC_BODY}\n{_SYNC_BODY}",
@@ -1407,7 +1407,7 @@ def test_hotfix_torch_lib_sync_skips_a_second_run(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
-    """cmp only proves the bytes landed; the new libamdhip64 still has to work"""
+    """cmp only proves the bytes landed; the new libamdhip64 still has to work against the other ROCm libs torch bundles under $ORIGIN."""
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
         body=_SYNC_BODY_SOFT,
@@ -1423,7 +1423,7 @@ def test_hotfix_torch_lib_sync_rolls_back_when_torch_breaks(tmp_path: Path):
 
 
 def test_hotfix_torch_lib_sync_refreshes_a_snapshot_after_a_torch_upgrade(tmp_path: Path):
-    """A torch upgrade between runs left the snapshot describing the previous"""
+    """A torch upgrade between runs left the snapshot describing the previous install, so the new vendor libs were overwritten with no copy kept and a rollback would have pushed the old ABI into the new torch."""
     torch_lib = tmp_path / "torch" / "lib"
     res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1495,7 +1495,7 @@ def test_hotfix_asset_change_keeps_the_vendor_backup(tmp_path: Path):
 
 
 def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_path: Path):
-    """When torch never shipped libroctracer64.so, a single-library hotfix bump"""
+    """When torch never shipped libroctracer64.so, a single-library hotfix bump must not treat the injected tracer as a vendor refresh trigger."""
     hotfix_hip = tmp_path / "rocm" / "lib" / _HOTFIX_HIP_SONAME
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1513,7 +1513,7 @@ def test_partial_hotfix_asset_update_with_absent_tracer_keeps_vendor_backup(tmp_
 
 
 def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path):
-    """A truncated fingerprint can force a refresh, but the rebuild must not"""
+    """A truncated fingerprint can force a refresh, but the rebuild must not promote hotfix bytes already sitting in torch/lib into the vendor snapshot."""
     fp = f'"{tmp_path}/torch/lib/{_BACKUP_DIRNAME}/.fingerprint"'
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1530,7 +1530,7 @@ def test_refresh_preserves_vendor_when_torch_still_carries_hotfix(tmp_path: Path
 
 
 def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
-    """torch resolves the versioned soname first, so copying the bytes under the"""
+    """torch resolves the versioned soname first, so copying the bytes under the unversioned name alone left the profiler on the vendor library."""
     bin_dir = _fake_elf_tools(tmp_path)
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1552,7 +1552,7 @@ def test_torch_lib_sync_links_versioned_soname_aliases(tmp_path: Path):
 
 
 def test_torch_lib_sync_relinks_a_soname_alias_that_went_missing(tmp_path: Path):
-    """Matching bytes are not enough to call the sync done: a pip reinstall can"""
+    """Matching bytes are not enough to call the sync done: a pip reinstall can drop the alias and leave the versioned lookup back on the vendor library."""
     bin_dir = _fake_elf_tools(tmp_path)
     alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
@@ -1584,7 +1584,7 @@ def test_torch_lib_sync_skips_a_second_run_once_aliases_exist(tmp_path: Path):
 
 
 def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
-    """A torch that ships a real file under the versioned name must get it back"""
+    """A torch that ships a real file under the versioned name must get it back byte for byte, not the symlink the sync put there."""
     bin_dir = _fake_elf_tools(tmp_path)
     vendor_alias = tmp_path / "torch" / "lib" / "libamdhip64.so.7"
     res, _rocm_lib, torch_lib = _drive_torch_lib_sync(
@@ -1607,7 +1607,7 @@ def test_runtime_failure_restores_a_real_vendor_soname_file(tmp_path: Path):
 
 
 def test_verify_hotfix_only_fails_when_no_hotfix_is_installed(tmp_path: Path):
-    """--verify-hotfix is a standalone check, so it has to report a bad state"""
+    """--verify-hotfix is a standalone check, so it has to report a bad state instead of exiting clean on a host that never applied the hotfix."""
     bin_dir = _fake_elf_tools(tmp_path)
     res, _rocm_lib, _torch_lib = _drive_torch_lib_sync(
         tmp_path,
@@ -1690,7 +1690,7 @@ def test_hotfix_survives_a_runtime_probe_failing_for_unrelated_reasons(tmp_path:
 
 
 def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
-    """The installer runs under set -e: a bare sync call would end setup instead"""
+    """The installer runs under set -e: a bare sync call would end setup instead of degrading to "hotfix not applied"."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1736,7 +1736,7 @@ def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
 
 
 def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
-    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under"""
+    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never runs the benchmark and left the profiler unfixed."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1833,7 +1833,7 @@ def test_restore_persisted_framework_env_without_vllm_venv_root(
 
 
 def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
-    """A re-run with --install-framework none must reuse .env's isolated vLLM"""
+    """A re-run with --install-framework none must reuse .env's isolated vLLM env so torch/lib sync still targets the venv that runs benchmarks."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
@@ -1956,7 +1956,7 @@ def _drive_hotfix_gate(
 
 
 def test_docker_run_mode_skips_the_hotfix_for_a_vllm_image(tmp_path: Path):
-    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying"""
+    """vLLM ROCm images carry their own kineto profiler workaround, so overlaying /opt/rocm into their torch/lib trades a vendor-validated pair for an untested one."""
     res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" not in res.stdout
@@ -1970,7 +1970,7 @@ def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
 
 
 def test_baremetal_run_mode_keeps_the_hotfix_for_vllm(tmp_path: Path):
-    """The framework split is docker-only: a bare-metal vLLM host profiles through"""
+    """The framework split is docker-only: a bare-metal vLLM host profiles through the same ROCm libs the overlay fixes, so gating it there would lose profiling."""
     res = _drive_hotfix_gate(tmp_path, run_mode="baremetal", importable={"vllm"})
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -2386,7 +2386,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
-    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator"""
+    """Writing kernel-agent env must NOT wipe the Anthropic creds the operator put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL after install)."""
     install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
@@ -2476,7 +2476,7 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
 
 
 def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
-    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted"""
+    """Fresh-shell CLI starts from .env, so GEAK_CLAUDE_MODEL must be persisted there in addition to kernel-agent.env.sh."""
 
     def bash_path(path: Path) -> str:
         text = str(path)

@@ -123,7 +123,7 @@ def _should_drop_flag(name: str) -> bool:
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a"""
+    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a source that cannot be read or shell-parsed."""
     text = _read_source(source)
 
     envs = _extract_envs(text)

@@ -1081,7 +1081,7 @@ class TestNonGitRepoRoot:
         assert root == str(site.resolve()), "venv-in-git must use the package root, not the git project toplevel"
 
     def test_reset_venv_in_git_restores_from_pristine(self, tmp_path):
-        """Repro: an UNTRACKED pip source under a git work tree must be reset from the"""
+        """Repro: an UNTRACKED pip source under a git work tree must be reset from the pristine snapshot (git checkout is a no-op on untracked files)."""
         site, src = _venv_in_git_layout(tmp_path)
         pristine_text = src.read_text()
         out = tmp_path / "out"
@@ -1093,7 +1093,7 @@ class TestNonGitRepoRoot:
         assert src.read_text() == pristine_text, "untracked venv source must be reverted via pristine snapshot"
 
     def test_export_venv_in_git_produces_patch(self, tmp_path):
-        """End-to-end: venv-in-git layout must still yield a non-empty, package-relative"""
+        """End-to-end: venv-in-git layout must still yield a non-empty, package-relative patch (not fall into the empty git-diff path)."""
         site, src = _venv_in_git_layout(tmp_path)
         out = tmp_path / "out"
         pdir = _snapshot_fusion_source(str(site), str(src), out)

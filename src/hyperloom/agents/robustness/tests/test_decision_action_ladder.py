@@ -1211,7 +1211,7 @@ async def test_local_server_unreachable_idempotency_key_disambiguates_targets():
 
 
 async def test_local_server_unreachable_idempotency_key_stable_for_same_target():
-    """The same target re-firing (e.g. a later tick after cooldown) must derive"""
+    """The same target re-firing (e.g. a later tick after cooldown) must derive the same per-target suffix, since that's what makes the disambiguator deterministic rather than a source of new spurious duplicates."""
     ladder = ActionLadder()
     first = await ladder.decide(
         [_server_unreachable_symptom("http://127.0.0.1:8000/health")],

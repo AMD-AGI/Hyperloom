@@ -1025,7 +1025,7 @@ def _ta_ok(*, report_md: Path) -> dict:
 
 
 def _run_roofline_captured_payload(tmp_path, *, reason: str) -> dict:
-    """Run RooflineExecutor with stubbed profile/trace_analyze; return the"""
+    """Run RooflineExecutor with stubbed profile/trace_analyze; return the payload passed to record_trace_analyze."""
     import asyncio
 
     md = tmp_path / "analysis.md"
@@ -1085,7 +1085,7 @@ def test_prelude_roofline_records_baseline_arm(tmp_path):
 
 
 def test_watermark_roofline_tags_current_best_arm(tmp_path):
-    """A non-prelude roofline explicitly tags arm=current_best (no reliance on"""
+    """A non-prelude roofline explicitly tags arm=current_best (no reliance on transient recorder inference)."""
     payload = _run_roofline_captured_payload(
         tmp_path,
         reason="explore_keep_watermark",
@@ -1405,7 +1405,7 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
 # cuda-graph folding -> trace_analyze ok but 0 hot kernels
 @pytest.mark.asyncio
 async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
-    """trace_analyze succeeds but returns 0 hot kernels because cuda-graph"""
+    """trace_analyze succeeds but returns 0 hot kernels because cuda-graph capture folded per-kernel activity; the executor appends a ``cuda_graph_attribution_degraded`` trace_health_warnings entry so the LLM re-profiles eager instead of reading top=[] as 'no optimizable kernels'."""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"
@@ -1437,7 +1437,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
 
 @pytest.mark.asyncio
 async def test_431_zero_hot_without_degraded_health_no_warning(tmp_path):
-    """Healthy trace (per_kernel_attribution_degraded=False) that genuinely"""
+    """Healthy trace (per_kernel_attribution_degraded=False) that genuinely finds 0 hot kernels must NOT be mislabeled as cuda-graph degradation."""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"
@@ -1579,7 +1579,7 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
 
 @pytest.mark.asyncio
 async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
-    """Even if trace_health says degraded, a non-empty hot_kernels list"""
+    """Even if trace_health says degraded, a non-empty hot_kernels list proves attribution worked — do NOT append the warning."""
     state = _state()
     ctx = _ctx(tmp_path)
     md = tmp_path / "analysis.md"

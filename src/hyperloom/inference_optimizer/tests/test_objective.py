@@ -584,7 +584,7 @@ def _state_with_within(value: object) -> SharedState:
 
 
 class TestARooflineTargetOnlyCountsAMeasuredRoofline:
-    """The objective has no separate \"was it profiled\" gate; an unmeasured"""
+    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero progress."""
 
     def test_no_snapshot_reads_as_unmeasured(self):
         st = SharedState(session_id="s")
@@ -620,7 +620,7 @@ class TestARooflineTargetOnlyCountsAMeasuredRoofline:
 
 
 class TestEitherTargetEndsTheRun:
-    """Gain and roofline measure different axes, so they compose rather than"""
+    """Gain and roofline measure different axes, so they compose rather than compete."""
 
     def _both(self) -> AnyObjective:
         return AnyObjective([TargetGainObjective(300.0), TargetRooflineObjective(80.0)])
@@ -641,7 +641,7 @@ class TestEitherTargetEndsTheRun:
         assert self._both().reached(st) is False
 
     def test_the_gap_comes_from_the_closest_member_not_the_smaller_number(self):
-        """The two gaps are percentage points of different quantities, so the"""
+        """The two gaps are percentage points of different quantities, so the smaller number is not the nearer target."""
         st = _state_with_within(40.0)
         st.cumulative_gain_validated = 200.0
         both = self._both()

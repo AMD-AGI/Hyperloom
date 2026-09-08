@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``tools/robustness_monitor.sh.example`` session-dir resolution and"""
+"""Tests for ``tools/robustness_monitor.sh.example`` session-dir resolution and resume gating."""
 
 from __future__ import annotations
 

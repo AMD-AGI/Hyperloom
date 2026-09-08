@@ -2,7 +2,77 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Sweep the AMD compute-partition modes and report which one the workload wants."""
+"""Sweep the AMD compute-partition modes and report which one the workload wants.
+
+Sets each requested mode on one card in turn, runs the same fixed benchmark on
+every partition that mode creates, and sums the result. The comparison it prints
+is the one an operator needs before committing a multi-hour optimization
+session: under which shape does this workload go fastest, and what does that
+cost in per-request latency.
+
+**The fan-out is the whole point.** A partition gets a fraction of the card, so
+a benchmark that loads one partition and ignores the rest measures a fraction of
+the card. Measured on this node, one MI355X in ``CPX`` presents eight 32-CU
+partitions -- a single-partition run reports roughly an eighth of the card's
+throughput, making ``CPX`` look catastrophic when in aggregate it may well win.
+Every figure here is therefore the sum over a mode's partitions with all of them
+loaded at once, and a mode whose partitions cannot all be loaded is reported as
+unmeasured rather than as slow.
+
+**Why the privileged set lives here and not in the optimizer.** Changing the
+mode is a card-wide privileged operation that evicts every process holding a GPU
+context. That is reasonable between benchmarks in an operator-run script and
+unreasonable inside an optimization loop that also runs agent-authored code, so
+``hyperloom`` itself only ever *reads* the mode -- see
+``hyperloom.common.gpu_partition`` -- and refuses at launch any session whose
+streams will not fit one partition. This script is the other half of that
+split: the boundary that establishes the shape the optimizer then treats as
+fixed for the whole session.
+
+**Device indices are not portable between tools, so partitions are matched on CU
+count.** Measured on an 8-card MI355X node with card 0 in ``CPX``: ``amd-smi``
+orders by PCI address and calls the eight partitions devices 0-7, while HSA/HIP
+enumerates whole cards first and calls them devices 7-14. A device list computed
+with one tool and handed to the other is wrong, and wrong invisibly -- the
+benchmark runs to completion, on the wrong silicon. Partitions are selected here
+the way :func:`~hyperloom.common.gpu_partition.partition_device_predicate`
+documents: by matching the expected CU count, in the HIP index space the
+benchmark itself will use, and narrowed to the card being swept so that an
+identical CU count on a neighbouring card cannot be mistaken for a partition.
+
+Only the target card is repartitioned; the rest of the node is left alone. That
+keeps total silicon constant across the sweep, which is what makes the modes
+comparable to each other.
+
+Usage::
+
+    # print the plan, touch nothing
+    python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+
+    # sweep the modes the card reports it supports
+    python3 scripts/partition_mode_sweep.py \\
+        --benchmark-config /path/to/benchmark.yaml \\
+        --modes SPX,DPX,QPX,CPX \\
+        --output-dir /shared/partition-sweep
+
+    # arbitrary workload; {device} and {output_dir} are substituted per partition
+    python3 scripts/partition_mode_sweep.py \\
+        --benchmark-command 'my_bench --gpu {device} --out {output_dir}' \\
+        --per-stream-gib 20.7
+
+Exit codes:
+
+    0  the sweep completed and a winner was reported
+    1  the sweep ran but no mode produced a valid measurement
+    2  the request was refused before anything was changed
+    3  the sweep finished but the card could not be restored to its entry mode
+    4  the sweep stopped on an error it does not model, after reporting whatever
+       it had already measured and restoring the card
+
+Every path out of a started sweep goes through the restore and the report,
+including an unexpected exception, so ``3`` stays reachable and the modes
+measured before a failure are never lost to it.
+"""
 
 from __future__ import annotations
 

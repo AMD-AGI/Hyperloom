@@ -369,7 +369,7 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     baseline_yaml: Path,
     monkeypatch,
 ):
-    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like"""
+    """On MI325X/MI308X conc-sweep must select the mi300x runner script, like every other executor — not state.gpu_type's real type."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.gpu_type = "mi325x"
     monkeypatch.setenv("GPU_TYPE", "mi300x")
@@ -1593,7 +1593,7 @@ class TestTheChartFollowsTheGradedAxis:
         ],
     )
     def test_the_chart_plots_the_field_the_summary_graded(self, monkeypatch, mode: str, env: dict[str, str]):
-        """Binds both sides: whichever way the session resolved its axis, the"""
+        """Binds both sides: whichever way the session resolved its axis, the curve reads the same point field the summary took its speedups on."""
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -1623,7 +1623,7 @@ class TestTheChartFollowsTheGradedAxis:
 
 
 class TestTheRooflineNeedsBothItsAxisAndARealShape:
-    """``_ceiling_series`` returns a decode-only output-throughput bound, in the"""
+    """``_ceiling_series`` returns a decode-only output-throughput bound, in the output pair's units, computed from the session's ISL/OSL."""
 
     def _payload(self, mode: str, metric: str) -> dict[str, Any]:
         return {
@@ -2222,7 +2222,7 @@ def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """After both arms finish (happy path), run_conc_sweep must reap any"""
+    """After both arms finish (happy path), run_conc_sweep must reap any lingering server via the same broad /proc scan used elsewhere: a per-variant timeout that fires before a server_lifecycle pidfile is written leaves nothing for that pidfile-based teardown to find, so this is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
@@ -2250,7 +2250,7 @@ def test_run_conc_sweep_reaps_stale_servers_even_when_an_arm_raises(
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The reap must fire from a ``finally`` -- even when an arm blows up"""
+    """The reap must fire from a ``finally`` -- even when an arm blows up with an exception that escapes its own internal handling, not just on the happy path."""
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
@@ -2277,7 +2277,7 @@ def test_run_conc_sweep_skips_reap_under_pytest(
     session_dir: Path,
     baseline_yaml: Path,
 ):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is"""
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):

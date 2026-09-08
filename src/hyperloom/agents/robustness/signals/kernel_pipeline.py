@@ -195,7 +195,7 @@ def _kernel_opt_no_progress_symptoms(
     data: SourceData,
     cfg: KernelPipelineConfig,
 ) -> list[Symptom]:
-    """Identify kernels where no backend attempt reached a >=1.2x microbench"""
+    """Identify kernels where no backend attempt reached a >=1.2x microbench speedup and no integrate row recorded a KEEP decision."""
     audit = data.local_decision_audit
     if not isinstance(audit, dict):
         return []

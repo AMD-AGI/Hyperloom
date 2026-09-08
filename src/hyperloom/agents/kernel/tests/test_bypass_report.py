@@ -1066,7 +1066,7 @@ def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):
 
 
 def test_finder_non_patchable_verdict_blocks_repo_scan(monkeypatch):
-    """A finder non_patchable verdict is authoritative: the repo-scan tier must"""
+    """A finder non_patchable verdict is authoritative: the repo-scan tier must not override it with a coincidental kernel-name hit."""
     monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("", "non_patchable"))
     scanned: list[str] = []
 

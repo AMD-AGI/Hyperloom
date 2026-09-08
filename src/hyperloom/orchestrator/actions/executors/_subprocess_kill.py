@@ -45,7 +45,7 @@ COOPERATIVE_REAP_BUDGET_SEC: float = (
 
 
 def new_session_kwargs() -> dict:
-    """``Popen`` kwargs so the child gets its own POSIX session (killable via"""
+    """``Popen`` kwargs so the child gets its own POSIX session (killable via ``os.killpg``)."""
     if os.name == "posix":
         return {"start_new_session": True}
     return {}
@@ -382,7 +382,7 @@ def _server_log_shows_death(path: str) -> str | None:
 
 
 def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
-    """Return a short ``server.log`` excerpt around the first terminal"""
+    """Return a short ``server.log`` excerpt around the first terminal engine/worker-init marker, or ``None`` when no fatal marker is present."""
     candidates = [path]
     try:
         base_dir = os.path.dirname(path) or "."
@@ -527,7 +527,7 @@ def _scan_logs_increment(server_log_path: str, offsets: dict[str, int]) -> _LogS
 
 
 def _scan_server_log_increment(path: str, from_offset: int) -> tuple[int, bool, bool, bool]:
-    """Incrementally scan the bytes appended to ``server.log`` since"""
+    """Incrementally scan the bytes appended to ``server.log`` since ``from_offset`` for ready / generation-progress / eval-start markers."""
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -722,7 +722,7 @@ class _SoftDeadlineExceeded(_ReapedByWatchdog):
 
 
 class _ServerDeadDetected(_ReapedByWatchdog):
-    """Internal sentinel: the server-liveness watchdog saw a terminal engine /"""
+    """Internal sentinel: the server-liveness watchdog saw a terminal engine / worker init marker that persisted past the grace window."""
 
     returncode = SERVER_DEAD_RETURNCODE
 
@@ -744,7 +744,7 @@ class _ServerDeadDetected(_ReapedByWatchdog):
 
 
 class _ServerStalledDetected(_ReapedByWatchdog):
-    """Internal sentinel: the detokenizer-stall watchdog saw the server report"""
+    """Internal sentinel: the detokenizer-stall watchdog saw the server report ready and then produce no generation progress for the grace window."""
 
     returncode = DETOKENIZER_STALL_RETURNCODE
 

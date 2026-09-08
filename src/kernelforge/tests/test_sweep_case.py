@@ -236,7 +236,7 @@ sys.exit(1)
 
 
 def test_a_bad_case_id_is_not_recorded_as_a_rejection_of_the_flag(tmp_path):
-    """This driver KNOWS --bench-case; it refused the case id, and it says so"""
+    """This driver KNOWS --bench-case; it refused the case id, and it says so the same way an unknown flag does -- non-zero, then fine without it."""
     driver, tally = _counting_driver(tmp_path, _CASE_CHECKING_DRIVER)
     missing = _sweep(driver, case_id="sq99")
     assert missing["success"] is False
@@ -256,7 +256,7 @@ def test_a_bad_case_id_is_not_recorded_as_a_rejection_of_the_flag(tmp_path):
 
 
 def test_a_declared_case_the_flag_still_refused_does_memoise(tmp_path):
-    """The other side of the same evidence: the case came back in the suite, so"""
+    """The other side of the same evidence: the case came back in the suite, so the argument was satisfiable and the parser is what would not take it."""
     driver, tally = _counting_driver(tmp_path, _FLAG_REJECTING_DRIVER)
     assert _sweep(driver)["success"]
     assert list(_CASE_FLAG_REJECTED.values()) == [True]
@@ -613,7 +613,7 @@ print("case_ms: sq64 0.500000")
     ],
 )
 def test_a_verbatim_sweep_cannot_move_the_cache_or_change_the_compiler(tmp_path, name):
-    """Same class as the device and toolchain names already refused: each of"""
+    """Same class as the device and toolchain names already refused: each of these makes the probe compile, or compile against, something other than what the gate will read, so the number would not describe this source."""
     marker = tmp_path / "ran.txt"
     driver = _driver(
         tmp_path,
@@ -632,7 +632,7 @@ print("case_ms: sq64 0.500000")
 
 @pytest.mark.parametrize("name", ["HSA_XNACK", "AMD_SERIALIZE_KERNEL", "TRITON_DEBUG"])
 def test_the_open_tuning_families_stay_sweepable_verbatim(tmp_path, name):
-    """The reserved list must not swallow the knobs a sweep exists to vary: a"""
+    """The reserved list must not swallow the knobs a sweep exists to vary: a runtime tuning variable changes how the source runs, which is the question, not what the source is."""
     driver = _driver(
         tmp_path,
         f"""

@@ -166,7 +166,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_scoring_call_writes_full_conversation_trace(tmp_path: Path):
-    """With ``session_dir`` set, each scoring call records both a token row"""
+    """With ``session_dir`` set, each scoring call records both a token row (component=proposal_scorer) and a full prompt/reply conversation row."""
     session_dir = tmp_path / "SESSION"
     session_dir.mkdir()
     client = _FakeClient(
@@ -580,7 +580,7 @@ async def test_resume_idempotent_on_round_id(tmp_path):
 
 
 class _ScriptedStream:
-    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs"""
+    """Async iterator yielding caller-supplied chunks; with ``stall`` set it hangs forever after them, emulating a proxy that opens the stream then stalls mid-body."""
 
     def __init__(self, chunks: list[Any], *, stall: bool = False):
         self._chunks = chunks

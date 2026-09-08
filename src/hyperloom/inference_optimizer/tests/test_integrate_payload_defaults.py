@@ -209,7 +209,7 @@ class TestFillIntegrateDefaultsFromState:
         assert out["base_tput"] == 750.0
 
     def test_base_tput_prefers_current_best_over_baseline(self, session_dir):
-        """A candidate must be judged against the CURRENT BEST recipe it stacks"""
+        """A candidate must be judged against the CURRENT BEST recipe it stacks onto (current_best.tput), not the raw baseline."""
         _seed_state(
             session_dir,
             baseline_tput=800.0,
@@ -345,7 +345,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
 
 
 class TestVendorPlaybookDeployBlocked:
-    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach"""
+    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle config copy, not a rewrite of the real installed operator source (PR #1191 review finding #1)."""
 
     def test_backfilled_from_kernel_opt_attempts_ledger(self, session_dir):
         state = SharedState.load_or_init(session_dir)
@@ -365,7 +365,7 @@ class TestVendorPlaybookDeployBlocked:
         assert out["_vendor_playbook_deploy_blocked"] is True
 
     def test_backfilled_from_last_kernel_opt_when_ledger_missing(self, session_dir):
-        """An LLM-initiated integrate can name a kernel_id that never made it"""
+        """An LLM-initiated integrate can name a kernel_id that never made it into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
         state = SharedState.load_or_init(session_dir)
         state.last_kernel_opt = {
             "kernel_id": "k010",

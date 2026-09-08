@@ -178,7 +178,7 @@ def canonical_labels(
     framework_version: str,
     precision: str,
 ) -> dict[str, str]:
-    """Return the 7-key ``labels`` dict mirroring the canonical id, so"""
+    """Return the 7-key ``labels`` dict mirroring the canonical id, so ``/recipes/search`` can ``label_match`` by individual dimension."""
     return {
         F_LABEL_MODEL: _slug(model, DEFAULT_MODEL_SLUG),
         F_LABEL_HARDWARE: _slug(hardware, DEFAULT_HARDWARE_SLUG),
@@ -199,7 +199,7 @@ _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
 
 
 def detect_framework_version(framework_name: str) -> str:
-    """Best-effort installed version of ``framework_name`` via importing its"""
+    """Best-effort installed version of ``framework_name`` via importing its top-level package and reading ``__version__``."""
     fw_slug = _slug(framework_name, "")
     if not fw_slug:
         return DEFAULT_FRAMEWORK_VERSION_SLUG

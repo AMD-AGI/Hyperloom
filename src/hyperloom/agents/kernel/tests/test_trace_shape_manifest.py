@@ -325,7 +325,7 @@ def test_empty_launches_produce_no_rows():
 
 
 def test_reader_enriches_launches_and_feeds_producer(tmp_path):
-    """A tiny real trace flows through the reader and its enriched launches build"""
+    """A tiny real trace flows through the reader and its enriched launches build a manifest with resolved shapes/dtypes (proves the additive reader change)."""
     events = [
         {
             "cat": "cpu_op",

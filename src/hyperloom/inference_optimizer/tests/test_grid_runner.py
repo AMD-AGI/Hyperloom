@@ -2241,7 +2241,7 @@ class TestSessionBudgetWarmupRounds:
 
 
 class TestCompactJsonServerArgs:
-    """JSON-valued flags must be space-free to survive Magpie's unquoted"""
+    """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
         out = _grid_runner.compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
@@ -2353,7 +2353,7 @@ class TestCompactJsonServerArgs:
 
 
 class TestRemoveServerArgsPreservesJson:
-    """``remove_server_args`` tokenizes with ``shlex.split`` (which strips JSON"""
+    """``remove_server_args`` tokenizes with ``shlex.split`` (which strips JSON inner double quotes) and runs AFTER ``compact_json_server_args`` in ``materialize_config_with_envs`` (GEMM shape-capture always passes ``remove_args=['--port']``)."""
 
     def test_remove_port_keeps_sibling_json_valid(self):
         raw = '--compilation-config {"cudagraph_mode":"FULL"} --port 8888'

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``_grid_runner`` process-reaping (``_kill_stale_servers``) and"""
+"""Coverage for ``_grid_runner`` process-reaping (``_kill_stale_servers``) and the ``run_grid`` per-variant failure branches (yaml build error, magpie timeout, server-dead / overtime sentinels, missing workspace, invalid measurement)."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def _clear_gpu_mask_envs(monkeypatch) -> None:
 
 
 def test_kill_stale_servers_skips_candidate_outside_our_gpu_mask(monkeypatch):
-    """When we have our own visible-GPU mask (an operator carved us a subset"""
+    """When we have our own visible-GPU mask (an operator carved us a subset of the machine), a matching candidate whose own mask is disjoint from ours must be left alone -- it belongs to someone else's GPU allocation."""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -138,7 +138,7 @@ def test_kill_stale_servers_skips_candidate_outside_our_gpu_mask(monkeypatch):
 
 
 def test_kill_stale_servers_kills_candidate_overlapping_our_gpu_mask(monkeypatch):
-    """A matching candidate whose mask overlaps ours (same GPU allocation)"""
+    """A matching candidate whose mask overlaps ours (same GPU allocation) is reaped, same as with no mask at all."""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -190,7 +190,7 @@ def test_kill_stale_servers_skips_candidate_with_unreadable_environ(monkeypatch)
 
 
 def test_kill_stale_servers_skips_candidate_declaring_no_mask(monkeypatch):
-    """A candidate with a readable but empty environ (no GPU-mask var set at"""
+    """A candidate with a readable but empty environ (no GPU-mask var set at all) is skipped -- its GPU scope is unknown, not "the whole machine"."""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -214,7 +214,7 @@ def test_kill_stale_servers_skips_candidate_declaring_no_mask(monkeypatch):
 
 
 def test_kill_stale_servers_skips_shm_wipe_when_we_have_a_gpu_mask(monkeypatch):
-    """The /dev/shm wipe carries no GPU/owner tag to scope by, so with a mask"""
+    """The /dev/shm wipe carries no GPU/owner tag to scope by, so with a mask of our own it must not run at all: it could otherwise crash a correctly spared co-tenant's server by pulling its shared-memory segments out from under it, even though the per-pid reap above left it alone."""
     _clear_gpu_mask_envs(monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -236,7 +236,7 @@ def test_kill_stale_servers_skips_shm_wipe_when_we_have_a_gpu_mask(monkeypatch):
 
 
 def test_kill_stale_servers_reaps_everything_when_we_have_no_mask(monkeypatch):
-    """With no mask on our own side (whole machine is ours, or nothing is"""
+    """With no mask on our own side (whole machine is ours, or nothing is scoping either side), every match is reaped regardless of the candidate's own mask -- this is the pre-existing, unscoped behavior."""
     _clear_gpu_mask_envs(monkeypatch)
 
     kill_calls: list[int] = []
@@ -259,7 +259,7 @@ def test_kill_stale_servers_reaps_everything_when_we_have_no_mask(monkeypatch):
 
 
 def test_kill_stale_servers_skips_sleep_when_nothing_was_killed(monkeypatch):
-    """The KFD-release pause must not be paid on the common case where the"""
+    """The KFD-release pause must not be paid on the common case where the /proc scan finds nothing to reap."""
     _clear_gpu_mask_envs(monkeypatch)
     slept: list[int] = []
 
@@ -429,7 +429,7 @@ async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
     tmp_path,
     monkeypatch,
 ):
-    """A killed-overtime variant salvages a rough output tput from the engine's"""
+    """A killed-overtime variant salvages a rough output tput from the engine's partial ``server.log`` decode-throughput logs."""
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 
@@ -539,7 +539,7 @@ async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, monkeypatch):
-    """A blank stderr must not become a blank `error`, the way the sibling"""
+    """A blank stderr must not become a blank `error`, the way the sibling branch's non-empty fallback already prevents."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_RETURNCODE,
     )

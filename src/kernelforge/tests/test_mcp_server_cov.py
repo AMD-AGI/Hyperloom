@@ -24,7 +24,7 @@ def _write_driver(tmp_path, name: str, body: str) -> str:
 
 
 def _run_and_flush(coro):
-    """Run a coroutine, then pump the loop so a killed subprocess transport"""
+    """Run a coroutine, then pump the loop so a killed subprocess transport finishes closing before the loop is torn down (avoids a spurious 'Event loop is closed' unraisable warning on the timeout path)."""
     loop = asyncio.new_event_loop()
     try:
         result = loop.run_until_complete(coro)

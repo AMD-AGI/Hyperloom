@@ -363,7 +363,7 @@ def test_summarize_change_falls_back_to_task_kind():
 
 # derive_journal_outcome
 def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
-    """A reverted integrate_patch is promotable (status != failed) but must"""
+    """A reverted integrate_patch is promotable (status != failed) but must journal as REVERT, not KEEP."""
     out = derive_journal_outcome(
         "integrate_patch",
         {"status": "reverted", "delta_pct": -0.44},

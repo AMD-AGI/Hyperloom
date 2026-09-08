@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Vendor-operator-playbook registry: route a closed-source hot kernel to a"""
+"""Vendor-operator-playbook registry: route a closed-source hot kernel to a validated KernelForge *task bundle* instead of a source rewrite."""
 
 from __future__ import annotations
 

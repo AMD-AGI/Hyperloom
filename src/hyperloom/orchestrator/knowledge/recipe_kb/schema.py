@@ -113,7 +113,7 @@ class Lesson:
 
 @dataclass
 class StackFingerprint:
-    """Software-stack identity — used to detect \"is this recipe stale?\""""
+    """Software-stack identity — used to detect "is this recipe stale?"."""
 
     vllm_version: str = ""
     aiter_commit: str = ""
@@ -201,7 +201,7 @@ class SessionSummary:
 # Recipe — arbor superset
 @dataclass
 class Recipe:
-    """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus the"""
+    """One on-disk recipe row, isomorphic to arbor's ``Recipe`` plus the version + provenance metadata our atomic-archive needs."""
 
     # ----- store-managed metadata -----
     canonical_id: str

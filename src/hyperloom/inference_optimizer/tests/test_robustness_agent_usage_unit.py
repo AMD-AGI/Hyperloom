@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``RobustnessAgentBackend._merge_llm_usage`` — folds the"""
+"""Unit tests for ``RobustnessAgentBackend._merge_llm_usage`` — folds the runtime's ``llm_usage`` block onto ``BackendTurnResult.metadata`` token counters."""
 
 from __future__ import annotations
 

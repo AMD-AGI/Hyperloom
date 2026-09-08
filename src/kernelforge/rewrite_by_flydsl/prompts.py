@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Program text for the PORT phase — instructs the flydsl to translate the"""
+"""Program text for the PORT phase — instructs the flydsl to translate the source kernel into FlyDSL, correctness first."""
 
 from __future__ import annotations
 

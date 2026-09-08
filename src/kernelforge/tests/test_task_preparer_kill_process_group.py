@@ -28,7 +28,7 @@ def test_none_pid_is_noop(monkeypatch):
 
 
 def test_happy_path_signals_pgid_once(monkeypatch):
-    """Under start_new_session pid == pgid, so getpgid returns pid; killpg fires"""
+    """Under start_new_session pid == pgid, so getpgid returns pid; killpg fires exactly once on that pgid and proc.kill() is skipped (pid-not-in-targets branch is skipped since pid is already the resolved target)."""
     calls = []
     monkeypatch.setattr(os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
@@ -39,7 +39,7 @@ def test_happy_path_signals_pgid_once(monkeypatch):
 
 
 def test_never_calls_getpgid(monkeypatch):
-    """Regression for the PID-reuse leak: the original pid (== pgid at creation"""
+    """Regression for the PID-reuse leak: the original pid (== pgid at creation under start_new_session) must be signalled DIRECTLY. getpgid(pid) must never be consulted at kill time -- after the leader exits and the PID is reused it can resolve an unrelated group and SIGKILL innocents."""
     calls = []
 
     def forbidden(pid):

@@ -441,7 +441,7 @@ def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
 
 
 def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path: Path):
-    """integrate_patch carries only specialist_task_id; the bridge must map it"""
+    """integrate_patch carries only specialist_task_id; the bridge must map it back to the originating PR-URL candidate so the row matches the select key."""
     stub = _Stub(tmp_path, authoring=True)
     stub.shared_state.framework_agent_specialist_candidate_map = {
         "spec-7": "https://github.com/ROCm/aiter/pull/3888",
@@ -634,7 +634,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
-    """A patch dropped by safety-vetting (empty patches_written) must still stamp"""
+    """A patch dropped by safety-vetting (empty patches_written) must still stamp a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump re-dispatches the candidate forever (livelock)."""
     stub = _Stub(tmp_path, authoring=True)
     cand = "https://github.com/sgl-project/sglang/pull/28067"
     task = SimpleNamespace(
@@ -689,7 +689,7 @@ def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
-    """Non-empty patches_written means autosubmit will create an integrate_patch"""
+    """Non-empty patches_written means autosubmit will create an integrate_patch that owns the terminal row; the empty-outcome bridge must NOT also stamp one."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-x",
@@ -745,7 +745,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
 
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
-    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no"""
+    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-cfg",
@@ -782,7 +782,7 @@ def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
-    """A non-diff tuned artifact (``artifacts_written`` with a real source file)"""
+    """A non-diff tuned artifact (``artifacts_written`` with a real source file) is a FULL result: autosubmit routes it to ``integrate_patch``, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     stub = _Stub(tmp_path, authoring=True)
@@ -862,7 +862,7 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
 
 
 def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Path):
-    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file"""
+    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file OUTSIDE the specialist sandbox is NOT routable, so the empty-outcome bridge MUST stamp a terminal row."""
     import os
 
     from hyperloom.inference_optimizer.session.session_paths import runs_dir

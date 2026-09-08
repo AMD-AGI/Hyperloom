@@ -110,7 +110,7 @@ def test_build_report_no_geometry_skips_analytic(tmp_path):
 
 
 def test_print_summary_full_report_smoke(tmp_path, capsys):
-    """A report with every optional section (per-step + analytic ceiling +"""
+    """A report with every optional section (per-step + analytic ceiling + reconciliation) must render without raising."""
     _write_csvs(tmp_path)
     report = dr.build_report(
         tmp_path,
@@ -128,7 +128,7 @@ def test_print_summary_full_report_smoke(tmp_path, capsys):
 
 
 def test_print_summary_minimal_report_smoke(tmp_path, capsys):
-    """No timeline -> ``gpu_busy_ratio`` None exercises the ``_fmt_pct`` n/a"""
+    """No timeline -> ``gpu_busy_ratio`` None exercises the ``_fmt_pct`` n/a branch; no geometry -> optional sections are omitted."""
     _write_csvs(tmp_path, with_timeline=False)
     report = dr.build_report(tmp_path, num_denoise_steps=None, top_k=3)
     dr.print_summary(report)
@@ -172,7 +172,7 @@ def test_aggregate_unified_memory_bound_split():
 
 
 def test_build_report_analytic_geometry_missing_key_is_fail_soft(tmp_path):
-    """A dit_geometry dict missing a required key hits the guarded"""
+    """A dit_geometry dict missing a required key hits the guarded ``except (KeyError, TypeError, ValueError)`` path without raising."""
     _write_csvs(tmp_path)
     report = dr.build_report(
         tmp_path,
@@ -298,7 +298,7 @@ def test_main_with_dit_geometry_flags(tmp_path, monkeypatch, capsys):
 
 
 def test_main_target_platform_resolves_achievable(tmp_path, monkeypatch, capsys):
-    """``--target-platform`` (without an explicit --achievable-tflops) exercises"""
+    """``--target-platform`` (without an explicit --achievable-tflops) exercises the HW_SPECS_ACHIEVABLE resolution branch (fail-soft on any import error)."""
     csv_dir = tmp_path / "csvs"
     csv_dir.mkdir()
     _write_csvs(csv_dir)

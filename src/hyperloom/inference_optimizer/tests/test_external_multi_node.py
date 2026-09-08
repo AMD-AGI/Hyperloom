@@ -503,7 +503,7 @@ def test_a_rayjob_handoff_takes_its_node_count_only_from_the_flag(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rayjob hand-off names its cluster by head IP and never by pod, so its"""
+    """A rayjob hand-off names its cluster by head IP and never by pod, so its size can only come from the caller."""
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")

@@ -39,7 +39,7 @@ async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
-    """The factory-built classifier must resolve a config for every registry"""
+    """The factory-built classifier must resolve a config for every registry slot: entries the factory omits fall back to the registry default, so nothing is left unconfigured."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     expected_slots = {spec.config_attr for spec in _SIGNAL_REGISTRY if spec.config_attr}
@@ -263,7 +263,7 @@ async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_p
 
 @pytest.mark.asyncio
 async def test_factory_falls_back_to_noop_when_the_anthropic_transport_is_unusable(tmp_path: Path, monkeypatch):
-    """A subscription token with no claude CLI, or no Anthropic credential at"""
+    """A subscription token with no claude CLI, or no Anthropic credential at all, must degrade at build time instead of failing on every tick."""
     from hyperloom.agents.robustness.decision.rca_engine import NoopRcaEngine
 
     monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: False)
@@ -442,7 +442,7 @@ async def test_factory_default_auto_probes_inference_server(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
-    """``auto_probe_inference_server=False`` (scriptable/server-less workloads)"""
+    """``auto_probe_inference_server=False`` (scriptable/server-less workloads) drops the 8888/health target while keeping the LocalProbe (gpu/disk/fd)."""
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
     config = Config(session_dir=tmp_path, auto_probe_inference_server=False)

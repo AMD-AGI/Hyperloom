@@ -50,7 +50,7 @@ _POD_LOCAL_WORKSPACE: str = "/workspace"
 
 
 def _default_workspace_root() -> str:
-    """Container images ship a writable ``/workspace``; bare metal off root has"""
+    """Container images ship a writable ``/workspace``; bare metal off root has neither it nor permission to create it, so fall back to the caller's dir."""
     probe = _POD_LOCAL_WORKSPACE
     while not os.path.exists(probe) and probe != os.path.dirname(probe):
         probe = os.path.dirname(probe)

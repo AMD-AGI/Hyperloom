@@ -990,7 +990,7 @@ class InSessionGate:
         }
 
     async def _on_pre_bash(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
-        """Deny shell writes to protected harness files, and driver runs that"""
+        """Deny shell writes to protected harness files, and driver runs that would go around the command this session must measure through."""
         if input_data.get("tool_name", "") != "Bash":
             return {}
         command = self._bash_command(input_data)

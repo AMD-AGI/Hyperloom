@@ -155,7 +155,7 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
 async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
     tmp_path: Path,
 ):
-    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak"""
+    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=2)
     probe = _ConcurrencyProbe(sleep_seconds=0.3)
     coord.sub.register_executor("specialist", probe)
@@ -185,7 +185,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
 
 @pytest.mark.asyncio
 async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
-    """capacity=1 serialises execution (peak concurrency 1) while still draining"""
+    """capacity=1 serialises execution (peak concurrency 1) while still draining the whole queue across re-scans within a single pump."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=1)
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -214,7 +214,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
     tmp_path: Path,
     monkeypatch,
 ):
-    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the"""
+    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the research_lane has headroom; both tasks drain serially, reusing GPU id 0."""
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=2,

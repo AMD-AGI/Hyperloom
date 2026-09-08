@@ -1,4 +1,4 @@
-"""Canonical ``analysis.md`` renderer for the trace-analysis routes that build"""
+"""Canonical ``analysis.md`` renderer for the trace-analysis routes that build the report themselves rather than having a model write it (today: bypass)."""
 
 from __future__ import annotations
 

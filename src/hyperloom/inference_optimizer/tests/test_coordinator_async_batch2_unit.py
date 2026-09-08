@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Batch 2 coverage for Coordinator: synchronous context readers, the"""
+"""Batch 2 coverage for Coordinator: synchronous context readers, the no-progress circuit-breaker signal, resume replay, orchestration-conversation reset, and lifecycle teardown (stop / Recipe KB T4 safety net)."""
 
 from __future__ import annotations
 
@@ -1838,7 +1838,7 @@ async def test_record_specialist_result_no_dead_research_evidence_log(
     coord: Coordinator,
     caplog,
 ) -> None:
-    """Successful specialist recording must not emit the"""
+    """Successful specialist recording must not emit the research-evidence failure log."""
     import logging
 
     task = _ptask("rec-spec-dead", "specialist")
@@ -2082,7 +2082,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
 
 @pytest.mark.asyncio
 async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coord: Coordinator, monkeypatch) -> None:
-    """A pending hint is genuinely stale once the target is not the phase whose"""
+    """A pending hint is genuinely stale once the target is not the phase whose exit rule reads it -- it can never reach that check again -- so this is the one case the unrelated-transition cleanup should still clear it."""
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "FRAMEWORK_AGENT"

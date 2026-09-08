@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``cli_backends``: per-role backend construction (mock/agent"""
+"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors), advisory proposal-scorer wiring and robustness option overrides."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _build(**over):
 
 @pytest.fixture(autouse=True)
 def _isolated_provider_env(monkeypatch):
-    """Every case in this module resolves backends from the environment, so the"""
+    """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
 
 
@@ -104,7 +104,7 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
 
 
 def test_build_backends_anthropic_only_refuses_to_degrade_without_root(monkeypatch) -> None:
-    """Silently swapping the critic for bare tool-use would drop KB priors and"""
+    """Silently swapping the critic for bare tool-use would drop KB priors and session memory with no signal, so a missing root is now an error."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -148,7 +148,7 @@ def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) ->
 
 
 def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) -> None:
-    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a"""
+    """The review client resolves LLM_GATEWAY_KEY, so the flag must accept a gateway-only host instead of rejecting a config that would have run."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
@@ -161,7 +161,7 @@ def test_build_backends_forced_openai_protocol_accepts_gateway_key(monkeypatch) 
 
 
 def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monkeypatch) -> None:
-    """resolve_openai_client_config derives an OpenAI side from an Anthropic"""
+    """resolve_openai_client_config derives an OpenAI side from an Anthropic gateway -- one host, two protocols, one token."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
     b = _build(
@@ -184,7 +184,7 @@ def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch
 
 
 def test_build_backends_forced_anthropic_protocol_accepts_a_subscription_token(monkeypatch) -> None:
-    """The Claude CLI authenticates from the token alone, so the flag must"""
+    """The Claude CLI authenticates from the token alone, so the flag must accept it instead of rejecting a config that would have run."""
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     b = _build(

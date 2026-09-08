@@ -276,7 +276,7 @@ def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
 
 
 def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeypatch):
-    """An absolute target containing ``..`` is rejected even if it would"""
+    """An absolute target containing ``..`` is rejected even if it would normalise inside a root."""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
     monkeypatch.setattr(ip, "resolve_source_file_allowlist", lambda: [str(fw)])
@@ -284,7 +284,7 @@ def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeyp
 
 
 def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_path, monkeypatch):
-    """An absolute target inside an allowlisted root must be recorded with a"""
+    """An absolute target inside an allowlisted root must be recorded with a FRAMEWORK-RELATIVE ``rel_target`` so the KEEP source-snapshot (which treats rel_target as framework-relative via ``snapshot_source_layer``) captures the installed artifact."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
     ws = tmp_path / "ws"

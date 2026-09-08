@@ -107,7 +107,7 @@ def test_openai_kwargs_reads_openai_custom_headers():
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers():
-    """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit"""
+    """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit OpenAI-side config wins over the Anthropic host."""
     kwargs = openai_client_kwargs(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
@@ -561,7 +561,7 @@ def test_claude_sdk_env_options_expands_anthropic_custom_header_reference():
 
 
 def test_claude_sdk_env_options_no_header_auto_injection():
-    """A gateway without an explicit ANTHROPIC_CUSTOM_HEADERS gets NO"""
+    """A gateway without an explicit ANTHROPIC_CUSTOM_HEADERS gets NO auto-injected subscription header."""
     opts = claude_sdk_env_options(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -573,7 +573,7 @@ def test_claude_sdk_env_options_no_header_auto_injection():
 
 
 def test_claude_sdk_env_options_does_not_copy_openai_custom_headers():
-    """OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude (Anthropic) side; the"""
+    """OPENAI_CUSTOM_HEADERS is NOT copied onto the Claude (Anthropic) side; the claude path reads only ANTHROPIC_CUSTOM_HEADERS."""
     opts = claude_sdk_env_options(
         env={
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
@@ -1292,7 +1292,7 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
 
 def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
-    """The SDK only spawns `claude`; an importable package with no reachable"""
+    """The SDK only spawns `claude`; an importable package with no reachable binary still cannot serve a call, and failing here beats failing at the first review."""
     from hyperloom.common import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
@@ -1313,7 +1313,7 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
 
 @pytest.mark.parametrize("binary_name", ["claude", "claude.exe"])
 def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_path, binary_name):
-    """The SDK ships the binary under a platform-dependent name. Matching one"""
+    """The SDK ships the binary under a platform-dependent name."""
     from hyperloom.common import claude_oneshot
 
     bundled = tmp_path / "_bundled"
@@ -1383,7 +1383,7 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
 
 
 def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
-    """The Messages API accepts it, and callers that ask for a low temperature"""
+    """The Messages API accepts it, and callers that ask for a low temperature to pin an output shape must keep getting one."""
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
@@ -1399,7 +1399,7 @@ def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
 
 
 def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
-    """Absent means absent: sending an explicit default would change the"""
+    """Absent means absent: sending an explicit default would change the sampling behaviour of every caller that never asked for one."""
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
@@ -1414,7 +1414,7 @@ def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
 
 
 def test_anthropic_completion_drops_temperature_on_the_cli_path(fake_one_shot):
-    """The CLI has no temperature knob, so the argument is accepted and ignored"""
+    """The CLI has no temperature knob, so the argument is accepted and ignored rather than raising -- one entry point, two transports, same signature."""
     llm_config.anthropic_completion(
         model="claude-opus-5",
         messages=[{"role": "user", "content": "hi"}],
@@ -1468,7 +1468,7 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
 
 
 def test_anthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
-    """The CLI resolves its own credential from the environment it is given, so"""
+    """The CLI resolves its own credential from the environment it is given, so an explicit mapping must reach it instead of being dropped for the ambient one — otherwise a caller that resolved credentials from provider-specific variables silently authenticates as something else."""
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE, "ANTHROPIC_BASE_URL": "https://gw.example"}
 
     llm_config.anthropic_completion(
@@ -1579,7 +1579,7 @@ def test_anthropic_completion_reads_the_ambient_environment_by_default(monkeypat
 
 
 def test_claude_sdk_env_options_disables_advisor_tool_by_default():
-    """Claude Code's advisor-tool beta header (rejected by strict gateways) is"""
+    """Claude Code's advisor-tool beta header (rejected by strict gateways) is disabled by default; an operator preset is preserved."""
     opts = claude_sdk_env_options(env={"_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic"})
     assert opts["env"]["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] == "1"
 

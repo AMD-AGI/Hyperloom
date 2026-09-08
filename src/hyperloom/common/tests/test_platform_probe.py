@@ -138,7 +138,7 @@ def _amdgpu(root: Path, *addresses: str) -> Path:
 
 
 def test_gpus_outside_pci_domain_zero_are_counted(tmp_path):
-    """A host large enough to need several PCI domains puts its GPUs outside"""
+    """A host large enough to need several PCI domains puts its GPUs outside ``0000:``, and that is the hardware this record exists to describe."""
     root = _amdgpu(
         tmp_path,
         "0002:00:01.0",

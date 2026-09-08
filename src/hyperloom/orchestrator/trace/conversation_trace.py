@@ -87,7 +87,7 @@ class ConversationRecord:
     response: str = ""
 
     def to_row(self) -> dict[str, Any]:
-        """Serialize to the on-disk row dict, stamping ``ts`` and redacting"""
+        """Serialize to the on-disk row dict, stamping ``ts`` and redacting the prompt / response text."""
         return {
             "session_id": str(self.session_id),
             "ts": _now_iso(),

@@ -901,7 +901,7 @@ def test_discover_capture_shards_skips_a_whole_capture_per_rank_file(tmp_path):
 
 
 def _graph_under_recorded_events():
-    """Synthetic graph-mode trace: 4 graph launches but only 1 replay's kernels"""
+    """Synthetic graph-mode trace: 4 graph launches but only 1 replay's kernels recorded, spanning a large wall clock (busy fraction << 0.5)."""
     events = [{"cat": "cpu_op", "name": "aten::mm", "args": {"External id": 200}}]
     # Four graph-launch runtime events (no External id, only correlation).
     for i, corr in enumerate((5, 6, 7, 8)):
@@ -1009,7 +1009,7 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
 
 
 def _graph_fully_recorded_idle_events():
-    """Four graph launches that EACH recorded a kernel (coverage 1.0) but spread"""
+    """Four graph launches that EACH recorded a kernel (coverage 1.0) but spread over a long wall so busy% ~0 / idle% ~100%."""
     events = []
     for corr in (5, 6, 7, 8):
         events.append(
@@ -1057,7 +1057,7 @@ def test_fully_recorded_idle_graph_still_suppressed_by_idle_gate(tmp_path, capsy
 
 
 def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
-    """Regression: recorded-launch coverage must be computed over the FULL event"""
+    """Regression: recorded-launch coverage must be computed over the FULL event stream, not the steady window."""
     # One recorded kernel per graph launch (coverage 1.0 on the full trace), spread far apart in time so a narrow
     # window contains only the first replay.
     k_events = [
@@ -1086,7 +1086,7 @@ def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
 
 
 def _graph_launch_stripped_events():
-    """The graph-under-recorded kernels WITHOUT the hipGraphLaunch runtime events"""
+    """The graph-under-recorded kernels WITHOUT the hipGraphLaunch runtime events -- i.e. what a steady-state chunk can look like after the splitter drops the launch records."""
     return [
         {"cat": "kernel", "ph": "X", "name": "graph_fused_attn", "ts": 1100, "dur": 100, "args": {"correlation": 5}},
         {

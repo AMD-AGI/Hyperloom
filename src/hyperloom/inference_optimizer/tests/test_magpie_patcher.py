@@ -196,7 +196,7 @@ def fake_magpie(tmp_path: Path) -> Path:
 
 
 def _write_magpie_tree(root: Path, benchmarker_src: str) -> Path:
-    """Materialise a minimal Magpie tree under ``root`` and return the"""
+    """Materialise a minimal Magpie tree under ``root`` and return the ``benchmarker.py`` path."""
     bench_dir = root / "Magpie" / "modes" / "benchmark"
     bench_dir.mkdir(parents=True)
     (bench_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -324,7 +324,7 @@ def test_remote_trust_drift_is_reported_separately(
     tmp_path: Path,
     caplog,
 ):
-    """Atomic copy can be fixed while the SGLang trust patch drifts; the status"""
+    """Atomic copy can be fixed while the SGLang trust patch drifts; the status API must expose those as separate bits."""
     _write_magpie_tree(tmp_path, _UPSTREAM_ATOMIC_BENCHMARKER_PY)
     script = _write_sglang_script(
         tmp_path,
@@ -389,7 +389,7 @@ def test_reason_upstream_atomic_is_benign(tmp_path: Path):
 
 
 def test_reason_unrecognized_shape_is_genuine_failure(tmp_path: Path):
-    """Neither legacy block nor atomic upstream → genuine failure: the status"""
+    """Neither legacy block nor atomic upstream → genuine failure: the status must flag atomic_genuine_failure so a strict install fails loud."""
     drifted = "class _FakeBenchmarker:\n    def _prepare_benchmark_scripts(self):\n        pass\n"
     bench_py = _write_magpie_tree(tmp_path, drifted)
     assert _apply_patch_atomic_reason(bench_py) == _ATOMIC_REASON_UNRECOGNIZED_SHAPE
@@ -400,7 +400,7 @@ def test_reason_unrecognized_shape_is_genuine_failure(tmp_path: Path):
 
 
 def test_missing_tree_is_benign_not_genuine_failure(tmp_path: Path):
-    """No benchmarker.py → atomic_ok False but NOT a genuine failure (the race"""
+    """No benchmarker.py → atomic_ok False but NOT a genuine failure (the race just cannot be assessed), so a strict install must not abort on it."""
     status = magpie_scripts_patch_status(tmp_path / "nope")
     assert status.atomic_ok is False
     assert status.atomic_reason == _ATOMIC_REASON_MISSING
@@ -560,7 +560,7 @@ def test_concurrent_patchers_produce_one_patch(fake_magpie: Path):
 
 
 def test_reader_never_sees_torn_file(fake_magpie: Path):
-    """A concurrent reader must never see a torn file —"""
+    """A concurrent reader must never see a torn file — every snapshot is either the verbatim original or contains the sentinel."""
     bench_py = fake_magpie / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
     original = bench_py.read_text(encoding="utf-8")
 

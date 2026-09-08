@@ -248,7 +248,7 @@ def check_full_cache(fw: dict[str, source_env.FrameworkRoot]) -> None:
 
 # --- 5) real Triton/TileLang .py kernels: discovery + editable gate ---------
 def check_py_kernels(fw: dict[str, source_env.FrameworkRoot]) -> None:
-    """Find real ``@triton.jit`` kernels in the installed tree; the editable gate"""
+    """Find real ``@triton.jit`` kernels in the installed tree; the editable gate must accept them (their source comes from the trace ``kernel_file``)."""
     found: list[Path] = []
     for name in sorted(fw):  # aiter sorts first: its ops/ hold triton kernels
         for dirpath, _dirs, names in os.walk(fw[name].root):

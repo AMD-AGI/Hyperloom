@@ -26,7 +26,7 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 
 @pytest.fixture
 def coord(build_coord):
-    """``build_coord`` augmented with the routing-method surface the framework"""
+    """``build_coord`` augmented with the routing-method surface the framework phase delegates to (launch-probe enqueue, rearm capture, build lifecycle)."""
     build_coord._rearm_calls = []
     for name in (
         "_enqueue_build_launch_probe",

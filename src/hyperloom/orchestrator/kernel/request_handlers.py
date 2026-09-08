@@ -4553,7 +4553,7 @@ def _build_trace_analyze_cmd(
     target_platform: str,
     analysis_mode: str,
 ) -> "tuple[list[str], str]":
-    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns"""
+    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [

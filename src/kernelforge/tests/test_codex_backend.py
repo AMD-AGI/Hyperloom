@@ -2265,7 +2265,7 @@ def test_the_guard_does_not_hold_the_repositorys_own_bookkeeping(tmp_path: Path)
 
 
 def test_git_housekeeping_during_a_session_is_not_a_violation(tmp_path: Path) -> None:
-    """git rewrites its own bookkeeping unprompted -- refreshing a stale stat"""
+    """git rewrites its own bookkeeping unprompted -- refreshing a stale stat cache rewrites the index, and a build touching files is enough to cause it."""
     repo, _kernel, _driver = _make_repo(tmp_path)
     guard = WorkspaceGuard(replace(_read_only_spec(repo), read_only_resume=True))
     guard.prepare()

@@ -23,7 +23,7 @@ _LONG_STALL_GRACE = 3600.0
 
 
 def test_from_ready_excludes_pre_ready_phase(tmp_path):
-    """Pre-ready time is NOT counted: a child that spends > deadline BEFORE the"""
+    """Pre-ready time is NOT counted: a child that spends > deadline BEFORE the ready marker but only a little AFTER it finishes normally."""
     log_path = tmp_path / "server.log"
     # 3s pre-ready boot, then ready, then ~1s post-ready client.
     script = (
@@ -50,7 +50,7 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
 
 
 def test_from_ready_fires_after_ready(tmp_path):
-    """Post-ready overrun IS killed: once ready, exceeding the deadline in the"""
+    """Post-ready overrun IS killed: once ready, exceeding the deadline in the client phase reaps the tree with the overtime sentinel."""
     log_path = tmp_path / "server.log"
     # Ready immediately, then a post-ready run that overruns the deadline.
     script = (
@@ -75,7 +75,7 @@ def test_from_ready_fires_after_ready(tmp_path):
 
 
 def test_opt_out_reverts_to_from_spawn(tmp_path, monkeypatch):
-    """With INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0 the legacy from-spawn"""
+    """With INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0 the legacy from-spawn clock applies even with a server.log: pre-ready time counts and trips."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "0")
     log_path = tmp_path / "server.log"
     # Long pre-ready phase; from-spawn overruns the 1s deadline.

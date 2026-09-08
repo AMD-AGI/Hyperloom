@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Map aiperf ``profile_export_aiperf.json`` metrics to the InferenceX result"""
+"""Map aiperf ``profile_export_aiperf.json`` metrics to the InferenceX result schema (``inferencex_result.json``)."""
 
 from __future__ import annotations
 

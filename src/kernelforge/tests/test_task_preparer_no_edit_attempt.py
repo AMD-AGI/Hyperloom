@@ -390,7 +390,7 @@ def test_jit_timeout_retry_tells_agent_not_to_rewrite(tmp_path, monkeypatch):
 
 
 def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
-    """When the driver lives OUTSIDE the workspace, prepare_task must stage it"""
+    """When the driver lives OUTSIDE the workspace, prepare_task must stage it via ExternalArtifactTransaction, let the agent edit the staged copy, and publish the result back on success."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "kernel.py").write_text("def kernel(x):\n    return x\n", encoding="utf-8")

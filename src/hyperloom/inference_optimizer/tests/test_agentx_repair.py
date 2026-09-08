@@ -373,20 +373,20 @@ def test_installer_aiperf_gate_truth_table(tmp_path, flags, expect_install):
 
 
 def test_installer_gate_makes_an_explicit_request_fatal(tmp_path):
-    """Asked for by name means AIPERF_REQUIRED=1, which is what makes"""
+    """Asked for by name means AIPERF_REQUIRED=1, which is what makes ``ensure_aiperf`` die instead of warn."""
     out = _run_aiperf_gate(tmp_path, env={"INSTALL_AIPERF": "1"})
     assert "RAN ensure_aiperf required=1" in out
 
 
 def test_installer_gate_prewarm_stays_non_fatal(tmp_path):
-    """The default arm must not raise the flag: an interpreter that cannot"""
+    """The default arm must not raise the flag: an interpreter that cannot supply aiperf must not block a provision that was never going to use it."""
     out = _run_aiperf_gate(tmp_path, env={})
     assert "RAN ensure_aiperf required=0" in out
     assert "pre-warming" in out
 
 
 def test_installer_gate_skips_a_build_without_the_client(tmp_path):
-    """The pre-warm keys on the shipped client, so a build without it says so"""
+    """The pre-warm keys on the shipped client, so a build without it says so rather than installing a dependency it has no use for."""
     out = _run_aiperf_gate(tmp_path, env={}, ships_client=False)
     assert "RAN ensure_aiperf" not in out
     assert "ships no" in out

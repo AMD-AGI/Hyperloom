@@ -284,7 +284,7 @@ def test_run_with_session_kill_eval_start_marker_retires_soft_deadline(tmp_path)
 
 
 def test_run_with_session_kill_soft_deadline_still_fires_without_eval_marker(tmp_path):
-    """Without the eval marker the deadline keeps its teeth — a genuinely slow"""
+    """Without the eval marker the deadline keeps its teeth — a genuinely slow throughput phase is still reaped."""
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\n")
     start = time.monotonic()
@@ -653,7 +653,7 @@ def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
 
 
 def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
-    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a"""
+    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a nested ``benchmark_<fw>_<ts>/server.log``."""
     watched = tmp_path / "server.log"  # never written by the wrapper
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
@@ -669,7 +669,7 @@ def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
-    """The excerpt helper also falls back to a nested ``benchmark_*/server.log``"""
+    """The excerpt helper also falls back to a nested ``benchmark_*/server.log`` so the failure classifier still surfaces the real server fault."""
     watched = tmp_path / "server.log"
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
@@ -686,7 +686,7 @@ def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
-    """The excerpt helper returns the engine/worker-init root-cause line (with a"""
+    """The excerpt helper returns the engine/worker-init root-cause line (with a little context) for the failure classifier; a healthy / missing log returns ``None``."""
     log_path = tmp_path / "server.log"
     assert server_log_death_excerpt(str(log_path)) is None  # missing → None
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
@@ -704,7 +704,7 @@ def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
-    """A config-validation-stage failure (brand-new checkpoint ``model_type``"""
+    """A config-validation-stage failure (brand-new checkpoint ``model_type`` unknown to the installed transformers/vLLM) dies BEFORE the engine starts and must still be surfaced as a fatal excerpt."""
     from hyperloom.agents.framework.enablement import classify_failure
 
     log_path = tmp_path / "server.log"
@@ -731,7 +731,7 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
 
 
 def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
-    """A child that writes a fatal server marker then hangs is reaped via the"""
+    """A child that writes a fatal server marker then hangs is reaped via the watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -752,7 +752,7 @@ def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
 
 
 def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
-    """If the harness exits on its own within the grace window after emitting a"""
+    """If the harness exits on its own within the grace window after emitting a marker, its real returncode wins (no spurious SERVER_DEAD)."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -771,7 +771,7 @@ def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
 
 
 def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
-    """A child with a clean server.log returns its own returncode — the"""
+    """A child with a clean server.log returns its own returncode — the watchdog must not false-positive on a healthy (or slow) server."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys\n"
@@ -791,7 +791,7 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
 
 # ── Detokenizer-stall watchdog ──
 def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
-    """The incremental scanner advances its offset and flags ready/progress"""
+    """The incremental scanner advances its offset and flags ready/progress markers only in the newly appended bytes."""
     log_path = tmp_path / "server.log"
     log_path.write_text("INFO loading weights\nApplication startup complete\n")
     off, ready, prog, ev = _scan_server_log_increment(str(log_path), 0)
@@ -868,7 +868,7 @@ def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path)
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):
-    """A server that reports ready then produces no generation progress is"""
+    """A server that reports ready then produces no generation progress is reaped with ``DETOKENIZER_STALL_RETURNCODE`` well before the hard timeout."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -888,7 +888,7 @@ def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_pat
 
 
 def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
-    """A server still loading weights (no ready marker) must NOT trip the stall"""
+    """A server still loading weights (no ready marker) must NOT trip the stall gate even past the grace window — slow is not stalled."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -906,7 +906,7 @@ def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
 
 
 def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
-    """Continued generation-progress lines reset the stall clock so a healthy"""
+    """Continued generation-progress lines reset the stall clock so a healthy (if slow) run finishes with its own returncode."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -927,7 +927,7 @@ def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
 
 
 def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
-    """A long, quiet first-request JIT/compile after ready must NOT trip the"""
+    """A long, quiet first-request JIT/compile after ready must NOT trip the gate: ANY new log line (not just throughput) is liveness, so a huge model that logs compile progress between ready and its first token survives."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"

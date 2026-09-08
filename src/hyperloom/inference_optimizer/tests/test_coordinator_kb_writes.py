@@ -666,7 +666,7 @@ def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkey
 
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
-    """benchmark_mode is stamped so the mode survives a restart; the gate should"""
+    """benchmark_mode is stamped so the mode survives a restart; the gate should trust it rather than the shell that happens to be running."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"

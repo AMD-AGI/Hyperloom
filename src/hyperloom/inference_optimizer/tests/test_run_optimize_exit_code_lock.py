@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for optimize exit-code semantics: multi-node topology"""
+"""Behavior-lock tests for optimize exit-code semantics: multi-node topology gates exit 2, and a session already held exits 3 (SESSION_BUSY_EXIT_CODE)."""
 
 from __future__ import annotations
 

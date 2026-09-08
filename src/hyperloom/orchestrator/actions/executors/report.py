@@ -43,7 +43,7 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when absent"""
+    """Call a zero-arg SharedState helper, returning ``default`` when absent or raising."""
     fn = getattr(state, method, None)
     if not callable(fn):
         return default
@@ -665,7 +665,7 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
-    """Render honesty annotations for work left unfinished (unvalidated"""
+    """Render honesty annotations for work left unfinished (unvalidated KEEPs, untried hot kernels, KEEPs awaiting integrate)."""
     unvalidated = bool(summary.get("has_unvalidated_keeps"))
     untried = list(summary.get("untried_hot_reusable_kernels") or [])
     pending_keeps = list(summary.get("pending_keep_kernels") or [])
@@ -687,7 +687,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
 
 
 def _extract_executive_summary(analysis_md_path: str) -> str:
-    """Extract the ``## Executive Summary`` block (up to the next level-2"""
+    """Extract the ``## Executive Summary`` block (up to the next level-2 heading) from analysis.md."""
     if not analysis_md_path:
         return "(no analysis.md path recorded)"
     try:
@@ -723,7 +723,7 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
 
 
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
-    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by"""
+    """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
     from ...kernel.roofline_snapshot import format_roofline_metrics_table
 
     lines: list[str] = ["## Roofline Comparison", ""]
@@ -958,7 +958,7 @@ def _render_conc_sweep_curve_for_report(
 
 
 def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
-    """Best-effort load of ``target_analysis/target_baseline.json``; ``None``"""
+    """Best-effort load of ``target_analysis/target_baseline.json``; ``None`` when missing / unreadable (errors swallowed so a corrupt JSON never breaks report generation)."""
     try:
         from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 
@@ -1010,7 +1010,7 @@ def _write_kernel_opt_summary(
 
 
 def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
-    """Build the small ``conc_sweep_summary`` pointer for ``final.json``"""
+    """Build the small ``conc_sweep_summary`` pointer for ``final.json`` (report_path + status + summary); ``None`` when conc_sweep wrote no summary."""
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
@@ -1209,7 +1209,7 @@ class ReportExecutor:
         return None
 
     def _maybe_publish_results(self, session_dir: Path, state: SharedState) -> dict[str, Any]:
-        """Best-effort publish hook for code-driven optimizer runs (opt-in"""
+        """Best-effort publish hook for code-driven optimizer runs (opt-in unless the results service URL is configured)."""
         service_url = os.environ.get("HYPERLOOM_RESULTS_SERVICE_URL", "")
         auto_publish = os.environ.get("HYPERLOOM_RESULTS_AUTO_PUBLISH", "").lower()
         if not service_url and auto_publish not in {"1", "true", "yes"}:

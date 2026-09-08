@@ -1188,7 +1188,7 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
     monkeypatch,
     capsys,
 ):
-    """Defence in depth: a bypass the protected-path rule missed still cannot"""
+    """Defence in depth: a bypass the protected-path rule missed still cannot reach a measurement, and the tree is returned to canonical before the next candidate inherits it."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     driver = workspace / "driver.py"
     loop.ic = replace(

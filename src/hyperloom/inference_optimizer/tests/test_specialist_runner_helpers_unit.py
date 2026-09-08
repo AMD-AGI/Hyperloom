@@ -256,7 +256,7 @@ def _finalize(r, tmp_path, payload):
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
-    """The Critic is told to reject a proposal_set carrying self-reported gain"""
+    """The Critic is told to reject a proposal_set carrying self-reported gain fields, which costs the round every idea in it."""
     result, written = _finalize(
         _runner(),
         tmp_path,

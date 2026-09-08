@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rewrite specification — the normalized description of one cross-language"""
+"""Rewrite specification — the normalized description of one cross-language rewrite task (source kernel -> FlyDSL), shared by every stage of the pipeline."""
 
 from __future__ import annotations
 

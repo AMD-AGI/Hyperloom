@@ -44,7 +44,7 @@ def test_atomic_write_json_creates_parents_and_roundtrips(tmp_path):
 
 
 def test_atomic_write_json_pins_utf8_on_the_temp_file(tmp_path, monkeypatch):
-    """``ensure_ascii=False`` callers put non-ASCII in the payload, so the temp"""
+    """``ensure_ascii=False`` callers put non-ASCII in the payload, so the temp file cannot be left on a locale-derived encoding -- under an ASCII default it raised UnicodeEncodeError and lost the report."""
     seen: dict[str, object] = {}
     real = tempfile.NamedTemporaryFile
 

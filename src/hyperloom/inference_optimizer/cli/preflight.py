@@ -309,7 +309,7 @@ def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -
 
 
 def _load_kernel_agent_env_fallback() -> dict[str, Any]:
-    """Auto-source the installer-written kernel-agent env file"""
+    """Auto-source the installer-written kernel-agent env file (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``)."""
     candidate = os.environ.get("KERNEL_AGENT_ENV")
     if not candidate:
         user_data = (os.environ.get("USER_DATA_PATH") or "").strip()

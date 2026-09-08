@@ -267,7 +267,7 @@ async def test_run_skips_diagnostics_when_not_requested():
 
 # ---- gateway endpoint identifier -----------------------------------------
 def test_gateway_endpoint_drops_url_userinfo(monkeypatch):
-    """The diagnostic is appended to an on-disk trace, and a base URL of the"""
+    """The diagnostic is appended to an on-disk trace, and a base URL of the form ``https://user:key@gw/...`` puts the key in netloc."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://user:s3cret@gw.example.com:8443/api/v1")
     assert _backend()._gateway_endpoint_identifier() == "gw.example.com"
 
@@ -370,7 +370,7 @@ class _StopMsg(_Msg):
 
 
 async def test_stop_reason_reaches_metadata():
-    """Without it a truncated reply is indistinguishable from a badly formatted"""
+    """Without it a truncated reply is indistinguishable from a badly formatted one, so the SDK's own stop reason must survive to the caller."""
     stream = [_StopMsg(content=[TextBlock("half a rep")], result="half a rep", stop_reason="max_tokens")]
     b = _backend()
     b.sdk_query_factory = _query(stream)

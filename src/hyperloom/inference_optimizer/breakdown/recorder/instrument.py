@@ -735,7 +735,7 @@ def record_phase_event(
     tick: int = 0,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
-    """Record one ``phase_timeline`` event from a ``record_action_attempt``"""
+    """Record one ``phase_timeline`` event from a ``record_action_attempt`` entry, and mirror the same attempt into the canonical v4 streams via ``_mirror_action_v4``."""
     if not session_dir or not isinstance(entry, dict):
         trace_skip(reason="no session_dir" if not session_dir else "entry is not a dict", section="phase_transitions")
         return

@@ -194,7 +194,7 @@ class FakeMessage:
 
 @dataclass
 class FakeOptions:
-    """Captures kwargs passed to ``sdk_options_cls``, playing the role of"""
+    """Captures kwargs passed to ``sdk_options_cls``, playing the role of ``claude_agent_sdk.ClaudeAgentOptions`` without touching network."""
 
     kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -204,7 +204,7 @@ class FakeOptions:
 
 @dataclass
 class FakeSDK:
-    """Stub for ``sdk_query_factory`` — records prompts and replays scripted"""
+    """Stub for ``sdk_query_factory`` — records prompts and replays scripted responses."""
 
     scripted_chunks: list[str] = field(default_factory=lambda: ["fake-sdk: ok"])
     side_effect: Exception | None = None

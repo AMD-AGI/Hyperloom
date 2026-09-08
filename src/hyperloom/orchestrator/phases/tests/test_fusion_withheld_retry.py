@@ -66,7 +66,7 @@ def test_a_round_with_unfunded_targets_is_retried():
 
 
 def test_repeated_unfunded_rounds_stop_being_retried():
-    """Every retry re-runs discovery, so a target that keeps being re-discovered"""
+    """Every retry re-runs discovery, so a target that keeps being re-discovered and re-withheld must not re-spend the budget without bound."""
     assert REQUIRED(_phase(_round(withheld=3), spent=MAX_FUSION_WITHHELD_RETRIES)) is False
 
 
@@ -95,7 +95,7 @@ def test_a_kept_round_is_still_blocked_by_its_own_status():
 
 @pytest.mark.asyncio
 async def test_each_unfunded_round_increments_the_counter(tmp_path):
-    """The count lives on the session: ``last_fusion`` is replaced every run, so"""
+    """The count lives on the session: ``last_fusion`` is replaced every run, so holding it there would hand the cap a clean slate."""
     phase = _phase(None, session_dir=tmp_path)
 
     for expected in (1, 2, 3):

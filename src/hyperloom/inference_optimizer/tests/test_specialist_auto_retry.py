@@ -67,7 +67,7 @@ def test_classify_is_case_and_whitespace_insensitive():
 
 
 def test_retry_eligibility_matches_membership():
-    """Every retry-eligible classification must be a member of the set, and"""
+    """Every retry-eligible classification must be a member of the set, and every non-eligible one must not be — the two sources of truth agree."""
     cases = [
         ("succeeded", ""),
         ("tool_violation", "x"),
@@ -117,7 +117,7 @@ def test_auto_retry_notice_blank_reason_is_noop():
 
 # Freeform + mode=patch prompt path
 def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
-    """A freeform specialist dispatched with ``mode=patch`` still gets the"""
+    """A freeform specialist dispatched with ``mode=patch`` still gets the free-form mandate AND the worktree patch-authoring protocol."""
     system, _user = build_specialist_prompts(_freeform_inputs(mode="patch"))
     assert "Free-form mandate (scope = freeform)" in system
     assert "prefill blocks decode" in system
@@ -203,7 +203,7 @@ async def test_auto_retry_needs_gpu_acquires_gpu_research_lane():
 
 @pytest.mark.asyncio
 async def test_auto_retry_bench_specialist_acquires_both_lanes():
-    """A bench-capable specialist (mode=patch & bench=true, needs_gpu defaulted)"""
+    """A bench-capable specialist (mode=patch & bench=true, needs_gpu defaulted) must hold both benchmark_lane and gpu_research_lane on retry."""
     captured = []
     phase = _make_explore_phase_stub(
         registry_lanes=["research_lane"],

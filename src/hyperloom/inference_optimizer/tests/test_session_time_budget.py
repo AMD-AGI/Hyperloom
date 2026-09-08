@@ -102,7 +102,7 @@ class TestTheCostTheGateJudgesOn:
         assert expected_action_cost_minutes(None) == 0.0
 
     def test_no_catalogued_action_reads_as_free(self):
-        """A zero cost admits an action on any budget, so a whole catalogue of"""
+        """A zero cost admits an action on any budget, so a whole catalogue of them is an admission gate that is not there — which is what reading a renamed field through a ``getattr`` default silently produced."""
         free = sorted(name for name, meta in ACTION_CATALOGUE.items() if expected_action_cost_minutes(meta) <= 0.0)
         assert free == []
 
@@ -118,7 +118,7 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         assert cost == pytest.approx(51.0)
 
     def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
-        """The measurement is a floor, not a replacement: only the catalogue"""
+        """The measurement is a floor, not a replacement: only the catalogue knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
             ACTION_CATALOGUE[_EXPENSIVE_ACTION],
             measured_baseline_sec=10 * 60.0,
@@ -294,7 +294,7 @@ class TestTimeBudgetGate:
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
     def test_this_session_s_own_baseline_changes_the_answer(self, coord: Coordinator):
-        """Half an hour left admits a baseline the catalogue prices at five"""
+        """Half an hour left admits a baseline the catalogue prices at five minutes -- until this session has measured one and knows better."""
         _set_budget(coord, minutes=30)
         assert coord._time_budget_denial_for_action(_BASELINE_ACTION) is None
 

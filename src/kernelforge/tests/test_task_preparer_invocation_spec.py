@@ -925,7 +925,7 @@ def test_the_note_carries_the_specification_verbatim(tmp_path):
 
 
 def test_the_note_demands_the_deployment_shapes_not_a_toy_size(tmp_path):
-    """A kernel tuned at a size the workload never serves can report a large"""
+    """A kernel tuned at a size the workload never serves can report a large speedup that disappears end to end; that is the failure this text targets."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text(json.dumps({"invocation": {"arguments": []}}), encoding="utf-8")
 
@@ -937,7 +937,7 @@ def test_the_note_demands_the_deployment_shapes_not_a_toy_size(tmp_path):
 
 
 def test_an_absent_field_is_shown_as_absent_rather_than_as_an_empty_one(tmp_path):
-    """A graph replay has no CPU-side parent op, so the profiler records no"""
+    """A graph replay has no CPU-side parent op, so the profiler records no arguments and the key is simply missing."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text(
         json.dumps({"schema_version": 2, "missing_fields": ["inputs"]}, indent=2),
@@ -1003,7 +1003,7 @@ def test_a_malformed_spec_is_inlined_verbatim_rather_than_dropped(tmp_path):
 
 
 def test_an_unreadable_spec_still_produces_a_usable_note(tmp_path):
-    """The document is evidence, not a precondition; losing it must not take the"""
+    """The document is evidence, not a precondition; losing it must not take the instruction with it."""
     missing = tmp_path / "gone.json"
 
     note = task_preparer._invocation_spec_note(missing, tmp_path)

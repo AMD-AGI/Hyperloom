@@ -70,7 +70,7 @@ Re-run with --update_improved to apply.
 
 
 class TestParseNewShapes:
-    """Regression: an all-new-shape run must parse (not silently vanish and be"""
+    """Regression: an all-new-shape run must parse (not silently vanish and be misreported as no_improvement, which skips E2E validation of the new configs)."""
 
     def test_new_rows_are_parsed_as_is_new(self):
         rows = _parse_tuner_stdout(_NEW_SHAPES_TABLE, "")
@@ -122,7 +122,7 @@ class TestSummarize:
 
 
 class TestCandidateCsvFallback:
-    """Fallback for the aiter output mode that prints only a"""
+    """Fallback for the aiter output mode that prints only a "Successfully tuned shapes" summary (no per-shape table) but still writes a valid candidate CSV."""
 
     def _write_candidate(self, tmp_path):
         p = tmp_path / "candidate_a8w8_blockscale.csv"

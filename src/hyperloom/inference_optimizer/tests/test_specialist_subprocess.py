@@ -282,7 +282,7 @@ def test_runner_accepts_subprocess_config_only():
 
 
 def test_denylist_blocks_dangerous_process_tools():
-    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule"""
+    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule against global process cleanup that could kill the serving / benchmark process."""
     assert "KillShell" in SPECIALIST_TOOL_DENYLIST
     assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
 
@@ -448,7 +448,7 @@ async def test_subprocess_path_injects_llm_stability_env(
     fake_framework_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The dispatcher injects low-risk claude-code stability flags but does not"""
+    """The dispatcher injects low-risk claude-code stability flags but does not set API_TIMEOUT_MS by default; liveness is governed by the process.log / heartbeat stale reaper."""
     # Ensure no inherited values mask the setdefault under test.
     for var in (
         "API_TIMEOUT_MS",
@@ -628,7 +628,7 @@ async def test_subprocess_recovers_partial_when_no_final(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A specialist that wrote only the partial (then died before the final"""
+    """A specialist that wrote only the partial (then died before the final done.json) surfaces the partial as a non-empty result."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
@@ -662,7 +662,7 @@ async def test_wall_budget_overrides_legacy_max_seconds(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung"""
+    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung specialist well before the legacy ``max_turns × per_turn`` ceiling (here 2 × 15 = 30s)."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="hang")
     session_dir = tmp_path / "session"
@@ -711,7 +711,7 @@ class _FakeProc:
 async def test_reap_loop_process_log_activity_prevents_stale_kill(
     tmp_path: Path,
 ):
-    """A specialist that streams to process.log but never self-writes"""
+    """A specialist that streams to process.log but never self-writes heartbeat.json must NOT be reaped as stale."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     process_log = workspace / "process.log"
@@ -753,7 +753,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """With neither heartbeat.json nor process.log activity, the reaper"""
+    """With neither heartbeat.json nor process.log activity, the reaper still reaps a silent/hung subprocess as stale."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
@@ -976,7 +976,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """With a gpu_lease, run() launches inside the actor (no local Popen) and"""
+    """With a gpu_lease, run() launches inside the actor (no local Popen) and strips *_VISIBLE_DEVICES so Ray owns the card assignment (P2/T4)."""
     workspace = tmp_path / "ws"
     lease = _FakeGpuSpecialistLease(workspace)
 

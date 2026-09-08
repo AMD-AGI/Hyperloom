@@ -859,7 +859,7 @@ def test_invalid_probe_payload_reports_a_contract_error():
 
 
 def test_untracked_fork_recovers_and_still_injects(tmp_path):
-    """End to end: an untracked fork remote must not lose the feature when the"""
+    """End to end: an untracked fork remote must not lose the feature when the source path can prove which upstream it belongs to."""
     (tmp_path / "csrc").mkdir()
     (tmp_path / "csrc" / "k.cu").write_text("// kernel")
     client = _PathIndexClient(
@@ -923,7 +923,7 @@ def test_probe_contract_error_is_reported_without_starting_discovery(tmp_path):
 
 
 def test_probe_requests_are_counted_as_http_calls(tmp_path):
-    """Probing is real traffic. Omitting it understates the cost of the"""
+    """Probing is real traffic."""
     client = _PathIndexClient({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})
 
     result = collect_references(client=client, **_fork_workspace(tmp_path))

@@ -101,7 +101,7 @@ class _GpuProbe:
 
 
 def test_framework_gpu_params_request_whole_machine(tmp_path, monkeypatch):
-    """The shared helper (used by BOTH the perf-framework and enablement param"""
+    """The shared helper (used by BOTH the perf-framework and enablement param builders) requests the whole machine when GPUs are visible + single-node."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     assert coord.framework_gpu_pool.capacity == 4
     gpu_params = coord._framework_gpu_params()
@@ -142,7 +142,7 @@ def test_framework_gpu_params_empty_on_multi_node(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path, monkeypatch):
-    """A framework-family GPU task leases every card from ``framework_gpu_pool``"""
+    """A framework-family GPU task leases every card from ``framework_gpu_pool`` even though ``gpu_specialist_capacity=0`` empties the EXPLORE pool."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     assert coord.gpu_specialist_pool.capacity == 0  # EXPLORE pool empty
     assert coord.framework_gpu_pool.capacity == 4  # whole machine
@@ -174,7 +174,7 @@ async def test_framework_family_leases_whole_machine_when_capacity_zero(tmp_path
 
 @pytest.mark.asyncio
 async def test_framework_family_defaults_gpu_count_to_whole_machine(tmp_path, monkeypatch):
-    """Omitting ``gpu_count`` defaults a framework-family task to the whole"""
+    """Omitting ``gpu_count`` defaults a framework-family task to the whole machine (not the serving TP)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     probe = _GpuProbe()
     coord.sub.register_executor("specialist", probe)
@@ -204,7 +204,7 @@ async def test_framework_family_defaults_gpu_count_to_whole_machine(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
-    """While a framework GPU task holds gpu_research_lane, the serving lanes"""
+    """While a framework GPU task holds gpu_research_lane, the serving lanes (benchmark / profile / server_lifecycle) cannot be acquired."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     held = await coord.locks.try_acquire_many(
         ["gpu_research_lane"],
@@ -242,7 +242,7 @@ async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_explore_gpu_specialist_still_gated_by_capacity(tmp_path, monkeypatch):
-    """A NON-framework needs_gpu specialist still leases from the carved"""
+    """A NON-framework needs_gpu specialist still leases from the carved ``gpu_specialist_pool`` — so ``gpu_specialist_capacity=0`` leaves it queued (the whole-machine special case must NOT leak to EXPLORE)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
     probe = _GpuProbe()
     coord.sub.register_executor("specialist", probe)
@@ -270,7 +270,7 @@ async def test_explore_gpu_specialist_still_gated_by_capacity(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
-    """With capacity>0 and no serving carve, an EXPLORE GPU specialist leases"""
+    """With capacity>0 and no serving carve, an EXPLORE GPU specialist leases from the carved pool (gpu_count=1 → a single card)."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4)
     assert coord.gpu_specialist_pool.capacity == 4
     probe = _GpuProbe()
@@ -300,7 +300,7 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_path, monkeypatch):
-    """A bench-capable EXPLORE specialist (mode=patch & bench=true) leases the"""
+    """A bench-capable EXPLORE specialist (mode=patch & bench=true) leases the whole machine from ``framework_gpu_pool`` — so serving occupying the whole node (TP == #GPUs, which empties the serving-disjoint pool) does not leave it unschedulable."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4, tp=4)
     # Serving carve empties the disjoint pool; the whole-machine pool is full.
     assert coord.gpu_specialist_pool.capacity == 0
@@ -333,7 +333,7 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
 
 @pytest.mark.asyncio
 async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch):
-    """A non-bench GPU probe (bench=false) keeps the serving-disjoint pool — the"""
+    """A non-bench GPU probe (bench=false) keeps the serving-disjoint pool — the whole-machine route must NOT leak to ordinary microbench/profiling probes."""
     # 8 visible cards, serving TP=4 → carved pool = cards [4..7].
     coord = _build_coord(
         tmp_path,
@@ -373,7 +373,7 @@ async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_serving_priority_defers_gpu_specialist_and_releases_lane(tmp_path, monkeypatch):
-    """§3.4 dispatcher E2E: when serving_slot_busy()==True the GPU specialist is"""
+    """§3.4 dispatcher E2E: when serving_slot_busy()==True the GPU specialist is deferred (stays queued), its executor is never called, and the SQLite gpu_research_lane lease is released so it leaves no held holder."""
     import hyperloom.orchestrator.actions.executors._ray_backend as _rb
 
     # Enable serving-priority and make the slot always appear busy.
@@ -414,7 +414,7 @@ async def test_serving_priority_defers_gpu_specialist_and_releases_lane(tmp_path
 
 @pytest.mark.asyncio
 async def test_serving_priority_defers_on_second_probe_racing_admit(tmp_path, monkeypatch):
-    """§3.4 immediate-probe regression: a serving start that races between the"""
+    """§3.4 immediate-probe regression: a serving start that races between the pass start and the per-task admit must still trigger a defer."""
     import hyperloom.orchestrator.actions.executors._ray_backend as _rb
 
     # serving-priority enabled; the slot was free at the start of the pass but became busy by the time we probe at
@@ -464,7 +464,7 @@ async def test_serving_priority_defers_on_second_probe_racing_admit(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_serving_priority_admits_gpu_specialist_when_slot_free(tmp_path, monkeypatch):
-    """§3.4 inverse: when serving_slot_busy()==False the GPU specialist IS"""
+    """§3.4 inverse: when serving_slot_busy()==False the GPU specialist IS admitted (executor runs), so the serving-priority gate is not overly aggressive."""
     import hyperloom.orchestrator.actions.executors._ray_backend as _rb
 
     monkeypatch.setattr(_rb, "ray_serving_priority_enabled", lambda: True)

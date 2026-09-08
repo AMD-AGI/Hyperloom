@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Assert a built wheel's contents against ``pyproject.toml``."""
+"""Assert a built wheel's contents against ``pyproject.toml``.
+
+Complements ``test_packaging_lint.py``: that module lints the declarations
+against the source tree, this one opens the real artifact. Checks are derived
+from ``pyproject.toml`` rather than hardcoded, so the list cannot rot.
+
+Usage: python scripts/check_wheel_contents.py dist/*.whl
+"""
 
 from __future__ import annotations
 

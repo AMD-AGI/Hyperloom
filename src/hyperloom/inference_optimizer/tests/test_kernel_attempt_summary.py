@@ -140,7 +140,7 @@ def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
 
 
 def test_ledger_only_rejection_reaches_the_breakdown(tmp_path: Path) -> None:
-    """A rejected kernel that never made top15 must be in both the total and the"""
+    """A rejected kernel that never made top15 must be in both the total and the per-reason split, or ``totals.rejected`` and ``rejection_breakdown`` disagree."""
     state = _make_state(
         top15=[_top15_entry("k001")],
         attempts={

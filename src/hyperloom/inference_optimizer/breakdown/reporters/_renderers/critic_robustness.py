@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic robustness renderer — surfaces recorded critic decisions and their"""
+"""Critic robustness renderer — surfaces recorded critic decisions and their pass/fail counts for the session."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ _MAX_ROWS = 20
 
 @register_renderer("critic_robustness")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the critic-robustness section: recorded critic decisions and"""
+    """Render the critic-robustness section: recorded critic decisions and pass/fail counts."""
     cr = breakdown.get("critic_robustness") or []
     if not cr:
         return RenderedSection(

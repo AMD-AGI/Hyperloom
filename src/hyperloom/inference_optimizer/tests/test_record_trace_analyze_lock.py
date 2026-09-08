@@ -47,7 +47,7 @@ def test_written_dict_has_fifteen_keys() -> None:
 
 
 def test_snapshot_id_wraps_to_one_after_last_trace_analyze_cleared() -> None:
-    """After ``last_trace_analyze`` is cleared (as profile promote does), the id"""
+    """After ``last_trace_analyze`` is cleared (as profile promote does), the id resets to 1 because it is derived from the previous dict, not a counter."""
     state = SharedState()
     _record(state, "t1")
     assert state.last_trace_analyze["roofline_snapshot_id"] == 1
@@ -91,7 +91,7 @@ def test_roofline_snapshots_capped_keeps_baseline_anchor() -> None:
 
 
 def test_history_block_failure_does_not_drop_canonical_write() -> None:
-    """A failure inside the history block is swallowed; ``last_trace_analyze`` is"""
+    """A failure inside the history block is swallowed; ``last_trace_analyze`` is still written and no history entry is appended."""
     state = SharedState()
     _record(state, "first")
     assert len(state.roofline_snapshots) == 1

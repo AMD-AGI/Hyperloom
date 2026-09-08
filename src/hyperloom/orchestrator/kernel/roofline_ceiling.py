@@ -819,7 +819,7 @@ _EMPTY_BREAKDOWN = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
 
 
 def select_peak_and_bound(t_mem: float, t_cmp: float) -> tuple[float, str]:
-    """Pick the dominant (lower) ceiling and its label from the memory- and"""
+    """Pick the dominant (lower) ceiling and its label from the memory- and compute-bound projections."""
     if t_mem <= 0 and t_cmp <= 0:
         return 0.0, "unknown"
     if t_cmp <= 0:
@@ -881,7 +881,7 @@ def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_by
 
 
 def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0) -> tuple[int, int, int, int] | None:
-    """DiT transformer shape from ``<model>/transformer/config.json`` for the"""
+    """DiT transformer shape from ``<model>/transformer/config.json`` for the compute-bound diffusion ceiling."""
     try:
         cfg = json.loads((Path(model_path) / "transformer" / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -1219,7 +1219,7 @@ def _fused_moe_bytes(
     weight_bpe: float,
     act_bpe: float | None = None,
 ) -> float:
-    """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector"""
+    """HBM bytes for one gated SwiGLU MoE forward using the coupon-collector active-expert count, inlined from TraceLens FusedMoE.bytes_func."""
     if act_bpe is None:
         act_bpe = weight_bpe
     e_active = num_experts * (1.0 - ((num_experts - topk) / num_experts) ** M)

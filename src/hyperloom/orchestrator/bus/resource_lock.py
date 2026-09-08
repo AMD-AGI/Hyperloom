@@ -278,7 +278,7 @@ class SqliteLeaseBackend:
             return cur.rowcount
 
     async def reap_expired(self) -> list[dict]:
-        """Sweep expired rows; emits one ``lease_expired`` event per stale"""
+        """Sweep expired rows; emits one ``lease_expired`` event per stale (lane, holder_id) row."""
         now_iso_str = _now_iso()
         reaped: list[dict] = []
         async with self.db.transaction() as cur:

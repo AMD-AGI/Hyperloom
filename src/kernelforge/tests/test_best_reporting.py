@@ -371,7 +371,7 @@ def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
 
 
 def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
-    """A crash between os.replace and manifest write can leave version_dir"""
+    """A crash between os.replace and manifest write can leave version_dir visible but truncated."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("verified\n")
     publisher = BestResultPublisher(str(tmp_path))
@@ -415,7 +415,7 @@ def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
 
 
 def test_retry_repairs_inconsistent_orphan_bundle(tmp_path, monkeypatch):
-    """A visible-but-inconsistent orphan bundle (wrong patch bytes) is treated"""
+    """A visible-but-inconsistent orphan bundle (wrong patch bytes) is treated as repairable: quarantine + rewrite, not a hard 'inconsistent' error."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("verified\n")
     publisher = BestResultPublisher(str(tmp_path))

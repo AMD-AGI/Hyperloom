@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the local-health signal rule (server/log/gpu/disk/shm/fd/ray"""
+"""Unit tests for the local-health signal rule (server/log/gpu/disk/shm/fd/ray + D1 log-pattern extensions)."""
 
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ def test_a_seen_server_is_recorded_in_the_evidence():
 
 
 def test_all_targets_down_suggests_the_real_dispatchable_action():
-    """The HIGH suggestion must not point at ``server_lifecycle`` -- PolicyGate"""
+    """The HIGH suggestion must not point at ``server_lifecycle`` -- PolicyGate rejects it as unknown_action; action_ladder routes this symptom to a real ``delegate(recover, force_gpu_cleanup=True)``, and the suggestion text reaching the orchestration prompt must say so instead."""
     data = SourceData(
         local_processes=_live_server(),
         local_server_health=[

@@ -406,7 +406,7 @@ def test_prelude_preserves_source_model_identity(tmp_path, monkeypatch):
 
 
 def test_prelude_no_display_name_without_quantization(monkeypatch):
-    """Without quantization the prelude leaves args untouched, so the identity"""
+    """Without quantization the prelude leaves args untouched, so the identity resolver falls back to the plain model-path basename."""
     args = _Args(model="/models/Qwen3-32B", quantize=None)
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert getattr(args, "model_display_name", None) in (None, "")
@@ -417,7 +417,7 @@ def test_prelude_no_display_name_without_quantization(monkeypatch):
 
 
 def test_prelude_env_gate_skips_when_disabled(monkeypatch, capsys):
-    """With $HYPERLOOM_QUANTIZE_ENABLED off, the prelude skips quantization even"""
+    """With $HYPERLOOM_QUANTIZE_ENABLED off, the prelude skips quantization even when --quantize is present."""
     monkeypatch.setenv("HYPERLOOM_QUANTIZE_ENABLED", "0")
     monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
     called = {"n": 0}

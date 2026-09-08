@@ -174,7 +174,7 @@ def test_preflight_does_not_export_a_derived_url_for_a_subscription_token(
     clean_url_env,
     stub_install_steps,
 ):
-    """The Claude CLI resolves its own endpoint, and all three installers keep"""
+    """The Claude CLI resolves its own endpoint, and all three installers keep this URL a local variable."""
     monkeypatch.setenv("HOME", str(tmp_path))
     _oauth_only_env(monkeypatch, base_url="")
 
@@ -303,7 +303,7 @@ def test_preflight_keeps_anthropic_side_supplied_by_dotenv(
     clean_url_env,
     stub_install_steps,
 ):
-    """``.env`` is operator configuration: with the OpenAI side exported in the"""
+    """``.env`` is operator configuration: with the OpenAI side exported in the shell and the Anthropic side coming from ``.env``, both sides survive."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "ak-gw")
@@ -326,7 +326,7 @@ def test_preflight_rejects_half_configured_side_from_dotenv(
     clean_url_env,
     stub_install_steps,
 ):
-    """A key in ``.env`` whose own base URL is absent is a mispaired shape and is"""
+    """A key in ``.env`` whose own base URL is absent is a mispaired shape and is rejected, not silently dropped, even though the shell side is complete."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "ak-openai")
@@ -348,7 +348,7 @@ def test_preflight_openai_only_drops_anthropic_creds_from_installer_env(
     clean_url_env,
     stub_install_steps,
 ):
-    """A stale installer env file must not inject an Anthropic-side key into an"""
+    """A stale installer env file must not inject an Anthropic-side key into an OpenAI-only run: that would turn a valid config into a rejected one."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
@@ -391,7 +391,7 @@ def test_preflight_anthropic_only_leaves_openai_protocol_aliases_unset(
     clean_url_env,
     stub_install_steps,
 ):
-    """The GEAK / LLM aliases address OpenAI-protocol endpoints, so an"""
+    """The GEAK / LLM aliases address OpenAI-protocol endpoints, so an Anthropic-only entry leaves both the URL and the key side unset."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -960,7 +960,7 @@ def test_resolve_robustness_choice_explicit_mock_wins():
 
 
 def test_resolve_robustness_choice_keeps_the_agent_on_multi_node():
-    """Multi-node runs the agent on its node-agnostic signals; the local probe"""
+    """Multi-node runs the agent on its node-agnostic signals; the local probe is what gets disabled, not the whole backend."""
     args = _make_args(robustness_backend=None, nodes=4)
 
     assert cli._resolve_robustness_choice(args) == "agent"
@@ -1184,7 +1184,7 @@ def test_validate_claude_model_falls_back_to_openai_url_single_gateway(monkeypat
 
 
 def test_validate_claude_model_skips_probe_for_oauth_only(monkeypatch, capsys):
-    """The catalog probe is bearer-authenticated; a subscription token has nothing"""
+    """The catalog probe is bearer-authenticated; a subscription token has nothing to send, so probing would only fail with a misleading auth error."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -1229,7 +1229,7 @@ def _oauth_only_env(monkeypatch, *, base_url: str) -> None:
 
 
 def test_preflight_warns_when_a_subscription_token_targets_a_foreign_endpoint(monkeypatch, capsys):
-    """A subscription token only authenticates against Anthropic itself, so a"""
+    """A subscription token only authenticates against Anthropic itself, so a third-party gateway both fails and puts the credential on the wire to a host that was never meant to see it."""
     _oauth_only_env(monkeypatch, base_url="https://gateway.internal.example/anthropic")
 
     cli_credentials._validate_credentials()
@@ -1250,7 +1250,7 @@ def test_preflight_accepts_a_subscription_token_on_the_official_endpoint(monkeyp
 
 
 def test_provider_only_mode_reads_a_subscription_token_as_anthropic_only(monkeypatch):
-    """Without this the token yields no provider-only mode, so a stale OpenAI"""
+    """Without this the token yields no provider-only mode, so a stale OpenAI side from the kernel-agent env file is never suppressed."""
     _oauth_only_env(monkeypatch, base_url="")
 
     assert cli_preflight._provider_only_mode() == "anthropic"
@@ -1261,7 +1261,7 @@ def test_provider_only_mode_reads_a_subscription_token_as_anthropic_only(monkeyp
 
 
 def test_claude_config_json_is_left_alone_in_subscription_mode(monkeypatch, tmp_path, capsys):
-    """customApiUrl would point the CLI away from the only endpoint that accepts"""
+    """customApiUrl would point the CLI away from the only endpoint that accepts the token, so subscription mode must not touch the operator's config."""
     monkeypatch.setenv("HOME", str(tmp_path))
     _oauth_only_env(monkeypatch, base_url="")
     config_path = tmp_path / ".claude" / "config.json"
@@ -1273,7 +1273,7 @@ def test_claude_config_json_is_left_alone_in_subscription_mode(monkeypatch, tmp_
 
 
 def test_claude_config_json_still_written_for_a_gateway_bearer_token(monkeypatch, tmp_path):
-    """The skip must key off \"is this run on the subscription\", not off an empty"""
+    """The skip must key off "is this run on the subscription", not off an empty primaryApiKey: this host authenticates through ANTHROPIC_AUTH_TOKEN, so it arrives with no ANTHROPIC_API_KEY while genuinely needing the gateway URL."""
     monkeypatch.setenv("HOME", str(tmp_path))
     _oauth_only_env(monkeypatch, base_url="https://gateway.internal.example/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
@@ -1308,7 +1308,7 @@ def test_validate_claude_model_still_probes_when_oauth_accompanies_an_api_key(mo
 
 
 def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch, capsys):
-    """Dual entry: Anthropic side returns 404/405 for /models (no catalog route)"""
+    """Dual entry: Anthropic side returns 404/405 for /models (no catalog route) → proceed without probing the OpenAI side."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.delenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
@@ -1337,7 +1337,7 @@ def test_validate_claude_model_split_entry_no_models_route_proceeds(monkeypatch,
 
 
 def test_validate_claude_model_split_entry_auth_error_refuses(monkeypatch):
-    """Dual entry: Anthropic catalog probe fails with auth/network (None, not the"""
+    """Dual entry: Anthropic catalog probe fails with auth/network (None, not the 404 sentinel) and custom models disabled → refuse to start."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", "0")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
@@ -1573,7 +1573,7 @@ def test_probe_llm_catalog_passes_anthropic_custom_headers(monkeypatch):
 
 
 def test_probe_llm_catalog_uses_openai_custom_headers_for_openai_side(monkeypatch):
-    """Strict per-side: probing the OpenAI base uses OPENAI_CUSTOM_HEADERS (not"""
+    """Strict per-side: probing the OpenAI base uses OPENAI_CUSTOM_HEADERS (not ANTHROPIC_CUSTOM_HEADERS)."""
     monkeypatch.setattr("time.sleep", lambda s: None)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: openai-key")
@@ -1924,7 +1924,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
 def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
     monkeypatch, tmp_path, clean_url_env, stub_install_steps
 ):
-    """An Anthropic-only deploy stays Anthropic-only across preflight: the OpenAI"""
+    """An Anthropic-only deploy stays Anthropic-only across preflight: the OpenAI side is never populated from the Anthropic gateway, so Codex keeps following the Claude model."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")

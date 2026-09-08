@@ -907,7 +907,7 @@ def test_promote_warm_replay_keeps_prebaseline_enablement_as_zero_gain_anchor(
 
 
 def test_promote_warm_replay_rejected_by_failed_quality_gate(tmp_path):
-    """A faster warm config that FAILS the image-quality gate vs the baseline"""
+    """A faster warm config that FAILS the image-quality gate vs the baseline reference must NOT be promoted (no stack push, no current_best), even though its throughput beats baseline."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -985,7 +985,7 @@ def test_all_revert_branches_retain_pending_on_rollback_failure(
 
 
 def test_promote_warm_replay_passes_quality_gate_is_promoted(tmp_path):
-    """A warm config that beats baseline AND clears the quality gate (mse within"""
+    """A warm config that beats baseline AND clears the quality gate (mse within the ceiling) is promoted normally."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",
@@ -1520,7 +1520,7 @@ def test_prelude_bootstrap_skipped_when_roofline_pending(tmp_path):
 
 
 def test_prelude_bootstrap_skipped_when_stop_pending(tmp_path):
-    """A baseline that halted the run (e.g. baseline_accuracy_failed) must not"""
+    """A baseline that halted the run (e.g. baseline_accuracy_failed) must not enqueue/dispatch any post-baseline bootstrap work before the halt fires."""
     coord = _make_coord(tmp_path)
     coord.shared_state.stop_reason = "baseline_accuracy_failed"
     assert coord._should_run_prelude_bootstrap(600.0) is False
@@ -1537,7 +1537,7 @@ def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):
 
 
 def test_inject_warm_recipe_history_adds_what_failed_rows(tmp_path):
-    """Every what_failed row carries a canonical fingerprint into the"""
+    """Every what_failed row carries a canonical fingerprint into the rejected ledger, with ``source=warm_start_recipe``."""
     recipe = _warm_recipe_t1(
         what_failed=[
             {

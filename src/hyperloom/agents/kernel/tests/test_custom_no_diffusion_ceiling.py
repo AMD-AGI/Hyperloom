@@ -52,7 +52,7 @@ def _without_hyperloom(monkeypatch):
 class TestDiffusionCeilingGate:
     @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
     def test_the_gate_is_whatever_the_registry_declares(self, framework):
-        """Asserted against the table itself, so a new entry is classified when it"""
+        """Asserted against the table itself, so a new entry is classified when it is added rather than when someone remembers this call site."""
         assert tl._has_diffusion_ceiling(framework) is fr.has_denoiser_config(framework)
 
     def test_custom_claims_no_diffusion_ceiling(self):
@@ -67,7 +67,7 @@ class TestDiffusionCeilingGate:
         assert tl._has_diffusion_ceiling(framework) is False
 
     def test_custom_is_still_scriptable(self):
-        """The gate narrows the ceiling only; custom keeps the scriptable route"""
+        """The gate narrows the ceiling only; custom keeps the scriptable route (plain pytorch perf report, no decode steady-state splitter)."""
         assert tl._is_scriptable_framework("custom") is True
 
     @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
@@ -120,7 +120,7 @@ class TestTheGateIsWiredIn:
     """The helper above is only worth anything if ``write_reports`` consults it."""
 
     def test_the_analytic_gate_asks_has_diffusion_ceiling(self, tmp_path, monkeypatch):
-        """Pins the call site, not just the predicate: swapping the gate back to"""
+        """Pins the call site, not just the predicate: swapping the gate back to ``_is_scriptable_framework`` leaves this recorder untouched."""
         _stub_trace_derived_report(monkeypatch)
         asked: list[str | None] = []
         monkeypatch.setattr(tl, "_has_diffusion_ceiling", lambda fw: asked.append(fw) or False)
@@ -128,7 +128,7 @@ class TestTheGateIsWiredIn:
         assert asked == ["custom"]
 
     def test_custom_keeps_the_trace_derived_sidecar(self, tmp_path, monkeypatch):
-        """The totals are aggregated from the perf CSVs alone, so withholding the"""
+        """The totals are aggregated from the perf CSVs alone, so withholding the analytic ceiling must not withhold them too -- `_scriptable_latency_roofline` degrades to `totals.sigma_ideal_roofline_us` when the ceiling is absent."""
         _stub_trace_derived_report(monkeypatch)
         artifacts = _write_reports_for(tmp_path, "custom")
         assert "diffusion_roofline" in artifacts
@@ -164,7 +164,7 @@ class TestThroughputUnit:
 
 
 class TestTheTwoRoutesAgree:
-    """bypass and TraceLens are two spellings of one feature (`request_handlers`"""
+    """bypass and TraceLens are two spellings of one feature (`request_handlers` picks between them), so a framework must not be scriptable on one and not the other -- the sidecar they each emit is the same artifact."""
 
     @pytest.mark.parametrize("framework", sorted(fr.FRAMEWORKS))
     def test_both_routes_read_scriptable_from_the_registry(self, framework):

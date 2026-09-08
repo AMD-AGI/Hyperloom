@@ -2,7 +2,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node TraceLens SGLang patch fan-out."""
+"""Multi-node TraceLens SGLang patch fan-out.
+
+Fans out one NodeAffinity-pinned actor per alive pod to apply the
+TraceLens roofline patches where SGLang lives. Each actor resolves the
+sglang version + apply root, skips if the sentinel markers are already
+present (idempotent), ``git apply --check``s then applies every
+``$TRACELENS_ROOT/.../sglang_<X_Y_Z>/*.patch`` (rolling back on mid-set
+failure). Emits one JSON summary on stdout.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Assessment dataclass + ``classify_attempt`` — turn one attempt's"""
+"""Assessment dataclass + ``classify_attempt`` — turn one attempt's workspace state into a single ``OutcomeId``."""
 
 from __future__ import annotations
 

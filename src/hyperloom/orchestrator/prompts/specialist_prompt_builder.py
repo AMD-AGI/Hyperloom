@@ -81,7 +81,7 @@ BASH_KILL_SAFETY_PREAMBLE = (
 
 
 def _is_atom(inp: SpecialistPromptInputs) -> bool:
-    """True when ``_focus_*`` blocks should use atom-flavoured hints"""
+    """True when ``_focus_*`` blocks should use atom-flavoured hints (empty framework falls back to the canonical sglang/vllm block)."""
     return (inp.framework or "").strip().lower() == "atom"
 
 
@@ -889,7 +889,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Heads-up block when this dispatch is a bounded auto-retry of a prior"""
+    """Heads-up block when this dispatch is a bounded auto-retry of a prior transient (timeout / crash / stale-heartbeat) attempt."""
     reason = inp.auto_retry_reason.strip()
     return [
         "",
@@ -907,7 +907,7 @@ def _auto_retry_note_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
-    """On-GPU autonomy block appended for GPU specialists (those with a card"""
+    """On-GPU autonomy block appended for GPU specialists (those with a card allocation)."""
     cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
     return [
         "",
@@ -947,7 +947,7 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Free-form mandate appended when ``scope == 'freeform'``. The"""
+    """Free-form mandate appended when ``scope == 'freeform'``."""
     desc = (inp.task_description or "").strip() or "(no task description provided)"
     if _authors_patches(inp):
         reach = "upstream PRs, host probing, source patches"
@@ -974,7 +974,7 @@ def _freeform_block(inp: SpecialistPromptInputs) -> list[str]:
 
 
 def _cross_domain_block(inp: SpecialistPromptInputs) -> list[str]:
-    """Cross-domain mandate appended when ``scope == 'domains'``. The"""
+    """Cross-domain mandate appended when ``scope == 'domains'``."""
     tags = ", ".join(inp.extra_focus_tags) if inp.extra_focus_tags else inp.domain.key
     return [
         "",
@@ -1188,7 +1188,7 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 4 — optional KB context
 def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Return True when every prior KB/PR/research source is empty, so the"""
+    """Return True when every prior KB/PR/research source is empty, so the cold-start directive is injected in place of the KB block."""
     return (
         not inp.kb_subgraph
         and not inp.warm_start_recipe
@@ -1452,7 +1452,7 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 5b — Related lessons (positive priors from prior KEEPs)
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=lesson`` points from prior KEEPs, compactly"""
+    """Render KB ``kind=lesson`` points from prior KEEPs, compactly (statement + measured_impact)."""
     rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
     if not inp.warm_start_lessons:
         rows.append(_NONE_PLACEHOLDER)
@@ -1502,7 +1502,7 @@ def _format_version_note(
     inp: SpecialistPromptInputs,
     lesson_attrs: dict[str, Any],
 ) -> str:
-    """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when"""
+    """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when the lesson's framework_version differs; empty when either side is unknown or they match."""
     lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
@@ -1514,7 +1514,7 @@ def _format_version_note(
 
 
 def _render_measured_impact(raw: Any) -> str:
-    """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy"""
+    """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy string, or other)."""
     if isinstance(raw, dict):
         parts: list[str] = []
         gain = raw.get("gain_pct")
@@ -1539,7 +1539,7 @@ def _render_measured_impact(raw: Any) -> str:
 
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=pitfall`` points from prior REVERTs (description +"""
+    """Render KB ``kind=pitfall`` points from prior REVERTs (description + severity); framed as forbidden paths, not suggestions."""
     rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
     if not inp.warm_start_pitfalls:
         rows.append(_NONE_PLACEHOLDER)

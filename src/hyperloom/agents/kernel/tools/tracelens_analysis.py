@@ -4146,14 +4146,14 @@ _TRACELENS_REF_DEFAULT = "a59a9c165bb64c7c416fd7cf79149803d552e43c"
 
 
 def _default_tracelens_root() -> Path:
-    """Installer-managed default checkout path (mirrors install.sh /"""
+    """Installer-managed default checkout path (mirrors install.sh / hyperloom.inference_optimizer.session.paths.deps_cache_root)."""
     from hyperloom.inference_optimizer.session.paths import deps_cache_root
 
     return deps_cache_root() / "TraceLens"
 
 
 def _is_default_tracelens_root(tl_root: Path) -> bool:
-    """True when tl_root is the installer-managed default (not an operator"""
+    """True when tl_root is the installer-managed default (not an operator override)."""
     try:
         return Path(tl_root).resolve() == _default_tracelens_root().resolve()
     except OSError:

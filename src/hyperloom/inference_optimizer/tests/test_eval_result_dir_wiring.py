@@ -472,7 +472,7 @@ def _write_results_score(path: Path, score: float) -> None:
 
 
 def test_parse_eval_results_ignores_discarded_warmup_round(tmp_path):
-    """integrate_patch grades from the grid slot (parent of the measured"""
+    """integrate_patch grades from the grid slot (parent of the measured ``benchmark_*`` workspace)."""
     slot = tmp_path / "variant_00_kv"
     # Measured round eval at the slot root: slot/<model>/results_<ts>.json.
     _write_results_score(slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.90)
@@ -503,7 +503,7 @@ def test_parse_eval_results_ignores_discarded_mn_warmup_round(tmp_path):
 
 
 def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):
-    """The warmup filter is workspace-relative, not absolute: a parse rooted AT a"""
+    """The warmup filter is workspace-relative, not absolute: a parse rooted AT a ``warmup_round`` slot (the baseline warmup round parses its own ``RESULT_DIR == .../warmup_round``) must still find its own results."""
     warm_slot = tmp_path / "warmup_round"
     _write_results_score(warm_slot / "Qwen__model" / "results_2026-07-15T10-00-00.000000.json", 0.77)
     out = parse_eval_results(warm_slot, framework="vllm")
@@ -511,7 +511,7 @@ def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):
 
 
 def test_warm_decision_gated_variant_grades_from_warmup_round(tmp_path):
-    """Warm-decision explore runs the decision round with ``RUN_EVAL=false``, so a"""
+    """Warm-decision explore runs the decision round with ``RUN_EVAL=false``, so a gated variant's only score sits under ``warmup_round/``."""
     slot = tmp_path / "variant_00_kv"
     _write_results_score(
         slot / "warmup_round" / "Qwen__model" / "results_2026-07-15T09-00-00.000000.json",
@@ -528,7 +528,7 @@ def test_warm_decision_gated_variant_grades_from_warmup_round(tmp_path):
 
 
 def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
-    """RUN_EVAL=false coming from the base YAML ``benchmark.envs`` (not"""
+    """RUN_EVAL=false coming from the base YAML ``benchmark.envs`` (not ``extra_envs``) must be honored: baseline reads the effective RUN_EVAL from the materialized config, so a stale ``results*.json`` in the reused slot is not promoted into ``baseline_accuracy``."""
     base = tmp_path / "base.yaml"
     cfg = {
         "benchmark": {
@@ -582,7 +582,7 @@ def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
 
 
 def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
-    """``IntegratePatchExecutor._grade_accuracy`` grades from the grid slot (the"""
+    """``IntegratePatchExecutor._grade_accuracy`` grades from the grid slot (the parent of the measured ``benchmark_*`` workspace)."""
     from hyperloom.orchestrator.actions.executors.integrate_patch import (
         IntegratePatchExecutor,
     )
@@ -605,7 +605,7 @@ def test_integrate_patch_grade_ignores_discarded_warmup_round(tmp_path):
 
 
 def _fake_scriptable_workspace(slot: Path, *, gate_passed: bool = True) -> Path:
-    """A scriptable (xDiT) bench workspace: framework=xdit plus a fresh image"""
+    """A scriptable (xDiT) bench workspace: framework=xdit plus a fresh image ``quality_gate`` block embedded in ``benchmark_report.json``."""
     ws = slot / "benchmark_xdit_20260715_010101"
     ws.mkdir(parents=True)
     (ws / "benchmark_report.json").write_text(

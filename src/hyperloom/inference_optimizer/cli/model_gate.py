@@ -360,7 +360,7 @@ def _load_model_config_tags(model_path: str) -> dict:
 
 
 def _arch_is_supported_text_generation(arch: str) -> bool:
-    """True when an architecture class name denotes a supported text-generation"""
+    """True when an architecture class name denotes a supported text-generation (decoder-only causal LM) model."""
     a = (arch or "").strip()
     if not a:
         return False
@@ -694,7 +694,7 @@ def _detect_amd_unsupported_quant(model_path: str) -> str | None:
 
 
 def _detect_mlx_quant_weights(model_path: str) -> str | None:
-    """Detect MLX (mx.quantize) checkpoints by their ``.biases``/``.scales``"""
+    """Detect MLX (mx.quantize) checkpoints by their ``.biases``/``.scales`` tensors in the safetensors index."""
     idx = (resolve_local_model_dir(model_path) or Path(model_path)) / "model.safetensors.index.json"
     if not idx.is_file():
         return None

@@ -177,7 +177,7 @@ def test_cumulative_gain_falls_back_to_baseline_tput_together(monkeypatch):
 
 @pytest.mark.parametrize("agentx", [True, False])
 def test_the_anchor_chokepoint_is_the_output_axis_on_every_session(monkeypatch, agentx):
-    """It seeds ``base_tput``, backs the drift check, and answers the two"""
+    """It seeds ``base_tput``, backs the drift check, and answers the two objective resolvers, whose targets are operator-supplied output figures."""
     _agentx(monkeypatch) if agentx else _synthetic(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
 

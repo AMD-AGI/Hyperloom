@@ -23,7 +23,7 @@ _CALIBRATION_ENV = "FORGE_FUSION_CALIBRATION"
 
 
 def _batch_factor(decode_batch: int) -> float:
-    """Gain shrinks at larger decode batch (elementwise tail is a smaller share of"""
+    """Gain shrinks at larger decode batch (elementwise tail is a smaller share of the more GEMM-bound large-batch decode). ~1.0 at batch<=16, ~0.5 at batch 64, matching the measured GraniteMoE +4.7/3.5/2.4% and dense +2.2/1.9/0.7% trend."""
     b = max(1, int(decode_batch or 16))
     if b <= 16:
         return 1.0

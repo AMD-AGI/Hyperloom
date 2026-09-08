@@ -1069,7 +1069,7 @@ PATCH_CAPABILITY_PHRASES = (
 
 
 def test_readonly_domains_never_grant_patch_authoring():
-    """Read-only domains must not be told they may author patches anywhere in"""
+    """Read-only domains must not be told they may author patches anywhere in the prompt — identity, iron rules, and output protocol alike."""
     for key in READONLY_DOMAIN_KEYS:
         system, user = build_specialist_prompts(
             SpecialistPromptInputs(
@@ -1102,7 +1102,7 @@ def test_readonly_dispatch_states_the_read_only_boundary():
 
 
 def test_cross_domain_research_dispatch_drops_patch_deliverable():
-    """Mode outranks scope: a read-only `domains` dispatch must not be promised"""
+    """Mode outranks scope: a read-only `domains` dispatch must not be promised the coupled cross-domain patch."""
     _, user = build_specialist_prompts(
         SpecialistPromptInputs(
             task_id="task-domains-ro",
@@ -1119,7 +1119,7 @@ def test_cross_domain_research_dispatch_drops_patch_deliverable():
 
 
 def test_freeform_research_dispatch_drops_patch_deliverable():
-    """A bare freeform dispatch resolves to research mode, so its mandate must"""
+    """A bare freeform dispatch resolves to research mode, so its mandate must not promise a patch deliverable."""
     system, user = build_specialist_prompts(
         SpecialistPromptInputs(
             task_id="task-ff",
@@ -1161,7 +1161,7 @@ def test_patch_mode_keeps_full_authoring_contract():
 
 
 def test_patch_mode_without_gpu_keeps_the_authoring_clause():
-    """The no-GPU iron rule still offers patch authoring in patch mode; only"""
+    """The no-GPU iron rule still offers patch authoring in patch mode; only research mode drops it."""
     kwargs = dict(
         task_id="task-patch-cpu",
         domain=get_domain("serving_specialist"),
@@ -1178,7 +1178,7 @@ def test_patch_mode_without_gpu_keeps_the_authoring_clause():
 # --------------------------------------------------------------------------- # Stage-2 guard: mandate section carries
 # run-status when available --------------------------------------------------------------------------- #
 def test_mandate_section_renders_run_status():
-    """§0 MANDATE must contain baseline, validated gain, and KEEP threshold"""
+    """§0 MANDATE must contain baseline, validated gain, and KEEP threshold when those fields are non-zero."""
     domain = get_domain("serving_specialist")
     assert domain is not None
     inp = SpecialistPromptInputs(

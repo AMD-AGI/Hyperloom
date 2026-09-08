@@ -60,7 +60,7 @@ class xFuserModel:
 
 @pytest.fixture(autouse=True)
 def _isolate_xdit_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear ``$XDIT_PATH`` so a synthetic ``tmp_path`` test never discovers a"""
+    """Clear ``$XDIT_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod xDiT checkout (tests that exercise discovery re-set it)."""
     monkeypatch.delenv("XDIT_PATH", raising=False)
 
 
@@ -146,7 +146,7 @@ def test_discovery_survives_find_spec_error(monkeypatch) -> None:
 
 
 def test_discovery_uses_importable_xfuser_spec(tmp_path: Path, monkeypatch) -> None:
-    """When ``$XDIT_PATH`` is unset, discovery falls back to the importable"""
+    """When ``$XDIT_PATH`` is unset, discovery falls back to the importable ``xfuser`` package location (``find_spec.submodule_search_locations``)."""
     pkg_root = tmp_path / "site-packages"
     target = pkg_root.joinpath(*_REL)
     target.parent.mkdir(parents=True)

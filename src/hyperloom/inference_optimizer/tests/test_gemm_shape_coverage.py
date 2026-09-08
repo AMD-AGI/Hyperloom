@@ -319,7 +319,7 @@ class TestTunedCsvCoverage:
         assert tuned_csv_shapes(tmp_path / "nope.csv") == set()
 
     def test_an_fmoe_csv_yields_no_dense_shapes(self, tmp_path):
-        """An MoE table has no M,N,K columns; reading one as dense would invent"""
+        """An MoE table has no M,N,K columns; reading one as dense would invent shapes and report coverage against a schema it never described."""
         path = tmp_path / "tuned_fmoe.csv"
         path.write_text(
             "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
