@@ -144,7 +144,7 @@ def _coverage_gaps(demand_report: dict | None, tuner_specs: list, output_dir: Pa
     if not demand_report:
         return []
     try:
-        from .tier3 import coverage_gaps
+        from .coverage import coverage_gaps
 
         gaps = coverage_gaps(demand_report, tuner_specs)
         if not gaps:
@@ -157,76 +157,6 @@ def _coverage_gaps(demand_report: dict | None, tuner_specs: list, output_dir: Pa
     except Exception:  # noqa: BLE001 - a report must never fail the run
         log.debug("could not record coverage gaps", exc_info=True)
         return []
-
-
-def _attempt_tier3(
-    gaps: list,
-    demand_json: str,
-    output_dir: Path,
-    *,
-    profile: Any,
-    gpu_type: str,
-    framework: str,
-) -> dict | None:
-    """Try a generated tuner for the strongest gap nothing else can cover.
-
-    Reached only when a demanded table has no owner at all, so the time it
-    spends is not taken from a tuner that would have covered that table --
-    there is none. Everything it can conclude still has to survive our own
-    re-timing, and a table we cannot dispatch stops the attempt rather than
-    producing an unverified result.
-
-    Never raises: this is an extra chance at a table that was otherwise going
-    to be left untuned, and it must not be able to damage the run carrying it.
-    Note that the caller must not compute arguments for this call either --
-    reading one wrong attribute off the profile at the call site took down a
-    completed tuning run, because argument evaluation happens outside the
-    guard. Hence ``profile`` rather than fields pulled from it.
-    """
-    if not gaps:
-        return None
-    try:
-        model_name = str(getattr(profile, "model_path", "") or getattr(profile, "architecture", "") or "unknown")
-        from .evidence import load_demand
-        from .tier3 import attempt_generated_tuner
-        from .tier3.dispatch import adapters_for
-        from .tier3.gate import should_generate
-
-        decision = should_generate(gaps)
-        if not decision.allowed or decision.gap is None:
-            log.info("tier3: not attempted -- %s", "; ".join(decision.reasons))
-            return {"attempted": False, "reasons": decision.reasons}
-
-        adapter = adapters_for(decision.gap.table)
-        demand = load_demand(demand_json)
-
-        def shapes_for(gap):
-            entry = demand.tables.get(gap.table) if demand else None
-            return list(getattr(entry, "shapes", None) or [])
-
-        outcome = attempt_generated_tuner(
-            gaps,
-            shapes_for,
-            output_dir,
-            model_name=model_name,
-            gpu=gpu_type,
-            framework=framework,
-            decision=decision,
-            make_baseline=adapter.make_baseline if adapter else None,
-            make_dispatch=adapter.make_dispatch if adapter else None,
-            make_correctness=adapter.make_correctness if adapter else None,
-            sync=adapter.sync() if adapter else None,
-        )
-        log.info("tier3: %s -- %s", outcome.stage, outcome.reason)
-        (output_dir / "tier3_outcome.json").write_text(
-            json.dumps(outcome.to_dict(), indent=2),
-            encoding="utf-8",
-        )
-        return outcome.to_dict()
-    except Exception:  # noqa: BLE001 - a bonus attempt must not fail the run
-        log.warning("tier3 attempt failed; tuning continues", exc_info=True)
-        return None
-
 
 def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
     """Return a usable shapes-JSON *file path*, materializing inline content.
@@ -517,9 +447,9 @@ def run(
     )
 
     # What the runtime asked for that nothing selected can write. Always
-    # recorded, so whether a generated tuner has any real target is a question
-    # the fleet answers rather than one that gets argued about.
-    coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path)
+    # recorded, so whether a table is going untuned is a question the fleet
+    # answers rather than one that gets argued about.
+    _coverage_gaps(demand_report, tuner_specs, output_path)
 
     # If --tuner specified, filter to only that one. An explicit --tuner is a
     # directive: if the router didn't auto-select it (e.g. a non-canonical
@@ -701,20 +631,6 @@ def run(
             result.total_shapes,
             result.best_micro_speedup,
             result.elapsed_s,
-        )
-
-    # Last, and only on what the selected tuners left behind. Running it here
-    # rather than alongside them is what keeps the guarantee that a generated
-    # tuner cannot take time from a tuner that was going to produce something:
-    # by now they all have.
-    if coverage_gap_list and time.time() < global_deadline:
-        _attempt_tier3(
-            coverage_gap_list,
-            demand_json,
-            output_path,
-            profile=profile,
-            gpu_type=gpu_type,
-            framework=framework,
         )
 
     # Build report

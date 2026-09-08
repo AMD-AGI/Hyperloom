@@ -140,11 +140,8 @@ fa = "hyperloom.agents.framework.runtime.cli:main"
 robustness-agent = "hyperloom.agents.robustness.main:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
-# ``python -m kernelforge.cli`` directly; these are for interactive use.
+# ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
-# Deprecated alias kept for one release: the standalone ``kernel-agents``
-# distribution is gone, and operator scripts still reference this name.
-kernel-agents = "kernelforge.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes

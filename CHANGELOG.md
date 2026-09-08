@@ -5,6 +5,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **The generated-tuner tier, the `learning/` tuning database, the tracker's
+  scoring layer, and the fusion reachability island are gone — KernelForge
+  loses ~3.4k lines of production code with no behaviour change.**
+  Each was a subsystem that had been superseded in place rather than deleted:
+  `gemm_tune/tier3/` (10 files) was gated on `warrants_generated_tuner`, which
+  fires only for tables the dispatcher has no entry for, while its own
+  dispatcher admitted exactly one table — the two predicates accept disjoint
+  sets, and on the path where the gate does fire the runner discards the
+  model-authored tuner unconditionally at the referee stage. `learning/`
+  (4 files) wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has
+  been `False` since `knowledge/experience_sink.py` took over the same job, and
+  its output files had no reader. The tracker's `best_iteration` /
+  `summary_table` / `KernelScoringView` cluster in `tracker/schema.py` was the
+  pre-`loop/scoring.py` scorer; production reads only `.iterations` and
+  `.checkpoint` off the tracker, and `loop/runner.py` carries its own
+  `_is_gate_met` and `best_mean_case_speedup`. `fusion/validate.py` held a
+  closed seven-function island (`unreached_fusion_symbols` and its six private
+  helpers) whose only references were each other's definitions. The live
+  `coverage_gaps` reporting moved out of `tier3/` to `gemm_tune/coverage.py`
+  with the dead property dropped, and `fused_symbol_invocation_evidence`, which
+  `fusion/command.py` does call, is untouched.
+
+- **The deprecated `kernel-agents` console script is gone.** The rename to
+  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
+  nothing in this repository, the docs, or the example scripts invoked it, and
+  the orchestrator dispatches `python -m kernelforge.cli` directly. The
+  `kernel_agents.agent_providers` entry-point group stays: it is how
+  third-party provider plugins published before the rename are still
+  discovered, and it is not a CLI surface.
+
 ### Changed
 
 - **AgentX installs its own benchmark client instead of letting an agent guess

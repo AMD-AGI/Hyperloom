@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
@@ -13,25 +12,7 @@ from kernelforge.kernel_rewrite_controller.task_publisher import (
     publish_complete_staged_tasks,
     publish_staged_task,
 )
-
-_GIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "publisher-test",
-    "GIT_AUTHOR_EMAIL": "publisher-test@local",
-    "GIT_COMMITTER_NAME": "publisher-test",
-    "GIT_COMMITTER_EMAIL": "publisher-test@local",
-}
-
-
-def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env={**os.environ, **_GIT_IDENTITY},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+from kernelforge.tests.kernel_rewrite_controller.conftest import _git
 
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:

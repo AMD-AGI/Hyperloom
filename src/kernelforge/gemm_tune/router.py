@@ -425,7 +425,8 @@ def _tuners_the_demand_says_are_needed(
     for entry in demands:
         name = str(entry.get("tuner") or "")
         # A demand with no registered owner is a coverage gap, not a selection:
-        # tier3 handles those, and inventing a TunerSpec here would shadow it.
+        # ``coverage_gaps`` reports those, and inventing a TunerSpec here would
+        # hide the gap behind a tuner that cannot run.
         if not name or name in have:
             continue
         have.add(name)
