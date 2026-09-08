@@ -8,16 +8,24 @@ it. What that is worth depends entirely on the command, because RTK carries a
 per-command filter and passes anything it has no filter for straight through.
 Measured against rtk 0.48 on this repository:
 
-  - ``find`` 93%, ``pytest`` 82%, ``git status`` 78%
-  - ``grep`` 28%, ``git diff`` 20%
-  - ``ninja`` / ``cmake`` 0% — upstream ships no filter for either, so the
-    build command :func:`smart_wrap` wraps is passed through unchanged
+  - ``find`` 93%, ``git status`` 78%, ``grep`` 28%, ``git diff`` 20%
+  - ``ninja`` / ``cmake`` 0% — upstream ships no filter for either, so a build
+    command handed to :func:`smart_wrap` is passed through unchanged
 
-So the saving is in the shell commands the *agent* issues, which is why
-:func:`is_available` also gates the system-prompt paragraph asking it to prefix
-them (see ``orchestrator/agent.py``). Wrapping the build command costs nothing
-and currently buys nothing; it will start paying if upstream adds a build
-filter.
+The two subcommands that do not care what the inner command is cover the rest:
+
+  - ``rtk err <cmd>`` keeps only errors and warnings — 99% on a noisy build,
+    and the build is where the 0% above would otherwise leave us. See
+    :func:`err_wrap`.
+  - ``rtk test <cmd>`` keeps only failures — 86% on a real pytest run.
+
+Both preserve the inner command's exit status, emit the trimmed lines on the
+stream they came from, and tee the full output to a log file whose path they
+print, so nothing is discarded — it just stops being paid for by default.
+
+The rest of the saving is in the shell commands the *agent* issues, which is
+why :func:`is_available` also gates the system-prompt paragraph asking for
+them (see ``orchestrator/agent.py``).
 
 Install: ``kernelforge install-rtk`` (see :mod:`kernelforge.rtk_install`)
 Verify:  ``rtk --version && rtk gain``
@@ -90,6 +98,26 @@ _RTK_SKIP_COMMANDS = {
     "llvm-objdump",  # We parse register info from disassembly
     "readelf",  # We parse ELF notes
 }
+
+
+def err_wrap(cmd: Sequence[str]) -> list[str]:
+    """Wrap a command so only its errors and warnings survive.
+
+    For a build. ``rtk`` has no ``ninja``/``cmake`` filter, so :func:`wrap_command`
+    leaves a build exactly as noisy as it was; ``rtk err`` is command-agnostic and
+    keeps the diagnostic lines out of several thousand lines of progress. It
+    preserves the inner command's exit status, so a caller still branches on
+    ``returncode``, and tees the untrimmed output to a file whose path it prints.
+
+    Examples:
+        err_wrap(["ninja", "-j4"])   → ["rtk", "err", "ninja", "-j4"]
+
+    If RTK is not installed:
+        err_wrap(["ninja", "-j4"])   → ["ninja", "-j4"]
+    """
+    if _RTK_PATH is None or not cmd:
+        return list(cmd)
+    return [_RTK_PATH, "err", *cmd]
 
 
 def smart_wrap(cmd: Sequence[str]) -> list[str]:

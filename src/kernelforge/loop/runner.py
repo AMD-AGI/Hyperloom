@@ -105,7 +105,7 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher
-from kernelforge.rtk import smart_wrap, unavailable_warning as rtk_unavailable_warning
+from kernelforge.rtk import err_wrap, smart_wrap, unavailable_warning as rtk_unavailable_warning
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
@@ -244,6 +244,21 @@ def _bench_failure_detail(bench_result: dict) -> str:
     if not output:
         return message
     return f"{message}\n{textwrap.indent(output[-2000:], '    ')}"
+
+
+def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
+    """The tail of a failed build, taken from whichever stream carried it.
+
+    Only stderr used to be read. ninja prints the compiler's own output on
+    stdout, so a ninja failure was reported to the agent as ``BUILD FAILED:``
+    and nothing else -- the one line that would have told it what to fix went
+    to the stream nobody looked at. ``rtk err`` keeps each diagnostic on the
+    stream it arrived on, which makes reading both the fix as well as the
+    precondition.
+    """
+    combined = b"\n".join(part.strip() for part in (stdout or b"", stderr or b"") if part.strip())
+    text = combined.decode("utf-8", errors="replace").strip()
+    return text[-limit:] if text else "no build output"
 
 
 def _patch_paths(patch: str, *, cwd: str) -> list[str]:
@@ -2460,18 +2475,18 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
-                *smart_wrap(list(self.ic.build_command)),
+                *err_wrap(list(self.ic.build_command)),
                 cwd=self.ic.build_dir or self.ic.workspace_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            _, stderr = await communicate_process_group(
+            stdout, stderr = await communicate_process_group(
                 proc,
                 timeout=self.ic.build_timeout_sec,
             )
             if proc.returncode != 0:
-                print(f"  Baseline build FAILED: {stderr.decode()[-300:]}")
+                print(f"  Baseline build FAILED: {_build_failure_tail(stdout, stderr, 300)}")
                 return None
         bench_result = await measure_wallclock(
             driver_script=self.ic.driver_script,
@@ -3558,11 +3573,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         iter_start = time.time()
         force_jit_rebuild(self._jit_source_files())
 
-        # Step 1: Build (if configured) — RTK-wrap so a build failure's tail chars are signal, not boilerplate
-        # (ninja/cmake collapse 80%+).
+        # Step 1: Build (if configured), through `rtk err` so the tail the agent is
+        # handed below is diagnostics rather than progress chatter. Bare `rtk` was
+        # wrapped here before and did nothing: rtk ships no ninja/cmake filter and
+        # passes an unknown command through (see kernelforge.rtk).
         if self.ic.build_command:
             proc = await asyncio.create_subprocess_exec(
-                *smart_wrap(list(self.ic.build_command)),
+                *err_wrap(list(self.ic.build_command)),
                 cwd=self.ic.build_dir or self.ic.workspace_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -3577,7 +3594,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     iteration=iteration,
                     duration_sec=time.time() - iter_start,
                     validation_passed=False,
-                    validation_summary=f"BUILD FAILED: {stderr.decode()[-500:]}",
+                    validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
                     kept=False,
                 )
 

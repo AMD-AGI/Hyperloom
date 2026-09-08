@@ -194,21 +194,37 @@ def make_agent_fn(
         )
 
     # `rtk` (token filter) is advertised to the agent ONLY when it's actually on PATH; otherwise the agent would
-    # prefix every shell command with a missing binary (command not found).
+    # prefix every shell command with a missing binary (command not found). Mirrors kernelforge.rtk.wrap_command,
+    # which no-ops the same way.
+    #
+    # The commands named below are the ones rtk 0.48 actually has a filter for, with savings measured on this
+    # repository -- not the list this paragraph used to carry. `ninja`, `cmake` and `rocprofv3` are NOT among them:
+    # rtk passes an unknown command straight through, so `rtk ninja -j4` was a no-op the prompt spent tokens asking
+    # for. Builds and test runs are served by the two wrappers that do not care what the inner command is: `rtk err`
+    # (keep only errors and warnings) and `rtk test` (keep only failures). Both tee the full output to a log whose
+    # path they print, so nothing is lost -- the agent reads it only when it needs to.
     if rtk.is_available():
         _rtk_guidance = (
-            "Always prefix shell commands with `rtk` — it filters verbose output (ninja,\n"
-            "cmake, git, grep, find, ls, rocprofv3, etc.) for 60-90% fewer tokens, and\n"
-            "passes through unchanged for unknown commands. Examples:\n"
-            "  - `rtk git diff` instead of `git diff`\n"
-            "  - `rtk grep -r foo .` instead of `grep -r foo .`\n"
-            "  - `rtk ninja -j4` instead of `ninja -j4`\n"
-            "  - `rtk ls path/` instead of `ls path/`\n"
+            "Run noisy shell commands through `rtk`, which trims their output before it\n"
+            "enters this context. Two wrappers cover anything, whatever the inner command:\n"
+            "  - `rtk err <cmd>` — keeps only errors and warnings (~99% smaller on a build).\n"
+            "    Use it for every compile: `rtk err ninja -j4`, `rtk err cmake --build .`,\n"
+            "    `rtk err python setup.py build_ext --inplace`.\n"
+            "  - `rtk test <cmd>` — keeps only failures (~86% smaller on a pytest run).\n"
+            "    Use it for the driver and the correctness suite: `rtk test pytest -q`.\n"
+            "Plus per-command filters: `rtk find …` (~93%), `rtk ls -laR …` (~99%),\n"
+            "`rtk git status` (~78%), `rtk grep -r foo .` (~28%), `rtk tree`, `rtk read`,\n"
+            "`rtk wc`. Both wrappers and the filters tee the full output to a log file and\n"
+            "print its path, so read that only if the trimmed output is not enough.\n"
+            "An unknown command (a profiler, a build tool) is passed through unchanged,\n"
+            "so a bare `rtk` in front of one buys nothing — reach for `rtk err` there.\n"
         )
         _rtk_guidance_terse = (
-            "Prefix noisy shell commands with `rtk` to filter verbose output (ninja, cmake,\n"
-            "git, grep, find, ls, rocprofv3, …) for 60-90% fewer tokens; it passes unknown\n"
-            "commands through unchanged. "
+            "Run noisy shell commands through `rtk`: `rtk err <cmd>` for builds (keeps only\n"
+            "errors/warnings), `rtk test <cmd>` for test runs (keeps only failures), and\n"
+            "`rtk find`/`rtk ls`/`rtk git`/`rtk grep` for those. Both wrappers tee the full\n"
+            "output to a log and print its path. An unknown command passes through\n"
+            "unchanged, so wrapping one in bare `rtk` buys nothing. "
         )
     else:
         _rtk_guidance = ""
