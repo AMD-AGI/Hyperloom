@@ -179,6 +179,17 @@ class Config:
     # overwrite an explicit False with whatever the env var said.
     include_mori_kb: bool | None = field(default=None)
 
+    # Experimental / off by default: render every knowledge pillar as a one-line
+    # pointer instead of inlining its whole INDEX.md map. The maps cost roughly
+    # 8.6k tokens on every turn of every session; across 97 recorded sessions
+    # they produced 10 card reads. Deferring them trades that fixed per-turn
+    # cost for one Read in the sessions that engage the KB at all -- but whether
+    # an agent still goes looking is a behaviour question, not an arithmetic
+    # one, so this stays opt-in until an A/B says otherwise.
+    # None means "unset, defer to the env var" -- see include_mori_kb above for
+    # why a plain bool would make an explicit False indistinguishable.
+    defer_knowledge_maps: bool | None = field(default=None)
+
     def __post_init__(self):
         """Derive paths and validate provider-specific runtime settings."""
         from kernelforge.agent_backends.registry import get_agent_provider
@@ -230,6 +241,12 @@ class Config:
         # wins over the environment.
         if self.include_mori_kb is None:
             self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
+        if self.defer_knowledge_maps is None:
+            self.defer_knowledge_maps = os.getenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
@@ -318,4 +335,5 @@ class Config:
             gbrain_token=knowledge_config.gbrain_token,
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
+            defer_knowledge_maps=overrides.get("defer_knowledge_maps"),
         )

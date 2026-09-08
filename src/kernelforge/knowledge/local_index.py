@@ -205,15 +205,20 @@ def _render_level(root: Path, rel: str) -> str:
     return f"{header}\n\n{listing}"
 
 
-def _render_pointer(root: Path, rel: str) -> str:
+def _render_pointer(root: Path, rel: str, *, carried: bool = True) -> str:
     """Render one knowledge level as a one-line pointer instead of its whole map.
 
-    For the SECOND language a backend carries. Triton and Gluon carry each
-    other so a campaign knows that switching is an available move rather than a
-    different project -- but knowing the move exists needs the map's location,
-    not its 2.7k-token body inlined ahead of every turn of every session. The
-    pointer keeps the affordance and defers the map to a ``Read`` the agent
-    makes only if it actually crosses over.
+    Used for the SECOND language a backend carries, and for every pillar when
+    ``defer_all`` is set. Triton and Gluon carry each other so a campaign knows
+    that switching is an available move rather than a different project -- but
+    knowing the move exists needs the map's location, not its 2.7k-token body
+    inlined ahead of every turn of every session. The pointer keeps the
+    affordance and defers the map to a ``Read`` the agent makes only if it
+    actually needs it.
+
+    ``carried`` picks the wording: a level the backend merely carries is an
+    available move ("if this task crosses into ..."), while a deferred pillar is
+    the map itself and reads as one.
     """
     folder = root / rel
     if not folder.is_dir():
@@ -233,7 +238,12 @@ def _render_pointer(root: Path, rel: str) -> str:
             break
     header = f"## {rel}/  —  base: {folder}"
     what = f" — {title}" if title else ""
-    return f"{header}\n\nMap not inlined{what}. `Read` `{index}` if this task crosses into `{rel}`."
+    call = (
+        f"`Read` `{index}` if this task crosses into `{rel}`."
+        if carried
+        else f"`Read` `{index}` for this pillar's map before opening any card under it."
+    )
+    return f"{header}\n\nMap not inlined{what}. {call}"
 
 
 def build_forge_knowledge(
@@ -242,8 +252,23 @@ def build_forge_knowledge(
     language: str | Sequence[str] | None = None,
     include_aiter: bool = False,
     include_mori: bool = False,
+    defer_all: bool = False,
 ) -> str:
-    """Assemble the layered knowledge block for one forge-loop kernel task."""
+    """Assemble the layered knowledge block for one forge-loop kernel task.
+
+    Layers, in reading order: ``hardware/`` + ``common_methodology/`` always;
+    ``framework/aiter/`` when ``include_aiter``; ``framework/mori/`` when
+    ``include_mori`` (ablation-only, off by default); ``languages/<language>/``
+    when given and present. ``language`` accepts a sequence (triton/gluon are one
+    toolchain and carry each other); duplicates collapse. Each level follows the
+    INDEX.md convention. Returns "" if the root or all levels are missing.
+
+    ``defer_all`` renders EVERY level as a pointer rather than only the carried
+    language -- the ablation behind ``Config.defer_knowledge_maps``. It is off by
+    default: the maps are what tells an agent a card exists at all, and whether it
+    still goes looking without them is a question for an A/B, not for arithmetic
+    on their token cost.
+    """
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():
         return ""
@@ -262,10 +287,17 @@ def build_forge_knowledge(
         # one the backend merely carries, and is deferred to a pointer.
         if position:
             deferred.add(rel)
+    if defer_all:
+        deferred.update(rels)
 
-    sections = [
-        s for s in ((_render_pointer if rel in deferred else _render_level)(root_path, rel) for rel in rels) if s
-    ]
+    def render(rel: str) -> str:
+        if rel not in deferred:
+            return _render_level(root_path, rel)
+        # A level deferred only because the backend merely carries it reads as an
+        # available move; one deferred by the ablation is the pillar itself.
+        return _render_pointer(root_path, rel, carried=not defer_all)
+
+    sections = [s for s in (render(rel) for rel in rels) if s]
     if not sections:
         return ""
 
