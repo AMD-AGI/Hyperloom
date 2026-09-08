@@ -34,6 +34,7 @@ import pytest
 import yaml
 
 from hyperloom.common.env_safety import DOTENV_EXACT_ALLOWLIST
+from hyperloom.inference_optimizer.cli import _SUCCESS_STOP_REASONS
 
 _SELF_HOSTED_LABEL = "hyperloom-pre-e2e-baremetal"
 
@@ -146,6 +147,22 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     body = cleanup[0]["run"]
     assert "/stop" in body
     assert "leave_running" in body
+
+
+def test_every_copy_of_the_clean_terminal_vocabulary_agrees(poll_script: str, bootstrap_script: str) -> None:
+    """Three copies of this list decide the same thing and must not drift apart.
+
+    bootstrap ends the pod, poll writes the gate verdict and the CLI sets the
+    exit code. A value present in one and missing from another means the same
+    leg is judged both ways: the pod exits failed while the gate reports a pass.
+    """
+
+    def _case_arm(script: str) -> set[str]:
+        m = re.search(r"is_clean_stop_reason\(\) \{\n\s*case \"\$1\" in\n\s*([^)]+)\)", script)
+        assert m, "could not read the clean-terminal case arm"
+        return set(m.group(1).split("|"))
+
+    assert _case_arm(bootstrap_script) == _case_arm(poll_script) == set(_SUCCESS_STOP_REASONS)
 
 
 def test_an_llm_closeout_is_a_clean_terminal(poll_script: str) -> None:
