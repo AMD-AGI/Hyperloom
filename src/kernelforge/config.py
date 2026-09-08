@@ -179,13 +179,25 @@ class Config:
     # overwrite an explicit False with whatever the env var said.
     include_mori_kb: bool | None = field(default=None)
 
-    # Experimental / off by default: render every knowledge pillar as a one-line
-    # pointer instead of inlining its whole INDEX.md map. The maps cost roughly
-    # 8.6k tokens on every turn of every session; across 97 recorded sessions
-    # they produced 10 card reads. Deferring them trades that fixed per-turn
-    # cost for one Read in the sessions that engage the KB at all -- but whether
-    # an agent still goes looking is a behaviour question, not an arithmetic
-    # one, so this stays opt-in until an A/B says otherwise.
+    # On by default: render every knowledge pillar as a one-line pointer instead
+    # of inlining its whole INDEX.md map. The maps are re-read on every turn of
+    # every session, and the index is carried into each specialist and synthesis
+    # payload as well, so the cost is far larger than one copy: measured on the
+    # analysis role, the first-turn prefix falls from 51,275 tokens to 8,415
+    # (-83.6%), and on the implementer lanes from a mean 62,022 (n=18) to 17,704
+    # (n=4, -71.5%, ranges disjoint).
+    #
+    # The behaviour question -- does an agent still go looking once the map is a
+    # pointer -- was the reason this stayed opt-in, and a four-a-side A/B on
+    # forge-loop softmax answered it. Deferred: speedup 1.2036 / 1.1562 / 1.1068
+    # / 1.1193, improved 4 of 4. Inlined: 1.0800 / 1.0481 / 1.1447 / 1.0000,
+    # improved 3 of 4. The deferred arm's worst run beats the inlined arm's mean
+    # (1.1068 vs 1.0682). Agents do follow the pointer: two INDEX.md reads in the
+    # deferred arm were each followed by a card read, where the inlined arm read
+    # INDEX.md zero times in 98 sessions.
+    #
+    # Set KERNELFORGE_DEFER_KNOWLEDGE_MAPS=0 to inline the maps again. Note the
+    # A/B covers one kernel at n=4 a side, so that escape hatch is deliberate.
     # None means "unset, defer to the env var" -- see include_mori_kb above for
     # why a plain bool would make an explicit False indistinguishable.
     defer_knowledge_maps: bool | None = field(default=None)
@@ -242,10 +254,12 @@ class Config:
         if self.include_mori_kb is None:
             self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
         if self.defer_knowledge_maps is None:
-            self.defer_knowledge_maps = os.getenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", "").strip().lower() in (
-                "1",
-                "true",
-                "yes",
+            # Defaults on, so the env var reads as an opt-*out*: anything that
+            # is not an explicit "off" leaves the pointers in place.
+            self.defer_knowledge_maps = os.getenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", "").strip().lower() not in (
+                "0",
+                "false",
+                "no",
             )
 
     def agent_runtime(self):

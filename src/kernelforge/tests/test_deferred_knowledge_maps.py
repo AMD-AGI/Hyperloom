@@ -100,10 +100,18 @@ def test_the_knob_reads_the_environment(monkeypatch: pytest.MonkeyPatch, value: 
     assert Config().defer_knowledge_maps is True
 
 
-def test_the_knob_is_off_when_the_environment_says_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_knob_is_on_when_the_environment_says_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     from kernelforge.config import Config
 
     monkeypatch.delenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", raising=False)
+    assert Config().defer_knowledge_maps is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "NO"])
+def test_the_environment_can_still_turn_the_pointers_off(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    from kernelforge.config import Config
+
+    monkeypatch.setenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", value)
     assert Config().defer_knowledge_maps is False
 
 
@@ -120,8 +128,8 @@ def test_the_kernel_backend_prompt_carries_the_choice(monkeypatch: pytest.Monkey
     from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 
     monkeypatch.delenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", raising=False)
-    inlined = build_single_kernel_backend_prompt(Config(), "triton")
-    deferred = build_single_kernel_backend_prompt(Config(defer_knowledge_maps=True), "triton")
+    inlined = build_single_kernel_backend_prompt(Config(defer_knowledge_maps=False), "triton")
+    deferred = build_single_kernel_backend_prompt(Config(), "triton")
     # triton carries gluon, so the default already defers exactly that one map.
     assert inlined.count("Map not inlined") == 1
     assert "crosses into `languages/gluon`" in inlined

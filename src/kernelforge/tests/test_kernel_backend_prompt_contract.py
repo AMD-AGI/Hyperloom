@@ -160,7 +160,12 @@ class TestSharedCardsAreReachable:
 
     @pytest.fixture()
     def knowledge_block(self) -> str:
-        config = Config(gpu_target=_GPU)
+        # Maps inlined on purpose: what is under test here is the *content* of
+        # the INDEX maps -- whether they register the cards at all. Deferral
+        # (the default) does not touch those files, it only replaces the inlined
+        # copy with a pointer to them, so the registration is asserted against
+        # the inlined form and the pointer path is covered separately below.
+        config = Config(gpu_target=_GPU, defer_knowledge_maps=False)
         return build_single_kernel_backend_prompt(config, "flydsl")
 
     def test_cards_exist_on_disk(self):
@@ -177,7 +182,7 @@ class TestSharedCardsAreReachable:
     def test_loop_form_card_reaches_a_triton_kernel_context(self):
         """The loop-form rule must land in a Triton kernel's context specifically."""
         prompt = build_single_kernel_backend_prompt(
-            Config(gpu_target=_GPU),
+            Config(gpu_target=_GPU, defer_knowledge_maps=False),
             "triton",
             task_type="image_kernel",
             source_paths=["vllm/attention/ops/triton_sparse_attn_prefill.py"],
@@ -186,6 +191,33 @@ class TestSharedCardsAreReachable:
         assert prompt.count(_LOOP_FORM_CARD) >= 2, (
             "expected the card in both the common_methodology and languages/triton maps"
         )
+
+    def test_the_default_prompt_still_reaches_the_cards_through_the_pointers(self):
+        """Under the default the maps are pointers, so reachability is a chain.
+
+        Nothing is inlined, so the guarantee the two tests above make about the
+        assembled prompt has to be re-made one link further out: the prompt must
+        name the INDEX of each pillar that registers a card, and that INDEX --
+        the file an agent is told to ``Read`` -- must actually register it.
+        """
+        root = Path(Config(gpu_target=_GPU).local_knowledge_dir)
+        prompt = build_single_kernel_backend_prompt(
+            Config(gpu_target=_GPU),
+            "triton",
+            task_type="image_kernel",
+            source_paths=["vllm/attention/ops/triton_sparse_attn_prefill.py"],
+        )
+        assert _LOOP_FORM_CARD not in prompt, "the default must not inline the maps"
+
+        for pillar, cards in (
+            ("common_methodology", (_SWEEP_CARD, _EDIT_SURFACE_CARD, _LOOP_FORM_CARD)),
+            ("languages/triton", (_LOOP_FORM_CARD,)),
+        ):
+            index = root / pillar / "INDEX.md"
+            assert str(index) in prompt, f"the prompt never points at {pillar}/INDEX.md"
+            registered = index.read_text()
+            for card in cards:
+                assert card in registered, f"{card} is not registered in {pillar}/INDEX.md"
 
 
 class TestDocumentedSweepHelper:
