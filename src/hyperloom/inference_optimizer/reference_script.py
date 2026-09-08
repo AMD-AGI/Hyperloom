@@ -308,6 +308,7 @@ def render_reference_script(
     framework: str,
     server_args: str,
     envs: dict[str, str] | None = None,
+    overlay_pythonpath: str | None = None,
     model: str | None = None,
     tp: int | None = None,
     max_model_len: int | None = None,
@@ -357,6 +358,9 @@ def render_reference_script(
             lines.append(f"# export {k}=<redacted; supply manually>")
         else:
             lines.append(f"export {k}={shlex.quote(str(v))}")
+    if overlay_pythonpath:
+        prefix = shlex.quote(str(overlay_pythonpath))
+        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
 
     if runtime:
         lines.append("")
