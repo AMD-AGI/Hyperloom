@@ -74,11 +74,15 @@ class EnablementRound:
     # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
     # stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)
-    # Whether the last round's kept patches targeted more than one source tree; injected into the next mandate so the
-    # specialist splits them per round.
+    # Serialized ApplyFeedback records from the last round's failed ``git apply``
+    # (stderr, reject hunks, target source window), injected into the next
+    # round's mandate so it re-grounds instead of resubmitting the same diff.
+    last_apply_feedback: list = field(default_factory=list)
+    # Whether the last round's kept patches targeted more than one source tree;
+    # injected into the next mandate so the specialist splits them per round.
     patches_span_multiple_roots: bool = False
-    # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per target); re-installed as a base
-    # before the next round's patch.
+    # Flat ordered deduped artifact dicts derived from kept_rounds (last-wins per
+    # target); used for the specialist mandate note and session-breakdown reporting.
     kept_artifacts: list = field(default_factory=list)
 
     @classmethod

@@ -216,10 +216,10 @@ class EnablementParams(CoordinatorCollaborator):
         if base_patches or base_setup or base_artifacts or acc_envs or acc_args:
             progress_bits = []
             if base_patches:
-                progress_bits.append(f"{len(base_patches)} prior patch(es): {base_patches}")
+                progress_bits.append(f"{len(base_patches)} prior patch(es) already in the tree: {base_patches}")
             if base_artifacts:
                 art_targets = [a["target"] for a in base_artifacts[:4]]
-                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) installed: {art_targets}")
+                progress_bits.append(f"{len(base_artifacts)} prior artifact(s) already in the tree: {art_targets}")
             if base_setup:
                 progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
             if acc_envs or acc_args:
@@ -228,12 +228,13 @@ class EnablementParams(CoordinatorCollaborator):
                     cfg_bits.append(f"envs={acc_envs}")
                 if acc_args:
                     cfg_bits.append(f"args={acc_args!r}")
-                progress_bits.append("accumulated config from prior advanced rounds: " + "; ".join(cfg_bits))
+                progress_bits.append("accumulated config (re-applied on every launch): " + "; ".join(cfg_bits))
             notes = (
-                "STACKED ENABLEMENT (progress so far): the following already "
-                "cleared earlier boot crashes and WILL be re-applied/re-run as a "
-                "base before your changes — do NOT redo them; fix only the CURRENT "
-                "(deeper) failure, composing on top. " + "; ".join(progress_bits)
+                "PRIOR ENABLEMENT PROGRESS: the following already cleared earlier "
+                "boot crashes. Patches and artifacts are permanently in the tree; "
+                "setup commands and config are re-run on every launch. Do NOT redo "
+                "them; fix only the CURRENT (deeper) failure, composing on top. "
+                + "; ".join(progress_bits)
             )
         # Composed rather than an ``elif``: a stalled round that already banked
         # progress needs both halves, and the stacked note alone reads as "all
@@ -241,8 +242,8 @@ class EnablementParams(CoordinatorCollaborator):
         if attempt:
             retry_note = (
                 f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
-                f"patch for this failure never made the combo runnable — it was reverted "
-                f"or failed to apply. Try a DIFFERENT bridging approach / candidate than before."
+                f"patch for this failure never made the combo runnable — it failed to apply "
+                f"or did not advance the boot. Try a DIFFERENT bridging approach / candidate than before."
             )
             notes = (retry_note + "\n\n" + notes).strip() if notes else retry_note
         if apply_feedback:

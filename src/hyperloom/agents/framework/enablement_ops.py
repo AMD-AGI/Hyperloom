@@ -300,9 +300,9 @@ ENABLEMENT_PROGRESS_GUIDANCE: tuple[str, ...] = (
     "have to reach full end-to-end runnability in this one budget window.",
     "If you cannot make the combo fully run, apply the SMALLEST CHANGE that "
     "ADVANCES the boot PAST THE CURRENT failure — clear THIS error even if a "
-    "new, different failure then appears. The change is KEPT and stacked as a "
-    "base; the next round resumes from the deeper failure. One step forward is "
-    "strictly better than returning nothing. The change may be a source patch, "
+    "new, different failure then appears. The change is kept permanently in the "
+    "tree; the next round builds on it from the deeper failure. One step forward "
+    "is strictly better than returning nothing. The change may be a source patch, "
     "a serve flag, an env var, or a dependency install — whichever is simplest.",
     "Record the change: a source patch in ``patches_written``, serve-flag or "
     "env-var changes in ``proposal_set`` (each entry as ``extra_server_args`` "
@@ -384,7 +384,7 @@ _LADDER_TWO_AXES: tuple[str, ...] = (
     "merely un-wired needs only the cheap top rungs (a flag / a small patch) — do "
     "NOT pull code or compile for it. A genuinely-new architecture climbs higher.",
     "After each cleared boot failure, RE-DIAGNOSE the new (deeper) failure and pick "
-    "a rung again — enablement is serial and progress is stacked.",
+    "a rung again — enablement is serial and each round's fix is cumulative.",
 )
 
 _LADDER_RUNGS: tuple[str, ...] = (
