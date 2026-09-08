@@ -416,6 +416,10 @@ DEFAULT_MAX_MACRO_CYCLES: int = 1000
 # Share of a bounded session's total budget that must remain to open a cycle.
 _CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
 
+# Ceiling on the floor once it is raised to cover one granted variant round, so a
+# session too short to fund a round is not treated as exhausted from tick one.
+_CYCLE_RELOOP_MAX_BUDGET_SHARE: float = 0.5
+
 
 def _default_cycle_reloop_min_remaining_sec() -> float:
     """Absolute reloop floor in seconds; env-overridable via
@@ -549,11 +553,45 @@ def target_was_reached(state: Any) -> bool:
     return bool(str(getattr(state, "target_reached_at", "") or "").strip())
 
 
+def _one_variant_grant_sec(state: Any) -> float:
+    """Seconds a single variant round is actually granted, for budget arithmetic.
+
+    Prices the round the way the sweep's admission check does rather than at the
+    declared timeout, so both sides agree on what a cycle costs.
+
+    Args:
+        state (Any): Frozen SharedState view exposing the declared variant timeout.
+
+    Returns:
+        float: The granted per-variant cap in seconds, or ``0.0`` when unknown.
+    """
+    declared = getattr(state, "conc_sweep_variant_timeout_sec", 0) or 0
+    try:
+        declared_sec = int(declared)
+    except (TypeError, ValueError):
+        return 0.0
+    if declared_sec <= 0:
+        return 0.0
+    try:
+        from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
+    except ImportError:  # grid runner unavailable; price at the declared timeout
+        return float(declared_sec)
+    return float(agentx_variant_timeout_sec(declared_sec, shared_state=state))
+
+
 def _cycle_reloop_min_remaining_sec(
     state: Any,
     min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
 ) -> float:
     """Session-scaled floor on the seconds that must remain to justify a new cycle.
+
+    The session-scaled share keeps a short run from being blocked by a threshold
+    it can never satisfy, but that share can fall below the cost of the cheapest
+    unit of work in a cycle. The floor is therefore raised back to one granted
+    variant round, so a cycle is never opened with budget it cannot spend. That
+    raise is itself capped at :data:`_CYCLE_RELOOP_MAX_BUDGET_SHARE` of the
+    session so a run too short to fund a round does not read as exhausted from
+    its first tick.
 
     Args:
         state (Any): Frozen SharedState view exposing ``max_minutes``.
@@ -565,7 +603,10 @@ def _cycle_reloop_min_remaining_sec(
     effective = float(min_remaining_sec)
     max_minutes = _max_minutes(state)
     if max_minutes > 0:
-        effective = min(effective, max_minutes * 60.0 * _CYCLE_RELOOP_BUDGET_RATIO)
+        budget_sec = max_minutes * 60.0
+        effective = min(effective, budget_sec * _CYCLE_RELOOP_BUDGET_RATIO)
+        grant = min(_one_variant_grant_sec(state), budget_sec * _CYCLE_RELOOP_MAX_BUDGET_SHARE)
+        effective = max(effective, grant)
     return effective
 
 
@@ -1721,6 +1762,9 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
         if current == PHASE_SWEEP and _sweep_has_recorded_closeout(state):
             return None
         evidence: dict[str, Any] = {"evidence": "llm_escalation", "hint": hint}
+        # The robustness label is only justified by a robustness signal; record the
+        # crash count alongside the budget so the two can be told apart after the run.
+        evidence["crash_count"] = int(getattr(state, "crash_count", 0) or 0)
         floor = _cycle_reloop_min_remaining_sec(state)
         evidence["min_remaining_sec_effective"] = round(floor, 2)
         remaining = session_remaining_seconds(state)

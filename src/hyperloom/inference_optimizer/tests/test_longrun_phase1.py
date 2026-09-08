@@ -134,7 +134,7 @@ def _framework_state(*, max_minutes: int = 180, started_hours_ago: float = 1.0) 
 
 def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
     """A budget-driven close is time_exhausted, not a robustness abort."""
-    # 3h budget, ~2h39m spent -> ~1260s left, under the 1620s reloop floor.
+    # 3h budget, ~2h39m spent -> ~1260s left, under the 1800s reloop floor.
     st = _framework_state(max_minutes=180, started_hours_ago=2.65)
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
@@ -142,8 +142,8 @@ def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
     assert reason == "time_exhausted"
-    assert evidence["min_remaining_sec_effective"] == 1620.0
-    assert evidence["session_remaining_seconds"] < 1620.0
+    assert evidence["min_remaining_sec_effective"] == 1800.0
+    assert evidence["session_remaining_seconds"] < 1800.0
 
 
 def test_framework_skip_to_close_with_budget_left_stays_escalated():
@@ -156,6 +156,39 @@ def test_framework_skip_to_close_with_budget_left_stays_escalated():
     assert target == ps.PHASE_CLOSE
     assert reason == "robustness_escalated"
     assert evidence["session_remaining_seconds"] >= 1620.0
+
+
+def test_cycle_reloop_floor_covers_one_variant_grant():
+    """The floor prices a cycle at what one variant round is actually granted."""
+    st = _framework_state(max_minutes=180)
+    # 15% of a 3h budget is 1620s, below the 1800s a variant round is granted.
+    assert ps._cycle_reloop_min_remaining_sec(st) == float(st.conc_sweep_variant_timeout_sec)
+
+
+def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():
+    """Budget that cannot fund one variant round is exhausted, not a robustness abort."""
+    # 3h budget, ~1699s left: above the old 15% floor, below one variant grant.
+    st = _framework_state(max_minutes=180, started_hours_ago=2.528)
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    target, reason, evidence = nxt
+    assert target == ps.PHASE_CLOSE
+    assert reason == "time_exhausted"
+    assert evidence["min_remaining_sec_effective"] == 1800.0
+    assert 1620.0 < evidence["session_remaining_seconds"] < 1800.0
+
+
+def test_escalate_evidence_records_crash_count():
+    """A genuine escalation must carry the crash evidence that justifies its label."""
+    st = _framework_state(max_minutes=180, started_hours_ago=1.0)
+    st.crash_count = 4
+    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
+    nxt = ps.compute_next_phase(st)
+    assert nxt is not None
+    _target, reason, evidence = nxt
+    assert reason == "robustness_escalated"
+    assert evidence["crash_count"] == 4
 
 
 def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
@@ -503,10 +536,18 @@ def test_unbounded_run_uses_absolute_floor():
 
 
 def test_short_bounded_run_scales_floor():
-    # 2h session: effective = min(10800, 2*3600*0.15) = min(10800, 1080) = 1080s.
+    # 2h session: the 1080s share is below one 1800s variant grant, so the grant wins.
     st = _sweep_state(max_minutes=2 * 60, started_hours_ago=0.0)
     _, ev = ps.should_reloop_to_explore(st)
-    assert ev["min_remaining_sec_effective"] == pytest.approx(1080.0, abs=1.0)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)
+
+
+def test_very_short_run_caps_the_floor_at_half_the_budget():
+    """A run too short to fund a variant round must not read as exhausted at tick one."""
+    # 30min session: the 1800s grant exceeds the budget, so it is capped at 900s.
+    st = _sweep_state(max_minutes=30, started_hours_ago=0.0)
+    _, ev = ps.should_reloop_to_explore(st)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(900.0, abs=1.0)
 
 
 def test_long_bounded_run_caps_at_absolute_floor():
