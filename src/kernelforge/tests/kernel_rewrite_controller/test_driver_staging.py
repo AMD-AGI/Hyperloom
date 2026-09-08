@@ -126,6 +126,37 @@ def test_two_operators_do_not_share_a_staging_directory(staged, tmp_path: Path, 
     assert stage_operator_driver(other, task_dir, worktree).parent != driver.parent
 
 
+def test_the_staging_directory_does_not_survive_the_borrow(staged, tmp_path: Path) -> None:
+    """A borrowed repository is handed back as it was found.
+
+    The driver copy cannot be found by the untracked scan that removes the rest
+    of the campaign's leavings: that scan lists neither directories nor the
+    ignored files inside one, and everything here is ignored by design.
+    """
+    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+
+    _task, workspace, driver = staged
+    assert driver.is_file()
+
+    worktree_module._remove_producer_untracked(workspace)
+
+    assert not driver.parent.exists()
+
+
+def test_a_driver_left_by_a_killed_run_is_reclaimed(staged) -> None:
+    """Cleanup is by prefix, so the next borrower does not inherit the last one's."""
+    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+
+    _task, workspace, _driver = staged
+    abandoned = workspace / f"{DRIVER_STAGE_PREFIX}0123456789abcdef"
+    abandoned.mkdir()
+    (abandoned / "driver.py").write_text("stale\n", encoding="utf-8")
+
+    worktree_module._remove_producer_untracked(workspace)
+
+    assert not abandoned.exists()
+
+
 def test_the_preparation_audit_is_kept_outside_the_workspace(tmp_path: Path) -> None:
     """Its home is deleted with the borrowed tree, and it is the only account
     of why a task that could not be prepared stopped."""

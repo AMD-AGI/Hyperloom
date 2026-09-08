@@ -1976,7 +1976,12 @@ async def prepare_task(
         agent_workspace = external_transaction.stage_root
 
     driver_access_dir = driver_path.parent.resolve()
-    harness_path = driver_access_dir / "graph_harness.py" if driver_external else workspace / "graph_harness.py"
+    # Beside the driver in both cases, which is where the prompt says it is and
+    # where the driver imports it from. Identical to the workspace root for a
+    # driver that sits there; different only for one kept in a subdirectory,
+    # where placing it at the root left the agent to find nothing and write its
+    # own -- tripping the guard that protects harness files from being rewritten.
+    harness_path = driver_access_dir / "graph_harness.py"
 
     def _audit_text(relative: str, text: str) -> None:
         if audit_dir is None:

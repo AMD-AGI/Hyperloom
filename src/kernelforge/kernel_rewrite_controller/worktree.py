@@ -154,6 +154,13 @@ def _remove_producer_untracked(repo_root: Path) -> None:
     root = repo_root / FORGE_LOOP_OUTPUT_DIRNAME
     if root.is_dir():
         shutil.rmtree(root, ignore_errors=True)
+    # Named rather than left to the scan above, which lists neither directories
+    # nor the ignored files inside one. Every match is removed, not just this
+    # campaign's, so a run the host killed does not leave its driver behind for
+    # the next borrower to inherit.
+    for stage in repo_root.glob(f"{DRIVER_STAGE_PREFIX}*"):
+        if stage.is_dir():
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> None:
