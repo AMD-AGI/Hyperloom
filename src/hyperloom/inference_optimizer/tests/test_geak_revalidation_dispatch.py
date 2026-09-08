@@ -218,6 +218,64 @@ async def test_enqueue_internal_stack_rebench_uses_macro_cycle_idempotency_key(
     assert row1.task_id != row0.task_id
 
 
+@pytest.mark.asyncio
+async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, tmp_path, monkeypatch) -> None:
+    c = coordinator
+    st = c.shared_state
+    _arm_kernel_to_sweep(st)
+    st.benchmark_mode = "agentx"
+    st.resume_pending_revalidation = True
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 120.0}
+    st.cumulative_gain_validated = 20.0
+    st.geak_result = {
+        "status": "ok",
+        "throughput_speedup": 2.0,
+        "accepted_config": {},
+        "final_overlay": str(tmp_path / "missing-overlay"),
+    }
+    before_best = dict(st.current_best)
+
+    async def _must_not_launch(**_kwargs):
+        raise AssertionError("Direct dispatch fallback must refuse canonical AgentX replay")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
+    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    summary = await c._enqueue_internal_stack_rebench(reason="unit")
+    assert summary["fallback"] == "geak_harness"
+    await c._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert st.current_best == before_best
+    assert st.cumulative_gain_validated == 20.0
+    assert st.resume_pending_revalidation is True
+    assert "revalidation_task_id" not in st.geak_pending
+    assert st.geak_pending["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
+    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
+
+
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+@pytest.mark.asyncio
+async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordinator, bench_client) -> None:
+    c = coordinator
+    st = c.shared_state
+    st.benchmark_mode = "agentx"
+    st.baseline_config_path = "/run/canonical-agentx.yaml"
+    st.baseline_tput = 100.0
+    st.geak_result = {
+        "status": "ok",
+        "bench_client": bench_client,
+        "accepted_config": {"flags": "--candidate", "env": ""},
+    }
+
+    summary = await c._enqueue_internal_stack_rebench(reason="unit")
+    task = await c.tasks.get(str(summary["task_id"]))
+
+    assert summary["mode"] == "geak_2b"
+    assert task.params["config_path"] == st.baseline_config_path
+    assert task.params["grid"][0]["extra_args"] == "--candidate"
+    assert "bench_client" not in task.params
+
+
 @pytest.mark.parametrize(
     ("remove_args", "unset_envs", "args_mode"),
     [
@@ -898,6 +956,7 @@ async def test_geak_revalidation_collision_replays_persisted_succeeded_result(co
     c = coordinator
     st = c.shared_state
     _arm_kernel_to_sweep(st)
+    st.resume_pending_revalidation = True
     st.baseline_tput = 100.0
     st.current_best = {
         "action": "explore",
@@ -958,7 +1017,7 @@ async def test_geak_revalidation_collision_replays_persisted_succeeded_result(co
     assert st.current_best["tput"] == pytest.approx(120.0)
     assert st.geak_result["revalidation_status"] == "no_promote"
     assert not st.geak_pending
-    assert st.resume_pending_revalidation is False
+    assert st.resume_pending_revalidation is True
 
 
 @pytest.mark.asyncio
@@ -969,6 +1028,9 @@ async def test_geak_rebench_failure_releases_pending_and_preserves_result_diagno
     st.geak_result = {"status": "ok"}
     placeholder = gr.geak_revalidate_idempotency_key(0)
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": placeholder}
+    st.resume_pending_revalidation = True
+    st.cumulative_gain_validated = 20.0
+    st.cumulative_gain_validated_ts = "2026-09-08T00:00:00Z"
 
     task = await c.tasks.create(
         kind="explore",
@@ -986,7 +1048,9 @@ async def test_geak_rebench_failure_releases_pending_and_preserves_result_diagno
     assert st.geak_result["revalidation_status"] == "failed"
     assert st.geak_result["revalidation_error_class"] == "subprocess_nonzero"
     assert st.geak_result["revalidation_error"] == "revalidation failed"
-    assert st.resume_pending_revalidation is False
+    assert st.resume_pending_revalidation is True
+    assert st.cumulative_gain_validated == 20.0
+    assert st.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1074,7 @@ async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> Non
         task_id="failed-then-late-rebench",
     )
     st.geak_pending = {}
+    st.resume_pending_revalidation = True
 
     await c._promote_to_shared_state(
         task.kind,
@@ -1023,6 +1088,7 @@ async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> Non
 
     assert st.current_best["tput"] == pytest.approx(100.0)
     assert not st.geak_pending
+    assert st.resume_pending_revalidation is True
     assert st.geak_result["revalidation_status"] == "failed"
     assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
 

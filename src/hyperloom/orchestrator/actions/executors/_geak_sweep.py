@@ -16,11 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import shlex
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -36,7 +34,6 @@ from hyperloom.orchestrator.loop.coordinator_helpers import (
     _resolve_handoff_gpu_ids_space,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
-from .benchmark_result import _merge_raw_result
 
 log = logging.getLogger(__name__)
 
@@ -171,79 +168,6 @@ def _replay_serving_env(handoff: Mapping[str, Any], env_spec: Mapping[str, Any])
     }
 
 
-def _agentx_replay_measurement(
-    summary: Mapping[str, Any],
-    *,
-    expected_identity: Mapping[str, Any],
-    conc: int,
-    source_path: Path,
-) -> dict[str, Any]:
-    """Validate current GEAK replay evidence before exposing any promotion axes."""
-    if summary.get("benchmark_mode") != "agentx" or summary.get("bench_client") != "agentx":
-        raise ValueError("agentx_replay_client_mismatch")
-    if not expected_identity or summary.get("workload_identity") != expected_identity:
-        raise ValueError("agentx_replay_workload_identity_mismatch")
-    if type(summary.get("concurrency")) is not int or summary["concurrency"] != conc:
-        raise ValueError("agentx_replay_concurrency_mismatch")
-    if (
-        summary.get("status") != "complete"
-        or summary.get("usable_for_acceptance") is not True
-        or summary.get("measurement_mode") != "isolated_server"
-    ):
-        raise ValueError("agentx_replay_measurement_not_usable")
-    measurement = summary.get("measurement")
-    if not isinstance(measurement, dict) or measurement.get("submission_valid") is not True:
-        raise ValueError("agentx_replay_submission_not_valid")
-    if measurement.get("submission_invalid_reasons") != []:
-        raise ValueError("agentx_replay_submission_invalid_reasons")
-    for key in ("output_throughput", "input_throughput", "total_token_throughput", "intvty_p90_tok_s_user", "duration"):
-        value = measurement.get(key)
-        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-            raise ValueError(f"agentx_replay_invalid_{key}")
-    aggregation = summary.get("measurement_aggregation")
-    if (
-        not isinstance(aggregation, Mapping)
-        or aggregation.get("method") != "median"
-        or type(aggregation.get("sample_count")) is not int
-        or aggregation["sample_count"] <= 0
-        or type(summary.get("runs")) is not int
-        or summary["runs"] != aggregation["sample_count"]
-    ):
-        raise ValueError("agentx_replay_invalid_measurement_aggregation")
-    for key in ("client_config_digest", "effective_config_digest"):
-        if not isinstance(summary.get(key), str) or not summary[key].strip():
-            raise ValueError(f"agentx_replay_missing_{key}")
-    axis = {
-        "aggregate_total_token_tok_s": "total_token_throughput",
-        "aggregate_output_tok_s": "output_throughput",
-    }.get(summary.get("metric_basis"))
-    headline = summary.get("throughput_tok_s_median")
-    if (
-        axis is None
-        or type(headline) not in (int, float)
-        or not math.isfinite(headline)
-        or headline <= 0
-        or not math.isclose(headline, measurement[axis], rel_tol=0.0, abs_tol=0.001)
-    ):
-        raise ValueError("agentx_replay_headline_metric_mismatch")
-    normalized = dict(measurement)
-    _merge_raw_result(normalized, measurement, source_path=source_path)
-    normalized["intvty_p90"] = measurement["intvty_p90_tok_s_user"]
-    normalized["total_throughput"] = measurement["total_token_throughput"]
-    return {
-        **normalized,
-        "measurement": dict(measurement),
-        "benchmark_mode": "agentx",
-        "bench_client": "agentx",
-        "workload_identity": dict(expected_identity),
-        "client_config_digest": summary["client_config_digest"],
-        "effective_config_digest": summary["effective_config_digest"],
-        "measurement_aggregation": dict(aggregation),
-        "metric_basis": summary["metric_basis"],
-        "throughput_tok_s_median": headline,
-    }
-
-
 async def sweep_via_geak(
     *,
     result: dict[str, Any],
@@ -268,12 +192,11 @@ async def sweep_via_geak(
     """
     handoff = handoff or {}
     bench_client = str(result.get("bench_client") or "native").strip() or "native"
-    agentx = bench_client == "agentx" or handoff.get("bench_client") == "agentx"
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     final_launch_script = str(result.get("final_launch_script") or "").strip()
     final_launch_path = Path(final_launch_script) if final_launch_script else None
     use_final_launch = bool(
-        not agentx and final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK)
+        final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK)
     )
     replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
     overlay = result.get("final_overlay") or ""
@@ -299,14 +222,6 @@ async def sweep_via_geak(
     except (OSError, UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as exc:
         return {"status": "failed", "error_class": "invalid_replay_identity", "error": str(exc)}
     model, backend = serving_env["MODEL"], serving_env["BACKEND"]
-    client_config = handoff.get("bench_client_config") or {}
-    expected_identity = client_config.get("workload_identity") if isinstance(client_config, Mapping) else None
-    if agentx and (not isinstance(expected_identity, Mapping) or not expected_identity):
-        return {
-            "status": "failed",
-            "error_class": "agentx_replay_missing_workload_identity",
-            "error": "Missing AgentX workload identity",
-        }
 
     # Forward the validated measurement config + client trust onto every variant
     # so the sweep measures on the same workload shape the KERNEL_AGENT phase
@@ -368,15 +283,6 @@ async def sweep_via_geak(
             for name in VISIBLE_DEVICE_VARS:
                 env.pop(name, None)
             env.update(serving_env)
-            if agentx:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", encoding="utf-8", prefix="bench_client_", suffix=".json", dir=out_dir, delete=False
-                ) as config_file:
-                    json.dump(client_config, config_file, sort_keys=True)
-                env["BENCH_CLIENT"] = "agentx"
-                env["BENCH_CLIENT_CONFIG"] = str(Path(config_file.name).resolve())
-                env["GEAK_REPEAT_MODE"] = "isolated_server"
-                env.pop("EFFECTIVE_CONFIG_DIGEST", None)
             # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
@@ -416,23 +322,10 @@ async def sweep_via_geak(
             try:
                 proc = await asyncio.to_thread(_run)
                 summ = read_json(out_dir / "bench_summary.json", default={}, require_dict=True)
-                if agentx:
-                    current_measurement = _agentx_replay_measurement(
-                        summ,
-                        expected_identity=expected_identity,
-                        conc=conc,
-                        source_path=out_dir / "bench_summary.json",
-                    )
-                    entry.update(current_measurement)
-                    tput = current_measurement["output_throughput"]
-                    ttft = current_measurement.get("ttft_mean_ms")
-                    tpot = current_measurement.get("tpot_mean_ms")
-                    e2el = current_measurement.get("e2el_mean_ms")
-                else:
-                    tput = summ.get("output_throughput_tok_s_median")
-                    ttft = summ.get("ttft_ms_median")
-                    tpot = summ.get("tpot_ms_median")
-                    e2el = summ.get("e2el_ms_median")
+                tput = summ.get("output_throughput_tok_s_median")
+                ttft = summ.get("ttft_ms_median")
+                tpot = summ.get("tpot_ms_median")
+                e2el = summ.get("e2el_ms_median")
                 if proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0:
                     succeeded = True
                     entry.update(

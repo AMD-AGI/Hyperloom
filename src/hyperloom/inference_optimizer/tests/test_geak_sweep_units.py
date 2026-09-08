@@ -230,6 +230,7 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(
+        benchmark_mode="synthetic",
         framework="vllm",
         model_path="/models/validated",
         tp=2,
@@ -292,44 +293,33 @@ async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stale_parent", [False, True], ids=["clean_parent", "stale_parent"])
-async def test_agentx_replay_owns_isolation_protocol_not_parent_environment(
+@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
+async def test_geak_replay_uses_existing_client_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stale_parent: bool,
+    bench_client: str,
 ) -> None:
-    """GEAK owns the actual config digest; Hyperloom owns this replay's isolation."""
-    for name in ("GEAK_REPEAT_MODE", "EFFECTIVE_CONFIG_DIGEST", "REPEATS", "REPLICAS"):
-        monkeypatch.delenv(name, raising=False)
-    if stale_parent:
-        monkeypatch.setenv("GEAK_REPEAT_MODE", "legacy_same_server")
-        monkeypatch.setenv("EFFECTIVE_CONFIG_DIGEST", "old-unrelated-config")
-        monkeypatch.setenv("REPEATS", "9")
-        monkeypatch.setenv("REPLICAS", "9")
     bench = _bench_script(tmp_path)
-    identity = {"benchmark_mode": "agentx", "corpus_sha256": "accepted-corpus", "conc": 4}
     captured: dict[str, str] = {}
 
     def _fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         captured.update(kwargs["env"])
-        return subprocess.CompletedProcess(command, 1, "", "test stops after replay protocol capture")
+        out = Path(captured["OUT_DIR"])
+        (out / "bench_summary.json").write_text(
+            json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
     outcome = await sweep_via_geak(
-        result={"status": "ok", "bench_script": str(bench), "bench_client": "agentx", "accepted_config": {}},
+        result={"status": "ok", "bench_script": str(bench), "bench_client": bench_client, "accepted_config": {}},
         handoff={
             "model_path": "/models/validated",
             "framework": "sglang",
             "tp": 1,
             "gpu_ids": "4",
             "gpu_ids_space": "absolute",
-            "bench_client": "agentx",
-            "bench_client_config": {
-                "argv": ["bash", "/run/aiperf_client.sh"],
-                "cwd": "/run",
-                "env": {"CONC": "4"},
-                "workload_identity": identity,
-            },
+            "bench_client": bench_client,
         },
         conc_values=[4],
         isl_osl_configs=["16:16"],
@@ -338,11 +328,10 @@ async def test_agentx_replay_owns_isolation_protocol_not_parent_environment(
         repeats=3,
     )
 
-    assert captured["GEAK_REPEAT_MODE"] == "isolated_server"
+    assert captured["BENCH_CLIENT"] == bench_client
     assert captured["REPEATS"] == "3"
-    assert "EFFECTIVE_CONFIG_DIGEST" not in captured
-    assert outcome["status"] == "failed"
-    assert not outcome["promotion_measurement"]
+    assert outcome["status"] == "succeeded"
+    assert outcome["promotion_measurement"]["output_throughput"] == 200.0
 
 
 def test_point_from_variant_defaults_conc_zero_on_bad_env() -> None:

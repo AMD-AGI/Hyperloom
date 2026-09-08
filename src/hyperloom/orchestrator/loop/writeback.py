@@ -1087,7 +1087,6 @@ class WritebackCollaborator:
                 # KERNEL -> SWEEP transition forever.  The settled verdict and
                 # its diagnostics survive in ``geak_result`` instead.
                 self.shared_state.geak_pending = {}
-                self.shared_state.resume_pending_revalidation = False
                 any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
@@ -3954,21 +3953,45 @@ class WritebackCollaborator:
             # the GEAK harness (2a). Native revalidations keep the
             # unconditional watermark reconciliation below.
             if bool((task.params or {}).get("geak_fallback")):
-                got_hash = ""
-                if isinstance(best_winner, dict):
-                    got_hash = str(best_winner.get("fingerprint") or "")
-                if not got_hash and isinstance(winners, list) and winners and isinstance(winners[0], dict):
-                    got_hash = str(winners[0].get("fingerprint") or "")
+                from hyperloom.common.perf_metric import output_tput_of
+
+                rebench_variant = (
+                    best_winner
+                    if isinstance(best_winner, Mapping)
+                    else next((winner for winner in winners if isinstance(winner, Mapping)), {})
+                )
+                rebench_measurement = rebench_variant.get("bench_result")
+                if not isinstance(rebench_measurement, Mapping):
+                    rebench_measurement = rebench_variant.get("measurement")
+                if not isinstance(rebench_measurement, Mapping):
+                    rebench_measurement = rebench_variant
+                rebench_measurement = dict(rebench_measurement)
+                if "output_throughput" not in rebench_measurement and "tput" not in rebench_measurement:
+                    rebench_measurement["output_throughput"] = measured
+                measured = output_tput_of(rebench_measurement)
+                got_hash = str(rebench_variant.get("fingerprint") or "")
                 cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                 cb_tput = cb_now.get("tput")
+                baseline_grade = resolve_graded_comparison(self.shared_state, rebench_measurement, against_baseline=True)
+                current_grade = resolve_graded_comparison(self.shared_state, rebench_measurement)
                 decision = _geak_revalidation_decision(
-                    measured=measured,
-                    baseline=self.shared_state.baseline_tput,
+                    measured=baseline_grade.candidate,
+                    baseline=baseline_grade.reference,
                     got_hash=got_hash,
                     expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
-                    current_best=cb_tput,
+                    current_best=current_grade.reference,
                 )
+                if (
+                    measured <= 0
+                    or not baseline_grade.comparable
+                    or not current_grade.comparable
+                    or baseline_grade.objective != current_grade.objective
+                    or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}
+                ):
+                    decision = "fallback"
+                elif decision == "validated" and (baseline_grade.vetoed or current_grade.vetoed):
+                    decision = "no_promote"
                 # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
                 # cannot see the overlay drop out between dispatch and launch —
                 # ``run_grid`` skips an overlay whose dir has gone away and logs
@@ -4032,24 +4055,13 @@ class WritebackCollaborator:
 
                 macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
-                # Both engagement facts were computed above to choose between
-                # ``validated`` and ``fallback``, and were then discarded: the
-                # V5 attempt row has no field for either, so a reader could see
-                # the verdict but not the evidence that the configuration under
-                # test had actually engaged. Record them with the attempt.
-                self._record_geak_rebench_timeline(
-                    task=task,
-                    decision=decision,
-                    pending_status=pending_status,
-                    measured=measured,
-                    config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
-                    if str((task.params or {}).get("expected_cfg_hash") or "")
-                    else None,
-                    overlay_loaded=overlay_loaded if expected_overlay else None,
-                    got_hash=got_hash,
-                    got_overlay_digest=got_digest,
-                )
-                if not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
+                settled_result = not pending and str(ps.get("revalidation_status") or "") in {
+                    "failed",
+                    "fallback_failed",
+                    "no_promote",
+                    "no_material",
+                }
+                if settled_result or not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
                     # The slot either names another task or already carries a
                     # verdict, so this result is orphaned or late. Record it:
                     # silently dropping a measured rebench is hard to diagnose.
@@ -4077,28 +4089,37 @@ class WritebackCollaborator:
                         )
                     except Exception:  # noqa: BLE001 - observation is best-effort
                         log.exception("geak orphan rebench: observation emit failed")
+                    decision = "ignored"
                 elif decision == "validated":
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
                     # validated gain and clear geak_pending.
-                    rebench_measurement = (
-                        best_winner
-                        if isinstance(best_winner, Mapping)
-                        else next(
-                            (winner for winner in winners if isinstance(winner, Mapping)),
-                            None,
-                        )
-                    )
-                    self._promote_geak_from_candidate(
-                        ps,
+                    promotion_result = dict(ps)
+                    for key in (
+                        "output_throughput",
+                        "input_throughput",
+                        "total_throughput",
+                        "total_token_throughput",
+                        "intvty_p90",
+                        "tpot_p90_ms",
+                        "submission_valid",
+                        "submission_invalid_reasons",
+                    ):
+                        promotion_result.pop(key, None)
+                        if key in rebench_measurement:
+                            promotion_result[key] = rebench_measurement[key]
+                    promoted = self._promote_geak_from_candidate(
+                        promotion_result,
                         measured_tput=float(measured),
                         provenance="geak_orch_harness_validated",
                         # Only an overlay that was dispatched AND still matches
                         # its manifest proves a kernel was in the measurement.
                         overlay_loaded=bool(expected_overlay) and overlay_loaded,
-                        measurement_provenance=rebench_measurement,
+                        measurement_provenance={**rebench_variant, **rebench_measurement},
                     )
-                elif decision == "no_material":
+                    if not promoted:
+                        decision = "no_promote"
+                if decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
                     # is same-config measurement noise. Do not touch the
                     # headline / stack / gain; record + clear the candidate.
@@ -4174,8 +4195,9 @@ class WritebackCollaborator:
                     ps_stamped["revalidation_status"] = "no_promote"
                     self.shared_state.geak_result = ps_stamped
                     self.shared_state.geak_pending = {}
-                    self.shared_state.resume_pending_revalidation = False
-                else:
+                    result["status"] = "no_promote"
+                    result[PROMOTION_REFUSED_KEY] = True
+                elif decision == "fallback":
                     # 2b inconclusive -> GEAK harness replay (2a), which
                     # clears the pending flag on success. Best-effort.
                     log.warning(
@@ -4233,8 +4255,35 @@ class WritebackCollaborator:
                         )[:500]
                         self.shared_state.geak_result = geak_result
                         self.shared_state.geak_pending = {}
-                        self.shared_state.resume_pending_revalidation = False
-                changed = True
+                        result["status"] = (
+                            "incomparable" if fallback_result.get("status") == "incomparable" else "failed"
+                        )
+                        result[PROMOTION_REFUSED_KEY] = True
+                    else:
+                        promoted = True
+                        decision = "validated"
+                self._record_geak_rebench_timeline(
+                    task=task,
+                    decision=decision,
+                    pending_status=pending_status,
+                    measured=measured,
+                    config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
+                    if str((task.params or {}).get("expected_cfg_hash") or "")
+                    else None,
+                    overlay_loaded=overlay_loaded if expected_overlay else None,
+                    got_hash=got_hash,
+                    got_overlay_digest=got_digest,
+                )
+                self.shared_state.record_action_attempt(
+                    action="explore",
+                    task_id=task.task_id,
+                    status=str(result.get("status") or "succeeded"),
+                    decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
+                    result=result,
+                    extras={"revalidation_decision": decision, "output_throughput": measured},
+                )
+                outcome.changed = True
+                return
             else:
                 if measured_ok and self.shared_state.baseline_tput > 0:
                     if self._update_cumulative_gain_validated(measured, result):
@@ -5840,30 +5889,24 @@ class WritebackCollaborator:
         Returns:
             A summary dict describing whether validation succeeded.
         """
+        from hyperloom.common.perf_metric import is_agentx_mode
+        from ..actions.executors._workload_envs import agentx_enabled
+
+        mode = str(getattr(self.shared_state, "benchmark_mode", "") or "").strip()
+        agentx = is_agentx_mode(mode) if mode else agentx_enabled()
+        if agentx:
+            return {
+                "validated": False,
+                "status": "incomparable",
+                "reason": "geak_harness_unsupported_canonical_workload",
+            }
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
         from hyperloom.common.jsonio import read_json
-        from ..actions.executors._workload_envs import agentx_active
 
         handoff = read_json(self.session_dir / "geak" / "handoff.json", default={}, require_dict=True)
         env_spec = self.build_env_spec()
-        client_config = handoff.get("bench_client_config") or {}
-        expected_identity = client_config.get("workload_identity") if isinstance(client_config, Mapping) else None
-        expected_client = str(handoff.get("bench_client") or "").strip().lower()
-        result_client = str(ps.get("bench_client") or "").strip().lower()
-        agentx = agentx_active(self.shared_state) or "agentx" in {expected_client, result_client}
-        if agentx:
-            identity_error = ""
-            if expected_client != "agentx" or result_client != "agentx":
-                identity_error = "agentx_replay_client_mismatch"
-            elif not isinstance(expected_identity, Mapping) or not expected_identity:
-                identity_error = "agentx_replay_missing_handoff_workload_identity"
-            elif ps.get("workload_identity") != expected_identity:
-                identity_error = "agentx_replay_workload_identity_mismatch"
-            if identity_error:
-                log.warning("geak 2a: %s; canonical revalidation required", identity_error)
-                return {"validated": False, "status": "incomparable", "reason": identity_error}
         # Overlay identity, captured BEFORE the replay so it can be compared
         # after. 2a replays GEAK's own launch script, which is why a
         # ``succeeded`` status proves the *config* engaged -- but the overlay is
@@ -5917,15 +5960,6 @@ class WritebackCollaborator:
             osl = int(reg.get("osl") or 1024)
         except (TypeError, ValueError):
             conc, isl, osl = 64, 1024, 1024
-        if agentx:
-            workload = handoff.get("workload") or {}
-            canonical_conc = workload.get("conc") if isinstance(workload, Mapping) else None
-            if type(canonical_conc) is not int or canonical_conc <= 0 or conc != canonical_conc:
-                return {
-                    "validated": False,
-                    "status": "incomparable",
-                    "reason": "agentx_replay_canonical_concurrency_mismatch",
-                }
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
 
@@ -5950,33 +5984,6 @@ class WritebackCollaborator:
             pin_num_prompts=True,
         )
         promotion_measurement = res.get("promotion_measurement")
-        promotion_result = ps
-        if agentx and str(res.get("status") or "") == "succeeded":
-            if (
-                not isinstance(promotion_measurement, Mapping)
-                or promotion_measurement.get("bench_client") != "agentx"
-                or promotion_measurement.get("workload_identity") != expected_identity
-                or not isinstance(promotion_measurement.get("measurement"), Mapping)
-            ):
-                return {
-                    "validated": False,
-                    "status": "incomparable",
-                    "reason": "agentx_replay_missing_current_measurement",
-                }
-            promotion_result = dict(ps)
-            for key in (
-                "output_throughput",
-                "input_throughput",
-                "total_throughput",
-                "total_token_throughput",
-                "intvty_p90",
-                "tpot_p90_ms",
-                "submission_valid",
-                "submission_invalid_reasons",
-            ):
-                promotion_result.pop(key, None)
-                if key in promotion_measurement:
-                    promotion_result[key] = promotion_measurement[key]
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
             # Rebench-first: write the headline from the GEAK-harness MEASURED
             # throughput (engages by construction via the launch-script replay),
@@ -6016,7 +6023,7 @@ class WritebackCollaborator:
                     _geak_overlay_digest(ps_overlay_2a),
                 )
             accepted = self._promote_geak_from_candidate(
-                promotion_result,
+                ps,
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
                 overlay_loaded=overlay_loaded_2a,
