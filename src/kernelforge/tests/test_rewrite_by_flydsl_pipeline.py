@@ -258,9 +258,7 @@ def test_optimize_hands_over_every_new_best_exactly_once(tmp_path, monkeypatch):
         Config.from_env(workspace=str(tmp_path)),
         experiments_dir=str(tmp_path),
         result_json=str(rj),
-        on_new_best=lambda payload: seen.append(
-            (payload["best_commit"], payload["best_ms"])
-        ),
+        on_new_best=lambda payload: seen.append((payload["best_commit"], payload["best_ms"])),
         new_best_poll_sec=0.0,
     )
 

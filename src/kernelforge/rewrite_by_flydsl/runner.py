@@ -515,14 +515,11 @@ def run_rewrite(
         shown = _git(workspace, "show", f"{commit}:{spec.flydsl_kernel_relpath}")
         if shown.returncode != 0 or not shown.stdout.strip():
             print(
-                f"  [forge-rewrite] KEEP publish skipped: {commit[:12]} has no "
-                f"{spec.flydsl_kernel_relpath}",
+                f"  [forge-rewrite] KEEP publish skipped: {commit[:12]} has no {spec.flydsl_kernel_relpath}",
                 flush=True,
             )
             return
-        optimize_session_digest = hashlib.sha256(
-            str(payload.get("experiment_id") or commit).encode()
-        ).hexdigest()
+        optimize_session_digest = hashlib.sha256(str(payload.get("experiment_id") or commit).encode()).hexdigest()
         write = write_flydsl_kb_solution(
             spec,
             driver_path,
@@ -536,8 +533,7 @@ def run_rewrite(
             content_override=shown.stdout.encode(),
         )
         print(
-            f"  [forge-rewrite] KEEP KB publish ({commit[:12]}): "
-            f"{write.get('reason') or write.get('solution')}",
+            f"  [forge-rewrite] KEEP KB publish ({commit[:12]}): {write.get('reason') or write.get('solution')}",
             flush=True,
         )
 

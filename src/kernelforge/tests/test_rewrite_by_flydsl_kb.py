@@ -702,8 +702,7 @@ def _publish_ranked_candidates(spec, driver, config, ranks):
     """Publish one candidate per (rank, claimed source_ms/best_ms) pair."""
     for rank, source_ms, best_ms in ranks:
         Path(spec.flydsl_kernel).write_text(
-            f"import flydsl\nRANK = {rank}\n"
-            "def build_softmax_module(config):\n    return lambda inputs: inputs['x']\n"
+            f"import flydsl\nRANK = {rank}\ndef build_softmax_module(config):\n    return lambda inputs: inputs['x']\n"
         )
         written = kb.write_flydsl_kb_solution(
             spec,

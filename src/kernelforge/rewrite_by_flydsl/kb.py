@@ -381,9 +381,7 @@ async def try_flydsl_kb_warmstart(
         )
         Path(spec.flydsl_kernel).write_bytes(winner["content"])
         for item in measured:
-            item["attempt"]["reason"] = (
-                "applied" if item is winner else f"outperformed_by_rank_{winner['index'] + 1}"
-            )
+            item["attempt"]["reason"] = "applied" if item is winner else f"outperformed_by_rank_{winner['index'] + 1}"
         result.applied = True
         result.read_reason = "applied"
         result.solution_slug = winner["candidate"]["solution_slug"]
@@ -449,11 +447,7 @@ def write_flydsl_kb_solution(
         return {"written": False, "reason": "missing_gpu_type"}
     speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
     try:
-        content = (
-            content_override
-            if content_override is not None
-            else Path(spec.flydsl_kernel).read_bytes()
-        )
+        content = content_override if content_override is not None else Path(spec.flydsl_kernel).read_bytes()
         identity, canonical_id, signature, implementation = resolve_identity(
             spec,
             framework=framework,
