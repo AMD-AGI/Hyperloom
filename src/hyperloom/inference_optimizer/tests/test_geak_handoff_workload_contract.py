@@ -140,7 +140,7 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert handoff["workload"] == {"isl": 2048, "osl": 1536, "conc": 6}
     assert handoff["gpu_pin"]["var"] == "ROCR_VISIBLE_DEVICES"
     assert handoff["gpu_pin"]["ids"] == [6, 7]
-    assert handoff["gpu_ids"] == [0, 1]
+    assert handoff["gpu_ids"] == "0,1"
     assert handoff["gpu_ids_space"] == "logical"
     assert handoff["tp"] == 2
     assert handoff["accepted_flags"] == "--accepted-flag 1"

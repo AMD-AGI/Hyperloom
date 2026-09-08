@@ -234,6 +234,9 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
         "accepted_config": {},
         "final_overlay": str(tmp_path / "missing-overlay"),
     }
+    geak_dir = c.session_dir / "geak"
+    geak_dir.mkdir()
+    (geak_dir / "result.json").write_text(json.dumps(st.geak_result), encoding="utf-8")
     before_best = dict(st.current_best)
 
     async def _must_not_launch(**_kwargs):
