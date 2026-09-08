@@ -169,7 +169,7 @@ def test_builtin_model_ownership_predicates() -> None:
             "claude",
             model="claude-opus-4-8",
         ).fallback_model
-        == ""
+        == "claude-opus-4-8"
     )
     assert resolve_agent_runtime("codex").fallback_model == "gpt-5.5"
 
@@ -184,6 +184,53 @@ def test_claude_fallback_model_env_none_disables(monkeypatch) -> None:
     monkeypatch.setenv("FORGE_CLAUDE_FALLBACK_MODEL", "none")
     runtime = resolve_agent_runtime("claude", model="glm-5-3")
     assert runtime.fallback_model == ""
+
+
+def test_claude_fallback_model_blank_env_keeps_default(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_CLAUDE_FALLBACK_MODEL", "")
+    runtime = resolve_agent_runtime("claude", model="glm-5-3")
+    assert runtime.fallback_model == "claude-opus-4-8"
+
+
+def test_replaced_primary_model_keeps_claude_fallback() -> None:
+    from dataclasses import replace
+
+    runtime = replace(resolve_agent_runtime("claude", model="claude-opus-4-8"), model="supervisor-model")
+    assert runtime.fallback_model == "claude-opus-4-8"
+
+
+def test_probe_uses_registration_fallback_when_runtime_omits_it() -> None:
+    attempted_models = []
+
+    class Backend(_FakeBackend):
+        def probe(self, *, cwd, usage=None):
+            del cwd, usage
+            attempted_models.append(self.runtime.model)
+            if self.runtime.model == "primary-model":
+                raise AgentProviderUnavailableError("model not served")
+            return AgentRunResult(text="OK")
+
+    def factory(runtime):
+        backend = Backend(name=runtime.provider)
+        backend.runtime = runtime
+        return backend
+
+    register_agent_provider(
+        AgentProvider(
+            name="omitfallbackprobe",
+            factory=factory,
+            default_model="primary-model",
+            fallback_model="stable-model",
+            capabilities=AgentCapabilities(probe=True),
+        )
+    )
+    from kernelforge.agent_backends.base import AgentRuntimeConfig
+
+    runtime = AgentRuntimeConfig(provider="omitfallbackprobe", model="primary-model")
+    assert runtime.fallback_model is None
+    backend = create_registered_backend(runtime, probe_cwd="/tmp")
+    assert attempted_models == ["primary-model", "stable-model"]
+    assert backend.runtime.model == "stable-model"
 
 
 def test_default_runtime_uses_high_reasoning_effort() -> None:

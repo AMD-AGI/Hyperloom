@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 import warnings
@@ -239,7 +238,7 @@ def resolve_agent_runtime(
     return AgentRuntimeConfig(
         provider=registration.name,
         model=chosen_model,
-        fallback_model=_resolve_provider_fallback_model(registration, chosen_model),
+        fallback_model=_resolve_provider_fallback_model(registration),
         executable=executable.strip(),
         timeout_sec=timeout_sec,
         reasoning_effort=reasoning_effort.strip() or "high",
@@ -272,10 +271,7 @@ def create_registered_backend(
         if not runtime.fallback_provider:
             raise
         fallback_registration = get_agent_provider(runtime.fallback_provider)
-        fallback_model = _resolve_provider_fallback_model(
-            fallback_registration,
-            fallback_registration.default_model,
-        )
+        fallback_model = _resolve_provider_fallback_model(fallback_registration)
         fallback_runtime = replace(
             runtime,
             provider=fallback_registration.name,
@@ -321,7 +317,10 @@ def _prepare_with_model_fallback(
             usage=usage,
         )
     except AgentProviderUnavailableError as primary_error:
-        fallback_model = (runtime.fallback_model or "").strip()
+        if runtime.fallback_model is None:
+            fallback_model = (registration.fallback_model or "").strip()
+        else:
+            fallback_model = runtime.fallback_model.strip()
         log.warning(
             "agent model probe failed provider=%s model=%s fallback_model=%s: %s",
             registration.name,
@@ -357,15 +356,13 @@ def _prepare_with_model_fallback(
         return backend
 
 
-def _resolve_provider_fallback_model(registration: AgentProvider, model: str) -> str:
+def _resolve_provider_fallback_model(registration: AgentProvider) -> str:
     """Resolve the probe/SDK fallback model. Claude honors FORGE_CLAUDE_FALLBACK_MODEL."""
-    fallback = (registration.fallback_model or "").strip()
     if registration.name == "claude":
-        raw = os.environ.get("FORGE_CLAUDE_FALLBACK_MODEL")
-        if raw is not None:
-            fallback = "" if raw.strip().lower() in {"", "none", "off"} else raw.strip()
-    chosen = (model or "").strip() or registration.default_model
-    return "" if (not fallback or fallback == chosen) else fallback
+        from kernelforge.agent_backends.claude import resolve_claude_fallback_model
+
+        return resolve_claude_fallback_model(registration.fallback_model)
+    return (registration.fallback_model or "").strip()
 
 
 def _prepare_backend(

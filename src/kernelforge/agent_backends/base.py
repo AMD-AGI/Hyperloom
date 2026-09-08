@@ -105,7 +105,9 @@ class AgentRuntimeConfig:
 
     provider: str
     model: str
-    fallback_model: str = ""
+    # None: use the provider registration default at probe/SDK time.
+    # "": disable model fallback. Any other string is the fallback id.
+    fallback_model: str | None = None
     executable: str = ""
     timeout_sec: int = 1800
     reasoning_effort: str = "high"

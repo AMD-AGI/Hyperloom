@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,22 @@ from kernelforge.llm.process_reaping import (
 
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 FALLBACK_CLAUDE_MODEL = "claude-opus-4-8"
+_FALLBACK_MODEL_DISABLE = frozenset({"none", "off"})
 log = logging.getLogger(__name__)
+
+
+def resolve_claude_fallback_model(default: str = FALLBACK_CLAUDE_MODEL) -> str:
+    """Resolve Claude model fallback from ``FORGE_CLAUDE_FALLBACK_MODEL``.
+
+    Unset or blank keeps ``default``. ``none`` / ``off`` disables fallback.
+    """
+    raw = os.environ.get("FORGE_CLAUDE_FALLBACK_MODEL")
+    if raw is None or not raw.strip():
+        return default
+    stripped = raw.strip()
+    if stripped.lower() in _FALLBACK_MODEL_DISABLE:
+        return ""
+    return stripped
 
 
 class _DeadlineBackport:
@@ -311,11 +327,15 @@ class ClaudeBackend:
         runtime: AgentRuntimeConfig | None = None,
     ) -> None:
         """Resolve SDK symbols when the backend is selected."""
-        self.runtime = runtime or AgentRuntimeConfig(
-            provider=self.name,
-            model=DEFAULT_CLAUDE_MODEL,
-            fallback_model=FALLBACK_CLAUDE_MODEL,
-        )
+        if runtime is None:
+            runtime = AgentRuntimeConfig(
+                provider=self.name,
+                model=DEFAULT_CLAUDE_MODEL,
+                fallback_model=resolve_claude_fallback_model(),
+            )
+        elif runtime.fallback_model is None:
+            runtime = replace(runtime, fallback_model=resolve_claude_fallback_model())
+        self.runtime = runtime
         _prepare_claude_environment()
         self._query, self._options_type = _load_claude_sdk()
         self.fallback_reason = ""
@@ -411,7 +431,7 @@ class ClaudeBackend:
         }
         if spec.reasoning_effort:
             options["effort"] = spec.reasoning_effort
-        fallback_model = getattr(self.runtime, "fallback_model", "").strip()
+        fallback_model = (getattr(self.runtime, "fallback_model", None) or "").strip()
         if fallback_model and fallback_model != spec.model:
             options["fallback_model"] = fallback_model
         if spec.additional_directories:
@@ -739,4 +759,5 @@ __all__ = [
     "DEFAULT_CLAUDE_MODEL",
     "FALLBACK_CLAUDE_MODEL",
     "resolve_claude_cli",
+    "resolve_claude_fallback_model",
 ]
