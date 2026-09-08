@@ -41,6 +41,11 @@ PLAN_CRITIC_TIMEOUT_SEC = 600
 # One repair pass for a width block the review did not deliver.
 WIDTH_REPAIR_MAX_TURNS = 2
 WIDTH_REPAIR_TIMEOUT_SEC = 120
+# ...and, for the same reason, no more reasoning than restating a decision
+# takes. This is a ceiling, not a setting: a campaign already running below it
+# keeps its own effort. Without it the repair inherits the campaign's effort --
+# ``high`` by default -- to reformat one block it is forbidden to re-decide.
+WIDTH_REPAIR_EFFORT_CEILING = "low"
 _ERROR_DETAIL_MAX_CHARS = 2000
 _NARROWING_NOTE_MAX_CHARS = 240
 
@@ -531,6 +536,7 @@ class PlanCriticAgent:
                         cwd=context.workspace,
                         writable=False,
                         timeout_sec=self._repair_budget(),
+                        max_reasoning_effort=WIDTH_REPAIR_EFFORT_CEILING,
                         tool_policy=AgentToolPolicy(
                             read=False,
                             search=False,

@@ -12,6 +12,9 @@ sides: what a session runs as is a deployment decision, not a call-site one.
   the next reader believes it.
 * The context window is applied where the runtime is built and nowhere else,
   and it is empty unless a deployment names one.
+* The one exception is ``max_reasoning_effort``, which can only lower and is
+  spent on a single structurally-non-reasoning call; a second one has to be
+  argued for by editing the test that names it.
 """
 
 from __future__ import annotations
@@ -114,3 +117,48 @@ def test_configured_context_window_reaches_every_session() -> None:
 def test_with_context_window(model: str, window: str, expected: str) -> None:
     """The rewrite is Claude-only, idempotent, and a no-op without a window."""
     assert with_context_window(model, window) == expected
+
+
+def test_an_effort_ceiling_only_ever_lowers() -> None:
+    """A capped session runs at the cap, never above and never below it."""
+    spec = AgentRunSpec(
+        system_prompt="",
+        user_prompt="",
+        cwd="/tmp",
+        max_reasoning_effort="low",
+    )
+    for asked in ("medium", "high", "xhigh", "max"):
+        runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort=asked)
+        assert spec.resolved(runtime).reasoning_effort == "low"
+    # An operator already below the cap keeps their own value: the cap is a
+    # ceiling on this call's cost, not a floor under it.
+    runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort="none")
+    assert spec.resolved(runtime).reasoning_effort == "none"
+
+
+def test_an_unranked_effort_is_left_alone() -> None:
+    """A name outside the ladder reaches the provider unchanged, to be rejected there."""
+    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp", max_reasoning_effort="low")
+    runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort="turbo")
+    assert spec.resolved(runtime).reasoning_effort == "turbo"
+
+
+def test_ordinary_sessions_carry_no_ceiling() -> None:
+    """Without a cap the deployment's effort is what runs."""
+    spec = AgentRunSpec(system_prompt="", user_prompt="", cwd="/tmp")
+    assert spec.max_reasoning_effort == ""
+    runtime = AgentRuntimeConfig(provider="claude", model="m", reasoning_effort="high")
+    assert spec.resolved(runtime).reasoning_effort == "high"
+
+
+def test_the_width_repair_is_the_only_capped_call_site() -> None:
+    """A ceiling is an exception; new ones have to be argued for here."""
+    offenders: list[str] = []
+    for path in _python_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "max_reasoning_effort":
+                        offenders.append(str(path.relative_to(_SRC)))
+    assert offenders == ["orchestrator/plan_critic.py"], offenders

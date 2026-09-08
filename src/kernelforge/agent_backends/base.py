@@ -36,6 +36,32 @@ def session_environment(overlay: Mapping[str, str]) -> Iterator[None]:
         _session_environment.reset(token)
 
 
+#: The generic effort vocabulary, ordered. Providers narrow it to their own
+#: names (Codex folds ``max`` onto ``xhigh``); this ranking exists only so a
+#: ceiling can be compared against whatever the deployment asked for. A name
+#: outside the ladder is not ranked and therefore never clamped -- an unknown
+#: effort is the provider's to reject, not this module's to silently rewrite.
+_EFFORT_RANK: dict[str, int] = {
+    "none": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "xhigh": 4,
+    "max": 4,
+}
+
+
+def _clamped_effort(effort: str, ceiling: str) -> str:
+    """Return ``effort``, lowered to ``ceiling`` when it outranks it."""
+    if not ceiling:
+        return effort
+    asked = _EFFORT_RANK.get(effort.strip().lower())
+    limit = _EFFORT_RANK.get(ceiling.strip().lower())
+    if asked is None or limit is None or asked <= limit:
+        return effort
+    return ceiling.strip().lower()
+
+
 #: Attribute a provider sets to ``True`` on an error that is a VERDICT about
 #: what a session did to the workspace, as opposed to the provider failing at its
 #: own bookkeeping. Callers classify by this attribute rather than by class name,
@@ -204,6 +230,18 @@ class AgentRunSpec:
     # Untracked paths a tool is known to drop in the workspace on its own, as fnmatch patterns relative to the
     # workspace root.
     ignored_untracked_globs: list[str] = field(default_factory=list)
+    # Ceiling on the effort this session may run at, in the generic vocabulary
+    # ranked by :data:`_EFFORT_RANK`. Empty for every ordinary session: the
+    # deployment's effort is the one that runs, and a call site that thinks it
+    # knows better is exactly what ``resolved`` stopped honouring.
+    #
+    # It exists for the calls that are structurally not reasoning work -- the
+    # width repair below restates a decision that was already made, with no
+    # tools and two turns -- where the deployment's ``high`` (or ``max``) buys
+    # nothing and is billed anyway. A ceiling only ever lowers: an operator who
+    # runs the campaign at ``low`` still gets ``low`` here.
+    # Appended, like the field above, to keep the positional contract.
+    max_reasoning_effort: str = ""
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, context window, effort and environment.
@@ -220,6 +258,11 @@ class AgentRunSpec:
         for a runtime that names none, which no provider in this repository
         builds.
 
+        ``max_reasoning_effort`` is the one thing a call site may still say
+        about effort, and it can only lower: a session that is structurally not
+        reasoning work is capped there, while an operator running the campaign
+        below the cap keeps their own value.
+
         The context window is not negotiated at a call site either: every Claude
         session gets whichever one the deployment named, and none when it named
         none. See :mod:`kernelforge.agent_backends.model_context`.
@@ -228,7 +271,10 @@ class AgentRunSpec:
             self,
             model=with_context_window(self.model.strip() or runtime.model, runtime.context_window),
             timeout_sec=(self.timeout_sec if self.timeout_sec is not None else runtime.timeout_sec),
-            reasoning_effort=(runtime.reasoning_effort.strip() or self.reasoning_effort.strip()),
+            reasoning_effort=_clamped_effort(
+                runtime.reasoning_effort.strip() or self.reasoning_effort.strip(),
+                self.max_reasoning_effort,
+            ),
             env={**_session_environment.get(), **self.env},
         )
 
