@@ -274,6 +274,9 @@ cleanup() {
     # resp carries curl's stderr too; only the -w status line is bare digits.
     code="$(printf '%s\n' "$resp" | grep -oE '^[0-9]{3}$' | tail -n1)"
     case "$code" in
+      # 202: the backend recorded the cancel but nothing confirmed the workload
+      # down, so it may still hold its GPUs. Retrying cannot change that answer.
+      202) summary "⚠️ **workload \`$UID_\` cancel recorded, stop NOT confirmed** (HTTP 202) — it may still hold a GPU."; return 0 ;;
       2*) echo "[ci-e2e] workload $UID_ cancelled (HTTP $code)"; return 0 ;;
     esac
     echo "[ci-e2e] cancel attempt $attempt/$attempts for $UID_ failed (HTTP ${code:-none}): $(printf '%s' "$resp" | sed '$d' | head -c 300)" >&2
