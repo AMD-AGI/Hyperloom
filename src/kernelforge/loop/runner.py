@@ -744,6 +744,27 @@ class IterationLoop(AnalysisRuntimeMixin):
         """Return all staged and unstaged tracked changes relative to HEAD."""
         return self._git("diff", "HEAD", "--", ".")
 
+    def _candidate_changes(self, base: str) -> tuple[str, list[str]]:
+        """Snapshot tracked and allowed new sources without changing the real index."""
+        admitted = self._new_paths()[0] if self.ic.commit_new_paths else []
+
+        def read_changes(env=None):
+            patch = git("diff", base, "--", ".", cwd=self.ic.workspace_dir, env=env).stdout
+            names = git("diff", "--name-only", base, "--", ".", cwd=self.ic.workspace_dir, env=env).stdout
+            return patch, [line for line in names.splitlines() if line]
+
+        if not admitted:
+            return read_changes()
+        with tempfile.TemporaryDirectory(prefix="forge-candidate-index-") as temporary:
+            index = Path(self._git("rev-parse", "--git-path", "index"))
+            if not index.is_absolute():
+                index = Path(self.ic.workspace_dir) / index
+            candidate_index = Path(temporary) / "index"
+            candidate_index.write_bytes(index.read_bytes())
+            env = {"GIT_INDEX_FILE": str(candidate_index)}
+            git("add", "--", *admitted, cwd=self.ic.workspace_dir, env=env)
+            return read_changes(env)
+
     def _persist_pending_keep(self, pending: dict) -> None:
         """Atomically persist a verified candidate before creating its commit."""
         atomic_write_text(
@@ -795,44 +816,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         kernel_source: str,
     ) -> dict:
         """Capture every fact needed to finish a verified KEEP after restart."""
-        patch = self._tracked_diff_from_head()
-        if not patch:
-            raise ValueError("verified KEEP has no tracked candidate diff")
         base_head = self._git("rev-parse", "HEAD").splitlines()[0]
+        patch, changed_files = self._candidate_changes(base_head)
+        # Keep the journal's existing fingerprint convention; export the raw diff below.
+        patch = patch.strip()
+        if not patch:
+            raise ValueError("verified KEEP has no candidate diff")
         validation_text = result.validation_summary or "canonical validation passed"
         if result.error_output:
             validation_text = f"{validation_text}\n\n{result.error_output}".strip()
         benchmark = dict(result.bench_detail or {})
         benchmark.setdefault("median_ms", result.wall_ms)
-        changed_files = [
-            line.strip()
-            for line in self._git(
-                "diff",
-                "--name-only",
-                "HEAD",
-                "--",
-                ".",
-            ).splitlines()
-            if line.strip()
-        ]
         publication_base = self.ic.campaign_base_commit or base_head
-        publication_patch = self._git(
-            "diff",
-            publication_base,
-            "--",
-            ".",
-        )
-        publication_changed_files = [
-            line.strip()
-            for line in self._git(
-                "diff",
-                "--name-only",
-                publication_base,
-                "--",
-                ".",
-            ).splitlines()
-            if line.strip()
-        ]
+        publication_patch, publication_changed_files = self._candidate_changes(publication_base)
         commit_message = f"iter-{result.iteration}: {rationale[:72]}"
         return {
             "schema_version": 2,
@@ -918,7 +914,8 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         tracked_diff = self._tracked_diff_from_head()
         if current_head == base_head:
-            if tracked_diff and hashlib.sha256(tracked_diff.encode()).hexdigest() != expected_hash:
+            candidate_diff, _ = self._candidate_changes(base_head)
+            if candidate_diff and hashlib.sha256(candidate_diff.strip().encode()).hexdigest() != expected_hash:
                 raise ValueError("pending KEEP working tree mismatch")
             return "uncommitted"
 
@@ -1314,7 +1311,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not commit_hash:
             return ""
         try:
-            return self._git("diff", f"{commit_hash}~1", commit_hash)
+            return git("diff", f"{commit_hash}~1", commit_hash, cwd=self.ic.workspace_dir).stdout
         except Exception as e:
             log.debug("could not diff commit %s: %s", commit_hash, e)
             return ""
@@ -1333,6 +1330,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not isinstance(measurement, dict) or not measurement.get("success"):
             return False
         if not attempt_diff.strip():
+            return False
+        # The gate's tracked-diff fingerprint does not bind untracked source bytes.
+        if self.ic.commit_new_paths and self._new_paths()[0]:
             return False
         if self.ic.build_command:
             return False
@@ -1428,7 +1428,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         base = self.ic.campaign_base_commit
         if not base:
             return self._full_diff(commit_hash)
-        return self._git("diff", base, commit_hash, "--", ".")
+        return git("diff", base, commit_hash, "--", ".", cwd=self.ic.workspace_dir).stdout
 
     def _publish_best_result(
         self,
