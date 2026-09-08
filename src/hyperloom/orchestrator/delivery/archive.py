@@ -36,6 +36,12 @@ ROLE_LAUNCH_CONFIG = "launch_config"
 #: A tail of the server's own log, where a failed boot writes its traceback.
 ROLE_SERVER_LOG = "server_log"
 
+#: A whole-file artifact installed into the framework tree by an enablement round.
+ROLE_ARTIFACT_SOURCE = "artifact_source"
+
+#: The pre-image of a target before an artifact install replaced it.
+ROLE_ARTIFACT_PREIMAGE = "artifact_preimage"
+
 
 @dataclass(frozen=True)
 class ArchivedFile:
@@ -108,6 +114,8 @@ class RoundArchive:
 
 
 __all__ = [
+    "ROLE_ARTIFACT_PREIMAGE",
+    "ROLE_ARTIFACT_SOURCE",
     "ROLE_LAUNCH_CONFIG",
     "ROLE_PATCH",
     "ROLE_PROMPT",

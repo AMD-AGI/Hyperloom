@@ -493,6 +493,7 @@ class EnablementLane(CoordinatorCollaborator):
             rounds = list(state.enablement.kept_rounds)
             rounds.append(
                 {
+                    "task_id": str(res.get("specialist_task_id") or ""),
                     "patches": list(patches_this_round),
                     "artifacts": [dict(a) for a in (res.get("artifacts_applied") or []) if isinstance(a, dict)],
                 }
@@ -587,7 +588,12 @@ class EnablementLane(CoordinatorCollaborator):
                 state.enablement.launch_observation_path = str(res.get("enablement_observation_path") or "")
             _reset_baseline_failure_backstop()
         # Set on every round so neither outlives the round it describes.
-        state.enablement.last_grounding_drop_reason = [str(d) for d in (res.get("patches_ungrounded") or [])[:8]]
+        state.enablement.last_grounding_drop_reason = [
+            str(d) for d in (res.get("patches_dropped_by_grounding") or [])[:8]
+        ]
+        state.enablement.last_apply_feedback = [
+            fb for fb in (res.get("retry_feedback") or [])[:5] if isinstance(fb, dict)
+        ]
         state.enablement.patches_span_multiple_roots = bool(res.get("patches_span_multiple_roots"))
         # Phase-synthesised rounds carry no framework_root; keep the last real one.
         res_fw_root = str(res.get("framework_root") or "").strip()

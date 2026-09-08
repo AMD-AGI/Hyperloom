@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.delivery.archive import (
+    ROLE_ARTIFACT_PREIMAGE,
+    ROLE_ARTIFACT_SOURCE,
     ROLE_LAUNCH_CONFIG,
     ROLE_PATCH,
     ROLE_PROMPT,
@@ -195,6 +197,36 @@ def test_missing_server_log_is_skipped(tmp_path):
     assert archive.path_for(ROLE_SERVER_LOG) == ""
 
 
+def test_snapshot_round_archives_artifacts_and_preimages(tmp_path):
+    """Applied artifacts and their pre-images are archived by snapshot_round."""
+    source = tmp_path / "src" / "mod.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("# patched\n", encoding="utf-8")
+    backup = tmp_path / "bak" / "mod.py.bak"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("# original\n", encoding="utf-8")
+
+    res = _res(
+        artifacts_applied=[
+            {
+                "target": "/sgl-workspace/sglang/mod.py",
+                "source": str(source),
+                "backup": str(backup),
+                "rel_target": "mod.py",
+                "kind": "python_source",
+                "existed": True,
+            }
+        ]
+    )
+    archive = snapshot_round(tmp_path, res)
+
+    art_dir = tmp_path / "reports" / "enablement" / "abc123" / "artifacts"
+    assert (art_dir / "000_mod.py").read_text() == "# patched\n"
+    assert (art_dir / "000_mod.py.orig").read_text() == "# original\n"
+    assert archive.path_for(ROLE_ARTIFACT_SOURCE) == "reports/enablement/abc123/artifacts/000_mod.py"
+    assert archive.path_for(ROLE_ARTIFACT_PREIMAGE) == "reports/enablement/abc123/artifacts/000_mod.py.orig"
+
+
 def test_oversized_artifact_is_skipped(tmp_path):
     src = tmp_path / "runs" / "specialist" / "abc123" / "patches"
     src.mkdir(parents=True)
@@ -224,9 +256,21 @@ def _patch(tmp_path, rel, body="diff --git a/f b/f\n"):
     return str(p)
 
 
-def _round(*patches, artifacts=()):
-    """One accepted enablement round for ``EnablementRound.kept_rounds``."""
-    return {"patches": list(patches), "artifacts": list(artifacts)}
+def _round(task_id, *patches, artifacts=()):
+    """One accepted enablement round for ``EnablementRound.kept_rounds``.
+
+    Mirrors the structure _push_kept_round writes in lane.py.
+    """
+    return {"task_id": task_id, "patches": list(patches), "artifacts": list(artifacts)}
+
+
+def _archive_patches(tmp_path, task_id, patch_paths):
+    """Pre-populate the round archive so write_setting_script can read from it."""
+    archive_dir = tmp_path / "reports" / "enablement" / task_id / "patches"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for p in patch_paths:
+        src = Path(p)
+        (archive_dir / src.name).write_bytes(src.read_bytes())
 
 
 def test_write_setting_script_produces_executable(tmp_path):
@@ -234,7 +278,9 @@ def test_write_setting_script_produces_executable(tmp_path):
     en.setup_commands = ["pip install vllm==0.24"]
     en.accepted_config = {"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}, "extra_server_args": "--tp 4"}
     en.framework_root = "/sgl-workspace/sglang"
-    en.kept_rounds = [_round(_patch(tmp_path, "runs/specialist/s1/001.patch"))]
+    patch_path = _patch(tmp_path, "runs/specialist/s1/001.patch")
+    _archive_patches(tmp_path, "s1", [patch_path])
+    en.kept_rounds = [_round("s1", patch_path)]
 
     rel = write_setting_script(tmp_path, en, "sglang")
     out = tmp_path / rel
@@ -258,10 +304,11 @@ def test_same_named_patches_do_not_collide(tmp_path):
     """Specialists across rounds pick colliding names; the stack order keeps them apart."""
     en = EnablementRound()
     en.framework_root = "/sgl-workspace/sglang"
-    en.kept_rounds = [
-        _round(_patch(tmp_path, "runs/specialist/s1/patches/001_fix.patch", "first\n")),
-        _round(_patch(tmp_path, "runs/specialist/s2/patches/001_fix.patch", "second\n")),
-    ]
+    p1 = _patch(tmp_path, "runs/specialist/s1/patches/001_fix.patch", "first\n")
+    p2 = _patch(tmp_path, "runs/specialist/s2/patches/001_fix.patch", "second\n")
+    _archive_patches(tmp_path, "s1", [p1])
+    _archive_patches(tmp_path, "s2", [p2])
+    en.kept_rounds = [_round("s1", p1), _round("s2", p2)]
 
     write_setting_script(tmp_path, en, "sglang")
     dest = tmp_path / "reports" / "enablement" / "patches"
@@ -274,7 +321,9 @@ def test_same_named_patches_do_not_collide(tmp_path):
 def test_patches_dropped_without_a_framework_root(tmp_path):
     """git apply has no target, so emitting the section would guarantee a failure."""
     en = EnablementRound()
-    en.kept_rounds = [_round(_patch(tmp_path, "fix.patch"))]
+    p = _patch(tmp_path, "fix.patch")
+    _archive_patches(tmp_path, "s1", [p])
+    en.kept_rounds = [_round("s1", p)]
 
     write_setting_script(tmp_path, en, "sglang")
     text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
@@ -286,9 +335,8 @@ def test_oversized_patch_is_not_referenced(tmp_path):
     """A skipped copy must not leave a dangling apply line."""
     en = EnablementRound()
     en.framework_root = "/sgl-workspace/sglang"
-    big = tmp_path / "big.patch"
-    big.write_bytes(b"x" * (_FILE_SIZE_LIMIT + 1))
-    en.kept_rounds = [_round(str(big))]
+    # Nothing in the round archive: a big patch was never archived.
+    en.kept_rounds = [_round("s1")]
 
     write_setting_script(tmp_path, en, "sglang")
     text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
@@ -317,12 +365,13 @@ def test_write_setting_script_minimal_no_enablement_params(tmp_path):
 
 
 def test_synthetic_round_does_not_break_a_good_script(tmp_path):
-    """A phase-synthesised round carries no framework_root; the persisted one holds."""
+    """A phase-synthesised round carries no task_id; the good round still applies."""
     en = EnablementRound()
     en.framework_root = "/sgl-workspace/sglang"
-    en.kept_rounds = [_round(_patch(tmp_path, "fix.patch"))]
+    p = _patch(tmp_path, "fix.patch")
+    _archive_patches(tmp_path, "s1", [p])
+    en.kept_rounds = [_round("s1", p), _round("")]  # second round has no task_id
 
-    write_setting_script(tmp_path, en, "sglang")
     write_setting_script(tmp_path, en, "sglang")
     text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
     assert "export FRAMEWORK_ROOT=/sgl-workspace/sglang" in text
@@ -342,17 +391,13 @@ def test_generated_script_actually_applies_its_patch(tmp_path):
     _git("-C", str(root), "add", ".")
     _git("-C", str(root), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "init")
 
+    patch_body = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n"
+    patch_path = _patch(tmp_path, "runs/s1/fix.patch", patch_body)
+    _archive_patches(tmp_path, "s1", [patch_path])
+
     en = EnablementRound()
     en.framework_root = str(root)
-    en.kept_rounds = [
-        _round(
-            _patch(
-                tmp_path,
-                "runs/s1/fix.patch",
-                "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n",
-            )
-        )
-    ]
+    en.kept_rounds = [_round("s1", patch_path)]
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
 
     # Stub the launcher so only the replay portion executes.
@@ -375,17 +420,13 @@ def test_generated_script_runs_from_any_cwd(tmp_path):
     _git("-C", str(root), "add", ".")
     _git("-C", str(root), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qm", "init")
 
+    patch_body = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n"
+    patch_path = _patch(tmp_path, "runs/s1/fix.patch", patch_body)
+    _archive_patches(tmp_path, "s1", [patch_path])
+
     en = EnablementRound()
     en.framework_root = str(root)
-    en.kept_rounds = [
-        _round(
-            _patch(
-                tmp_path,
-                "runs/s1/fix.patch",
-                "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n",
-            )
-        )
-    ]
+    en.kept_rounds = [_round("s1", patch_path)]
     rel = write_setting_script(tmp_path, en, "sglang", model="/models/M")
 
     proc = subprocess.run(

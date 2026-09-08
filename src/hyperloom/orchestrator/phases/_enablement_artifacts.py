@@ -15,6 +15,8 @@ from hyperloom.inference_optimizer.session.session_paths import (
     runs_dir,
 )
 from hyperloom.orchestrator.delivery.archive import (
+    ROLE_ARTIFACT_PREIMAGE,
+    ROLE_ARTIFACT_SOURCE,
     ROLE_LAUNCH_CONFIG,
     ROLE_PATCH,
     ROLE_PROMPT,
@@ -113,6 +115,22 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
                     archive.record(ROLE_PATCH, dest)
                 copied.add(src.name)
 
+    artifacts_dir = round_dir / "artifacts"
+    for idx, art in enumerate(res.get("artifacts_applied") or []):
+        if not isinstance(art, dict):
+            continue
+        target_name = Path(str(art.get("target") or "")).name or f"artifact_{idx:03d}"
+        source_str = str(art.get("source") or "").strip()
+        backup_str = str(art.get("backup") or "").strip()
+        if source_str:
+            dest = artifacts_dir / f"{idx:03d}_{target_name}"
+            if _copy(Path(source_str), dest):
+                archive.record(ROLE_ARTIFACT_SOURCE, dest)
+        if backup_str:
+            dest = artifacts_dir / f"{idx:03d}_{target_name}.orig"
+            if _copy(Path(backup_str), dest):
+                archive.record(ROLE_ARTIFACT_PREIMAGE, dest)
+
     accepted_config = str(res.get("enablement_accepted_config_path") or "").strip()
     if accepted_config:
         dest = round_dir / "launch_config.yaml"
@@ -145,9 +163,10 @@ def write_setting_script(
     from hyperloom.inference_optimizer.reference_script import render_reference_script
     from hyperloom.orchestrator.bringup.trees import tree_kind
 
+    root = Path(session_dir)
     framework_root = str(enablement.framework_root or "").strip()
-    patches_dest = enablement_dir(Path(session_dir)) / "patches"
-    artifacts_dest = enablement_dir(Path(session_dir)) / "artifacts"
+    patches_dest = enablement_dir(root) / "patches"
+    artifacts_dest = enablement_dir(root) / "artifacts"
 
     patch_counter = 0
     artifact_counter = 0
@@ -157,22 +176,37 @@ def write_setting_script(
         rnd_script_patches: list[str] = []
         rnd_script_artifacts: list[dict[str, str]] = []
 
-        if framework_root:
-            for patch_str in rnd.get("patches") or []:
+        task_id = str(rnd.get("task_id") or "").strip()
+        round_dir = enablement_round_dir(root, task_id) if task_id else None
+
+        if framework_root and round_dir is not None:
+            patches_archive = round_dir / "patches"
+            archived_patches = sorted(patches_archive.glob("*.patch")) if patches_archive.is_dir() else []
+            for src in archived_patches:
                 patch_counter += 1
-                src = Path(str(patch_str))
                 name = f"{patch_counter:03d}_{src.name}"
                 if _copy(src, patches_dest / name):
                     rnd_script_patches.append(f"patches/{name}")
 
-        for art in rnd.get("artifacts") or []:
-            artifact_counter += 1
-            target = str(art.get("target") or "")
-            name = f"{artifact_counter:03d}_{Path(target).name}"
-            if not _copy(Path(str(art.get("source") or "")), artifacts_dest / name):
-                continue
-            _copy(Path(str(art.get("backup") or "")), artifacts_dest / f"{name}.orig")
-            rnd_script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
+        if round_dir is not None:
+            art_archive_dir = round_dir / "artifacts"
+            # Match archived sources to their target using the state record's ordering.
+            # snapshot_round names sources as <idx:03d>_<target_name> so sources and
+            # pre-images share the same numeric prefix; sources lack ".orig".
+            art_sources = sorted(
+                p for p in (art_archive_dir.glob("[0-9][0-9][0-9]_*") if art_archive_dir.is_dir() else [])
+                if not p.name.endswith(".orig")
+            )
+            for archived_src, art in zip(art_sources, rnd.get("artifacts") or []):
+                artifact_counter += 1
+                target = str(art.get("target") or "")
+                target_name = Path(target).name or archived_src.name
+                name = f"{artifact_counter:03d}_{target_name}"
+                archived_pre = archived_src.parent / f"{archived_src.name}.orig"
+                if not _copy(archived_src, artifacts_dest / name):
+                    continue
+                _copy(archived_pre, artifacts_dest / f"{name}.orig")
+                rnd_script_artifacts.append({"archive_path": f"artifacts/{name}", "target": target})
 
         if rnd_script_patches or rnd_script_artifacts:
             script_rounds.append({"patches": rnd_script_patches, "artifacts": rnd_script_artifacts})
