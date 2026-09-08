@@ -312,9 +312,16 @@ the forge-loop contract: `python3 driver.py` prints a correctness line such as
 --iters 20 --bench-mode` measures CUDA/HIP graph replays and prints
 `case_ms: <case> <ms>` for every case plus one `mean_ms: <ms>`;
 `python3 driver.py --profile-run` selects one representative case, runs only
-the target kernel for 1-3 synchronized iterations without reference work or
-timing output, and exits zero. Do not search other Hyperloom or KernelForge
-trees for task or driver examples; this prompt is the authoritative contract.
+   the target kernel for 1-3 synchronized iterations without reference work or
+   timing output, and exits zero. Do not search other Hyperloom or KernelForge
+   trees for task or driver examples; this prompt is the authoritative contract.
+
+The host copies driver.py into the repository under optimization before running
+it, one directory below the repository root. Resolve anything you need from the
+tree — a source file to hash, a config to read — as
+`Path(__file__).resolve().parents[1] / "<repo-relative path>"`. Do not derive
+that root from the current working directory, which is not the repository, nor
+from an environment variable, which the loop repoints at its build cache.
 
 Publish the strongest plausible task before investigating secondary candidates.
 The host and forge-loop own validation, so do not spend the analysis budget

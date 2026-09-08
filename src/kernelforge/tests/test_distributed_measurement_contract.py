@@ -193,7 +193,12 @@ def test_the_probe_tells_the_driver_and_itself_the_same_rank_count(monkeypatch, 
 
 
 def test_a_single_rank_probe_leaves_torch_distributed_alone(monkeypatch):
-    """The added observation is opt-in, so the single-GPU path is unchanged."""
+    """The added observation is opt-in, so the single-GPU path is unchanged.
+
+    Both names are cleared first: the probe inherits the caller's environment,
+    and a rank count left over from whatever ran before would otherwise decide
+    this test's answer.
+    """
     captured: dict = {}
 
     async def _fake_create(*args, **kwargs):
@@ -201,6 +206,8 @@ def test_a_single_rank_probe_leaves_torch_distributed_alone(monkeypatch):
         raise RuntimeError("stop before running")
 
     monkeypatch.setattr(task_preparer.asyncio, "create_subprocess_exec", _fake_create)
+    monkeypatch.delenv("FORGE_NPROC_PER_NODE", raising=False)
+    monkeypatch.delenv("GRAPH_PROBE_EXPECT_RANKS", raising=False)
 
     task_preparer.asyncio.run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
 

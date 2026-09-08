@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,11 +28,19 @@ from kernelforge.kernel_rewrite_controller.recovery import recover_task_result
 from kernelforge.kernel_rewrite_controller.state import TaskStateStore
 from kernelforge.kernel_rewrite_controller.task import load_task
 from kernelforge.kernel_rewrite_controller.worktree import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
     create_operator_worktree,
     operator_workspace,
     release_operator_worktree,
+    stage_operator_driver,
 )
+
+log = logging.getLogger(__name__)
+
+#: Where forge-loop's task preparer writes its per-attempt record, relative to
+#: the workspace it prepares.
+_PREPARATION_AUDIT_DIRNAME = "task_preparation"
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,34 @@ def _failure_detail(outcome: ForgeLoopOutcome) -> str:
     if not outcome.best_commit:
         return "forge-loop produced no best commit"
     return "forge-loop produced no validated improvement"
+
+
+def _keep_preparation_audit(
+    layout: ControllerLayout,
+    task: KernelRewriteTask,
+    worktree: OperatorWorktree | None,
+) -> None:
+    """Save the driver-preparation record before the workspace goes away.
+
+    Preparation is where a task whose driver does not yet conform either
+    becomes runnable or stops. Its record is the only account of which of those
+    happened and why, and it is written inside the workspace, which the release
+    below deletes. Best-effort: losing the copy must not turn a dispatch that
+    otherwise succeeded into a failure.
+    """
+    if worktree is None:
+        return
+    source = worktree.workspace / FORGE_LOOP_OUTPUT_DIRNAME / _PREPARATION_AUDIT_DIRNAME
+    if not source.is_dir():
+        return
+    destination = layout.preparation_audit_dir(task.operator_id)
+    try:
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination)
+    except OSError as error:
+        log.warning("could not keep the preparation audit for %s: %s", task.operator_id, error)
 
 
 def dispatch_single_task(
@@ -97,6 +135,7 @@ def dispatch_single_task(
             task_dir=task_path,
             worktree=worktree,
             deadline_unix=deadline_unix,
+            driver=stage_operator_driver(task, task_path, worktree),
         )
         outcome = run_forge_loop(
             invocation,
@@ -160,6 +199,8 @@ def dispatch_single_task(
         # campaign was for, and this returns the tree the patch was built in.
         # A private checkout is left standing instead, because the controller's
         # closing sweep still reads results out of it.
+        if task is not None:
+            _keep_preparation_audit(layout, task, worktree)
         release_operator_worktree(worktree)
 
 

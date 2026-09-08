@@ -18,7 +18,11 @@ from kernelforge.kernel_rewrite_controller.forge_runner import (
     run_forge_loop,
 )
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
-from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
+from kernelforge.kernel_rewrite_controller.worktree import (
+    DRIVER_STAGE_PREFIX,
+    OperatorWorktree,
+    stage_operator_driver,
+)
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -83,12 +87,18 @@ def test_invocation_maps_task_to_named_kernel_forge_loop(tmp_path: Path) -> None
         task_dir=task_dir,
         worktree=worktree,
         deadline_unix=deadline,
+        driver=stage_operator_driver(task, task_dir, worktree),
     )
 
     command = list(invocation.command)
     assert command[:4] == [sys.executable, "-m", "kernelforge.cli", "forge-loop"]
     assert command[command.index("--kernel") + 1] == str(worktree.kernel_path)
-    assert command[command.index("--driver") + 1] == str(driver)
+    # The workspace copy, not the published task file: forge-loop hands the
+    # driver's directory to the preparation agent, whose guard requires a repo.
+    dispatched_driver = Path(command[command.index("--driver") + 1])
+    assert dispatched_driver.parent.parent == worktree.workspace
+    assert dispatched_driver.parent.name.startswith(DRIVER_STAGE_PREFIX)
+    assert dispatched_driver.read_text(encoding="utf-8") == driver.read_text(encoding="utf-8")
     assert command[command.index("--workspace") + 1] == str(worktree.workspace)
     assert command[command.index("--operator-name") + 1] == task.operator_name
     assert command[command.index("--framework") + 1] == task.identity.framework
@@ -133,6 +143,7 @@ def test_invocation_forwards_world_size_as_nproc_per_node(tmp_path: Path) -> Non
         task_dir=task_dir,
         worktree=worktree,
         deadline_unix=time.time() + 3600,
+        driver=stage_operator_driver(task, task_dir, worktree),
     )
     command = list(invocation.command)
     assert command[command.index("--nproc-per-node") + 1] == "8"
