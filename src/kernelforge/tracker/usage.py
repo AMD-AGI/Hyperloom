@@ -124,6 +124,7 @@ class UsageAccumulator:
         long agent session actually accumulates and it is the only ranking
         available when cost is missing.
         """
+
         def _weight(item: tuple[str, dict[str, float]]) -> tuple[float, float]:
             counters = item[1]
             return (counters["total_cost_usd"], counters["input_tokens"])

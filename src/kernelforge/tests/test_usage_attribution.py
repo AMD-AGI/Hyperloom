@@ -30,9 +30,7 @@ def test_role_buckets_sum_to_the_campaign_total() -> None:
     assert sum(item["input_tokens"] for item in by_role.values()) == totals["input_tokens"]
     assert sum(item["output_tokens"] for item in by_role.values()) == totals["output_tokens"]
     assert sum(item["calls"] for item in by_role.values()) == totals["calls"]
-    assert round(sum(item["total_cost_usd"] for item in by_role.values()), 6) == round(
-        totals["total_cost_usd"], 6
-    )
+    assert round(sum(item["total_cost_usd"] for item in by_role.values()), 6) == round(totals["total_cost_usd"], 6)
     assert by_role["implementer"]["calls"] == 2
 
 

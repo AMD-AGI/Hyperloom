@@ -62,7 +62,10 @@ def test_a_missing_output_filter_is_reportable_not_silent(monkeypatch) -> None:
     monkeypatch.setattr(rtk, "_RTK_PATH", None)
     warning = rtk.unavailable_warning()
     assert "rtk is not on PATH" in warning
-    assert "github.com/rtk-ai/rtk" in warning
+    # The warning names the in-tree installer rather than the upstream URL:
+    # a reader who follows the URL lands on `cargo install`, while
+    # `kernelforge install-rtk` is the path this repository supports and tests.
+    assert "kernelforge install-rtk" in warning
 
     monkeypatch.setattr(rtk, "_RTK_PATH", "/usr/bin/rtk")
     assert rtk.unavailable_warning() == ""
