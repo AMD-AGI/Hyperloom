@@ -105,7 +105,7 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher
-from kernelforge.rtk import smart_wrap
+from kernelforge.rtk import smart_wrap, unavailable_warning as rtk_unavailable_warning
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
@@ -5625,6 +5625,12 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"{counters['output_tokens']:,} out tokens, "
                     f"{role_cost} ({counters['calls']} calls)"
                 )
+            # Printed next to the bill because that is where a reader asking
+            # "why was this expensive" is looking. rtk degrades silently by
+            # design; the degradation should not also be invisible.
+            rtk_warning = rtk_unavailable_warning()
+            if rtk_warning:
+                print(f"  NOTE: {rtk_warning}")
         print(f"  Experiment: {self.experiment.experiment_id}")
 
         return self.results
