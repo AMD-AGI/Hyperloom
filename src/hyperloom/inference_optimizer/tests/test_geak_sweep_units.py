@@ -305,9 +305,7 @@ async def test_geak_replay_uses_existing_client_contract(
     def _fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         captured.update(kwargs["env"])
         out = Path(captured["OUT_DIR"])
-        (out / "bench_summary.json").write_text(
-            json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8"
-        )
+        (out / "bench_summary.json").write_text(json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)

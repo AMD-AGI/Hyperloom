@@ -195,9 +195,7 @@ async def sweep_via_geak(
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
     final_launch_script = str(result.get("final_launch_script") or "").strip()
     final_launch_path = Path(final_launch_script) if final_launch_script else None
-    use_final_launch = bool(
-        final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK)
-    )
+    use_final_launch = bool(final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK))
     replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
     overlay = result.get("final_overlay") or ""
     cfg = result.get("accepted_config") or {}

@@ -3972,7 +3972,9 @@ class WritebackCollaborator:
                 got_hash = str(rebench_variant.get("fingerprint") or "")
                 cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                 cb_tput = cb_now.get("tput")
-                baseline_grade = resolve_graded_comparison(self.shared_state, rebench_measurement, against_baseline=True)
+                baseline_grade = resolve_graded_comparison(
+                    self.shared_state, rebench_measurement, against_baseline=True
+                )
                 current_grade = resolve_graded_comparison(self.shared_state, rebench_measurement)
                 decision = _geak_revalidation_decision(
                     measured=baseline_grade.candidate,
@@ -4061,7 +4063,9 @@ class WritebackCollaborator:
                     "no_promote",
                     "no_material",
                 }
-                if settled_result or not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
+                if settled_result or not geak_rebench_should_apply_result(
+                    self.shared_state, task, macro_cycle=macro_cycle
+                ):
                     # The slot either names another task or already carries a
                     # verdict, so this result is orphaned or late. Record it:
                     # silently dropping a measured rebench is hard to diagnose.
