@@ -108,6 +108,7 @@ def make_agent_fn(
     extra_protected_globs: list[str] | None = None,
     extra_protected_paths: list[str] | None = None,
     correctness_only: bool = False,
+    commit_new_paths: list[str] | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """Create an agent_fn callback for the autonomous iteration loop."""
     runtime = config.agent_runtime()
@@ -572,6 +573,7 @@ Make your change(s) now.
                 thinking_budget_tokens=3000,
             ),
             target_files=(source_files or [kernel_path]),
+            commit_new_paths=list(commit_new_paths or []),
             driver_script=driver_script or "",
             protected_globs=((_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])),
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime

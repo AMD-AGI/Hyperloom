@@ -237,6 +237,9 @@ class AgentRunSpec:
     # caller that names nothing still has its tokens counted.
     # Appended for the same reason as the field above.
     role: str = ""
+    # Campaign-owned source paths/globs, with the same anchored matching as KEEP.
+    # These remain visible to integrity checks, rollback, and artifact export.
+    commit_new_paths: list[str] = field(default_factory=list)
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.
