@@ -1,6 +1,6 @@
 ---
 name: geak-llm-report
-description: Render the phase → agent → API call → tool call report for a GEAK run, standalone or inside a Hyperloom session — every call's ISL/OSL, tokens (input/thinking/output/cache), wall-clock, derived USD and tool calls. Use when asked where GEAK's time or money went, which GEAK phase or agent dominates a run, whether a task is cheap enough to delegate to a smaller model, or to compare two models' GEAK runs.
+description: Render the phase → agent → API call → tool call report for a GEAK run, standalone or inside a Hyperloom session — every call's ISL/OSL, tokens (input/thinking/output/cache), wall-clock, derived USD and tool calls. Use when asked where GEAK's time or money went, which GEAK phase or agent dominates a run, whether a task is cheap enough to delegate to a smaller model, or to compare two models' GEAK runs. Also renders a single self-contained HTML page that joins what each phase cost to what it bought.
 ---
 
 # GEAK per-LLM-call report
@@ -58,13 +58,50 @@ ledger and none needs to.
    usually wants; the full depth bottoms out at tool names and runs to
    thousands of rows.
 
-3. **For the cross-hierarchy view**, add `--join-hyperloom <SESSION_DIR>`. The
+3. **Render the structured HTML page.** The Markdown tree above is a tree; the
+   HTML is the page to hand someone who has to *decide* something. It joins the
+   two halves of a run — what each phase cost, from `geak_calls.jsonl`, and what
+   each phase bought, from `geak_outcome.json` — into one file with no external
+   fetches, so it survives being copied to shared storage.
+
+   ```bash
+   PYTHONPATH=src python3 -m hyperloom.inference_optimizer.tools.render_geak_html_report \
+       --reports-dir <EVAL_DIR>/reports
+   ```
+
+   It needs `geak_calls.jsonl`, so render step 2 with `--include-text` first.
+   `geak_outcome.json` is written by GEAK's own outcome report and is optional —
+   without it the page says so, and every gain column reads *not measured*
+   rather than 0.00%.
+
+   | Section | Answers |
+   | --- | --- |
+   | Headline cards | total spend, calls, agents, wall-clock, USD per +1% throughput |
+   | Coverage | what the ledger does **not** contain — read this before quoting anything |
+   | What each phase bought | gain beside cost, and USD per +1%, per phase |
+   | Spend by phase | share of the bill, with the concentration curve |
+   | Inside each phase | the deep dive: cost by position in the conversation, ISL growth, per-call cost percentiles, tool mix, and the agent roster |
+   | Delegation signals | which phases look mechanical enough to hand to a cheaper model |
+
+   **Reading the deep dive.** Every agent's conversation is stretched onto the
+   same 0-9 scale, so the position curve answers *"does a call get more expensive
+   the longer its conversation runs?"* without being dominated by whichever agent
+   ran longest. It does: each call re-sends the conversation so far, so ISL
+   climbs through a conversation and the later deciles cost more. Agents with
+   fewer than 10 calls cannot be bucketed and are excluded; the count of those
+   is printed so the exclusion is visible.
+
+   **The delegation table is signals, not a verdict.** A high tool-call rate and
+   a flat per-call cost say a phase is a mechanical loop; they do not say a
+   smaller model would get the same answer. Nothing in the ledger can say that.
+
+4. **For the cross-hierarchy view**, add `--join-hyperloom <SESSION_DIR>`. The
    GEAK tree is nested under the session's `KERNEL_AGENT` phase, so one document
    carries Hyperloom phases on top and GEAK phases inside. Rows the GEAK
    harvester already wrote into that session's `ext/` shard are dropped first,
    so the run is not billed twice.
 
-4. **Read the Coverage section before quoting a number.** It is printed first
+5. **Read the Coverage section before quoting a number.** It is printed first
    for that reason.
 
 ## Options that widen the report
@@ -99,6 +136,9 @@ context is what `isl` counts.
 - **Summed agent durations exceed the run's wall-clock** wherever the script
   fanned out. The record's `durationMs` is the wall-clock; quote that for
   elapsed time and the sum for compute-time attribution.
+- **Agent roles in the HTML are derived from the prompt text**, not recorded.
+  A prompt that does not open with a role sentence renders as `unlabelled`
+  and is counted as such in Coverage — never guessed at.
 - **A repeated label gets `#2`, `#3`** suffixes — those are separate agents
   (a retry, or an unnumbered fan-out), not duplicates to merge.
 
