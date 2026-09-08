@@ -348,6 +348,40 @@ def test_agent_prompt_spells_out_nested_identity_and_evidence_list() -> None:
     assert "before investigating secondary candidates" in prompt
 
 
+def test_the_prompt_does_not_talk_a_collective_out_of_being_published() -> None:
+    """Every rule that could read as "skip the comms operator" is answered.
+
+    A collective reaches the analyst looking exactly like the thing the
+    editable-source rule exists to reject: a mangled symbol inside a vendor
+    comms library, split across rows that each understate it, carrying no
+    shapes. Each of those is a true statement about the evidence and a wrong
+    reason to drop the operator, so the prompt has to answer all of them where
+    they are read -- a carve-out further down is read after the decision.
+    """
+    prompt = _system_prompt()
+
+    # The editable-source rule must carry its own exception rather than leave
+    # it to a later rule.
+    editable_rule = prompt.split("2. Publish only operators with editable")[1].split("\n3.")[0]
+    assert "that alone does not disqualify it" in editable_rule
+    assert "which algorithm is chosen" in editable_rule
+
+    # The layer around the kernel is a target in its own right.
+    assert "rewriting that layer is a real optimization, not a workaround" in prompt
+    assert "the dispatch\n   layer that selects and configures it is" in prompt
+
+    # Leading with the skip is what made the exception easy to miss.
+    assert "A communication operator is a first-class target" in prompt
+    assert "Skip a collective only after" in prompt
+
+    # Ranking one prorated row against a fused GEMM is not like-for-like.
+    assert "nccl_summary_total_ms" in prompt
+
+    # Missing shapes are how the evidence arrives, not a defect in it.
+    assert "arrive with no shapes" in prompt
+    assert "is not\n    a reason to skip the candidate" in prompt
+
+
 def test_agent_failure_still_publishes_a_complete_task(tmp_path: Path) -> None:
     repo, _base_commit = _repo(tmp_path)
     layout = ControllerLayout(tmp_path / "output")

@@ -224,7 +224,12 @@ Apply these non-negotiable opportunity rules:
 2. Publish only operators with editable implementation source in one supplied
    Git repository. If the active implementation is available only as a binary,
    shared library, HSACO, or other generated artifact without a tracked editable
-   generator source, skip it.
+   generator source, skip it. Read this rule carefully before applying it to a
+   collective: its kernel usually does ship inside a vendor comms library, and
+   that alone does not disqualify it. What drives the collective is editable
+   here -- which algorithm is chosen, the size thresholds that choose it, buffer
+   and IPC registration, the quantized path, how it is captured into a graph --
+   and rewriting that layer is a real optimization, not a workaround.
 3. Prefer the largest measured end-to-end GPU-time share. Assign lower numeric
    priority values to higher-share operators. When exact percentages are
    unavailable, rank only from clearly labeled corroborated evidence and never
@@ -243,14 +248,27 @@ Apply these non-negotiable opportunity rules:
    custom_all_reduce_tp8) because the same collective at different rank counts
    is a different optimization target. Choose backend aiter for editable
    all_reduce / reduce_scatter / all_gather sources in aiter.
-8. Publish only communication operators with editable tracked source. Skip RCCL
-   and NCCL vendor binaries with no editable generator. kernel_candidates.json
-   rows with candidate_source nccl_summary already map mangled kernels back to
-   editable aiter device sources; those are valid publish targets.
-9. Do not author distributed launch or cross-rank measurement logic in driver.py.
-   Write the same single-process driver contract; forge-loop task preparer adds
-   torchrun launch, process-group setup, and cross-rank reductions when
-   world_size > 1.
+8. A communication operator is a first-class target, not a special case to be
+   avoided. Publish it when its own source is editable, or when the dispatch
+   layer that selects and configures it is. A candidate row whose
+   candidate_source is nccl_summary has already resolved a mangled comms symbol
+   to the editable device source that launched it. Skip a collective only after
+   establishing that neither its kernel nor anything that chooses, configures or
+   registers it can be edited in a supplied repository.
+9. Rank a collective on the communication total, not on one kernel row. One
+   logical collective is split across several rows whose durations are prorated
+   from a sample, so every row understates it and comparing those rows against a
+   single fused GEMM is not a like-for-like comparison. Use
+   nccl_summary_total_ms, which those rows carry, as the share to rank on.
+10. Expect a communication candidate to arrive with no shapes. A comms summary
+    row carries no tensor metadata, so an empty shapes list is normal and is not
+    a reason to skip the candidate or to call its evidence weak. Derive the cases
+    from the serving state instead: the TP width, the hidden size, the dtype and
+    the batch and sequence extents this workload actually runs.
+11. Do not author distributed launch or cross-rank measurement logic in driver.py.
+    Write the same single-process driver contract; forge-loop task preparer adds
+    torchrun launch, process-group setup, and cross-rank reductions when
+    world_size > 1.
 
 Do not start profiling, serving, or benchmark commands. Shell execution is not
 available. Use read and search tools for investigation. You may write only under
