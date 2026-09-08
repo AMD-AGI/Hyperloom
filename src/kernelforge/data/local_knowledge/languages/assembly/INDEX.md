@@ -2,6 +2,7 @@
 title: AMDGPU assembly workflow
 kind: index
 scope: languages/assembly
+updated: 2026-09-08
 ---
 
 <!--
@@ -16,6 +17,26 @@ register pressure, spills, barriers, or waits. Structural changes belong first
 in FlyDSL, Triton/Gluon, or HIP; compile a fresh assembly baseline after each
 such change. Read the actual GPU's ISA and memory-ordering documentation from
 the hardware knowledge map before changing synchronization or register usage.
+
+## Case knowledge: Neha / Evolve
+
+Read these cards when the symptom matches. Paths are relative to this folder.
+They distill Neha Prakriya's published Evolve-produced kernels, launcher, and
+tests, with commit-pinned sources. They are not a copy of Evolve's agent skill
+or search controller, which are not available in these sources.
+
+| Symptom or decision | Read | Transferable lesson |
+| --- | --- | --- |
+| Two reductions over the same input; dependency-bound wave reduction | [AttnRes score](cases/evolve_attnres_score_gfx950.md) | Interleave independent DPP chains; finish wave partials through compact LDS. |
+| Small softmax followed by a weighted sum; proposed load/barrier overlap | [AttnRes combine](cases/evolve_attnres_combine_gfx950.md) | Schedule independent exponentials; audit live registers before moving loads. |
+| A standalone `.s`/`.co` looks fast but its execution path is unverified | [HIP module integration](guides/hip_module_validation.md) | Verify ABI, candidate identity, stream, oracle, and timing before accepting a result. |
+
+These cases replace Triton kernels with handwritten gfx950 assembly. The
+AITER launcher lives under `ops/flydsl/` but uses HIP module APIs directly;
+it is not evidence of FlyDSL `CompiledFunction` compatibility. Their fixed
+Kimi-K3 shape and author-reported timings do not establish performance on
+other shapes, GPUs, MoE kernels, or Forge's FlyDSL adapter. The cards distinguish
+source observations, reported results, and experiments still to run.
 
 ## Source and toolchain
 
