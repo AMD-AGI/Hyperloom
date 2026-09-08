@@ -158,6 +158,7 @@ def _coverage_gaps(demand_report: dict | None, tuner_specs: list, output_dir: Pa
         log.debug("could not record coverage gaps", exc_info=True)
         return []
 
+
 def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
     """Return a usable shapes-JSON *file path*, materializing inline content.
 

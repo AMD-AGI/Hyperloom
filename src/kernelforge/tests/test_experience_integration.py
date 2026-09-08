@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.config import Config
 from kernelforge.knowledge import experience_integration as integ
 from kernelforge.knowledge.implementation_identity import implementation_signature
 from kernelforge.rewrite_by_flydsl import driver_contract, record_store, runner

@@ -12,7 +12,7 @@ that is not there.
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune.coverage import CoverageGap, coverage_gaps
+from kernelforge.gemm_tune.coverage import coverage_gaps
 from kernelforge.gemm_tune.router import TunerSpec
 
 
@@ -99,4 +99,3 @@ class TestCoverageGaps:
             ]
         }
         assert [g.table for g in coverage_gaps(report, [])] == ["big.csv", "small.csv"]
-

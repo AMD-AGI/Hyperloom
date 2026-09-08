@@ -39,7 +39,6 @@ from kernelforge.orchestrator.contracts import PlanCriticOutcome
 from kernelforge.tracker import ExperimentTracker
 
 
-
 def _loop(tmp_path, monkeypatch):
     """A loop with a committed workspace and a durable event log."""
     workspace = tmp_path / "workspace"
