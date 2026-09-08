@@ -17,6 +17,7 @@ import socket
 import subprocess  # nosec B404 - spawns a process purely so its pid can be signalled
 import sys
 import time
+from unittest import mock
 
 import pytest
 
@@ -45,6 +46,16 @@ def _own_the_session(session_dir, pid: int) -> None:
     path = optimizer_lock_path(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"pid": pid, "hostname": socket.gethostname()}), encoding="utf-8")
+
+
+def _stamp_tick_as(session_dir, pid: int, *, tick: int, now_unix: float) -> None:
+    """Stamp a tick the way the coordinator owning ``pid`` would have.
+
+    The coordinator writes the lock and the stamp from one process, so a stamp
+    carrying a different pid than the lock owner is a previous leg's.
+    """
+    with mock.patch.object(store.os, "getpid", return_value=pid):
+        store.stamp_tick(session_dir, tick=tick, now_unix=now_unix)
 
 
 def _a_pid_that_is_gone() -> int:
@@ -110,6 +121,17 @@ def test_a_live_pid_with_a_stopped_tick_is_wedged(tmp_path):
     assert observation.verdict == WEDGED
 
 
+def test_a_resumed_owner_is_not_wedged_by_the_previous_legs_stamp(tmp_path):
+    """The stamp file outlives its leg; a resume must not inherit its age."""
+    _own_the_session(tmp_path, os.getpid())
+    _stamp_tick_as(tmp_path, os.getpid() + 1, tick=25, now_unix=_NOW - 9_999.0)
+
+    observation = _supervisor(tmp_path, tick_stall_sec=100.0).observe()
+
+    assert observation.verdict == ALIVE
+    assert observation.tick == 0
+
+
 def test_an_owner_on_another_host_is_never_diagnosed(tmp_path):
     """A pid means nothing off the machine that issued it."""
     path = optimizer_lock_path(tmp_path)
@@ -132,7 +154,7 @@ async def test_a_wedged_coordinator_is_asked_to_stop_on_the_one_channel_that_rea
     """A signal is recorded by the drain thread; nothing the loop reads is."""
     pid = _a_pid_that_is_running(request)
     _own_the_session(tmp_path, pid)
-    store.stamp_tick(tmp_path, tick=1, now_unix=_NOW - 9_999.0)
+    _stamp_tick_as(tmp_path, pid, tick=1, now_unix=_NOW - 9_999.0)
     supervisor = _supervisor(tmp_path, tick_stall_sec=100.0)
 
     await supervisor.act(supervisor.observe())
@@ -147,7 +169,7 @@ async def test_the_stop_is_asked_for_once_and_then_waited_on(tmp_path, request):
     """A signal per poll would be a stop the coordinator never gets to run."""
     pid = _a_pid_that_is_running(request, deaf=True)
     _own_the_session(tmp_path, pid)
-    store.stamp_tick(tmp_path, tick=1, now_unix=_NOW - 9_999.0)
+    _stamp_tick_as(tmp_path, pid, tick=1, now_unix=_NOW - 9_999.0)
     supervisor = _supervisor(tmp_path, tick_stall_sec=100.0, stop_grace_sec=1_000.0)
 
     await supervisor.act(supervisor.observe())
@@ -162,7 +184,7 @@ async def test_a_coordinator_that_ignores_the_stop_is_left_diagnosed(tmp_path, r
     """A stop that goes unanswered is reported, not escalated to a kill."""
     pid = _a_pid_that_is_running(request, deaf=True)
     _own_the_session(tmp_path, pid)
-    store.stamp_tick(tmp_path, tick=1, now_unix=_NOW - 9_999.0)
+    _stamp_tick_as(tmp_path, pid, tick=1, now_unix=_NOW - 9_999.0)
     supervisor = _supervisor(tmp_path, tick_stall_sec=100.0, stop_grace_sec=0.0)
 
     await supervisor.act(supervisor.observe())

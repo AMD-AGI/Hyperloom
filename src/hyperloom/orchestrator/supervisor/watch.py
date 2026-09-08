@@ -183,6 +183,13 @@ class Supervisor:
             # A pid is only meaningful on the host that issued it.
             return Observation(UNKNOWN, pid=pid, detail=f"owner recorded on another host ({host})")
         stamp = store.read_tick(self.session_dir)
+        if stamp is not None and stamp.pid != pid:
+            # The stamp file outlives the leg that wrote it, so a resume finds
+            # the previous owner's stamp already older than any stall window:
+            # aging a stamp this owner did not write would end the session it
+            # just restarted. Both files are written by the coordinator itself,
+            # so a pid mismatch means this owner has not reached its first tick.
+            stamp = None
         age = -1.0 if stamp is None else max(0.0, self._now() - stamp.stamped_unix)
         tick = 0 if stamp is None else stamp.tick
         if not running(pid):
