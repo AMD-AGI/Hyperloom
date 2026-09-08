@@ -349,6 +349,7 @@ async def _run_agent(
             "reference implementation. Work directly in the supplied git worktree."
         ),
         user_prompt=prompt,
+        role="flydsl applyback",
         cwd=str(worktree),
         writable=True,
         timeout_sec=timeout_sec,

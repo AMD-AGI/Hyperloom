@@ -5613,6 +5613,18 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"{cost_text} "
                 f"({self.llm_usage['calls']} calls)"
             )
+            # The total alone says a campaign was expensive; it never says what
+            # was expensive. Print the split so the next cut can be aimed.
+            by_role = self.llm_usage.get("by_role") or {}
+            for name, counters in by_role.items():
+                role_cost = (
+                    f"${counters['total_cost_usd']:.2f}" if cost_available else "cost unavailable"
+                )
+                print(
+                    f"    {name}: {counters['input_tokens']:,} in / "
+                    f"{counters['output_tokens']:,} out tokens, "
+                    f"{role_cost} ({counters['calls']} calls)"
+                )
         print(f"  Experiment: {self.experiment.experiment_id}")
 
         return self.results

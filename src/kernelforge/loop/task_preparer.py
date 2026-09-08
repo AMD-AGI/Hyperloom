@@ -1119,6 +1119,7 @@ async def _run_prepare_agent(
     spec = AgentRunSpec(
         system_prompt=system_prompt,
         user_prompt=prompt,
+        role="task preparation",
         cwd=str(workspace),
         writable=True,
         timeout_sec=max(1, int(timeout_sec)),

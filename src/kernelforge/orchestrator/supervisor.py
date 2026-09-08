@@ -266,6 +266,7 @@ def make_supervisor_fn(
                         AgentRunSpec(
                             system_prompt=_SUPERVISOR_ROLE,
                             user_prompt=user_prompt,
+                            role="supervisor",
                             cwd=workspace,
                             writable=False,
                             timeout_sec=session_budget,

@@ -539,7 +539,7 @@ class ClaudeBackend:
                 async with deadline:
                     async for message in agen:
                         if usage is not None:
-                            usage.add_from_message(message)
+                            usage.add_from_message(message, role=spec.role)
                         _record_progress(spec.progress_log, message)
                         # The init SystemMessage and the final ResultMessage both carry the session id; keep the
                         # latest non-empty one so a caller can resume this exact conversation later.

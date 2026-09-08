@@ -1184,6 +1184,7 @@ class OrchestrationAgent:
                         user_prompt=user_prompt,
                         max_turns=max_turns,
                         timeout_sec=effective_timeout,
+                        role=role,
                         tools=tools,
                     ),
                     usage=usage,
@@ -1214,6 +1215,7 @@ class OrchestrationAgent:
             user_prompt="",
             max_turns=max_turns,
             timeout_sec=timeout_sec,
+            role=role,
             read_only_resume=True,
         )
         try:
@@ -1239,6 +1241,7 @@ class OrchestrationAgent:
         user_prompt: str,
         max_turns: int | None,
         timeout_sec: int,
+        role: str = "orchestration",
         read_only_resume: bool = False,
         tools: bool = True,
     ) -> AgentRunSpec:
@@ -1249,6 +1252,7 @@ class OrchestrationAgent:
             cwd=context.workspace,
             writable=False,
             timeout_sec=timeout_sec,
+            role=role,
             read_only_resume=read_only_resume,
             allow_dirty_targets=read_only_resume,
             allow_untracked=read_only_resume,

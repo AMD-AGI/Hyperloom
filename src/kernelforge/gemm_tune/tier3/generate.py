@@ -106,6 +106,7 @@ def generate_tuner(
         return GeneratedTuner(False, None, f"agent provider unusable: {exc!r}")
 
     spec = AgentRunSpec(
+        role="gemm tuner authoring",
         system_prompt=_SYSTEM_PROMPT,
         user_prompt=_user_prompt(mandate, script_path, retry_note),
         cwd=str(work_dir),

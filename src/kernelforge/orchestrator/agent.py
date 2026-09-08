@@ -574,6 +574,7 @@ Make your change(s) now.
         run_spec = AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=prompt,
+            role="implementer",
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
