@@ -426,12 +426,12 @@ class ClaudeBackend:
                 # ``allowed_tools`` is only a permission list: the CLI still loads
                 # and describes every built-in tool, and those schemas sit in the
                 # cached prefix that is re-read on every turn of the session. A
-                # trivial one-turn session measures 33,374 prefix tokens with the
-                # default set and 6,148 with the four an implementer actually uses,
-                # so naming the base set here takes ~27k tokens off *each* turn --
-                # on a 72-turn session that is most of its cache_read. MCP tools
-                # are not part of the built-in set and are carried by
-                # ``allowed_tools`` alone.
+                # one-turn session carrying the real implementer prompt measures
+                # 49,115 prefix tokens with the default set and 23,510 naming the
+                # six an implementer uses, so naming the base set here takes 25,605
+                # tokens off *each* turn -- on a 72-turn session that is about 1.84M
+                # fewer cached tokens read. MCP tools are not part of the built-in
+                # set and are carried by ``allowed_tools`` alone.
                 tools=_builtin_tools(allowed_tools),
                 permission_mode=(policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
             )
