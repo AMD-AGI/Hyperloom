@@ -5958,7 +5958,7 @@ class WritebackCollaborator:
         # a result carrying an accepted, positive-delta kernel is revalidated
         # too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
-        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or "env_map" in ps_cfg or ps_overlay):
             from ..actions.executors._proposal_identity import effective_fingerprint
 
             ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)

@@ -460,6 +460,41 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     )
 
 
+@pytest.mark.asyncio
+async def test_structured_environment_alone_dispatches_geak_rebench(coordinator) -> None:
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.geak_result = {"status": "ok", "accepted_config": {"env_map": {"SGLANG_USE_AITER": "1"}}}
+
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    row = await coordinator.tasks.get(str(enqueued["task_id"]))
+    entry = row.params["grid"][0]
+    ran = GridVariant(str(entry["name"]), str(entry["extra_args"]), dict(entry["extra_envs"]))
+    assert row.params["geak_fallback"] is True
+    assert ran.extra_envs == {"SGLANG_USE_AITER": "1"}
+    assert row.params["expected_cfg_hash"] == ran.fingerprint
+
+
+@pytest.mark.asyncio
+async def test_empty_structured_environment_does_not_rebench_legacy_values(coordinator) -> None:
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.geak_result = {"status": "ok", "accepted_config": {"env_map": {}, "env": "SGLANG_USE_AITER=1"}}
+
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert enqueued["skipped"] is True
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_map", [None, [], {"SGLANG_USE_AITER": 1}])
+async def test_malformed_structured_environment_does_not_dispatch(coordinator, env_map) -> None:
+    coordinator.shared_state.geak_result = {"status": "ok", "accepted_config": {"env_map": env_map}}
+    with pytest.raises(ValueError, match="env_map must map strings to strings"):
+        await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert not await coordinator.tasks.queued()
+
+
 def test_material_check_ignores_untrusted_env_names() -> None:
     """An untrusted key on one side only must not read as a config difference."""
     from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
