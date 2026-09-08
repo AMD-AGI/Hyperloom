@@ -1020,12 +1020,12 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_setup_commands"] == ["pip install -U transformers"]
-    assert "STACKED ENABLEMENT" in params["notes"]
+    assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "setup command" in params["notes"]
 
 
-def test_build_params_threads_base_patches_when_stacked(monkeypatch):
-    """Stacked kept-patches are passed to the next round + noted in the mandate."""
+def test_build_params_notes_prior_patches_for_mandate(monkeypatch):
+    """Stacked kept-patches appear in the specialist mandate note."""
     _stub_enumerate(monkeypatch, [])
     fake = _fake_self()
     fake.shared_state.enablement.kept_patches = [
@@ -1033,11 +1033,8 @@ def test_build_params_threads_base_patches_when_stacked(monkeypatch):
     ]
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
-    assert params["enablement_base_patches"] == [
-        "/s/runs/specialist/t1/patches/001_qk_rope.patch",
-    ]
-    # The mandate tells the specialist the prior patch is already applied.
-    assert "STACKED ENABLEMENT" in params["notes"]
+    assert "enablement_base_patches" not in params
+    assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "001_qk_rope.patch" in params["notes"]
 
 

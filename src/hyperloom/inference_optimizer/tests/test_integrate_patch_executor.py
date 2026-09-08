@@ -1060,8 +1060,7 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
 
     The server still does not fully boot (output_throughput=0), but the failure
     moved to a new, deeper actionable signature -> status='advanced': the patch
-    is recorded for stacking, the new failure log is surfaced, and the working
-    tree is reverted to clean for deterministic re-application next round.
+    stays permanently in the tree so the next round builds on it.
     """
     new_gap = (
         "ValueError: Following weights were not initialized from checkpoint: "
@@ -1080,57 +1079,111 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
     assert result["enablement"] is True
     assert result["runnable"] is False
     assert len(result["patches_applied"]) == 1
+    assert result["patches_reverted"] == []
     assert "not initialized from checkpoint" in result["enablement_launch_log"]
     assert result["after_signature"]["kind"] == "missing_weight"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
+    # Patch stays in the tree permanently; the next round builds on it.
+    assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
 @pytest.mark.asyncio
-async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeypatch):
-    """enablement_base_patches are applied before this round's patch (serial gaps)."""
+async def test_enablement_advanced_commits_to_git_root(tmp_path: Path, monkeypatch):
+    """An accepted 'advanced' round commits to the git root for cross-round durability."""
+    new_gap = "ValueError: weight not found\n"
+    result, repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=False,
+        bench_error=new_gap,
+        before_log="RuntimeError: shape mismatch\n",
+        after_log=new_gap,
+    )
+    assert result["status"] == "advanced"
+    assert result["patches_reverted"] == []
+    # The patch must be committed so a later ``git checkout --force HEAD`` does not erase it.
+    log = subprocess.check_output(
+        ["git", "-C", str(repo), "log", "--oneline", "-2"],
+        text=True,
+    )
+    assert "hyperloom advanced" in log
+
+
+@pytest.mark.asyncio
+async def test_enablement_zero_patch_round_does_not_erase_prior_accepted_work(
+    tmp_path: Path, monkeypatch
+):
+    """An env-only round that reverts must not touch files from a prior accepted round.
+
+    On a non-git tree the per-round backup root must be isolated so _revert_patches
+    for a zero-patch round cannot merge the previous round's ledger and undo
+    accumulated work.
+    """
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    repo = tmp_path / "framework"
-    init_git_repo(repo)
-    # A base patch touching a different file, plus this round's patch on src.py.
-    (repo / "other.py").write_text("def g():\n    return 10\n", encoding="utf-8")
-    git_commit_all(repo, "add other")
-    base_patch = tmp_path / "base_000.patch"
-    base_patch.write_text(
-        "--- a/other.py\n+++ b/other.py\n@@ -1,2 +1,2 @@\n def g():\n-    return 10\n+    return 20\n",
-        encoding="utf-8",
-    )
-    _write_specialist_workspace(session_dir, "t-spec-stack", patch_contents=[_VALID_PATCH])
-    executor = IntegratePatchExecutor(session_dir=session_dir)
+    # Use a plain directory (not a git repo) to exercise the nogit path.
+    # Named "framework" so the autouse allowlist fixture picks it up.
+    framework_root = tmp_path / "framework"
+    framework_root.mkdir()
+    (framework_root / "src.py").write_text("def f():\n    return 1\n", encoding="utf-8")
 
-    async def _fake_bench(**_kwargs):
-        return {
-            "output_throughput": 200.0,
-            "error": "",
-            "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
-        }, {
-            "accuracy_pass": None,
-            "enablement_accuracy": 0.5,
-            "timed_out": False,
-        }
+    _write_specialist_workspace(session_dir, "t-spec-patch", patch_contents=[_VALID_PATCH])
+    _write_specialist_workspace(session_dir, "t-spec-env", patch_contents=[])
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
 
     async def _noop_kb(**_kwargs):
         return None
 
-    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
 
-    params = {
-        "specialist_task_id": "t-spec-stack",
-        "framework_source_root": str(repo),
+    # Round 1: apply the patch and accept as advanced (not yet runnable).
+    new_gap = "MissingKernelError: kernel not found\n"
+
+    async def _fake_bench_round1(**_kwargs):
+        return {
+            "output_throughput": 0.0,
+            "error": new_gap,
+            "boot_observation_path": _persist_observation(session_dir, "after1", new_gap),
+        }, {"accuracy_pass": None, "enablement_accuracy": None, "timed_out": False}
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench_round1)
+    params1 = {
+        "specialist_task_id": "t-spec-patch",
+        "framework_source_root": str(framework_root),
         "enablement": True,
-        "enablement_base_patches": [str(base_patch)],
+        "enablement_before_observation_path": _persist_observation(
+            session_dir, "before1", "RuntimeError: shape mismatch\n"
+        ),
     }
-    result = await executor(_make_ctx("t-int-stack", params))
-    assert result["status"] == "kept"
-    assert len(result["patches_applied"]) == 2
-    assert (repo / "other.py").read_text().endswith("return 20\n")
-    assert (repo / "src.py").read_text().endswith("return 2\n")
+    result1 = await executor(_make_ctx("t-int-patch", params1))
+    assert result1["status"] == "advanced", result1.get("reason")
+    # The patch landed.
+    assert (framework_root / "src.py").read_text().endswith("return 2\n")
+
+    # Round 2: env-only round that ends up reverting (no gain, still not runnable).
+    async def _fake_bench_round2(**_kwargs):
+        return {
+            "output_throughput": 0.0,
+            "error": new_gap,
+            "boot_observation_path": _persist_observation(session_dir, "after2", new_gap),
+        }, {"accuracy_pass": None, "enablement_accuracy": None, "timed_out": False}
+
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench_round2)
+    params2 = {
+        "specialist_task_id": "t-spec-env",
+        "framework_source_root": str(framework_root),
+        "enablement": True,
+        "extra_envs": {"MY_FLAG": "1"},
+        "enablement_before_observation_path": _persist_observation(
+            session_dir, "before2", new_gap
+        ),
+    }
+    result2 = await executor(_make_ctx("t-int-env", params2))
+    assert result2["status"] == "reverted"
+    # Round 1's patch must still be in the tree after round 2's revert.
+    assert (framework_root / "src.py").read_text().endswith("return 2\n"), (
+        "prior accepted patch was erased by a later zero-patch round's revert"
+    )
 
 
 @pytest.mark.parametrize(

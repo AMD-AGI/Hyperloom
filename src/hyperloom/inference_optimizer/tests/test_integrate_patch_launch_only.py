@@ -118,7 +118,6 @@ async def test_launch_only_skips_critic_gate(tmp_path):
     ("field", "value"),
     [
         ("patches", ["candidate.patch"]),
-        ("enablement_base_patches", ["base.patch"]),
         ("localization_candidate", {"kind": "pr_backport"}),
         ("runtime_candidate", {"kind": "runtime_candidate"}),
         ("artifacts", [{"source": "x", "target": "y"}]),
