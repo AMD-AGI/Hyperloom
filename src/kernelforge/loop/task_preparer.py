@@ -1754,6 +1754,14 @@ Requirements specific to a collective:
   kernel's own Python binding to see what it expects.
 * Check correctness against the matching `torch.distributed` collective — it is
   the only reference that is itself distributed.
+* Validate two calls back to back, never one at a time. Build two different
+  inputs, issue both candidate calls, and compare both results only afterwards.
+  A compiled collective usually writes into a registered scratch buffer, so a
+  second call can overwrite the first call's output before anything has read
+  it. Validating each call the moment it is issued cannot see that, because
+  nothing has overwritten anything yet — and removing a synchronisation, which
+  is the change this lane's optimizer is most likely to make, is exactly what
+  opens the race.
 * Reduce every metric across ranks before printing: take the SLOWEST rank's
   time (a collective is as fast as its laggard) and the WORST rank's SNR (one
   wrong rank is a wrong collective). Print only from rank 0.
@@ -1775,9 +1783,16 @@ Requirements specific to a collective:
 The deterministic check observes the run itself and will reject it when the
 declared {nproc} ranks did not launch, when two ranks share a device, when the
 benchmark reduces across ranks without ever taking the slowest one, or when a
-rank exits with its process group still initialized. The remaining
-requirements above are yours to hold: nothing measures them for you, and
-getting one wrong buys a wasted end-to-end validation.
+rank exits with its process group still initialized.
+
+Every other requirement above is yours to hold, and they are not all the same
+size. Getting the timed region wrong costs an end-to-end validation that was
+never going to pay out. Getting a correctness one wrong -- identical inputs on
+every rank, a single-GPU reference, or validating one call at a time -- costs
+much more than that: each of them lets a candidate that quietly drops work
+report a real speedup and pass, and the end-to-end gate downstream can adopt on
+throughput alone without ever scoring accuracy. Nothing after you is guaranteed
+to catch it.
 """
 
 
