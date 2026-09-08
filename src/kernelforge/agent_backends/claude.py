@@ -425,13 +425,19 @@ class ClaudeBackend:
                 allowed_tools=list(dict.fromkeys(allowed_tools)),
                 # ``allowed_tools`` is only a permission list: the CLI still loads
                 # and describes every built-in tool, and those schemas sit in the
-                # cached prefix that is re-read on every turn of the session. A
-                # one-turn session carrying the real implementer prompt measures
-                # 49,115 prefix tokens with the default set and 23,510 naming the
-                # six an implementer uses, so naming the base set here takes 25,605
-                # tokens off *each* turn -- on a 72-turn session that is about 1.84M
-                # fewer cached tokens read. MCP tools are not part of the built-in
-                # set and are carried by ``allowed_tools`` alone.
+                # cached prefix that is re-read on every turn of the session, so
+                # naming the base set here is a per-turn saving rather than a
+                # one-off. Two measurements, because they differ a lot. A bare
+                # one-turn session carrying the implementer prompt and nothing
+                # else measures 49,115 prefix tokens with the default set and
+                # 23,510 naming the six an implementer uses (-25,605). In a real
+                # campaign the same change moved an analysis session's prefix
+                # only 56,592 -> 51,275 (-5,317), because there the inlined
+                # knowledge maps, not the tool schemas, dominate the prefix.
+                # Quote the second number for production; the first is an upper
+                # bound that only holds once the maps are out of the way.
+                # MCP tools are not part of the built-in set and are carried by
+                # ``allowed_tools`` alone.
                 tools=_builtin_tools(allowed_tools),
                 permission_mode=(policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
             )
