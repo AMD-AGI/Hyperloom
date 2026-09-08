@@ -357,11 +357,15 @@ def _prepare_with_model_fallback(
 
 
 def _resolve_provider_fallback_model(registration: AgentProvider) -> str:
-    """Resolve the probe/SDK fallback model. Claude honors FORGE_CLAUDE_FALLBACK_MODEL."""
+    """Resolve the probe/SDK fallback model from FORGE_*_FALLBACK_MODEL when set."""
     if registration.name == "claude":
         from kernelforge.agent_backends.claude import resolve_claude_fallback_model
 
         return resolve_claude_fallback_model(registration.fallback_model)
+    if registration.name == "codex":
+        from kernelforge.agent_backends.codex import resolve_codex_fallback_model
+
+        return resolve_codex_fallback_model(registration.fallback_model)
     return (registration.fallback_model or "").strip()
 
 

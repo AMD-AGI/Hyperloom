@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,21 @@ _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 DEFAULT_CODEX_MODEL = "gpt-5.6"
 FALLBACK_CODEX_MODEL = "gpt-5.5"
+_FALLBACK_MODEL_DISABLE = frozenset({"none", "off"})
+
+
+def resolve_codex_fallback_model(default: str = FALLBACK_CODEX_MODEL) -> str:
+    """Resolve Codex model fallback from ``FORGE_CODEX_FALLBACK_MODEL``.
+
+    Unset or blank keeps ``default``. ``none`` / ``off`` disables fallback.
+    """
+    raw = os.environ.get("FORGE_CODEX_FALLBACK_MODEL")
+    if raw is None or not raw.strip():
+        return default
+    stripped = raw.strip()
+    if stripped.lower() in _FALLBACK_MODEL_DISABLE:
+        return ""
+    return stripped
 
 
 class CodexBackendError(AgentProviderError):
@@ -376,13 +392,17 @@ class CodexBackend:
         runtime: AgentRuntimeConfig | None = None,
     ) -> None:
         """Capture transport overrides while deferring checks until execution."""
-        self.runtime = runtime or AgentRuntimeConfig(
-            provider=self.name,
-            model=DEFAULT_CODEX_MODEL,
-            fallback_model=FALLBACK_CODEX_MODEL,
-            executable=codex_bin,
-            sandbox_mode=("bypass" if bypass_sandbox is not False else "workspace-write"),
-        )
+        if runtime is None:
+            runtime = AgentRuntimeConfig(
+                provider=self.name,
+                model=DEFAULT_CODEX_MODEL,
+                fallback_model=resolve_codex_fallback_model(),
+                executable=codex_bin,
+                sandbox_mode=("bypass" if bypass_sandbox is not False else "workspace-write"),
+            )
+        elif runtime.fallback_model is None:
+            runtime = replace(runtime, fallback_model=resolve_codex_fallback_model())
+        self.runtime = runtime
         configured_gateway = self.runtime.options.get("gateway")
         if gateway is None and isinstance(configured_gateway, Mapping):
             gateway = configured_gateway
@@ -887,6 +907,7 @@ __all__ = [
     "DEFAULT_CODEX_MODEL",
     "FALLBACK_CODEX_MODEL",
     "resolve_codex_cli",
+    "resolve_codex_fallback_model",
     "resolve_codex_gateway",
     "resolve_codex_model",
     "resolve_codex_reasoning_effort",

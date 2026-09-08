@@ -39,6 +39,7 @@ def isolated_provider_registry(monkeypatch):
     monkeypatch.setattr(registry, "_providers", dict(registry._providers))
     monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
     monkeypatch.delenv("FORGE_CLAUDE_FALLBACK_MODEL", raising=False)
+    monkeypatch.delenv("FORGE_CODEX_FALLBACK_MODEL", raising=False)
 
 
 @pytest.fixture
@@ -197,6 +198,24 @@ def test_replaced_primary_model_keeps_claude_fallback() -> None:
 
     runtime = replace(resolve_agent_runtime("claude", model="claude-opus-4-8"), model="supervisor-model")
     assert runtime.fallback_model == "claude-opus-4-8"
+
+
+def test_codex_fallback_model_env_overrides_default(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_CODEX_FALLBACK_MODEL", "gpt-5.4")
+    runtime = resolve_agent_runtime("codex", model="gpt-5.6")
+    assert runtime.fallback_model == "gpt-5.4"
+
+
+def test_codex_fallback_model_env_none_disables(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_CODEX_FALLBACK_MODEL", "none")
+    runtime = resolve_agent_runtime("codex", model="gpt-5.6")
+    assert runtime.fallback_model == ""
+
+
+def test_codex_fallback_model_blank_env_keeps_default(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_CODEX_FALLBACK_MODEL", "")
+    runtime = resolve_agent_runtime("codex", model="gpt-5.6")
+    assert runtime.fallback_model == "gpt-5.5"
 
 
 def test_probe_uses_registration_fallback_when_runtime_omits_it() -> None:
