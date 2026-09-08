@@ -217,6 +217,11 @@ def test_reuses_only_measurement_for_exact_candidate(tmp_path, monkeypatch):
         measurement,
         attempt_diff=attempt_diff,
     )
+    loop.ic = replace(loop.ic, commit_new_paths=["*.s"])
+    assembly = workspace / "kernel.s"
+    assembly.write_text("s_endpgm\n")
+    assert not loop._can_reuse_insession_benchmark(measurement, attempt_diff=attempt_diff)
+    assembly.unlink()
     measurement["candidate_diff_sha256"] = hashlib.sha256(b"").hexdigest()
     assert not loop._can_reuse_insession_benchmark(
         measurement,
@@ -277,6 +282,48 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     assert pending["search_control"] == {
         "diversification_cycle_completed": True,
     }
+
+
+@pytest.mark.parametrize("assembly_source", ["s_endpgm\n", "s_endpgm\n\n", "s_endpgm"])
+def test_pending_keep_includes_new_assembly_in_recovery_and_publication(tmp_path, monkeypatch, assembly_source):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, commit_new_paths=["*.s"])
+    loop.run_state = RunState(campaign_id="new-source", session_index=1)
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def kernel():\n    return 2\n")
+    (workspace / "kernel.s").write_text(assembly_source)
+    (workspace / "notes.txt").write_text("not a candidate\n")
+    result = IterationResult(
+        iteration=1,
+        duration_sec=0.1,
+        validation_passed=True,
+        validation_summary="passed",
+        wall_ms=0.8,
+        mean_case_speedup=1.25,
+        kept=True,
+    )
+    pending = loop._build_pending_keep(
+        result, plan="assembly route", best_before=1.0, rationale="assembly route", kernel_source=kernel.read_text()
+    )
+    assert loop._git("diff", "--cached", "--name-only") == ""
+    commit = loop._git_commit(pending["commit_message"])
+    committed_patch = loop._git("diff", pending["base_head"], commit, "--", ".")
+
+    assert set(pending["changed_files"]) == {"kernel.py", "kernel.s"}
+    assert set(pending["publication_changed_files"]) == {"kernel.py", "kernel.s"}
+    assert pending["patch"] == committed_patch
+    assert pending["publication_patch"].strip() == committed_patch
+    assert pending["patch_sha256"] == hashlib.sha256(committed_patch.encode()).hexdigest()
+    assert "notes.txt" not in committed_patch
+
+    restored = tmp_path / "restored"
+    subprocess.run(["git", "clone", str(workspace), str(restored)], check=True, capture_output=True)
+    subprocess.run(["git", "checkout", pending["base_head"]], cwd=restored, check=True, capture_output=True)
+    for patch in [pending["publication_patch"], loop._publication_patch(commit)]:
+        subprocess.run(["git", "apply", "--check", "-"], cwd=restored, input=patch, text=True, check=True)
+    subprocess.run(["git", "apply", "-"], cwd=restored, input=pending["publication_patch"], text=True, check=True)
+    assert (restored / "kernel.py").read_bytes() == kernel.read_bytes()
+    assert (restored / "kernel.s").read_bytes() == (workspace / "kernel.s").read_bytes()
 
 
 def test_resume_replays_nonkeep_event_ahead_of_state(tmp_path, monkeypatch):

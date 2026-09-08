@@ -2,7 +2,7 @@
 title: AITER W4A16 MoE stage1 - verified FlyDSL assembly roundtrip
 kind: case
 gens: [gfx950]
-status: GPU-validated; no measured optimization benefit
+status: GPU-validated roundtrip and tile/dispatch gain; no assembly-specific gain
 updated: 2026-09-08
 ---
 
@@ -96,5 +96,63 @@ a next profiling hypothesis; the descriptor alone does not prove a
 bottleneck. If layout or tile changes are warranted, make them in FlyDSL,
 regenerate assembly, and repeat the roundtrip check.
 
-This validates stage1 candidate execution, not stage2/reduction, a full
-Kimi configuration, Neha's reported gains, or vLLM end-to-end performance.
+## Attribute tile changes separately from instruction edits
+
+A subsequent Forge agent campaign on the same installation used fixed
+`model_dim=7168`, `inter_dim=2048`, `experts=8`, and `topk=2`. The agent selected
+tile `[32,128,256]` for `tokens <= 129`, reassembled that compiler output, and
+retained the original `[32,256,256]` FlyDSL callable for larger token counts.
+This is a shape-dependent dispatch decision, not a runtime fallback on an
+assembly build or correctness failure. The threshold is specific to this
+experiment; it is not a recommended production dispatch rule.
+
+The protected seven-case driver passed, including ordinary BF16 scales,
+input preservation, and nondefault-stream graph replay. The two equally
+weighted scored cases (129 and 257 tokens) produced a 1.424x mean per-case
+speedup through Forge's statistical KEEP gate. Replaying the exact candidate
+with three fresh outer benchmarks reproduced 1.4243x; deliberately reversing
+the SiLU exponent sign triggered correctness failure and REVERT. Native and
+Hyperloom patches restored both `kernel.py` and `kernel.s` byte-for-byte and
+passed the unchanged driver in new processes with empty compiler caches.
+
+An independent comparison replaced the assembly route with the equivalent
+tuned FlyDSL callable while preserving the same dispatch condition. Seven
+interleaved rounds, nine samples per round, and 100 real calls per graph gave
+these warm-execution medians; compilation, loading, sorting, and oracle work
+were excluded:
+
+| Tokens, random routing / power-of-two scales | Original FlyDSL | Tuned FlyDSL dispatch | Assembly dispatch |
+| --- | --- | --- | --- |
+| 129 | 144.397 us | 77.987 us | 77.990 us |
+| 257 | 145.413 us | 145.446 us | 145.427 us |
+
+All three implementations passed the seven original cases and eight holdout
+cases: tokens 32, 127, 128, 130, 256, 258, and 513, plus 129 tokens with
+concentrated routing and ordinary random scales. Holdouts were independent
+validation, not additions to the campaign's scoring set. One 256-token timing
+round had large outliers; retain raw rounds and use medians rather than
+claiming tiny differences as improvements.
+
+The winning `.s` SHA-256 was
+`e49eeb81ea690551b6c086653f192820ef0fc9a609d9701746e5793aefc79c5a`, identical
+to the `[32,128,256]` compiler output. Therefore the useful gain is from
+tile/dispatch selection. Reassembly provided no meaningful additional gain
+over equivalent FlyDSL. Do not report the campaign's 1.424x score as a
+hand-written assembly speedup or as an aggregate latency ratio.
+
+Static assembly inspection found the original specialization declared 412
+bytes of private scratch and contained 31 scratch loads and 31 stores. The
+tuned specialization declared zero private scratch and contained none; LDS
+remained 32768 bytes. These are static resource observations, not counter-based
+bottleneck attribution. The original scratch instructions were outside the
+repeated main K loop. Measure counters before assigning the gain to spill
+traffic, occupancy, or a specific pipeline.
+
+For future searches, compare the original launcher, regenerated assembly, and
+equivalent tuned high-level launcher. Keep both launcher and assembly in each
+published bundle, apply its patch in a clean checkout, and rerun the protected
+driver before treating the result as reproducible.
+
+These experiments validate stage1 candidate execution, not stage2/reduction,
+a full Kimi configuration, Neha's reported gains, the arena acceptance suite,
+or vLLM end-to-end performance.
