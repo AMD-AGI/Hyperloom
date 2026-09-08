@@ -96,8 +96,8 @@ log = logging.getLogger(__name__)
 # the preflight timed out (clamped by the remaining wall, never reaching its own
 # PREFLIGHT_*_TIMEOUT_S ceilings) -> task_preparation_failed even though the
 # driver was fine. Raise the wall so agent + cold preflight both fit; it is
-# additionally clamped to the per-kernel deadline_unix (forge_submit passes the
-# ~3600s budget), so a larger value never overruns the outer budget.
+# additionally clamped to the per-kernel deadline_unix the caller passes, so a
+# larger value never overruns the outer budget.
 PREPARE_MAX_ATTEMPTS = int(os.environ.get("FORGE_PREPARE_MAX_ATTEMPTS", "3") or "3")
 PREPARE_MAX_WALL_SEC = int(os.environ.get("FORGE_PREPARE_MAX_WALL", "3000") or "3000")
 # Derived from the wall so it scales with it; a fixed constant falls below the

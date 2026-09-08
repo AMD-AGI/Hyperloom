@@ -5,8 +5,7 @@
 """Regression tests for install.sh home-directory resolution.
 
 The Claude Code CLI credentials are written by install.sh but read back through
-``Path.home()`` by ``inference_optimizer/cli/credentials.py`` and
-``agents/kernel/tools/backends/forge_submit.py``. A hardcoded ``/root/.claude``
+``Path.home()`` by ``inference_optimizer/cli/credentials.py``. A hardcoded ``/root/.claude``
 on the writing side either aborts the installer (``/root`` unwritable under
 ``set -euo pipefail``) or strands the credentials where no reader looks.
 

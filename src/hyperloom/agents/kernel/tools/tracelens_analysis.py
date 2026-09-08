@@ -5292,8 +5292,8 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
     (see KernelForge PR #88): each is gated on the *sum* of dispatch's +
     combine's ``gpu_pct``, since together they are one logical round trip.
     Each member keeps its own candidate entry (so either one can be picked as
-    the ``--kernel-id`` the orchestrator dispatches); ``forge_submit``'s
-    vendor-playbook path de-duplicates so only one forge-loop session actually
+    the ``--kernel-id`` the orchestrator dispatches); the vendor-playbook
+    dispatch path de-duplicates so only one forge-loop session actually
     runs per group per analysis session.
     """
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -5393,7 +5393,7 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
 #: about the kernel itself. Every one of these is derived from the old path, so
 #: a rewrite that leaves them in place produces a candidate describing two
 #: different sources at once -- and the downstream readers disagree about which
-#: one wins. ``forge_submit._resolve_framework`` consults ``source_framework``
+#: one wins. Framework resolution consults ``source_framework``
 #: before it ever looks at ``source_file``, and ``classify_patchability`` reads
 #: ``kernel_kind`` to decide a kernel is prebuilt assembly, so a stale value
 #: silently misroutes or skips the new source.

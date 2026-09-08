@@ -1555,9 +1555,8 @@ def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
     """A retired option now costs an exit code instead of being absorbed.
 
     It used to be accepted and ignored so that a caller still passing it would
-    not lose the run. Nothing passes it: this repo is the only consumer, and its
-    own argv tests assert ``--max-iters`` is never sent (see
-    ``test_forge_long_horizon_cli``). What the
+    not lose the run. Nothing passes it: this repo is the only consumer, and no
+    caller builds a forge-loop argv carrying ``--max-iters``. What the
     tolerance actually bought was a run that silently ignored what the caller
     asked for, so it is refused at parse time instead.
     """

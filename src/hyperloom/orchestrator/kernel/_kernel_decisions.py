@@ -553,11 +553,11 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
 def _vendor_playbook_id_from_result(result: dict[str, Any]) -> str:
     """Return the vendor-playbook group id a ``kernel_opt`` result belongs to.
 
-    ``forge_submit._submit_vendor_playbook()`` stamps ``vendor_playbook_id``
-    on every raw per-backend attempt dict it returns (winner and reused
-    sibling alike); ``kernel_optimization.py`` carries those attempt dicts
-    through verbatim in ``result["attempts"]``. Empty when this kernel_opt
-    result did not go through the vendor-playbook path.
+    A vendor-playbook dispatch stamps ``vendor_playbook_id`` on every raw
+    per-backend attempt dict it returns (winner and reused sibling alike);
+    ``kernel_optimization.py`` carries those attempt dicts through verbatim in
+    ``result["attempts"]``. Empty when this kernel_opt result did not go
+    through the vendor-playbook path.
     """
     for attempt in result.get("attempts") or []:
         if isinstance(attempt, dict):

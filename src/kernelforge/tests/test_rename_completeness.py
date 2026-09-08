@@ -119,27 +119,6 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "undeclared option is now an exit code, which is what makes this scope safe.",
     ),
     (
-        # The retired-name detector, and the test that pins it. This is the one
-        # place the old spelling may appear in live code, because the whole
-        # point is to recognise it: FORGE_ is on env_safety's dotenv prefix
-        # allowlist, so a stale FORGE_DISABLE_COMPILED_FELLOWS is forwarded into
-        # the run and then ignored, silently re-enabling the compiled kernel
-        # backends the operator had switched off. The line regex is the literal
-        # variable name rather than /fellow/, so this entry cannot grow to cover
-        # any other residue in either file.
-        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
-        "Detects the pre-rename opt-out variable so it fails loudly instead of "
-        "being forwarded and ignored. Honouring it would keep the retired "
-        "vocabulary alive; not naming it at all would make the silent "
-        "re-enablement undetectable.",
-    ),
-    (
-        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
-        "The test that pins the detector above. It must spell the retired name to assert on it.",
-    ),
-    (
         "src/kernelforge/tests/test_rename_completeness.py",
         r".",
         "This file names the old spelling in order to forbid it.",

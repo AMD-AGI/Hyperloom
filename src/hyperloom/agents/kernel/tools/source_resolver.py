@@ -72,8 +72,8 @@ __all__ = [
 # curated map marked its ~56 ``aiter_ck`` entries ``patchable: true`` and routed
 # them to the ck backend. Resolving from the device symbol alone, we
 # cannot recover that per-entry ck ownership, so a CK instantiation is
-# classified non-patchable and no longer reaches ``forge_submit._resolve_kernel_backend``
-# ck branch. This is deliberate: the symbol-based finder trades that
+# classified non-patchable and no longer reaches the ck backend branch of
+# kernel-backend resolution. This is deliberate: the symbol-based finder trades that
 # hand-maintained CK routing (which could not generalize across framework
 # versions) for coverage that self-heals. Restoring CK -> ck routing
 # would require a structured, symbol-derivable CK classifier and is left as a
