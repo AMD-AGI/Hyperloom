@@ -491,6 +491,54 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
     assert seen["run_grid_gpu"] == "mi300x"
 
 
+def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    baseline_yaml.write_text(
+        "benchmark:\n  framework: sglang\n  model: /models/test\n  run_mode: local\n"
+        "  benchmark_script: sglang_custom.sh\n  envs: {TP: 8, CONC: 64, ISL: 8192, OSL: 1024}\n"
+    )
+    state = _make_state(baseline_config_path=str(baseline_yaml), isl=8192)
+    state.gpu_type = "MI355X"
+    state.last_baseline = {"extras": {"fingerprint": {"benchmark_script": "sglang_custom.sh"}}}
+    monkeypatch.setenv("GPU_TYPE", "mi355x")
+    monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
+    )
+    calls = []
+
+    async def capture_grid(**kwargs):
+        variant = kwargs["grid"][0]
+        output = session_dir / f"variant_{len(calls)}"
+        output.mkdir()
+        path = _build_variant_yaml(
+            kwargs["base_yaml_path"],
+            "",
+            variant,
+            output_subdir=output,
+            gpu_type=kwargs["gpu_type"],
+            benchmark_script=kwargs.get("benchmark_script"),
+        )
+        calls.append((kwargs, yaml.safe_load(path.read_text())["benchmark"]))
+        return [_fake_variant(variant.name, throughput=120.0, envs=variant.extra_envs)]
+
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", capture_grid)
+    result = asyncio.run(run_conc_sweep(state, session_dir, concs=[64], total_budget_sec=None))
+
+    assert result["status"] == "succeeded"
+    assert [call[0]["grid"][0].name for call in calls] == ["optimized_conc64", "baseline_conc64"]
+    for kwargs, bench in calls:
+        assert bench["benchmark_script"] == "sglang_custom.sh"
+        assert bench["runner_type"] == "mi355x"
+        assert int(bench["envs"]["NUM_PROMPTS"]) == 320
+        assert bench["envs"]["RUN_EVAL"] == "false"
+        assert kwargs.get("server_lifecycle") is None
+
+
 def test_run_conc_sweep_optimized_oom_yields_failed_pair(
     session_dir: Path,
     baseline_yaml: Path,

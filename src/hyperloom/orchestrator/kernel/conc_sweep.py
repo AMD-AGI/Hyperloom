@@ -51,6 +51,7 @@ from .roofline_ceiling import (
     select_peak_and_bound,
 )
 from ..state.shared_state import SharedState
+from ..loop.coordinator_helpers import baseline_benchmark_script
 
 
 log = logging.getLogger(__name__)
@@ -419,6 +420,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     _all_results_ref: list[VariantResult],
     _budget_state: dict[str, Any],
     recorder: Any = None,
+    benchmark_script: str | None = None,
 ) -> list[VariantResult]:
     """Sweep one arm across all CONC values reusing a single persistent server.
 
@@ -518,6 +520,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 workspace=workspace,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
                 variant_timeout_sec=variant_timeout_sec,
                 soft_deadline_sec=soft_deadline_sec,
                 deadline=deadline,
@@ -571,6 +574,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 variant_timeout_sec=variant_timeout_sec,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
                 server_lifecycle=server_lifecycle_boot,
                 server_already_ready=False,
                 preclean_before_run=True,
@@ -722,6 +726,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             workspace=workspace,
             model_path=model_path,
             gpu_type=gpu_type,
+            benchmark_script=benchmark_script,
             variant_timeout_sec=variant_timeout_sec,
             soft_deadline_sec=soft_deadline_sec,
             deadline=deadline,
@@ -826,6 +831,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     variant_timeout_sec=variant_timeout_sec,
                     model_path=model_path,
                     gpu_type=gpu_type,
+                    benchmark_script=benchmark_script,
                     server_lifecycle=server_lifecycle_reuse,
                     server_already_ready=True,
                     preclean_before_run=False,
@@ -923,6 +929,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     _budget_state: dict[str, Any],
     serving_lease: Any = None,
     recorder: Any = None,
+    benchmark_script: str | None = None,
 ) -> list[VariantResult]:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
@@ -997,6 +1004,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                 variant_timeout_sec=variant_timeout_sec,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
                 soft_deadline_sec=soft_deadline_sec,
                 serving_lease=serving_lease,
             )
@@ -1303,12 +1311,14 @@ async def run_conc_sweep(
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
+    benchmark_script = baseline_benchmark_script(state.last_baseline)
     try:
         base_yaml_path = materialize_config_with_envs(
             base_yaml_path,
             workspace,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
+            benchmark_script=benchmark_script,
             out_name="conc_sweep_base.with_envs.yaml",
         )
     except FrameworkScriptMismatchError as exc:
@@ -1508,6 +1518,7 @@ async def run_conc_sweep(
                 workspace=workspace,
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
+                benchmark_script=benchmark_script,
                 variant_timeout_sec=variant_timeout_sec,
                 soft_deadline_sec=_session_soft_dl,
                 deadline=deadline,

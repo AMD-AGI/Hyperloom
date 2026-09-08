@@ -1909,3 +1909,61 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     else:
         assert "variant_timeout_sec" not in task.params
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["geak", "resume"])
+async def test_internal_stack_rebench_preserves_baseline_script(coordinator, tmp_path, monkeypatch, source) -> None:
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        "benchmark:\n  framework: sglang\n  model: /models/test\n  run_mode: local\n"
+        "  benchmark_script: sglang_custom.sh\n  envs: {TP: 1, CONC: 8, ISL: 256, OSL: 256}\n",
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.baseline_double_run = True
+    state.last_baseline = {"extras": {"fingerprint": {"benchmark_script": "sglang_custom.sh"}}}
+    if source == "geak":
+        state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
+    else:
+        state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
+    monkeypatch.setenv("GPU_TYPE", "mi355x")
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="script_regression")
+    task = await coordinator.tasks.get(str(enqueued["task_id"]))
+    calls = []
+
+    async def capture_grid(**kwargs):
+        output = tmp_path / f"variant_{len(calls)}"
+        output.mkdir()
+        variant_path = _build_variant_yaml(
+            kwargs["base_yaml_path"],
+            "",
+            kwargs["grid"][0],
+            output_subdir=output,
+            gpu_type=kwargs["gpu_type"],
+            benchmark_script=kwargs["benchmark_script"],
+        )
+        calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
+        return []
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.teardown_lifecycle_server", lambda **_kwargs: None
+    )
+    await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+        SimpleNamespace(task=task, extra={"shared_state": state})
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
+    assert calls[0][1]["runner_type"] == "mi355x"
+    assert calls[0][0]["server_lifecycle"] is None
+

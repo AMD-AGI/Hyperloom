@@ -40,6 +40,7 @@ __all__ = [
     "_GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT",
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
     "action_fits_time_budget",
+    "baseline_benchmark_script",
     "coerce_needs_gpu",
     "expected_action_cost_minutes",
     "measured_baseline_runtime_sec",
@@ -209,6 +210,19 @@ _GPU_BENCH_LANES: frozenset[str] = frozenset(
         "profile_lane",
     }
 )
+
+
+def baseline_benchmark_script(last_baseline: Mapping[str, Any]) -> str | None:
+    """Read the explicit script from the baseline task's recorded parameters.
+
+    Args:
+        last_baseline: Baseline attempt audit, including its parameter fingerprint.
+
+    Returns:
+        The operator's script override, or None when the default runner was used.
+    """
+    fingerprint = (last_baseline.get("extras") or {}).get("fingerprint") or {}
+    return str(fingerprint.get("benchmark_script") or "").strip() or None
 
 
 def measured_baseline_runtime_sec(shared_state: Any | None) -> float:

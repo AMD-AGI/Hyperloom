@@ -70,6 +70,7 @@ from .coordinator_helpers import (
     _geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
+    baseline_benchmark_script,
 )
 from ..policy.gate import (
     PolicyDenied,
@@ -5943,6 +5944,7 @@ class WritebackCollaborator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
+        benchmark_script = baseline_benchmark_script(self.shared_state.last_baseline)
         # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
         # revalidation config from result.json (the SINGLE source of truth), NOT
         # from stack materialization. This guarantees the same-harness rebench
@@ -6034,6 +6036,8 @@ class WritebackCollaborator:
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
+                if benchmark_script:
+                    params_ps["benchmark_script"] = benchmark_script
                 from ..phases.geak_rebench import resolve_geak_revalidate_idempotency_key
 
                 idempotency_key = await resolve_geak_revalidate_idempotency_key(
@@ -6095,6 +6099,8 @@ class WritebackCollaborator:
             params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
         lanes, ttl = self._registry_lanes_ttl("explore")
         self._inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
