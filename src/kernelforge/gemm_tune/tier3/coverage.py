@@ -44,13 +44,13 @@ _NOT_A_COVERAGE_GAP = (
 )
 
 
-# Why a demanded table went untuned. The three are not interchangeable: the first
-# says nothing owns the table, the other two say something owns it and did not
-# deliver. A real production log made the distinction immediately: a vLLM run
-# missed 122 bf16 keys with `sglang_dense_bf16` -- the tuner that owns that very
-# table -- simply not selected by the framework branch. Reporting that as "no
-# tuner exists" would send the reader hunting for a tuner that is already there.
-KIND_NO_TUNER = "no_tuner"  # nothing implements this table at all
+# Why a demanded table went untuned. Only the first is an argument for writing a
+# tuner; the other two are arguments for fixing something that already exists,
+# and treating them alike would manufacture demand for the third tier. A real
+# production log made the distinction immediately: a vLLM run missed 122 bf16
+# keys with `sglang_dense_bf16` -- the tuner that owns that very table -- simply
+# not selected by the framework branch. Nothing about that calls for a new tuner.
+KIND_NO_TUNER = "no_tuner"  # nothing implements this: the Tier-3 case
 KIND_SKIPPED = "skipped"  # a tuner exists and declined, for a reason
 KIND_NOT_SELECTED = "not_selected"  # a tuner exists and routing did not pick it
 
@@ -70,12 +70,18 @@ class CoverageGap:
     reason: str = ""
     kind: str = KIND_NO_TUNER
 
+    @property
+    def warrants_generated_tuner(self) -> bool:
+        """Only an absent capability does. A routing miss is a routing bug."""
+        return self.kind == KIND_NO_TUNER
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "table": self.table,
             "tuner": self.tuner,
             "env_var": self.env_var,
             "kind": self.kind,
+            "warrants_generated_tuner": self.warrants_generated_tuner,
             "key_schema": list(self.key_schema),
             "logged_fields": list(self.logged_fields),
             "miss_count": self.miss_count,
