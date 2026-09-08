@@ -1841,6 +1841,11 @@ _SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         # concurrency ladder settles, which means the run optimized and
         # closed normally (e.g. the no-kernel path), so neither is a CI failure.
         "sweep_done",
+        # Written for exactly one thing: the model asking to close early. A run
+        # whose infrastructure actually failed carries baseline_failed,
+        # crash_threshold_exceeded, policy_loop or signal instead, so this value
+        # marks a normal closeout and the breakdown keeps the escalation flag.
+        "robustness_escalated",
     }
 )
 

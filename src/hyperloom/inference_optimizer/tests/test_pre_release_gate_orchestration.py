@@ -148,6 +148,19 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     assert "leave_running" in body
 
 
+def test_an_llm_closeout_is_a_clean_terminal(poll_script: str) -> None:
+    """robustness_escalated is written for one thing only: the model closing early.
+
+    Nothing in the run is broken when it appears. A run whose infrastructure
+    really failed carries baseline_failed, crash_threshold_exceeded, policy_loop
+    or signal, so failing the gate on this value rejects runs that optimized and
+    closed normally.
+    """
+    clean = re.search(r"is_clean_stop_reason\(\) \{\n\s*case \"\$1\" in\n\s*([^)]+)\)", poll_script)
+    assert clean, "could not read the clean-terminal case arm"
+    assert "robustness_escalated" in clean.group(1).split("|")
+
+
 def test_the_eval_dataset_is_read_from_the_shared_cache_offline(dispatch_script: str, bootstrap_script: str) -> None:
     """The eval must not depend on the hub being reachable or generous.
 
