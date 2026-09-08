@@ -412,7 +412,15 @@ async def test_persisted_legacy_mode_allows_existing_geak_replay(
 @pytest.mark.parametrize("measurement_location", ["flat", "bench_result", "measurement"])
 @pytest.mark.parametrize(
     "case",
-    ["positive", "output_drop", "missing_axes", "missing_output", "identity_mismatch", "total_regression", "lift_refused"],
+    [
+        "positive",
+        "output_drop",
+        "missing_axes",
+        "missing_output",
+        "identity_mismatch",
+        "total_regression",
+        "lift_refused",
+    ],
 )
 async def test_agentx_2b_uses_current_canonical_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, measurement_location: str

@@ -1352,8 +1352,8 @@ def test_the_client_waits_for_the_trace_to_stop_growing(tmp_path):
     grower.write_text(
         "#!/usr/bin/env bash\n"
         f"printf '%s' '{{\"traceEvents\":[' > {trace_file}\n"
-        f"for i in 1 2 3 4 5 6; do printf '%s' '{{\"cat\":\"kernel\",\"ph\":\"X\",\"ts\":1,\"dur\":2}},' >> {trace_file}; sleep 2; done\n"
-        f"printf '%s' '{{\"cat\":\"kernel\",\"ph\":\"X\",\"ts\":1,\"dur\":2}}]}}' >> {trace_file}\n",
+        f'for i in 1 2 3 4 5 6; do printf \'%s\' \'{{"cat":"kernel","ph":"X","ts":1,"dur":2}},\' >> {trace_file}; sleep 2; done\n'
+        f'printf \'%s\' \'{{"cat":"kernel","ph":"X","ts":1,"dur":2}}]}}\' >> {trace_file}\n',
         encoding="utf-8",
     )
     grower.chmod(0o755)
@@ -1383,8 +1383,14 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     (source / "r0.trace.json").write_text("partial", encoding="utf-8")
 
     r = _run_profile(
-        bench, bind, res, tmp_path, TP="2", AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
-        FAKE_TRACE_SOURCE=str(source), FAKE_TRACE_DEST=str(trace),
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
     )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
@@ -1411,8 +1417,14 @@ def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
     )
 
     r = _run_profile(
-        bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
-        FAKE_TRACE_SOURCE=str(source), FAKE_TRACE_DEST=str(trace),
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="8",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
     )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr

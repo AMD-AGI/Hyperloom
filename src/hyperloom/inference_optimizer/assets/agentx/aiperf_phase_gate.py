@@ -49,7 +49,9 @@ def _trace_files(directories: list[str]) -> dict[str, list[int]]:
     files = {}
     for directory in directories:
         for path in Path(directory).resolve().rglob("*.trace.json*"):
-            if path.name.startswith(("graph_capture_", "merged-")) or {"capture_traces", "trace_split"}.intersection(path.parts):
+            if path.name.startswith(("graph_capture_", "merged-")) or {"capture_traces", "trace_split"}.intersection(
+                path.parts
+            ):
                 continue
             if path.is_file() and path.name.endswith((".trace.json", ".trace.json.gz")):
                 stat = path.stat()
@@ -106,7 +108,9 @@ def traces_complete(directories: list[str], snapshot: dict[str, Any], tp: int) -
             events = payload.get("traceEvents")
             if rank is None or rank not in range(tp) or rank in ranks or not isinstance(events, list):
                 return False
-            if not any(isinstance(event, dict) and event.get("cat") == "kernel" and event.get("ph") == "X" for event in events):
+            if not any(
+                isinstance(event, dict) and event.get("cat") == "kernel" and event.get("ph") == "X" for event in events
+            ):
                 return False
             ranks.add(rank)
         return ranks == set(range(tp)) and files == current_traces(directories, snapshot)

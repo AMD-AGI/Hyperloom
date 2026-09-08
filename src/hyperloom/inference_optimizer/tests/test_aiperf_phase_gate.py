@@ -109,7 +109,20 @@ def test_current_trace_proof_accepts_rank_metadata_without_rank_filename(tmp_pat
 
 @pytest.mark.parametrize(
     "case",
-    ["empty", "stale", "old_mtime", "partial_ranks", "duplicate_rank", "unknown_rank", "bad_gzip", "bad_json", "cpu_only", "rank_conflict", "bool_rank", "graph_capture"],
+    [
+        "empty",
+        "stale",
+        "old_mtime",
+        "partial_ranks",
+        "duplicate_rank",
+        "unknown_rank",
+        "bad_gzip",
+        "bad_json",
+        "cpu_only",
+        "rank_conflict",
+        "bool_rank",
+        "graph_capture",
+    ],
 )
 def test_current_trace_proof_rejects_incomplete_or_ambiguous_evidence(tmp_path, case):
     dirs = [str(tmp_path)]
