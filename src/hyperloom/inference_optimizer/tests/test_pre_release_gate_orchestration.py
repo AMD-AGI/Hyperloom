@@ -146,6 +146,36 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script
     assert "leave_running" in body
 
 
+def test_nested_container_memory_fits_the_host_pod(dispatch_script: str) -> None:
+    """Docker legs share one pod, so their limits must sum under its memory request.
+
+    Docker enforces --memory per container while Kubernetes enforces the pod
+    total, so oversubscribing here is invisible until several legs peak together
+    and the pod is OOM-killed, taking every docker leg with it. Adding a leg is
+    the moment this silently breaks.
+    """
+
+    def _default(name: str) -> str:
+        m = re.search(rf'{name}="\$\{{{name}:-([^}}]+)\}}"', dispatch_script)
+        assert m, f"could not find default for {name}"
+        return m.group(1)
+
+    def _gib(text: str) -> float:
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(Gi|g|G)", text.strip())
+        assert m, f"unrecognised memory literal {text!r}"
+        return float(m.group(1))
+
+    legs = re.search(r'ALL_LEGS="(.*?)"', dispatch_script, re.S).group(1).split()
+    docker_legs = [leg for leg in legs if leg.startswith("docker-")]
+    per_leg = {"-3h": _gib(_default("DOCKER_LEG_MEM_3H")), "-12h": _gib(_default("DOCKER_LEG_MEM_12H"))}
+    requested = sum(per_leg["-3h"] if leg.endswith("-3h") else per_leg["-12h"] for leg in docker_legs)
+    host = _gib(_default("HOST_MEM"))
+    assert requested <= host, (
+        f"{len(docker_legs)} docker legs request {requested:.0f}Gi of nested container "
+        f"memory but the host pod only has {host:.0f}Gi"
+    )
+
+
 def test_every_leg_name_resolves_through_the_glob_helpers(dispatch_script: str, tmp_path: Path) -> None:
     """The leg helpers parse by suffix glob, so a new name can silently resolve to nothing.
 

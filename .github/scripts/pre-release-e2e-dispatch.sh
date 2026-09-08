@@ -74,8 +74,11 @@ HOST_CPU="${HOST_CPU:-196}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SH
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
 LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
+# The nested containers share the host pod's memory, so their limits must sum
+# under HOST_MEM: two 3h legs plus four 12h legs is 1920Gi of 2048Gi, leaving the
+# rest for dockerd and the pod itself. Raising HOST_MEM is not an option here.
 DOCKER_LEG_MEM_3H="${DOCKER_LEG_MEM_3H:-256g}"
-DOCKER_LEG_MEM_12H="${DOCKER_LEG_MEM_12H:-512g}"
+DOCKER_LEG_MEM_12H="${DOCKER_LEG_MEM_12H:-352g}"
 DOCKER_LEG_SHM_3H="${DOCKER_LEG_SHM_3H:-64g}"
 DOCKER_LEG_SHM_12H="${DOCKER_LEG_SHM_12H:-64g}"
 # SaFE workload scheduling priority (Spec.Priority, an int): High=2, Med=1, Low=0
