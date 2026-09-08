@@ -1924,6 +1924,7 @@ class KernelPhase(PhaseHandler):
         }
         if isinstance(measurement_provenance, Mapping):
             for key in (
+                "accuracy",
                 "launch_evidence",
                 "launch_evidence_path",
                 "server_log_path",

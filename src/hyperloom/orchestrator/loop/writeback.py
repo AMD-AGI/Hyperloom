@@ -86,6 +86,7 @@ from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
     EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
+    accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
 
@@ -4208,11 +4209,12 @@ class WritebackCollaborator:
                     self.shared_state, rebench_measurement, against_baseline=True
                 )
                 current_grade = resolve_graded_comparison(self.shared_state, rebench_measurement)
+                expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
                 decision = _geak_revalidation_decision(
                     measured=baseline_grade.candidate,
                     baseline=baseline_grade.reference,
                     got_hash=got_hash,
-                    expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
+                    expected_hash=expected_hash,
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=current_grade.reference,
                 )
@@ -4228,6 +4230,19 @@ class WritebackCollaborator:
                     grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
                 ):
                     decision = "no_promote"
+                accuracy_rejection = next(
+                    (
+                        entry["reason"]
+                        for entry in result.get("per_variant_outcomes") or []
+                        if isinstance(entry, Mapping)
+                        and entry.get("outcome") == "REVERT"
+                        and entry.get("reason") in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE}
+                        and (not expected_hash or entry.get("fingerprint") == expected_hash)
+                    ),
+                    "",
+                )
+                if accuracy_rejection:
+                    decision = accuracy_rejection
                 # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
                 # cannot see the overlay drop out between dispatch and launch —
                 # ``run_grid`` skips an overlay whose dir has gone away and logs
@@ -4411,13 +4426,12 @@ class WritebackCollaborator:
                     # long-standing behaviour and is left as it is.
                     if geak_harness_replays_workload(self.shared_state):
                         self.shared_state.resume_pending_revalidation = False
-                elif decision == "no_promote":
-                    # Well-measured + engaged over baseline, but does not beat
-                    # current_best. This is a real result, NOT inconclusive, so
-                    # do not replay via the GEAK harness (2a); clear the pending
-                    # candidate without touching the headline / stack / gain.
+                elif decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE}:
+                    # A native quality rejection or measured loss is conclusive;
+                    # replaying through another harness cannot overturn it.
                     log.info(
-                        "geak 2b rebench did not beat current_best (measured=%r current_best=%r) -> no_promote",
+                        "geak 2b rebench rejected (decision=%s measured=%r current_best=%r)",
+                        decision,
                         measured,
                         cb_tput,
                     )
@@ -4426,8 +4440,8 @@ class WritebackCollaborator:
                             "coordinator",
                             "observation",
                             {
-                                "kind": "geak_no_promote",
-                                "measured_tput": float(measured),
+                                "kind": f"geak_{decision}",
+                                "measured_tput": float(measured) if measured_ok else None,
                                 "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
                                 "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
                             },
@@ -4439,6 +4453,15 @@ class WritebackCollaborator:
                     # adjudicated candidate (#1240).
                     ps_stamped = dict(ps) if isinstance(ps, dict) else {}
                     ps_stamped["revalidation_status"] = "no_promote"
+                    if accuracy_rejection:
+                        ps_stamped["revalidation_error"] = accuracy_rejection
+                        self.phase_kernel._reject_geak_kernel_journey(
+                            ps_stamped,
+                            measured_tput=float(measured) if measured_ok else 0.0,
+                            current_best_tput=float(cb_tput or 0.0),
+                            provenance="geak_orch_harness_validated",
+                            rejection_reason=accuracy_rejection,
+                        )
                     self.shared_state.geak_result = ps_stamped
                     self._record_geak_rebench_conclusion(final_status="no_promote")
                     self.shared_state.geak_pending = {}
@@ -6179,8 +6202,21 @@ class WritebackCollaborator:
             # etc.) so it is protocol-identical to the reported result.
             pin_num_prompts=True,
         )
-        promotion_measurement = res.get("promotion_measurement")
-        if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
+        measurement = res.get("promotion_measurement")
+        measurement = measurement if isinstance(measurement, Mapping) else {}
+        baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
+        replay_accuracy = measurement.get("accuracy")
+        accuracy_failure = ""
+        if baseline_accuracy > 0:
+            if (
+                isinstance(replay_accuracy, bool)
+                or not isinstance(replay_accuracy, (int, float))
+                or not 0.0 <= replay_accuracy <= 1.0
+            ):
+                accuracy_failure = EVAL_KIND_ACCURACY_UNAVAILABLE
+            elif not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
+                accuracy_failure = "accuracy_drop"
+        if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0 and not accuracy_failure:
             # Rebench-first: write the headline from the GEAK-harness MEASURED
             # throughput (engages by construction via the launch-script replay),
             # keeping the leaderboard number a same-harness total rather than a
@@ -6210,7 +6246,7 @@ class WritebackCollaborator:
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
                 overlay_loaded=overlay_loaded_2a,
-                measurement_provenance=promotion_measurement if isinstance(promotion_measurement, Mapping) else res,
+                measurement_provenance=measurement or res,
             )
             if not accepted:
                 return {"validated": False, "status": "no_promote", "reason": "replay_not_accepted"}
@@ -6223,12 +6259,17 @@ class WritebackCollaborator:
         if res.get("error"):
             reason = str(res["error"])
         log.warning(
-            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
+            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s accuracy_failure=%s)",
             res.get("status"),
             geak_sp,
             reason,
+            accuracy_failure,
         )
-        return {"validated": False, "status": res.get("status"), "reason": reason}
+        return {
+            "validated": False,
+            "status": "failed" if accuracy_failure else res.get("status"),
+            "reason": accuracy_failure or reason,
+        }
 
     async def _resume_reenter_kernel_if_needed(self) -> None:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
