@@ -13,7 +13,7 @@ import httpx
 
 from .log import warn
 
-# Hard-coded; see module docstring.
+# Ray Dashboard's fixed HTTP control port on the head pod.
 RAY_DASHBOARD_PORT = 8265
 
 # 30s read so a multi-MB log fetch doesn't wedge the poll cadence.

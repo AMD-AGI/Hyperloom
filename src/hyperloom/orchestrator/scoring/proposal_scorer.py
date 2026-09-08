@@ -152,7 +152,7 @@ def _normalise_model_scores(
 
 @dataclass
 class ProposalScorer:
-    """Advisory multi-model scorer (see module docstring)."""
+    """Score proposals without ranking or selecting them."""
 
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
     # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL.

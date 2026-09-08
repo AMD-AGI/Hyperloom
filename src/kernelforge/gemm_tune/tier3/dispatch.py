@@ -17,7 +17,7 @@ GRAPH_INNER = 20
 # Fresh-input correctness repeats, worst result counted.
 CORRECTNESS_TRIALS = 8
 
-# See the module docstring for why this is not an element-wise ratio.
+# Bound the aggregate referee error metric, not an element-wise relative ratio.
 MAX_RELATIVE_ERROR = 5e-2
 
 # Tables this module knows how to exercise.

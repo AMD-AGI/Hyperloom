@@ -102,20 +102,20 @@ def _iteration_of(payload: dict[str, Any]) -> int | None:
 def _select_trusted_result(
     manifest: dict[str, Any] | None,
     sidecar: dict[str, Any] | None,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str]:
     """Choose between the two trusted views of one workspace's best result."""
     if sidecar is None:
-        return manifest
+        return manifest, "best manifest"
     if manifest is None:
-        return sidecar
+        return sidecar, "forge result sidecar"
     if str(sidecar.get("commit_hash") or "") == str(manifest.get("commit_hash") or ""):
-        return manifest
+        return manifest, "best manifest"
     manifest_iteration = _iteration_of(manifest)
     sidecar_iteration = _iteration_of(sidecar)
     if manifest_iteration is not None and sidecar_iteration is not None and sidecar_iteration > manifest_iteration:
-        return sidecar
+        return sidecar, "forge result sidecar"
     # Either the manifest is at least as new, or one of them names no iteration to compare on.
-    return manifest
+    return manifest, "best manifest"
 
 
 def _already_published(layout: ControllerLayout, operator_id: str, best_commit: str) -> bool:
@@ -142,16 +142,16 @@ def recover_task_result(
             reason="operator workspace does not exist",
         )
 
-    trusted_manifest = _trusted_manifest(workspace)
-    trusted_sidecar = _trusted_result_sidecar(Path(task_dir))
-    manifest = _select_trusted_result(trusted_manifest, trusted_sidecar)
+    manifest, source = _select_trusted_result(
+        _trusted_manifest(workspace),
+        _trusted_result_sidecar(Path(task_dir)),
+    )
     if manifest is None:
         return RecoveryResult(
             operator_id=task.operator_id,
             published=False,
             reason="no trusted forge-loop best result",
         )
-    source = "forge result sidecar" if manifest is trusted_sidecar else "best manifest"
 
     best_commit = str(manifest.get("commit_hash") or "").strip().lower()
     if _already_published(layout, task.operator_id, best_commit):
@@ -208,18 +208,16 @@ def recover_task_result(
             best_commit=best_commit,
         )
     except Exception as error:
-        error_type = type(error).__name__
         log.warning(
-            "could not publish %s for %s (%s)",
-            source,
+            "could not publish result for %s: %s",
             task.operator_id,
-            error_type,
+            error,
         )
         return RecoveryResult(
             operator_id=task.operator_id,
             published=False,
             best_commit=best_commit,
-            reason=f"could not publish {source} ({error_type})",
+            reason=f"could not publish {source}: {error}",
         )
 
 

@@ -19,7 +19,7 @@ from mori_ep_config import get_ep_launch_config
 _WORLD_SIZE = 8
 _MASTER_PORT = "29581"
 
-# Fixed reference workload (see module docstring) — matches the numbers cited in
+# Fixed EP8/top-8 reference workload matching the values in
 # local_knowledge/framework/mori/operators/ep_dispatch_combine/tuning.md.
 _HIDDEN_DIM = int(os.environ.get("MORI_HIDDEN_DIM", "7168"))
 _NUM_EXPERTS_PER_RANK = 32  # E=256 total over world_size=8

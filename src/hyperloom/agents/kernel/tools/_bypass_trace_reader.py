@@ -867,7 +867,7 @@ def analyze_trace(
             "trace_file": "",
         }
 
-    # Correlation maps + light buffers (see module docstring for the chain).
+    # Kineto attribution chain: launch correlation -> external id -> framework op.
     corr_to_extid: dict[int, int] = {}
     extid_to_opname: dict[int, str] = {}
     # Compact per-op meta (first-seen) for shape + Triton-source enrichment.

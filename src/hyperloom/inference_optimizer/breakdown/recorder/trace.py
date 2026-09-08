@@ -14,8 +14,7 @@ from typing import Any, Mapping
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 
-#: Below ``DEBUG`` (10). See the module docstring: this is a per-write firehose,
-#: so it cannot share a level with output read for any other purpose.
+#: Below ``DEBUG`` because every recorder write emits an event.
 TRACE = 5
 
 #: Sole switch for the write trace. Independent of global verbosity, which the

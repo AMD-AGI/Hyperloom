@@ -13,7 +13,7 @@ from ...state.shared_state import SharedState
 
 
 class ConcSweepExecutor:
-    """ActionRunner for ``conc_sweep``. See module docstring."""
+    """Run the coordinator-owned concurrency sweep action."""
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the concurrency sweep action for the given context."""

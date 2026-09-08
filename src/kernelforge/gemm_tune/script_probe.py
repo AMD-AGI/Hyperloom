@@ -147,7 +147,7 @@ def probe_script(
             cwd=str(path.parent),
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        # Includes TimeoutExpired. Stay permissive: see module docstring.
+        # Probe failure is inconclusive, so keep the surface unknown rather than rejecting flags.
         log.warning("script probe failed for %s: %r", path, exc)
         return ScriptSurface(str(path), frozenset(), False, repr(exc))
 

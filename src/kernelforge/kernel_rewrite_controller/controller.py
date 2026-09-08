@@ -79,9 +79,8 @@ class ControllerRunState:
     #: A task naming a repository already pinned to a different commit is skipped,
     #: so this records what the campaign actually built against.
     repository_pins: dict[str, str] = field(default_factory=dict)
-    #: Validated results that could not be published. This survives controller
-    #: log loss, but stores only stable failure categories because exception
-    #: text may contain credentials or result payloads.
+    #: Validated results that could not be published. Persist the reason because
+    #: controller logs may be lost when Hyperloom kills it on timeout.
     recovery_failures: tuple[dict[str, str], ...] = ()
     #: What each operator's forge-loop spent on the model, one row per run that
     #: counted a call. The controller is the only place that sees both the spend

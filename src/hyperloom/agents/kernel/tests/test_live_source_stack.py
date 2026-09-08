@@ -38,8 +38,9 @@ LOCAL_CACHE_DIR = REPO_ROOT / "results" / "resolver_benchmarks_vllm" / "ksi_cach
 def _require_live() -> None:
     if os.environ.get("HYPERLOOM_LIVE_STACK", "").strip() != "1":
         raise SystemExit(
-            "SKIP: set HYPERLOOM_LIVE_STACK=1 and run inside a serving-framework "
-            "ROCm container (see this module's docstring for the exact command)."
+            "SKIP: run inside a serving-framework ROCm container with "
+            "HYPERLOOM_LIVE_STACK=1, HYPERLOOM_DISCOVER_ONLY=aiter,vllm, "
+            "HYPERLOOM_EXPECT_FRAMEWORKS=aiter,vllm, and PYTHONPATH=src."
         )
 
 

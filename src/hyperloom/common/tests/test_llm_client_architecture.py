@@ -96,7 +96,7 @@ _ALLOWLISTED_OWNERS = frozenset(
     }
 )
 
-# Known violations -- see the module docstring.
+# Temporary count-based exemptions; empty means every provider access has a sanctioned owner.
 
 _KNOWN_VIOLATIONS: dict[tuple[str, str], int] = {}
 

@@ -142,7 +142,7 @@ def collect_v6_close(
     elif sequence_done and not unsettled:
         status = "succeeded"
     else:
-        # The expected steady state — see the module docstring.
+        # The first projection runs before later CLOSE steps finish, so partial state is expected.
         status = "degraded"
 
     start_time = steps[0]["ts"] if steps else _close_entry_ts(state)
