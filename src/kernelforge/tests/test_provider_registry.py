@@ -149,9 +149,7 @@ def test_builtin_model_ownership_predicates() -> None:
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
     assert claude.default_model == "claude-opus-5"
-    assert claude.fallback_model == ""
     assert codex.default_model == "gpt-5.6"
-    assert codex.fallback_model == ""
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")
     assert codex.owns_model("gpt-5.6")
@@ -162,8 +160,6 @@ def test_builtin_model_ownership_predicates() -> None:
     assert not codex.owns_model("openchat-3.5")
     assert not codex.owns_model("claude-opus-5")
     assert not codex.owns_model("")
-    assert resolve_agent_runtime("claude").fallback_model == ""
-    assert resolve_agent_runtime("codex").fallback_model == ""
 
 
 def test_default_runtime_uses_high_reasoning_effort() -> None:
@@ -190,7 +186,6 @@ def test_provider_probe_failure_does_not_retry_another_model() -> None:
             name="modelprobe",
             factory=factory,
             default_model="future-model",
-            fallback_model="stable-model",
             capabilities=AgentCapabilities(probe=True),
         )
     )

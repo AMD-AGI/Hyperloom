@@ -50,7 +50,6 @@ class AgentProvider:
     name: str
     factory: Callable[[AgentRuntimeConfig], AgentBackend]
     default_model: str
-    fallback_model: str = ""
     capabilities: AgentCapabilities = AgentCapabilities()
     availability: Callable[[], bool] = _always_available
     owns_model: Callable[[str], bool] = _owns_no_model
@@ -267,7 +266,7 @@ def create_registered_backend(
         )
     except AgentProviderUnavailableError as exc:
         log.warning(
-            "agent model probe failed provider=%s model=%s: %s",
+            "agent provider unavailable provider=%s model=%s: %s",
             registration.name,
             runtime.model,
             exc,

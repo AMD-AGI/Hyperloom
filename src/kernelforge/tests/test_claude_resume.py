@@ -210,7 +210,6 @@ def test_opus_5_uses_max_effort_adaptive_thinking():
 
     kwargs = captured["options"].kwargs
     assert kwargs["model"] == "claude-opus-5"
-    assert "fallback_model" not in kwargs
     assert kwargs["effort"] == "max"
     assert kwargs["thinking"] == {"type": "adaptive"}
 
