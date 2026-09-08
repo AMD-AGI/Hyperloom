@@ -116,6 +116,95 @@ def test_has_optimization_missing_current_best():
 
 
 # _build_comparison
+@pytest.mark.parametrize("extra_args", ["", "--max-running-requests 64"])
+@pytest.mark.parametrize("persistent_server", [False, True])
+def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: str,
+    persistent_server: bool,
+):
+    import os
+    import subprocess
+
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+
+    overlay = session_dir / "retained_overlay"
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("import os\nos.environ['GEAK_SWEEP_OVERLAY_MARKER'] = 'candidate'\n")
+    baseline_yaml.write_text("benchmark:\n  framework: sglang\n  envs: {}\n")
+    state = _make_state(
+        baseline_config_path=str(baseline_yaml),
+        current_best={"extra_server_args": extra_args, "extra_envs": {}, "final_overlay": str(overlay)},
+    )
+    teardown_log: list[tuple] = []
+    if persistent_server:
+        _patch_lifecycle_eligible(monkeypatch, teardown_log)
+    else:
+        monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
+    child_results: list[tuple[str, str]] = []
+
+    async def _child_run_grid(*, grid: list[GridVariant], **kwargs):
+        outputs = []
+        for variant in grid:
+            config = _build_variant_yaml(
+                baseline_yaml, "", variant, output_subdir=session_dir / "child_configs" / variant.name
+            )
+            envs = yaml.safe_load(config.read_text())["benchmark"]["envs"]
+            child = subprocess.run(
+                [sys.executable, "-B", "-c", "import os; print(os.environ.get('GEAK_SWEEP_OVERLAY_MARKER', 'stock'))"],
+                env={"PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1", **envs},
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            child_results.append((variant.name, child.stdout.strip()))
+            outputs.append(_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs))
+        return outputs
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_child_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 2]))
+    assert payload["status"] == "succeeded"
+    assert len(child_results) == 4
+    for name, loaded in child_results:
+        assert loaded == ("candidate" if name.startswith("optimized_") else "stock")
+    if persistent_server:
+        assert len(teardown_log) == 2
+
+
+@pytest.mark.parametrize("overlay_state", ["missing", "inert", "joined", "traversal"])
+def test_conc_sweep_does_not_benchmark_without_retained_overlay(
+    session_dir: Path,
+    baseline_yaml: Path,
+    overlay_state: str,
+):
+    overlay = session_dir / "retained_overlay"
+    overlay_path = str(overlay)
+    if overlay_state != "missing":
+        overlay.mkdir()
+    if overlay_state in {"joined", "traversal"}:
+        (overlay / "sitecustomize.py").write_text("pass\n")
+        overlay_path = f"{overlay}:{overlay}" if overlay_state == "joined" else str(overlay / ".." / "retained_overlay")
+    state = _make_state(
+        baseline_config_path=str(baseline_yaml),
+        current_best={"extra_server_args": "--max-running-requests 64", "final_overlay": overlay_path},
+    )
+    with patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid") as grid:
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1]))
+    grid.assert_not_called()
+    assert payload["status"] == "skipped"
+    assert payload["skip_reason"] == "optimized_overlay_unavailable"
+    assert payload["final_overlay"] == overlay_path
+
+
 def test_build_comparison_simple_speedup():
     baseline = [
         {"conc": 1, "output_throughput": 100.0, "status": "succeeded"},

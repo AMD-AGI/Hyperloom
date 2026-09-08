@@ -87,12 +87,13 @@ def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: i
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
-    """Return ``(has_opt, args, envs)`` from ``state.current_best`` (either non-empty side counts as optimized)."""
+    """Return ``(has_opt, args, envs)`` for a retained config or kernel overlay."""
     cb = state.current_best or {}
     args = str(cb.get("extra_server_args") or "").strip()
     envs_raw = cb.get("extra_envs") or {}
     envs = {str(k): str(v) for k, v in envs_raw.items()}
-    return (bool(args) or bool(envs)), args, envs
+    overlay = str(cb.get("final_overlay") or "").strip()
+    return bool(args or envs or overlay), args, envs
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
@@ -363,6 +364,7 @@ def _build_arm_grid(
     num_prompts_factor: int,
     arm_args: str,
     arm_envs: dict[str, str],
+    overlay_pythonpath: str = "",
 ) -> list[GridVariant]:
     """Build a single-arm grid in descending CONC order."""
     out: list[GridVariant] = []
@@ -378,14 +380,14 @@ def _build_arm_grid(
             }
         )
         envs["RUN_EVAL"] = "false"
-        out.append(
-            GridVariant(
-                name=f"{arm_name}_conc{conc}",
-                extra_server_args=arm_args,
-                extra_envs=envs,
-                note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
-            )
+        variant = GridVariant(
+            name=f"{arm_name}_conc{conc}",
+            extra_server_args=arm_args,
+            extra_envs=envs,
+            note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
         )
+        variant.overlay_pythonpath = overlay_pythonpath  # type: ignore[attr-defined]
+        out.append(variant)
     return out
 
 
@@ -439,6 +441,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     )
 
     arm_results: list[VariantResult] = []
+    overlay = str((state.current_best or {}).get("final_overlay") or "").strip()
     grid = _build_arm_grid(
         arm_name,
         concs_desc,
@@ -447,6 +450,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         num_prompts_factor=num_prompts_factor,
         arm_args=arm_args,
         arm_envs=arm_envs,
+        overlay_pythonpath=overlay if arm_name == "optimized" else "",
     )
     if not grid:
         return arm_results
@@ -1260,6 +1264,13 @@ async def run_conc_sweep(
         return _declined(recorder, "missing_workload_shape", isl=isl, osl=osl)
     if not has_opt:
         return _declined(recorder, "no_optimization_to_compare")
+    opt_overlay = str((state.current_best or {}).get("final_overlay") or "").strip()
+    if opt_overlay:
+        from ..actions.executors._grid_runner import _is_safe_path_entry
+        from ..loop.coordinator_helpers import _geak_overlay_is_loadable
+
+        if not _is_safe_path_entry(opt_overlay) or not _geak_overlay_is_loadable(opt_overlay):
+            return _declined(recorder, "optimized_overlay_unavailable", final_overlay=opt_overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")
     # A non-positive budget is "no time left", not "budget gate off": running the
@@ -1442,6 +1453,7 @@ async def run_conc_sweep(
                 num_prompts_factor=num_prompts_factor,
                 arm_args=_aa,
                 arm_envs=_ae,
+                overlay_pythonpath=opt_overlay if _an == "optimized" else "",
             )
 
             # Check overall budget before starting each arm.
