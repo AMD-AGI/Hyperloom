@@ -27,9 +27,8 @@ log = _logging.getLogger(__name__)
 #: records alone.
 _KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots")
 
-#: Observations of *this* KEEP. A probe that could not run observed nothing, and
-#: the previous KEEP's observation is of another launch, another image and
-#: another interpreter, so it is replaced either way.
+#: Declared targets and observations of this KEEP replace the previous KEEP's
+#: records, including when a target set is empty or a probe could not run.
 _KEEP_OBSERVED_FIELDS = (
     "accepted_stack_targets",
     "launch_evidence",

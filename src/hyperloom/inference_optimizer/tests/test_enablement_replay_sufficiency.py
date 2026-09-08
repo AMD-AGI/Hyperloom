@@ -837,6 +837,32 @@ def test_credentialed_acquisition_url_is_exported_stripped_with_its_class():
     assert "credential_required" in _codes(_decide(state, {"runtime_provenance": provenance}))
 
 
+@pytest.mark.parametrize("userinfo", ["user:tok@", ""], ids=["credentialed", "public"])
+def test_acquisition_packages_are_sanitized_and_classified_for_replay(userinfo):
+    state = {
+        **_sufficient_state(),
+        **_runtime_state(
+            {
+                "acquisition_method": "wheel",
+                "packages": ["public @ https://host/public.whl", f"mypkg @ https://{userinfo}host/x.whl", "other==1.0"],
+                "resolved_packages": {
+                    name: {"version": "1.0", "artifact_digest": "sha256:w"} for name in ("public", "mypkg", "other")
+                },
+            }
+        ),
+    }
+    provenance = project_runtime_provenance(state)
+    assert provenance["acquisition"]["packages"] == [
+        "public @ https://host/public.whl",
+        "mypkg @ https://host/x.whl",
+        "other==1.0",
+    ]
+    assert provenance["acquisition"]["credential_class"] == ("opaque_credential" if userinfo else None)
+    decision = _decide(state, {**_sufficient_section(), "runtime_provenance": provenance})
+    assert _codes(decision) == (["credential_required"] if userinfo else [])
+    assert decision["status"] == ("insufficient" if userinfo else "sufficient")
+
+
 def test_credential_classes_over_the_admitted_grammar():
     assert classify_credential_class("pip install --index-url https://user:token@host/simple foo") == "index_url"
     assert classify_credential_class("pip install git+https://user:token@host/repo@main") == "vcs_url"

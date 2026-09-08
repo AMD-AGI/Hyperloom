@@ -183,13 +183,16 @@ def _project_acquisition(action: Any) -> dict[str, Any] | None:
     credential_class = classify_credential_value(str(action.get("repo_url") or "")) or classify_credential_value(
         str(action.get("index_url") or ""), option="--index-url"
     )
+    packages = [str(p) for p in (action.get("packages") or [])]
+    for package in packages:
+        credential_class = credential_class or classify_credential_value(package)
     resolved = action.get("resolved_packages")
     return {
         "acquisition_method": str(action.get("acquisition_method") or ""),
         "repo_url": strip_url_userinfo(str(action.get("repo_url") or "")),
         "ref": str(action.get("ref") or ""),
         "index_url": strip_url_userinfo(str(action.get("index_url") or "")),
-        "packages": [str(p) for p in (action.get("packages") or [])],
+        "packages": [strip_url_userinfo(p) for p in packages],
         "resolved_ref": str(action.get("resolved_ref") or "") or None,
         "resolved_packages": dict(resolved) if isinstance(resolved, dict) and resolved else None,
         "credential_class": credential_class,
