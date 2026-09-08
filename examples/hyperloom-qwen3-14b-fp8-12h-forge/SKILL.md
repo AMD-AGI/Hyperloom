@@ -201,9 +201,10 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
 checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
 
-Sourcing `kernel-agent.env.sh` can set `KERNEL_OPT_BACKEND_ORDER` from a
-previous install. Export `forge` **after** this block, and verify it right
-before launching:
+Sourcing `.env` in the block above sets `KERNEL_OPT_BACKEND_ORDER` to whatever
+the file carries, and `eval "$_dotenv_prev"` then replays the caller's
+pre-existing exports on top of it. Either value can win, so export `forge`
+**after** this block, and verify it right before launching:
 
 ```bash
 export KERNEL_OPT_BACKEND_ORDER=forge

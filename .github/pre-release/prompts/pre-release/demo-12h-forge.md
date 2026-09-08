@@ -16,8 +16,10 @@ unset, silently leaves GEAK owning the kernel phase. There is no CLI flag for it
 
 Two ways this silently degrades into a duplicate of the plain 12h leg — avoid both:
 
-- Sourcing `kernel-agent.env.sh` can set `KERNEL_OPT_BACKEND_ORDER`. Export `forge`
-  **after** that, not before.
+- The demo skill's pre-launch install block sources `.env`, which sets
+  `KERNEL_OPT_BACKEND_ORDER` to whatever that file carries, and then replays the
+  caller's pre-existing exports on top via `eval "$_dotenv_prev"`. Export `forge`
+  **after** that whole block, not before.
 - In docker mode the variable must be set **inside the same `docker exec`** that runs
   `optimize`. Exporting it on the host does not reach the optimizer.
 
