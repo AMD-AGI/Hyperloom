@@ -222,7 +222,8 @@ the bundle rather than the lever.
 
 ## Other requirements
 
-**GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x` and `mi355x`.
+**GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
+`r9700` and `radeon8060s` (Strix Halo).
 Note that **`mi308x` and `mi325x` map to `runner_type=mi300x`** with a warning,
 since those GPUs share the MI300X runner family. Without the flag, Hyperloom
 auto-detects through `rocm-smi --showproductname`.
