@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors._server_lifecycle import (
     reap_orphaned_servers,
 )
@@ -109,45 +111,20 @@ def _spawn_dead_leader_with_live_child(tmp_path: Path, marker: str) -> tuple[int
     raise AssertionError("leader did not write child pid")
 
 
-def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
+@pytest.mark.parametrize(
+    ("marker", "tag"),
+    [("sglang.launch_server", "sglang_8888"), ("atom.entrypoints.openai_server", "atom_8888")],
+    ids=["sglang", "atom"],
+)
+def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path, marker, tag):
     """A live server whose cmdline matches is reaped and its pidfile removed."""
-    proc = _spawn_marker_process("sglang.launch_server")
-    pidfile = _write_pidfile(tmp_path, "sglang_8888", proc.pid)
+    proc = _spawn_marker_process(marker)
+    pidfile = _write_pidfile(tmp_path, tag, proc.pid)
     try:
         reaped = reap_orphaned_servers(tmp_path)
 
         # Reap the zombie so the liveness probe reflects true termination
         # (the reaper is not this process's parent-waiter).
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-
-        assert proc.pid in reaped
-        assert not _pid_alive(proc.pid)
-        assert not pidfile.exists()
-    finally:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        proc.wait(timeout=5)
-
-
-def test_reap_kills_an_atom_server_orphan(tmp_path):
-    """An orphaned ATOM server is reaped like any other serving process.
-
-    ``--framework atom`` is a first-class framework (``atom_mi*x.sh`` is in
-    ``MAGPIE_BUILTIN_SCRIPTS``, so ATOM is admitted to the server_lifecycle reuse
-    protocol), but its cmdline -- ``python3 -m atom.entrypoints.openai_server`` --
-    matched none of the serving markers, so the reaper classified its own
-    session's server as "not a server" and left the whole tree running.
-    """
-    proc = _spawn_marker_process("atom.entrypoints.openai_server")
-    pidfile = _write_pidfile(tmp_path, "atom_8888", proc.pid)
-    try:
-        reaped = reap_orphaned_servers(tmp_path)
-
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:

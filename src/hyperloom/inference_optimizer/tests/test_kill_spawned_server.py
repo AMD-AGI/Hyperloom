@@ -97,14 +97,13 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
 
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="requires Linux process groups")
-@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
-def test_completed_warmup_keeps_its_persistent_server(tmp_path, framework):
+def test_completed_warmup_keeps_its_persistent_server(tmp_path):
     """The lifecycle owner, not a completed warmup wrapper, decides when to stop the server."""
     pidfile = tmp_path / "server.pid"
     server_code = "import time; time.sleep(60)"
     wrapper_code = (
         "import pathlib, subprocess, sys\n"
-        "server = subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[3]], "
+        "server = subprocess.Popen([sys.executable, '-c', sys.argv[2]], "
         "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
         "published = False\n"
         "try:\n"
@@ -120,9 +119,7 @@ def test_completed_warmup_keeps_its_persistent_server(tmp_path, framework):
     )
     server_pid = None
     try:
-        result = run_with_session_kill(
-            [sys.executable, "-c", wrapper_code, str(pidfile), server_code, framework], timeout=10
-        )
+        result = run_with_session_kill([sys.executable, "-c", wrapper_code, str(pidfile), server_code], timeout=10)
         assert result.returncode == 0
         server_pid = int(pidfile.read_text())
         assert os.getpgid(server_pid) == server_pid

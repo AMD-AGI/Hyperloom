@@ -40,11 +40,6 @@ _SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
     "sglang serve",
     "vllm.entrypoints",
     "vllm serve",
-    # ATOM serves through ``python3 -m atom.entrypoints.openai_server``. It is a
-    # first-class framework here -- ``atom_mi*x.sh`` is in MAGPIE_BUILTIN_SCRIPTS,
-    # so ATOM is admitted to the reuse protocol -- but without a marker of its own
-    # every gate below classified our own server as "not a server", declined to
-    # signal it, and left the setsid'd tree holding its GPUs.
     "atom.entrypoints",
     "launch_server",
 )
