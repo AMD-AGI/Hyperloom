@@ -3065,6 +3065,47 @@ class IntegratePatchExecutor:
             kept_result["enablement_localization_manifest"] = manifest
         return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
 
+    def _commit_accepted_work(
+        self,
+        *,
+        framework_root: Path | None,
+        applied: list[Path],
+        applied_artifacts: list[dict[str, Any]],
+        message: str,
+    ) -> tuple[str, bool]:
+        """Commit accepted patch and artifact changes to a git root for cross-round durability.
+
+        On a non-git root the call is a no-op: the changes are already resident
+        in the filesystem and nothing reverts them between rounds.
+
+        Returns:
+            ``(failure_note, head_advanced)`` where ``failure_note`` is empty on
+            success and ``head_advanced`` is ``True`` only when a real commit
+            landed (signals the realized-diff harvest may proceed).
+        """
+        if framework_root is None or not _is_git_tree(framework_root):
+            log.info(
+                "integrate_patch: non-git framework root %s; skipping commit-on-accept",
+                framework_root,
+            )
+            return "", False
+        try:
+            touched = _patch_touched_paths(framework_root, applied)
+            artifact_rels = [
+                str(a["rel_target"])
+                for a in (applied_artifacts or [])
+                if isinstance(a, dict) and a.get("rel_target")
+                and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
+            ]
+            all_paths = list(dict.fromkeys(touched + artifact_rels))
+            ok, note = _git_commit_kept(framework_root, message, all_paths)
+            if not ok:
+                return note or "git commit failed", False
+            return "", note == ""
+        except Exception as exc:  # noqa: BLE001
+            log.exception("integrate_patch: commit-on-accept raised")
+            return f"commit raised: {exc!r}", False
+
     def _finalize_localization_keep(
         self,
         ctx: Any,
@@ -3410,38 +3451,12 @@ class IntegratePatchExecutor:
             accuracy_delta_pct=acc_delta_pct,
             config_fingerprint=cfg_fingerprint,
         )
-        # The commit is what makes a KEEP survive the next candidate's
-        # ``checkout --force HEAD -- . && clean -fd``; nothing replays the
-        # source snapshot in-session. A failure is therefore terminal, or the
-        # stack would claim a win the tree no longer carries. Non-git roots have
-        # no checkout revert to survive, so the commit is skipped there.
-        commit_failure: str = ""
-        keep_committed = False
-        if framework_root is None or not _is_git_tree(framework_root):
-            log.info(
-                "integrate_patch: non-git framework root %s; skipping commit-on-KEEP",
-                framework_root,
-            )
-        else:
-            try:
-                touched = _patch_touched_paths(framework_root, applied)
-                ok, note = _git_commit_kept(
-                    framework_root,
-                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
-                    touched,
-                )
-                if not ok:
-                    commit_failure = note or "git commit failed"
-                else:
-                    # Only a real commit advances HEAD, and ``_git_commit_kept``
-                    # signals that with an empty note. Either no-op ("nothing to
-                    # commit" or "no patch-touched paths to commit") leaves HEAD on
-                    # the previous KEEP, so a later ``HEAD^..HEAD`` would be that
-                    # KEEP's diff, not this one -- the harvest must not run then.
-                    keep_committed = note == ""
-            except Exception as exc:  # noqa: BLE001 — surfaced as a verdict below
-                log.exception("integrate_patch: commit-on-KEEP raised")
-                commit_failure = f"commit raised: {exc!r}"
+        commit_failure, keep_committed = self._commit_accepted_work(
+            framework_root=framework_root,
+            applied=applied,
+            applied_artifacts=applied_artifacts,
+            message=f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+        )
         if commit_failure:
             log.error(
                 "integrate_patch: commit-on-KEEP failed (%s); reverting rather than "
@@ -3455,10 +3470,6 @@ class IntegratePatchExecutor:
                 stash_state,
                 stash_note,
                 {
-                    # Applied, benched, then rolled back: the same terminal
-                    # shape every other post-apply rollback reports. Calling it
-                    # an apply failure sent the re-author loop after a diff
-                    # that had already passed the bench.
                     "status": "reverted",
                     "error_class": "keep_commit_failed",
                     "error": commit_failure,
