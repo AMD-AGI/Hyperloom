@@ -196,11 +196,7 @@ class EnablementParams(CoordinatorCollaborator):
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        # Progressing patches from prior rounds, re-applied as a base before this
-        # round's patch (serial-gap stacking); author a fix composing on top.
         base_patches = [str(p) for p in (state.enablement.kept_patches or [])]
-        # Whole-file artifacts kept by prior rounds, re-installed before the
-        # boot the same way patches are re-applied.
         base_artifacts = list(state.enablement.kept_artifacts or [])
         # Only prior rounds' *actually-applied* setup commands (recorded by the
         # specialist and replayed by integrate_patch) stack as a base. No install
@@ -213,6 +209,7 @@ class EnablementParams(CoordinatorCollaborator):
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
         notes = ""
         grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
+        apply_feedback = [fb for fb in (state.enablement.last_apply_feedback or []) if isinstance(fb, dict)]
         spanned_roots = bool(state.enablement.patches_span_multiple_roots)
         acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
         acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
@@ -238,12 +235,27 @@ class EnablementParams(CoordinatorCollaborator):
                 "base before your changes — do NOT redo them; fix only the CURRENT "
                 "(deeper) failure, composing on top. " + "; ".join(progress_bits)
             )
-        elif attempt:
-            notes = (
+        # Composed rather than an ``elif``: a stalled round that already banked
+        # progress needs both halves, and the stacked note alone reads as "all
+        # good so far, go deeper" while the round in fact cleared nothing.
+        if attempt:
+            retry_note = (
                 f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
-                f"patch for this failure was REVERTED (did not make the combo runnable). "
-                f"Try a DIFFERENT bridging approach / candidate than before."
+                f"patch for this failure never made the combo runnable — it was reverted "
+                f"or failed to apply. Try a DIFFERENT bridging approach / candidate than before."
             )
+            notes = (retry_note + "\n\n" + notes).strip() if notes else retry_note
+        if apply_feedback:
+            from ..actions.executors._apply_feedback import ApplyFeedback
+
+            blocks = [
+                "APPLY FAILURE FEEDBACK: the prior round's patch never reached the "
+                "framework tree. Re-ground the diff against the target file as it "
+                "reads now — the errors below name the conflict."
+            ]
+            blocks.extend(ApplyFeedback.from_dict(fb).format_for_mandate() for fb in apply_feedback[:5])
+            apply_note = "\n\n".join(blocks)
+            notes = (apply_note + "\n\n" + notes).strip() if notes else apply_note
         if grounding_drops:
             drop_note = (
                 "PATCH GROUNDING FAILURE: the patches the prior round submitted "
@@ -308,10 +320,6 @@ class EnablementParams(CoordinatorCollaborator):
             # failure) the checkpoint's per-layer weight inventory. Rendered
             # into the mandate by _section_enablement_playbook.
             "enablement_source_context": source_context,
-            # Progressing patches from prior rounds, stacked as a base.
-            "enablement_base_patches": base_patches,
-            # Whole-file artifact records from prior rounds, re-installed before boot.
-            "enablement_base_artifacts": base_artifacts,
             # Allowlisted setup commands from prior rounds, replayed before boot.
             "enablement_setup_commands": base_setup,
             # Config accumulated by prior advanced rounds. The bench variant

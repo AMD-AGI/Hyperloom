@@ -187,7 +187,6 @@ def resolve_patch_source(params: Mapping[str, Any]) -> str:
 
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "patches",
-    "enablement_base_patches",
     "localization_candidate",
     "runtime_candidate",
     "artifacts",
@@ -1653,10 +1652,7 @@ class IntegratePatchExecutor:
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
-        # Both are set per round by _stage_apply and tell the revert the tree was
-        # written even when no patch landed in ``applied``.
         self._apply_attempted: bool = False
-        self._ip_base_artifact_replayed = False
         # This round's deliverable, digests frozen where the work was validated.
         # Held so the revert can read the apply's backup ledger back.
         self._nogit_backup_root: Path | None = None
@@ -2174,7 +2170,6 @@ class IntegratePatchExecutor:
         Returns an early-exit result dict on failure/no-patches/apply_only,
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
-        self._ip_base_artifact_replayed = False
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -2201,22 +2196,6 @@ class IntegratePatchExecutor:
             if prefix_loc:
                 log.info("integrate_patch: prepending %d localization patch(es)", len(prefix_loc))
                 patch_paths = prefix_loc + list(patch_paths)
-        base_patches = params.get("enablement_base_patches")
-        if bool(params.get("enablement")) and isinstance(base_patches, list) and base_patches:
-            seen = {str(p) for p in patch_paths}
-            prefix: list[Path] = []
-            for bp in base_patches:
-                bp_path = Path(str(bp))
-                if bp_path.is_file() and str(bp_path) not in seen:
-                    prefix.append(bp_path)
-                    seen.add(str(bp_path))
-            if prefix:
-                log.info(
-                    "integrate_patch: enablement stacking %d base patch(es) before this round's patch",
-                    len(prefix),
-                )
-                patch_paths = prefix + list(patch_paths)
-
         config_changes = dict(params.get("config_changes") or {})
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
@@ -2321,7 +2300,6 @@ class IntegratePatchExecutor:
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
-                self._replay_base_artifacts(params)
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
                 ctx._ip_framework_root = None  # type: ignore[attr-defined]
@@ -2510,10 +2488,9 @@ class IntegratePatchExecutor:
         ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
         ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
 
-        self._replay_base_artifacts(params)
-
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
+        self._nogit_backup_root = output_root / "patch_backups" if not git_tree else None
 
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
@@ -2547,12 +2524,10 @@ class IntegratePatchExecutor:
                         apply_feedbacks.append(fb)
                     break
             else:
-                nogit_backup_root = output_root / "patch_backups"
-                self._nogit_backup_root = nogit_backup_root
                 ok, err, backups, fb = _apply_patch_no_git(
                     framework_root,
                     patch,
-                    nogit_backup_root,
+                    self._nogit_backup_root,
                     seq_offset=len(self._nogit_patch_backups),
                 )
                 self._nogit_patch_backups.extend(backups)
@@ -4199,7 +4174,7 @@ class IntegratePatchExecutor:
                     return []
             self._log_residual_drift(framework_root)
             return list(applied)
-        if not self._apply_attempted and not applied and not self._ip_base_artifact_replayed:
+        if not self._apply_attempted and not applied:
             return reverted
         # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
         # committed, so HEAD is exactly the accepted stack: kept work is in
@@ -4260,69 +4235,6 @@ class IntegratePatchExecutor:
                 framework_root,
                 ", ".join(sorted(residual)),
             )
-
-    def _replay_base_artifacts(self, params: dict[str, Any]) -> None:
-        """Re-install artifacts that prior enablement rounds accepted.
-
-        Called twice per round: in launch-only mode (before the early return, so
-        the probe boots against the accepted stack) and after the framework stash
-        (so the re-install is not immediately swept up by ``_git_stash_if_dirty``).
-        The replay does not feed ``applied_artifacts``; base artifacts are the
-        stable base and must not be reverted when this round's candidate is rolled back.
-
-        Each entry is validated before installation:
-        - ``target`` must resolve inside a framework root
-          (via :func:`_resolve_artifact_target`).
-        - ``source`` must resolve inside the session directory.
-
-        An entry failing either check is skipped with a warning. The install
-        itself is unguarded on purpose: a base artifact belongs to the accepted
-        stack, so a round that cannot restore it would benchmark a tree no round
-        asked for. The ``OSError`` propagates and ``__call__`` unwinds it.
-
-        An entry whose source no longer hashes to the digest frozen when its
-        round was validated is skipped rather than re-installed.
-        """
-        if not bool(params.get("enablement")):
-            return
-        base_artifacts = params.get("enablement_base_artifacts")
-        if not isinstance(base_artifacts, list):
-            return
-        for art in base_artifacts:
-            if not isinstance(art, dict):
-                continue
-            source_str = str(art.get("source") or "").strip()
-            target_str = str(art.get("target") or "").strip()
-            if not source_str or not target_str:
-                continue
-            source = Path(source_str)
-            if not source.is_file():
-                log.warning("integrate_patch: base artifact source not found: %s", source)
-                continue
-            try:
-                source_resolved = source.resolve()
-            except (OSError, RuntimeError):
-                log.warning("integrate_patch: base artifact source unresolvable: %s", source)
-                continue
-            if not _is_within(source_resolved, self.session_dir.resolve()):
-                log.warning(
-                    "integrate_patch: base artifact source %s escapes session dir; skipping",
-                    source,
-                )
-                continue
-            resolved = _resolve_artifact_target(target_str)
-            if resolved is None:
-                log.warning(
-                    "integrate_patch: base artifact target %r not in a framework root; skipping",
-                    target_str,
-                )
-                continue
-            target = resolved[0]
-            # Set before the write so a copy that raises still counts as dirtying.
-            self._ip_base_artifact_replayed = True
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            log.info("integrate_patch: re-installed base artifact %s", target)
 
     def _apply_artifacts(
         self,

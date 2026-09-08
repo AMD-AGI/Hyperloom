@@ -1610,10 +1610,6 @@ class ExplorePhase(CoordinatorCollaborator):
                 before_path = str(spec_params.get("enablement_before_observation_path") or "")
                 if before_path:
                     integrate_params["enablement_before_observation_path"] = before_path
-                # Forward the stacked base patches for integrate_patch to re-apply.
-                base_patches = spec_params.get("enablement_base_patches")
-                if isinstance(base_patches, list) and base_patches:
-                    integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
                 # Forward stacked base setup commands to replay before boot.
                 base_setup = spec_params.get("enablement_setup_commands")
                 if isinstance(base_setup, list) and base_setup:
@@ -1768,9 +1764,6 @@ class ExplorePhase(CoordinatorCollaborator):
             before_path = str(spec_params.get("enablement_before_observation_path") or "")
             if before_path:
                 integrate_params["enablement_before_observation_path"] = before_path
-            base_patches = spec_params.get("enablement_base_patches")
-            if isinstance(base_patches, list) and base_patches:
-                integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
             # Merge the stacked base setup commands with any NEW setup_commands the
             # specialist just proposed in this deliverable (e.g. a stack upgrade),
             # so a config-lever-only enablement round actually replays the install
