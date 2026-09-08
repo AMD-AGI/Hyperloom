@@ -38,7 +38,10 @@ _CHANNEL_OPTIONS: frozenset[str] = frozenset({"-c", "--channel"})
 _ATTACHED_SHORT_VALUE_OPTIONS: tuple[str, ...] = ("-r", "-c", "-i", "-f")
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
-_CREDENTIALED_URL_RE = re.compile(r"(?:(?:git|hg|svn)\+)?[A-Za-z][A-Za-z0-9+.-]*://[^\s/@\"']+@[^\s\"']+")
+_CREDENTIALED_URL_RE = re.compile(
+    r"(?P<scheme>(?:(?:git|hg|svn)\+)?[A-Za-z][A-Za-z0-9+.-]*://)"
+    r"(?P<userinfo>[^\s/?#\"']+)@(?P<location>[^\s\"']+)"
+)
 
 #: The ambient spelling of ``--index-url``; an inline assignment of one is the
 #: same flag by another name, and the allowlist admits it as readily.
@@ -183,7 +186,8 @@ def url_userinfo(token: str) -> str:
     try:
         parts = urlsplit(text)
     except ValueError:
-        return ""
+        match = _CREDENTIALED_URL_RE.search(text)
+        return match.group("userinfo") if match else ""
     return parts.netloc.rsplit("@", 1)[0] if "@" in parts.netloc else ""
 
 
@@ -200,7 +204,7 @@ def strip_url_userinfo(url: str) -> str:
     try:
         parts = urlsplit(text)
     except ValueError:
-        return str(url or "")
+        return prefix + _CREDENTIALED_URL_RE.sub(r"\g<scheme>\g<location>", text)
     if "@" not in parts.netloc:
         return str(url or "")
     host = parts.netloc.rsplit("@", 1)[1]

@@ -16,6 +16,7 @@ import hashlib
 from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
+from hyperloom.orchestrator.framework import targeted_build
 
 from .credentials import (
     classify_credential_class,
@@ -26,14 +27,6 @@ from .credentials import (
 
 BUILTIN_PLAN_DRIVER = "builtin_plan"
 CUSTOM_COMMAND_DRIVER = "custom_command"
-
-#: Per-component defaults the built-in drivers substitute for a blank action
-#: field, mirroring ``targeted_build``'s own component paths.
-_COMPONENT_DEFAULTS: dict[str, tuple[str, int]] = {
-    "aiter": ("https://github.com/ROCm/aiter", 8),
-    "sgl_kernel": ("https://github.com/sgl-project/sglang", 8),
-    "vllm": ("https://github.com/ROCm/vllm", 8),
-}
 
 #: Names a component's own driver overwrites in the merge without first reading
 #: them: the inherited value never reaches the build, and the value that does is
@@ -154,7 +147,11 @@ def build_input_record(
         fs_root: Filesystem root the ambient credential channels are probed under.
     """
     component = str(getattr(action, "component", "") or "")
-    default_repo, default_jobs = _COMPONENT_DEFAULTS.get(component, ("", 0))
+    default_repo, default_jobs = {
+        "aiter": (targeted_build._AITER_DEFAULT_REPO, targeted_build._AITER_DEFAULT_MAX_JOBS),
+        "sgl_kernel": (targeted_build._SGLANG_DEFAULT_REPO, targeted_build._SGLANG_DEFAULT_MAX_JOBS),
+        "vllm_source": (targeted_build._VLLM_DEFAULT_REPO, targeted_build._VLLM_DEFAULT_MAX_JOBS),
+    }.get("aiter" if component == "framework_ext" else component, ("", 0))
     raw_repo = str(getattr(action, "repo_url", "") or "").strip() or default_repo
     versions = dict(installed_versions or {})
     ambient = ambient_closure(ambient_env, component=component)

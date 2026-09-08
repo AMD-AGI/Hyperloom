@@ -25,6 +25,7 @@ from hyperloom.orchestrator.enablement.recipe.build_inputs import (
     build_driver_for,
     build_input_record,
 )
+from hyperloom.orchestrator.enablement.recipe.credentials import strip_url_userinfo, url_userinfo
 from hyperloom.orchestrator.enablement.recipe.projections import (
     project_accepted_config,
     project_launch_evidence,
@@ -37,6 +38,8 @@ from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
     build_execution_row,
     mark_round_disposition,
 )
+from hyperloom.orchestrator.framework import targeted_build
+from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction
 
 NO_FS = "/nonexistent-probe-root"
 
@@ -355,6 +358,30 @@ def test_env_value_change_alone_changes_the_digest_and_emits_no_value():
     assert one["repo_url"] == "https://github.com/ROCm/aiter" and one["max_jobs"] == 8
 
 
+@pytest.mark.parametrize(
+    ("component", "default_prefix", "default_jobs"),
+    [("aiter", "_AITER", 3), ("framework_ext", "_AITER", 3), ("sgl_kernel", "_SGLANG", 5), ("vllm_source", "_VLLM", 7)],
+)
+@pytest.mark.parametrize(("repo_url", "max_jobs"), [("", 0), ("   ", 0), ("https://example.com/override", 11)])
+def test_build_inputs_follow_driver_defaults(monkeypatch, component, default_prefix, default_jobs, repo_url, max_jobs):
+    default_repo = f"https://example.com/{component}"
+    monkeypatch.setattr(targeted_build, f"{default_prefix}_DEFAULT_REPO", default_repo)
+    monkeypatch.setattr(targeted_build, f"{default_prefix}_DEFAULT_MAX_JOBS", default_jobs)
+    action = TargetedBuildAction(
+        gap_id="gap",
+        framework="vllm",
+        component=component,
+        capability="build",
+        repo_url=repo_url,
+        max_jobs=max_jobs,
+    )
+
+    record = build_input_record(action, installed_versions={}, ambient_env={}, fs_root=NO_FS)
+
+    assert record["repo_url"] == (repo_url.strip() or default_repo)
+    assert record["max_jobs"] == (max_jobs or default_jobs)
+
+
 def test_ambient_closure_tracks_build_effective_names_and_ignores_presentation():
     base = {"PATH": "/usr/bin", "ROCM_PATH": "/opt/rocm", "PIP_INDEX_URL": "https://a", "TERM": "xterm"}
     for changed in ("PATH", "ROCM_PATH", "PIP_INDEX_URL"):
@@ -393,10 +420,11 @@ def test_a_build_spawned_with_a_credentialed_index_env_classifies_it():
     assert "token" not in json.dumps(record)
 
 
-def test_credentialed_repo_url_is_stripped_and_classified():
+@pytest.mark.parametrize("host", ["github.com", "host]", "[host"])
+def test_credentialed_repo_url_is_stripped_and_classified(host):
     class _Action:
         component = "aiter"
-        repo_url = "https://user:token@github.com/org/repo"
+        repo_url = f"https://user:token@{host}/org/repo"
         ref = "v1"
         gpu_arch = "gfx950"
         max_jobs = 8
@@ -405,7 +433,7 @@ def test_credentialed_repo_url_is_stripped_and_classified():
         envs: dict = {}
 
     record = build_input_record(_Action(), installed_versions={}, ambient_env={}, fs_root=NO_FS)
-    assert record["repo_url"] == "https://github.com/org/repo"
+    assert record["repo_url"] == f"https://{host}/org/repo"
     # A repository URL is under no index option, so it takes the closed
     # vocabulary's catch-all rather than borrowing a flag's class.
     assert record["credential_class"] == "opaque_credential"
@@ -462,10 +490,11 @@ def test_a_credentialed_build_input_blocks_replay():
         assert "credential_required" in _codes(_decide(state)), inputs
 
 
-def test_a_credentialed_repo_url_recorded_by_the_builder_blocks_replay():
+@pytest.mark.parametrize("host", ["github.com", "host]", "[host"])
+def test_a_credentialed_repo_url_recorded_by_the_builder_blocks_replay(host):
     class _Action:
         component = "aiter"
-        repo_url = "https://user:token@github.com/org/repo"
+        repo_url = f"https://user:token@{host}/org/repo"
         ref = "v1"
         gpu_arch = "gfx950"
         max_jobs = 8
@@ -839,6 +868,35 @@ def test_an_unparseable_command_still_redacts_a_credentialed_url():
     assert "token" not in sanitized
     assert "private.example" not in sanitized
     assert "/simple" not in sanitized
+
+
+@pytest.mark.parametrize(
+    ("url", "userinfo", "stripped"),
+    [
+        ("https://user:token@host]/simple", "user:token", "https://host]/simple"),
+        ("https://user:token@[host/simple", "user:token", "https://[host/simple"),
+        ("https://user:token@[::1/simple", "user:token", "https://[::1/simple"),
+        ("git+https://user:token@host]/repo@main", "user:token", "git+https://host]/repo@main"),
+        ("https://user:tok@en@host]/simple?q=a@b#c@d", "user:tok@en", "https://host]/simple?q=a@b#c@d"),
+    ],
+)
+def test_malformed_url_userinfo_is_detected_and_stripped(url, userinfo, stripped):
+    assert url_userinfo(url) == userinfo
+    assert strip_url_userinfo(url) == stripped
+    assert classify_credential_value(url) is not None
+
+
+@pytest.mark.parametrize("host", ["host]", "[host", "[::1"])
+def test_malformed_credentialed_index_is_sanitized_and_blocks_replay(host):
+    cmd = PINNED_INSTALL.replace("pip install", f"pip install --index-url https://user:token@{host}/simple", 1)
+    row = _row(cmd)
+    assert row["credential_class"] == "index_url"
+    assert "user:token" not in row["cmd_sanitized"]
+    assert f"{host}/simple" not in row["cmd_sanitized"]
+    state = {**_sufficient_state(), "setup_commands": [cmd], "setup_executions": _accepted([row])}
+    decision = _decide(state, _sufficient_section())
+    assert _codes(decision) == ["credential_required"]
+    assert decision["status"] == "insufficient"
 
 
 def test_a_bare_credentialed_url_is_not_borrowed_from_the_index_flag():
