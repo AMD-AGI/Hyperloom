@@ -211,22 +211,32 @@ for the user-facing summary.
   configuring one box was being asked to learn two vocabularies for the same
   decision. `Config.from_env` now walks the ladder
   `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
-  `FORGE_AGENT_MODEL`, then `FORGE_CLAUDE_MODEL`/`FORGE_CODEX_MODEL`, then
-  `CLAUDE_MODEL`/`CODEX_MODEL` -- reimplemented rather than imported, because
+  `FORGE_AGENT_MODEL`, then `CLAUDE_MODEL`/`CODEX_MODEL` -- reimplemented
+  rather than imported, because
   this package does not depend on `hyperloom`. Reasoning effort falls back to
   the project-wide `HYPERLOOM_REASONING_EFFORT` when
   `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
   is not silently contradicted by the component doing most of the spending.<br/>
   **Three surfaces were reading a different ladder than the one they
-  documented.** `forge-fusion`'s `_resolve_agent_choice` read only
-  `CLAUDE_MODEL`/`CODEX_MODEL`, so an operator who set the documented
-  `FORGE_CLAUDE_MODEL` had it honoured by `forge-loop` and ignored by fusion.
-  Hyperloom's own `_run_vendor_playbook_loop_via_cli` read a bare `CODEX_MODEL`,
-  making it the one Forge launch site that ignored `FORGE_CODEX_MODEL`. And
+  documented.** `forge-fusion`'s `_resolve_agent_choice` and Hyperloom's own
+  `_run_vendor_playbook_loop_via_cli` each read one model variable directly
+  rather than the shared resolver, so a request-level `llm_model` and the
+  environment were ranked differently depending on which surface launched the
+  run. Both now go through the resolver. And
   `_credential_shape` did not count `CLAUDE_CODE_OAUTH_TOKEN`, so a box holding
   a subscription token was told it had no Anthropic credentials while the Claude
   CLI on it would have authenticated fine -- Hyperloom's own credential
   preflight has always counted that token as a complete Anthropic side.<br/>
+  **Removed:** `FORGE_CLAUDE_MODEL` and `FORGE_CODEX_MODEL`. They date from
+  when Forge was a separate project that had to name its own settings; inside
+  Hyperloom they were one component's second spelling of `CLAUDE_MODEL` /
+  `CODEX_MODEL`, and a second spelling of one setting is only ever a second
+  place for a box to be misconfigured -- a deployment that set one and not the
+  other silently ran Forge on a different model than everything else. A run
+  that genuinely needs Forge on its own model still says so with
+  `FORGE_AGENT_MODEL`, which is provider-neutral and therefore does not
+  reintroduce the pair. Dropped from the resolver on both sides, from the Ray
+  and Slurm environment allowlists, and from both env templates.<br/>
   **Removed:** `KERNEL_AGENTS_MODEL`. Nothing in either repository ever set it;
   it was only ever read, so it gave the ladder a rung to explain and nothing to
   configure. Use `FORGE_AGENT_MODEL`.

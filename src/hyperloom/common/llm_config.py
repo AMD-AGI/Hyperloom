@@ -251,14 +251,8 @@ def resolve_forge_llm_model(
         return explicit_model
     backend = (agent_backend or "").strip().lower()
     if backend == "codex":
-        return (
-            str(source.get("FORGE_CODEX_MODEL") or "").strip()
-            or str(source.get("CODEX_MODEL") or "").strip()
-            or default
-        )
-    return (
-        str(source.get("FORGE_CLAUDE_MODEL") or "").strip() or str(source.get("CLAUDE_MODEL") or "").strip() or default
-    )
+        return str(source.get("CODEX_MODEL") or "").strip() or default
+    return str(source.get("CLAUDE_MODEL") or "").strip() or default
 
 
 def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:

@@ -212,7 +212,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `FORGE_AGENT_MODEL`, `FORGE_CLAUDE_MODEL`/`FORGE_CODEX_MODEL` and `CLAUDE_MODEL`/`CODEX_MODEL`. |
+| `--model <name>` | provider default | LLM model; overrides `FORGE_AGENT_MODEL` and `CLAUDE_MODEL`/`CODEX_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |

@@ -455,15 +455,16 @@ def test_deepseek_compat_env_geak_model_follows_explicit_claude_model():
     assert updates["GEAK_CLAUDE_MODEL"] == "claude-opus-5"
 
 
-def test_resolve_forge_llm_model_prefers_forge_env_over_orchestration():
+def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
+    """Forge reads the platform's model variables and has none of its own."""
     env = {
         "CLAUDE_MODEL": "claude-orchestration",
         "FORGE_CLAUDE_MODEL": "claude-forge-only",
         "CODEX_MODEL": "gpt-orchestration",
         "FORGE_CODEX_MODEL": "gpt-forge-only",
     }
-    assert resolve_forge_llm_model("claude", env=env) == "claude-forge-only"
-    assert resolve_forge_llm_model("codex", env=env) == "gpt-forge-only"
+    assert resolve_forge_llm_model("claude", env=env) == "claude-orchestration"
+    assert resolve_forge_llm_model("codex", env=env) == "gpt-orchestration"
 
 
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
@@ -472,7 +473,7 @@ def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
     assert (
         resolve_forge_llm_model(
             "claude",
-            env={"FORGE_CLAUDE_MODEL": "claude-forge-only"},
+            env={"CLAUDE_MODEL": "claude-orchestration"},
             explicit="claude-payload",
         )
         == "claude-payload"

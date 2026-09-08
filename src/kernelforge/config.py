@@ -47,12 +47,17 @@ def resolve_agent_model(agent_backend: str) -> str:
 
     1. ``FORGE_AGENT_MODEL`` -- provider-neutral, this package's own, and still
        the way to name a model without caring which backend answers;
-    2. ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL`` -- the forge counterpart
-       of ``GEAK_CLAUDE_MODEL``;
-    3. ``CLAUDE_MODEL`` / ``CODEX_MODEL`` -- the orchestration-side value every
+    2. ``CLAUDE_MODEL`` / ``CODEX_MODEL`` -- the orchestration-side value every
        Hyperloom component inherits from.
 
-    A backend of ``auto`` reads the Claude ladder, matching both the default
+    There is deliberately no Forge-private per-provider variable between the
+    two. Forge used to read ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``
+    first, from when it was a separate project that had to name its own
+    settings; inside Hyperloom that is one component spelling a platform
+    setting a second way, and a second spelling is only ever a second place for
+    a box to be misconfigured.
+
+    A backend of ``auto`` reads the Claude variable, matching both the default
     provider selection here and what ``resolve_forge_llm_model`` does with a
     backend it does not recognise.
     """
@@ -60,14 +65,8 @@ def resolve_agent_model(agent_backend: str) -> str:
     if explicit:
         return explicit
     if (agent_backend or "").strip().lower() == "codex":
-        ladder = ("FORGE_CODEX_MODEL", "CODEX_MODEL")
-    else:
-        ladder = ("FORGE_CLAUDE_MODEL", "CLAUDE_MODEL")
-    for name in ladder:
-        value = os.getenv(name, "").strip()
-        if value:
-            return value
-    return ""
+        return os.getenv("CODEX_MODEL", "").strip()
+    return os.getenv("CLAUDE_MODEL", "").strip()
 
 
 def resolve_agent_reasoning_effort() -> str:

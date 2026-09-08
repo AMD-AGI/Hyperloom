@@ -3495,9 +3495,9 @@ def _run_vendor_playbook_loop_via_cli(
     cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     if _openai_only_provider():
         cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
-        # The shared ladder, not a bare CODEX_MODEL read: this path used to be
-        # the one Forge launch site that ignored FORGE_CODEX_MODEL, so a box
-        # configured the documented way ran the vendor playbook on the provider
+        # The shared resolver, not a bare CODEX_MODEL read: it is the one
+        # place the request-level override and the environment are ranked, and
+        # this path used to skip it and run the vendor playbook on the provider
         # default while every other Forge surface honoured the operator's id.
         from hyperloom.common.llm_config import resolve_forge_llm_model
 

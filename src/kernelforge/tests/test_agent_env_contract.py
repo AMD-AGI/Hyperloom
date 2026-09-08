@@ -51,20 +51,27 @@ def test_orchestration_model_is_inherited(clean_env) -> None:
     assert resolve_agent_model("auto") == "claude-opus-5"
 
 
-def test_forge_specific_model_outranks_orchestration(clean_env) -> None:
-    """``FORGE_*`` is how a deployment gives Forge a different model."""
+def test_the_forge_private_per_provider_vars_are_not_read(clean_env) -> None:
+    """``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL`` are gone, not deprecated.
+
+    They were Forge naming its own settings back when it was a separate
+    project. Inside Hyperloom they were a second spelling of ``CLAUDE_MODEL`` /
+    ``CODEX_MODEL``, and a second spelling of one setting is only ever a second
+    place for a box to be misconfigured. A run that needs Forge on a different
+    model than orchestration says so with ``FORGE_AGENT_MODEL``.
+    """
     clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
     clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
     clean_env.setenv("CODEX_MODEL", "gpt-5.6")
     clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
-    assert resolve_agent_model("claude") == "claude-sonnet-5"
-    assert resolve_agent_model("codex") == "gpt-5.5"
+    assert resolve_agent_model("claude") == "claude-opus-5"
+    assert resolve_agent_model("codex") == "gpt-5.6"
 
 
 def test_provider_neutral_model_outranks_everything(clean_env) -> None:
     """``FORGE_AGENT_MODEL`` names one model whichever backend answers."""
     clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
-    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.6")
     clean_env.setenv("FORGE_AGENT_MODEL", "claude-opus-4-8")
     assert resolve_agent_model("claude") == "claude-opus-4-8"
     assert resolve_agent_model("codex") == "claude-opus-4-8"
@@ -83,8 +90,8 @@ def test_the_removed_alias_is_no_longer_read(clean_env) -> None:
 
 def test_model_ladder_reaches_config(clean_env) -> None:
     """``Config.from_env`` uses the ladder for the backend it was given."""
-    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
-    clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
+    clean_env.setenv("CLAUDE_MODEL", "claude-sonnet-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.5")
     assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_model == "claude-sonnet-5"
     assert Config.from_env(agent_backend="codex", workspace="/tmp").agent_model == "gpt-5.5"
     # An explicit override still outranks the environment entirely.

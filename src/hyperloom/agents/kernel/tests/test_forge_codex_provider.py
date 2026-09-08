@@ -178,15 +178,15 @@ def test_openai_only_forwards_the_session_codex_model(tmp_path, monkeypatch):
     assert _flag_value(command, "--model") == "gpt-5.5"
 
 
-def test_openai_only_prefers_forge_codex_model_over_codex_model(tmp_path, monkeypatch):
-    """FORGE_CODEX_MODEL is the rewrite counterpart of the fusion/codex override."""
+def test_openai_only_ignores_the_removed_forge_codex_model(tmp_path, monkeypatch):
+    """The Forge-private spelling is gone; CODEX_MODEL is the one that runs."""
     _use_openai_only(monkeypatch)
     monkeypatch.setenv("CODEX_MODEL", "gpt-orchestration")
     monkeypatch.setenv("FORGE_CODEX_MODEL", "gpt-forge-only")
 
     command = _capture_forge_loop_argv(tmp_path, monkeypatch)
 
-    assert _flag_value(command, "--model") == "gpt-forge-only"
+    assert _flag_value(command, "--model") == "gpt-orchestration"
 
 
 def test_openai_only_omits_the_model_flag_without_codex_model(tmp_path, monkeypatch):
@@ -198,20 +198,20 @@ def test_openai_only_omits_the_model_flag_without_codex_model(tmp_path, monkeypa
     assert "--model" not in command
 
 
-def test_anthropic_path_forwards_forge_claude_model(tmp_path, monkeypatch):
-    """Claude-side rewrite must honor FORGE_CLAUDE_MODEL over CLAUDE_MODEL."""
+def test_anthropic_path_ignores_the_removed_forge_claude_model(tmp_path, monkeypatch):
+    """The Forge-private spelling is gone; CLAUDE_MODEL is the one that runs."""
     _use_anthropic_only(monkeypatch)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
     monkeypatch.setenv("FORGE_CLAUDE_MODEL", "claude-forge-only")
 
     command = _capture_forge_loop_argv(tmp_path, monkeypatch)
 
-    assert _flag_value(command, "--model") == "claude-forge-only"
+    assert _flag_value(command, "--model") == "claude-orchestration"
     assert "--agent-backend" not in command
 
 
-def test_anthropic_path_forwards_claude_model_without_forge_override(tmp_path, monkeypatch):
-    """With no FORGE_CLAUDE_MODEL, rewrite still forwards CLAUDE_MODEL."""
+def test_anthropic_path_forwards_claude_model(tmp_path, monkeypatch):
+    """The orchestration-side id is what rewrite forwards."""
     _use_anthropic_only(monkeypatch)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
 
@@ -220,29 +220,27 @@ def test_anthropic_path_forwards_claude_model_without_forge_override(tmp_path, m
     assert _flag_value(command, "--model") == "claude-orchestration"
 
 
-def test_flydsl_rewrite_openai_only_prefers_forge_codex_model(tmp_path, monkeypatch):
-    """FlyDSL rewrite must resolve FORGE_CODEX_MODEL; KernelForge does not."""
+def test_flydsl_rewrite_openai_only_resolves_codex_model(tmp_path, monkeypatch):
+    """FlyDSL rewrite must resolve the id itself; KernelForge does not see it."""
     _use_openai_only(monkeypatch)
     monkeypatch.setenv("CODEX_MODEL", "gpt-orchestration")
-    monkeypatch.setenv("FORGE_CODEX_MODEL", "gpt-forge-only")
 
     command, env = _capture_rewrite_argv(tmp_path, monkeypatch)
 
     assert env["FORGE_AGENT_BACKEND"] == "codex"
     assert env["FORGE_AGENT_FALLBACK_PROVIDER"] == "none"
-    assert _flag_value(command, "--model") == "gpt-forge-only"
+    assert _flag_value(command, "--model") == "gpt-orchestration"
 
 
-def test_flydsl_rewrite_anthropic_path_prefers_forge_claude_model(tmp_path, monkeypatch):
-    """FlyDSL rewrite must pass FORGE_CLAUDE_MODEL via --model, not ambient env alone."""
+def test_flydsl_rewrite_anthropic_path_passes_claude_model(tmp_path, monkeypatch):
+    """FlyDSL rewrite must pass CLAUDE_MODEL via --model, not ambient env alone."""
     _use_anthropic_only(monkeypatch)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-orchestration")
-    monkeypatch.setenv("FORGE_CLAUDE_MODEL", "claude-forge-only")
 
     command, env = _capture_rewrite_argv(tmp_path, monkeypatch)
 
     assert "FORGE_AGENT_BACKEND" not in env
-    assert _flag_value(command, "--model") == "claude-forge-only"
+    assert _flag_value(command, "--model") == "claude-orchestration"
 
 
 def test_flydsl_rewrite_omits_model_without_configured_ids(tmp_path, monkeypatch):

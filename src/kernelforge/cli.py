@@ -2152,7 +2152,7 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     show_default=True,
     help="Read and publish rewrite recipes.",
 )
-@click.option("--model", default=None, help="LLM model (overrides FORGE_AGENT_MODEL / FORGE_CLAUDE_MODEL / CLAUDE_MODEL)")
+@click.option("--model", default=None, help="LLM model (overrides FORGE_AGENT_MODEL / CLAUDE_MODEL / CODEX_MODEL)")
 @click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)")
 @click.option("--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up")
 @click.option(

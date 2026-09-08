@@ -128,9 +128,9 @@ def _resolve_agent_choice(
         provider = get_agent_provider(requested).name
 
     registration = get_agent_provider(provider)
-    # The same ladder forge-loop reads. Reading only CLAUDE_MODEL / CODEX_MODEL
-    # here meant an operator who set the documented FORGE_CLAUDE_MODEL had it
-    # honoured by forge-loop and silently ignored by forge-fusion.
+    # The same ladder forge-loop reads. Resolving it here rather than reading
+    # one variable directly is what keeps forge-fusion and forge-loop agreeing
+    # about which model a box is configured for.
     model = str(llm_model or "").strip() or resolve_agent_model(provider) or registration.default_model
     return provider, model
 

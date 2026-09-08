@@ -839,8 +839,8 @@ class TestForgeGemmHelperCoverage:
             }
         ) == ("codex", "gpt-explicit")
 
-    def test_resolve_forge_agent_prefers_forge_claude_model_over_claude_model(self, monkeypatch):
-        """FORGE_CLAUDE_MODEL mirrors GEAK_CLAUDE_MODEL for the Claude forge path."""
+    def test_resolve_forge_agent_ignores_the_removed_forge_claude_model(self, monkeypatch):
+        """The Forge-private spelling is gone; CLAUDE_MODEL is what runs."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
@@ -852,11 +852,11 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_agent({}) == (
             "claude",
-            "claude-forge-only",
+            "claude-orchestration",
         )
 
-    def test_resolve_forge_agent_prefers_forge_codex_model_over_codex_model(self, monkeypatch):
-        """FORGE_CODEX_MODEL overrides CODEX_MODEL when the forge backend is Codex."""
+    def test_resolve_forge_agent_ignores_the_removed_forge_codex_model(self, monkeypatch):
+        """Same on the Codex side: CODEX_MODEL is the only model variable."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
@@ -868,30 +868,29 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_agent({}) == (
             "codex",
-            "gpt-forge-only",
+            "gpt-orchestration",
         )
 
-    def test_resolve_forge_agent_forge_model_loses_to_payload_llm_model(self, monkeypatch):
-        """Request ``llm_model`` still outranks the forge-specific env knobs."""
+    def test_resolve_forge_agent_env_model_loses_to_payload_llm_model(self, monkeypatch):
+        """Request ``llm_model`` still outranks the environment."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
                 **_ANTHROPIC_ONLY_ENV,
                 "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CLAUDE_MODEL": "claude-forge-only",
             },
         )
 
         assert krh._resolve_forge_agent({"llm_model": "claude-payload"}) == ("claude", "claude-payload")
 
-    def test_resolve_forge_agent_ignores_other_backend_forge_model(self, monkeypatch):
-        """A Codex forge override must not leak onto the Claude forge path."""
+    def test_resolve_forge_agent_ignores_the_other_provider_model(self, monkeypatch):
+        """A Codex-side id must not leak onto the Claude forge path."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
                 **_ANTHROPIC_ONLY_ENV,
                 "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CODEX_MODEL": "gpt-forge-only",
+                "CODEX_MODEL": "gpt-orchestration",
             },
         )
 
@@ -2701,19 +2700,18 @@ class TestForgeCollectiveCoverage:
         assert result["requires_e2e_validation"] is False
 
     @pytest.mark.asyncio
-    async def test_run_forge_collective_prefers_forge_claude_model(
+    async def test_run_forge_collective_forwards_claude_model(
         self,
         tmp_path,
         monkeypatch,
     ):
-        """Collective must honor FORGE_CLAUDE_MODEL like fusion and rewrite."""
+        """Collective resolves the same model variable as fusion and rewrite."""
         SharedState(tp=2).save(tmp_path)
         _pin_fusion_provider_env(
             monkeypatch,
             {
                 **_ANTHROPIC_ONLY_ENV,
                 "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CLAUDE_MODEL": "claude-forge-only",
             },
         )
         monkeypatch.setattr(krh.time, "time_ns", lambda: 789)
@@ -2754,7 +2752,7 @@ class TestForgeCollectiveCoverage:
 
         assert result["status"] == "complete"
         assert captured["input"]["agent_backend"] == "claude"
-        assert captured["input"]["llm_model"] == "claude-forge-only"
+        assert captured["input"]["llm_model"] == "claude-orchestration"
 
     @pytest.mark.asyncio
     async def test_run_forge_collective_openai_only_selects_codex(
@@ -2762,14 +2760,13 @@ class TestForgeCollectiveCoverage:
         tmp_path,
         monkeypatch,
     ):
-        """OpenAI-only collective must pin Codex and FORGE_CODEX_MODEL."""
+        """OpenAI-only collective must pin Codex and CODEX_MODEL."""
         SharedState(tp=2).save(tmp_path)
         _pin_fusion_provider_env(
             monkeypatch,
             {
                 **_OPENAI_ONLY_ENV,
                 "CODEX_MODEL": "gpt-orchestration",
-                "FORGE_CODEX_MODEL": "gpt-forge-only",
             },
         )
         monkeypatch.setattr(krh.time, "time_ns", lambda: 790)
@@ -2810,7 +2807,7 @@ class TestForgeCollectiveCoverage:
 
         assert result["status"] == "complete"
         assert captured["input"]["agent_backend"] == "codex"
-        assert captured["input"]["llm_model"] == "gpt-forge-only"
+        assert captured["input"]["llm_model"] == "gpt-orchestration"
 
     @pytest.mark.asyncio
     async def test_run_forge_collective_unconfigured_provider_fails_before_subprocess(
