@@ -8,6 +8,7 @@ import asyncio
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -1841,3 +1842,70 @@ async def test_prune_drain_leaves_running_rebench_alone(coordinator) -> None:
 
     assert cancelled == []
     assert (await c.tasks.get(running.task_id)).state == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["geak", "resume"])
+@pytest.mark.parametrize(
+    ("baseline_runtime", "timeout_override", "expected_timeout", "expected_soft_deadline"),
+    [(4140.0, 9000, 9000, 6210.0), (4140.0, 0, 8280, 6210.0), (0.0, 0, 2400, None)],
+    ids=["explicit_override", "measured_baseline", "default"],
+)
+async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
+    coordinator,
+    tmp_path,
+    monkeypatch,
+    source,
+    baseline_runtime,
+    timeout_override,
+    expected_timeout,
+    expected_soft_deadline,
+) -> None:
+    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        "benchmark:\n"
+        "  framework: sglang\n"
+        "  model: /models/test\n"
+        "  run_mode: local\n"
+        "  benchmark_script: sglang_mi300x.sh\n"
+        "  envs: {TP: 1, CONC: 8, ISL: 256, OSL: 256}\n",
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.baseline_runtime_sec = baseline_runtime
+    state.explore_variant_timeout_sec_override = timeout_override
+    state.explore_variant_timeout_safety_margin = 0.5
+    state.explore_overtime_kill_ratio = 1.5
+    state.baseline_double_run = False
+    if source == "geak":
+        state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
+    else:
+        state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
+
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="runtime_budget_regression")
+    task = await coordinator.tasks.get(str(enqueued["task_id"]))
+    calls = []
+
+    async def capture_grid(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
+    executor = ExploreExecutor(session_dir=coordinator.session_dir)
+    await executor._run_explore(SimpleNamespace(task=task, extra={"shared_state": state}))
+
+    assert len(calls) == 1
+    assert calls[0]["variant_timeout_sec"] == expected_timeout
+    assert calls[0]["soft_deadline_sec"] == expected_soft_deadline
+    assert calls[0]["variant_expected_sec"] == (baseline_runtime or None)
+    assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
+    if timeout_override:
+        assert task.params["variant_timeout_sec"] == timeout_override
+    else:
+        assert "variant_timeout_sec" not in task.params
+

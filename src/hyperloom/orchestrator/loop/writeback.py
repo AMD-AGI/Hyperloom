@@ -4510,7 +4510,7 @@ class WritebackCollaborator:
                         # reason text is for the report, and a later KERNEL entry
                         # needs to know the replay is settled, not merely broken.
                         refusal = str(fallback_result.get("status") or "")
-                        geak_result["revalidation_status"] = "fallback_failed"
+                        geak_result["revalidation_status"] = "no_promote" if refusal == "no_promote" else "fallback_failed"
                         geak_result["revalidation_error_class"] = refusal
                         geak_result["revalidation_error"] = str(
                             fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
@@ -6041,6 +6041,7 @@ class WritebackCollaborator:
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                 )
                 lanes, ttl = self._registry_lanes_ttl("explore")
+                self._inject_explore_runtime_params(params_ps)
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
@@ -6095,6 +6096,7 @@ class WritebackCollaborator:
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
         lanes, ttl = self._registry_lanes_ttl("explore")
+        self._inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
@@ -6252,13 +6254,17 @@ class WritebackCollaborator:
                 overlay_loaded=overlay_loaded_2a,
                 measurement_provenance=measurement or res,
             )
-            if not accepted:
-                return {"validated": False, "status": "no_promote", "reason": "replay_not_accepted"}
-            gain_out = float(self.shared_state.cumulative_gain_validated)
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive
                 log.exception("geak 2a: SharedState.save failed")
+            if not accepted:
+                return {
+                    "validated": False,
+                    "status": "no_promote",
+                    "reason": str(self.shared_state.geak_result.get("revalidation_error") or "promotion_rejected"),
+                }
+            gain_out = float(self.shared_state.cumulative_gain_validated)
             return {"validated": True, "gain": gain_out, "reason": reason}
         if res.get("error"):
             reason = str(res["error"])

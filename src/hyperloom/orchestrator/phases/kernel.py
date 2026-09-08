@@ -1891,6 +1891,50 @@ class KernelPhase(PhaseHandler):
             "overlay_loaded": overlay_loaded,
         }
 
+    def _reject_geak_promotion(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        current_best_tput: float,
+        reason: str,
+    ) -> None:
+        """Close a measured candidate without recording an adoption."""
+        self._reject_geak_kernel_journey(
+            result,
+            measured_tput=measured_tput,
+            current_best_tput=current_best_tput,
+            provenance="geak_promote_rejected",
+            rejection_reason=reason,
+        )
+        rejected_result = dict(result)
+        rejected_result["revalidation_status"] = "no_promote"
+        rejected_result["revalidation_error"] = reason
+        rejected_result["final_validation"] = {
+            "decision": "REJECTED",
+            "reason": reason,
+            "measured_tput": measured_tput,
+            "current_best_tput": current_best_tput,
+        }
+        self.shared_state.geak_result = rejected_result
+        self.shared_state.geak_pending = {}
+        self.shared_state.resume_pending_revalidation = False
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+            instrument.record_geak_operation(
+                self.session_dir,
+                stage="final_validation_failed",
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                result=rejected_result,
+                status="failed",
+                validated=False,
+                measured_tput=measured_tput,
+                validation_source="geak_promote_rejected",
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("geak v4 final validation rejection recording failed", exc_info=True)
+
     def _promote_geak_from_candidate(
         self,
         result: dict[str, Any],
@@ -1917,6 +1961,7 @@ class KernelPhase(PhaseHandler):
         # config/env-only win, and only this site holds the overlay proof.
         entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
         kernel_proven = bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads"))
+        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
 
         promotion_measurement = {
             "name": "geak_e2e",
@@ -1927,7 +1972,7 @@ class KernelPhase(PhaseHandler):
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
-            **graded_axes_of(result),
+            **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }
         if isinstance(measurement_provenance, Mapping):
@@ -1942,17 +1987,19 @@ class KernelPhase(PhaseHandler):
                 value = measurement_provenance.get(key)
                 if value not in (None, "", {}):
                     promotion_measurement[key] = value
-        if not self._lift_to_current_best(
+        lifted = self._lift_to_current_best(
             "geak_e2e",
             measured,
             promotion_measurement,
             entry_extra=entry_extra,
-        ):
-            self._reject_geak_kernel_journey(
+        )
+        if not lifted:
+            KernelPhase._reject_geak_promotion(
+                self,
                 result,
                 measured_tput=measured,
-                current_best_tput=float(cb_tput or 0.0),
-                provenance="geak_promote_rejected",
+                current_best_tput=float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0,
+                reason="graded_comparison_rejected",
             )
             return False
 
@@ -1980,7 +2027,7 @@ class KernelPhase(PhaseHandler):
         if base > 0:
             self._update_cumulative_gain_validated(
                 measured,
-                result,
+                graded_measurement,
                 source="geak_e2e_promote",
             )
         self.shared_state.resume_pending_revalidation = False
