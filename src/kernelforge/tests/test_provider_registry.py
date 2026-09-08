@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -38,6 +38,7 @@ def isolated_provider_registry(monkeypatch):
     registry.discover_agent_providers()
     monkeypatch.setattr(registry, "_providers", dict(registry._providers))
     monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+    monkeypatch.delenv("FORGE_CLAUDE_FALLBACK_MODEL", raising=False)
 
 
 @pytest.fixture
@@ -171,6 +172,47 @@ def test_builtin_model_ownership_predicates() -> None:
         == ""
     )
     assert resolve_agent_runtime("codex").fallback_model == "gpt-5.5"
+
+
+def test_claude_fallback_model_env_overrides_default(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_CLAUDE_FALLBACK_MODEL", "glm-5-3")
+    runtime = resolve_agent_runtime("claude", model="claude-opus-5")
+    assert runtime.fallback_model == "glm-5-3"
+
+
+def test_claude_fallback_model_env_none_disables(monkeypatch) -> None:
+    monkeypatch.setenv("FORGE_CLAUDE_FALLBACK_MODEL", "none")
+    runtime = resolve_agent_runtime("claude", model="glm-5-3")
+    assert runtime.fallback_model == ""
+
+
+def test_probe_does_not_retry_when_fallback_model_disabled() -> None:
+    attempted_models = []
+
+    class Backend(_FakeBackend):
+        def probe(self, *, cwd, usage=None):
+            del cwd, usage
+            attempted_models.append(self.runtime.model)
+            raise AgentProviderUnavailableError("model not served")
+
+    def factory(runtime):
+        backend = Backend(name=runtime.provider)
+        backend.runtime = runtime
+        return backend
+
+    register_agent_provider(
+        AgentProvider(
+            name="nofallbackprobe",
+            factory=factory,
+            default_model="primary-model",
+            fallback_model="stable-model",
+            capabilities=AgentCapabilities(probe=True),
+        )
+    )
+    runtime = replace(resolve_agent_runtime("nofallbackprobe"), fallback_model="")
+    with pytest.raises(AgentProviderUnavailableError, match="model not served"):
+        create_registered_backend(runtime, probe_cwd="/tmp")
+    assert attempted_models == ["primary-model"]
 
 
 def test_default_runtime_uses_high_reasoning_effort() -> None:

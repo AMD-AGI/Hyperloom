@@ -377,6 +377,7 @@ SAFE_ENV_KEYS = (
     "GEAK_CLAUDE_MODEL",
     # Forge-fusion model overrides (mirrors GEAK_CLAUDE_MODEL for each backend).
     "FORGE_CLAUDE_MODEL",
+    "FORGE_CLAUDE_FALLBACK_MODEL",
     "FORGE_CODEX_MODEL",
     "GEAK_E2E_TIMEOUT_S",
     # Scoring/profiler/run knobs read by GEAK itself; stripped at the Ray

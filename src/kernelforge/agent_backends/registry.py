@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import warnings
@@ -21,6 +22,11 @@ from kernelforge.agent_backends.base import (
 )
 
 log = logging.getLogger(__name__)
+
+# Unset keeps the Claude provider registration default. Empty / none / off
+# disables probe and SDK model fallback.
+_CLAUDE_FALLBACK_MODEL_ENV = "FORGE_CLAUDE_FALLBACK_MODEL"
+_FALLBACK_MODEL_DISABLE = frozenset({"none", "off"})
 
 # Keeps a package-style prefix even though this module now lives in
 # ``kernelforge.llm``: the group name is the published contract third-party providers
@@ -234,14 +240,11 @@ def resolve_agent_runtime(
         fallback = ""
     if fallback:
         get_agent_provider(fallback)
+    chosen_model = model.strip() or registration.default_model
     return AgentRuntimeConfig(
         provider=registration.name,
-        model=model.strip() or registration.default_model,
-        fallback_model=(
-            registration.fallback_model
-            if (model.strip() or registration.default_model) != registration.fallback_model
-            else ""
-        ),
+        model=chosen_model,
+        fallback_model=_resolve_provider_fallback_model(registration, chosen_model),
         executable=executable.strip(),
         timeout_sec=timeout_sec,
         reasoning_effort=reasoning_effort.strip() or "high",
@@ -274,11 +277,15 @@ def create_registered_backend(
         if not runtime.fallback_provider:
             raise
         fallback_registration = get_agent_provider(runtime.fallback_provider)
+        fallback_model = _resolve_provider_fallback_model(
+            fallback_registration,
+            fallback_registration.default_model,
+        )
         fallback_runtime = replace(
             runtime,
             provider=fallback_registration.name,
             model=fallback_registration.default_model,
-            fallback_model=fallback_registration.fallback_model,
+            fallback_model=fallback_model,
             executable="",
             fallback_provider="",
             options={},
@@ -319,9 +326,27 @@ def _prepare_with_model_fallback(
             usage=usage,
         )
     except AgentProviderUnavailableError as primary_error:
-        fallback_model = (runtime.fallback_model or registration.fallback_model).strip()
+        log.warning(
+            "agent model probe failed provider=%s model=%s: %s",
+            registration.name,
+            runtime.model,
+            primary_error,
+        )
+        # Honor an empty runtime fallback (operator disable) and do not revive
+        # the provider registration default.
+        fallback_model = (runtime.fallback_model or "").strip()
         if not fallback_model or fallback_model == runtime.model:
+            log.warning(
+                "agent model probe has no fallback model; raising provider=%s model=%s",
+                registration.name,
+                runtime.model,
+            )
             raise
+        log.warning(
+            "retrying agent model probe provider=%s fallback_model=%s",
+            registration.name,
+            fallback_model,
+        )
         fallback_runtime = replace(
             runtime,
             model=fallback_model,
@@ -336,6 +361,12 @@ def _prepare_with_model_fallback(
                 usage=usage,
             )
         except AgentProviderUnavailableError as fallback_error:
+            log.warning(
+                "agent fallback model probe failed provider=%s fallback_model=%s: %s",
+                registration.name,
+                fallback_model,
+                fallback_error,
+            )
             add_note = getattr(primary_error, "add_note", None)
             if callable(add_note):
                 add_note(f"fallback model {fallback_model!r} also unavailable: {fallback_error}")
@@ -346,6 +377,28 @@ def _prepare_with_model_fallback(
             f"{runtime.model}: {primary_error}",
         )
         return backend
+
+
+def _resolve_provider_fallback_model(registration: AgentProvider, model: str) -> str:
+    """Resolve one provider's model-fallback id for a chosen primary model.
+
+    Claude reads ``FORGE_CLAUDE_FALLBACK_MODEL``: unset keeps the registration
+    default, empty / ``none`` / ``off`` disables fallback. Other providers keep
+    the registration default. A fallback equal to the primary is dropped.
+    """
+    if registration.name == "claude":
+        raw = os.environ.get(_CLAUDE_FALLBACK_MODEL_ENV)
+        if raw is None:
+            fallback = (registration.fallback_model or "").strip()
+        else:
+            stripped = raw.strip()
+            fallback = "" if (not stripped or stripped.lower() in _FALLBACK_MODEL_DISABLE) else stripped
+    else:
+        fallback = (registration.fallback_model or "").strip()
+    chosen = (model or "").strip() or registration.default_model
+    if not fallback or fallback == chosen:
+        return ""
+    return fallback
 
 
 def _prepare_backend(
