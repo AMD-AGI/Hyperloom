@@ -39,6 +39,24 @@ kernelforge kernel-rewrite-controller --handoff-dir <H> \
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
 local/remote environment contract and durable local layout.
 
+## install-rtk
+
+Installs the pinned [`rtk`](https://github.com/rtk-ai/rtk) output filter, which
+forge routes shell output through whenever it is on PATH — and silently skips
+when it is not, so a deployment that never installed it pays full price for tool
+output the code reads as trimmed.
+
+The release is pinned by tag and by sha256, and the archive is refused if it
+does not hash to the pinned digest. Hyperloom's `install.sh` runs this command;
+a standalone `pip install -e ".[forge]"` does not, so run it once yourself.
+Do not `pip install rtk` — the PyPI project of that name is an unrelated
+Raspberry Pi GPIO library.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--dest <dir>` | this interpreter's scripts directory | Where to write the binary. The default is the directory that already holds the `kernelforge` entry point, so it is on PATH by construction. |
+| `--force` | off | Download even when the pinned version already reports itself on PATH. Otherwise a re-run that finds it installs nothing. |
+
 ## kernel-rewrite-controller
 
 Initializes one fresh autonomous kernel-rewrite controller run. It validates the
