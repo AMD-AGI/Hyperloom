@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Rate card used to derive USD for LLM calls whose provider reports no cost.
+# Consumed by hyperloom.orchestrator.trace.pricing; override the whole file
+# with $HYPERLOOM_LLM_PRICING_FILE.
+#
+# Keys are normalized model ids (lowercased, provider prefix and any
+# ":<tag>" suffix stripped) and are matched longest-prefix-first, so
+# "claude-opus-4" covers "claude-opus-4-8-20260101". Rates are USD per
+# million tokens. Reasoning tokens bill at the output rate; a model that
+# does not price caching separately leaves cache_read/cache_write unset and
+# falls back to the input rate.
+
+version: 1
+
+defaults:
+  # Applied to a matched model for any rate it does not set itself.
+  cache_read: null
+  cache_write: null
+
+models:
+  claude-opus-5:
+    input: 5.0
+    output: 25.0
+    cache_read: 0.5
+    cache_write: 6.25
+  claude-opus-4:
+    input: 15.0
+    output: 75.0
+    cache_read: 1.5
+    cache_write: 18.75
+  claude-sonnet-5:
+    input: 3.0
+    output: 15.0
+    cache_read: 0.3
+    cache_write: 3.75
+  claude-sonnet-4:
+    input: 3.0
+    output: 15.0
+    cache_read: 0.3
+    cache_write: 3.75
+  claude-haiku-4:
+    input: 1.0
+    output: 5.0
+    cache_read: 0.1
+    cache_write: 1.25
+  claude-3-5-haiku:
+    input: 0.8
+    output: 4.0
+    cache_read: 0.08
+    cache_write: 1.0
+
+  # Self-hosted models served through the internal gateway. The gateway bills
+  # no dollars, so these rates express the rented-GPU equivalent and exist so
+  # a mixed run still totals in one unit. Edit them rather than the code.
+  gpt-oss-120b:
+    input: 0.15
+    output: 0.6
+  qwen3-14b:
+    input: 0.06
+    output: 0.24
+  qwen3:
+    input: 0.06
+    output: 0.24
+  minimax-m3:
+    input: 0.3
+    output: 1.2
+  llama-3:
+    input: 0.1
+    output: 0.4
