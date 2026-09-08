@@ -245,6 +245,7 @@ jobs:
       group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}
       cancel-in-progress: true
     runs-on: ${{ vars.FORGE_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
+    # Backstop only: QUEUE_MAX + RUN_MAX below must fire first.
     timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '240') }}
     steps:
       - name: Consume retest label
@@ -292,6 +293,13 @@ jobs:
           STATUS_CONTEXT: ci-e2e/kernelforge
           STATUS_INTERVAL_S: "300"
           POLL_INTERVAL_S: "60"
+          # Queueing for a GPU and running forge-loop are budgeted apart so a saturated
+          # pool reports "queue timeout" instead of consuming the run budget and
+          # reporting the tested commit as hung. RUN_MAX is left to the script so it
+          # keeps tracking MAX_HOURS + bootstrap slack (125 polls at the defaults
+          # below); 40 + 125 polls of 60s stay under the job timeout-minutes, so the
+          # script, which names the cause, always fails before the job-level cutoff.
+          QUEUE_MAX: ${{ vars.FORGE_E2E_QUEUE_MAX || '40' }}
           CI_E2E_BOOTSTRAP_SLACK_SEC: ${{ vars.FORGE_E2E_BOOTSTRAP_SLACK_SEC || '3600' }}
           CI_E2E_DELETE_ON_TIMEOUT: ${{ vars.FORGE_E2E_DELETE_ON_TIMEOUT || '0' }}
         run: |

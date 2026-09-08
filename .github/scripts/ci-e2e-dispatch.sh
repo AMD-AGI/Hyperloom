@@ -22,11 +22,14 @@
 #   BASE_REPO_URL     base repo clone url
 #   MODEL_BASE        local model base dir (optional; backend fills if empty)
 #   POLL_INTERVAL_S   seconds between polls             (default 30)
-#   POLL_MAX          max polls before timeout          (default 120 => ~60min)
+#   POLL_MAX          default for QUEUE_MAX / RUN_MAX   (default 120 => ~60min)
+#   QUEUE_MAX         max polls waiting for a GPU slot  (default POLL_MAX)
+#   RUN_MAX           max polls once dispatched         (default POLL_MAX)
 #   KNOWLEDGE_STORE_MODE  explicit local|remote mode     (default local)
 #   KB_STORE_URL / KB_STORE_TOKEN  required together when mode=remote
 #   CI_E2E_PR_CHECK_BASE  base dir for per-PR checkouts (default /tmp/ci-e2e)
 #   CI_E2E_CACERT / CI_E2E_INSECURE   TLS to the API endpoint (CA bundle / skip-verify)
+#   CI_E2E_CURL_CONNECT_TIMEOUT_S / CI_E2E_CURL_MAX_TIME_S  HTTP bounds (default 5 / 20)
 #
 # Optional live commit status on the PR (all three required to enable):
 #   GH_STATUS_TOKEN   GitHub token with statuses:write (Actions: secrets.GITHUB_TOKEN)
@@ -46,6 +49,11 @@ TP="${TP:-1}"
 MAX_HOURS="${MAX_HOURS:-0.5}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-30}"
 POLL_MAX="${POLL_MAX:-120}"
+# Waiting for a free GPU and running the optimizer are budgeted apart: a shared counter
+# lets an hours-long queue consume the run budget and then report the result as a run
+# timeout, which reads as "the tested code hung" when no GPU was ever allocated.
+QUEUE_MAX="${QUEUE_MAX:-$POLL_MAX}"
+RUN_MAX="${RUN_MAX:-$POLL_MAX}"
 KNOWLEDGE_STORE_MODE="${KNOWLEDGE_STORE_MODE:-local}"
 
 : "${E2E_API_BASE:?E2E_API_BASE is required}"
@@ -93,6 +101,14 @@ elif [ "${CI_E2E_INSECURE:-0}" = "1" ]; then
   tls=(-k)
 fi
 
+# ci-e2e.yml's cancel-in-progress gives this process ~10s between the runner's SIGINT
+# and its SIGKILL. Every call the cancel trap makes must be bounded or a hanging backend
+# — the case the cancel path exists for — eats the window before the workload is
+# reclaimed or the failure reported. The trap tightens both budgets further.
+CURL_CONNECT_S="${CI_E2E_CURL_CONNECT_TIMEOUT_S:-5}"
+CURL_MAX_S="${CI_E2E_CURL_MAX_TIME_S:-20}"
+IN_CANCEL_TRAP=0
+
 # ---- GitHub commit status (optional live status on the PR) ----------------
 # When GH_STATUS_TOKEN + GH_STATUS_REPO + GH_STATUS_SHA are set we publish a commit
 # status against the PR head sha and refresh it every STATUS_INTERVAL_S, so the PR's
@@ -104,7 +120,7 @@ gh_status_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] &
 post_status() { # state(pending|success|failure|error)  description
   gh_status_on || return 0
   local desc="${2:0:139}"
-  curl -sS -X POST \
+  curl -sS --connect-timeout "$CURL_CONNECT_S" --max-time "$CURL_MAX_S" -X POST \
     -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -245,19 +261,68 @@ last_push="$(date +%s)"
 
 # On cancellation (e.g. a newer commit via concurrency cancel-in-progress),
 # best-effort cancel the workload so we don't leak a GPU run.
-cleanup() { curl -sS "${tls[@]}" -X DELETE "$API/$UID_" "${auth[@]}" >/dev/null 2>&1 || true; }
-trap 'echo "[ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"; cleanup; exit 1' INT TERM
+# A swallowed failure here is how a superseded or timed-out run leaks a workload: the
+# backend dispatches it hours later and it burns a full GPU slot nobody is watching.
+cleanup() {
+  local resp code attempt attempts=2
+  # On the trap path there is no room for a second round trip; the timeout paths have
+  # no deadline, so they keep the retry that rides out a backend blip.
+  if [ "$IN_CANCEL_TRAP" = 1 ]; then attempts=1; fi
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    resp="$(curl -sS "${tls[@]}" --connect-timeout "$CURL_CONNECT_S" --max-time "$CURL_MAX_S" \
+      -w $'\n%{http_code}' -X DELETE "$API/$UID_" "${auth[@]}" 2>&1 || true)"
+    # resp carries curl's stderr too; only the -w status line is bare digits.
+    code="$(printf '%s\n' "$resp" | grep -oE '^[0-9]{3}$' | tail -n1)"
+    case "$code" in
+      2*) echo "[ci-e2e] workload $UID_ cancelled (HTTP $code)"; return 0 ;;
+    esac
+    echo "[ci-e2e] cancel attempt $attempt/$attempts for $UID_ failed (HTTP ${code:-none}): $(printf '%s' "$resp" | sed '$d' | head -c 300)" >&2
+    if [ "$attempt" -lt "$attempts" ]; then sleep 2; fi
+  done
+  summary "⚠️ **workload \`$UID_\` was NOT reclaimed** (last HTTP ${code:-none}) — it may still be dispatched and hold a GPU. Cancel it manually."
+  return 1
+}
+on_cancel() {
+  # A SIGTERM arriving mid-handler must not restart the handler and spend the window twice.
+  trap '' INT TERM
+  IN_CANCEL_TRAP=1
+  CURL_CONNECT_S=2
+  CURL_MAX_S=3
+  echo "[ci-e2e] cancelled; deleting workload $UID_"
+  post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+  cleanup || true
+  exit 1
+}
+trap on_cancel INT TERM
 
 # ---- poll -----------------------------------------------------------------
 i=0
+queue_polls=0
+run_polls=0
+dispatched=0
 prev_phase=""
-while [ "$i" -lt "$POLL_MAX" ]; do
+while : ; do
   i=$((i + 1))
   detail="$(curl -sS "${tls[@]}" "$API/$UID_" "${auth[@]}" || true)"
   phase="$(printf '%s' "$detail" | jq -r '.orchestration.phase // "Unknown"' 2>/dev/null || echo Unknown)"
+  # A failed poll leaves $detail empty, and jq exits 0 printing nothing on empty input, so
+  # neither the `//` default nor the `||` fallback fires -- without this the empty phase
+  # latches `dispatched` and a still-queued workload is judged as a hung run.
+  phase="${phase:-Unknown}"
   jobref="$(printf '%s' "$detail" | jq -r '.dispatches[-1].platform_ref // "-"' 2>/dev/null || echo -)"
   node="$(printf '%s' "$detail" | jq -r '.dispatches[-1].nodes // "-"' 2>/dev/null || echo -)"
-  echo "[ci-e2e] poll $i/$POLL_MAX phase=$phase node=$node job=$jobref uid=$UID_"
+  # Unknown is a transient API read, not evidence of a slot; only a real phase latches.
+  case "$phase" in
+    Queued|Pending|Unknown) ;;
+    *) dispatched=1 ;;
+  esac
+  if [ "$dispatched" = 0 ]; then
+    queue_polls=$((queue_polls + 1))
+    echo "[ci-e2e] poll $i queue=$queue_polls/$QUEUE_MAX phase=$phase node=$node job=$jobref uid=$UID_"
+  else
+    run_polls=$((run_polls + 1))
+    echo "[ci-e2e] poll $i run=$run_polls/$RUN_MAX phase=$phase node=$node job=$jobref uid=$UID_"
+  fi
   # Announce phase transitions (from the orchestration conditions ledger).
   if [ "$phase" != "$prev_phase" ]; then
     cond="$(printf '%s' "$detail" | jq -r '.orchestration.conditions[-1] | "\(.time) \(.phase): \(.message)"' 2>/dev/null || echo "")"
@@ -278,6 +343,23 @@ while [ "$i" -lt "$POLL_MAX" ]; do
       report_upsert "❌ Failed"
       exit 1 ;;
   esac
+  if [ "$dispatched" = 0 ] && [ "$queue_polls" -ge "$QUEUE_MAX" ]; then
+    err="never dispatched: still waiting for a GPU after $((QUEUE_MAX * POLL_INTERVAL_S))s"
+    summary "❌ **FAIL (queue timeout)** — ${err}. session_id=\`$UID_\`"
+    summary "The tested commit was never run; the GPU pool had no free slot."
+    post_status "failure" "queue timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "❌ Queue timeout"
+    cleanup || true
+    exit 1
+  fi
+  if [ "$dispatched" = 1 ] && [ "$run_polls" -ge "$RUN_MAX" ]; then
+    err="not terminal after $((RUN_MAX * POLL_INTERVAL_S))s of running"
+    summary "❌ **FAIL (run timeout)** — ${err}. session_id=\`$UID_\`"
+    post_status "failure" "run timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "❌ Run timeout"
+    cleanup || true
+    exit 1
+  fi
   # Throttled live status: push at most once per STATUS_INTERVAL_S (default 5min).
   now_s="$(date +%s)"
   if [ $((now_s - last_push)) -ge "$STATUS_INTERVAL_S" ]; then
@@ -286,10 +368,3 @@ while [ "$i" -lt "$POLL_MAX" ]; do
   fi
   sleep "$POLL_INTERVAL_S"
 done
-
-err="not terminal after $((POLL_MAX * POLL_INTERVAL_S))s"
-summary "❌ **FAIL (timeout)** — ${err}. session_id=\`$UID_\`"
-post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
-report_upsert "❌ Timeout"
-cleanup
-exit 1

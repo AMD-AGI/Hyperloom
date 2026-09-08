@@ -178,8 +178,8 @@ jobs:
     # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
     # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the run API.
     runs-on: Hyperloom-e2e-ci
-    # Covers a full MAX_HOURS run + setup/baseline overhead.
-    timeout-minutes: 240
+    # Backstop only: QUEUE_MAX + RUN_MAX below must fire first.
+    timeout-minutes: 255
     steps:
       - name: Consume retest label
         if: github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'retest'
@@ -228,9 +228,14 @@ jobs:
           GH_STATUS_SHA: ${{ needs.resolve.outputs.head_sha }}
           GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STATUS_INTERVAL_S: "300"
-          # Poll long enough to cover the run budget.
           POLL_INTERVAL_S: "60"
-          POLL_MAX: "220"
+          # Queueing for a GPU and running the optimizer are budgeted apart so a
+          # saturated pool reports "queue timeout" instead of consuming the run budget
+          # and reporting the tested commit as hung. RUN_MAX covers the observed
+          # 168-177min workload; the two together stay under timeout-minutes so the
+          # script, which names the cause, always fails before the job-level cutoff.
+          QUEUE_MAX: "40"
+          RUN_MAX: "195"
         run: |
           chmod +x .github/scripts/ci-e2e-dispatch.sh
           .github/scripts/ci-e2e-dispatch.sh

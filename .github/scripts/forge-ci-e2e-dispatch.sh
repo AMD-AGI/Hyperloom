@@ -49,6 +49,14 @@ DEADLINE_SEC="${CI_E2E_DEADLINE_SEC:-$(awk -v h="$MAX_HOURS" -v s="$BOOTSTRAP_SL
   'BEGIN{printf "%d", h*3600 + s}')}"
 POLL_MAX="${POLL_MAX:-$(awk -v d="$DEADLINE_SEC" -v i="$POLL_INTERVAL_S" \
   'BEGIN{printf "%d", int((d + i - 1) / i) + 5}')}"
+# Waiting for a free GPU and running forge-loop are budgeted apart: a shared counter
+# lets an hours-long queue consume the run budget and then report the result as a run
+# timeout, which reads as "the tested code hung" when no GPU was ever allocated.
+# RUN_MAX is the budget DEADLINE_SEC belongs to; QUEUE_MAX only falls back to the same
+# poll count so a direct invocation has one, and forge-e2e.yml sets the real, far
+# shorter queue budget.
+QUEUE_MAX="${QUEUE_MAX:-$POLL_MAX}"
+RUN_MAX="${RUN_MAX:-$POLL_MAX}"
 IMAGE="${CI_E2E_IMAGE:-harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.24.0}"
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
@@ -59,6 +67,14 @@ if [ -n "${CI_E2E_CACERT:-}" ]; then
 elif [ "${CI_E2E_INSECURE:-0}" = "1" ]; then
   tls=(-k)
 fi
+
+# forge-e2e.yml's cancel-in-progress gives this process ~10s between the runner's
+# SIGINT and its SIGKILL. Every call the cancel trap makes must be bounded or a hanging
+# backend — the case the cancel path exists for — eats the window before the workload is
+# reclaimed or the failure reported. The trap tightens both budgets further.
+CURL_CONNECT_S="${CI_E2E_CURL_CONNECT_TIMEOUT_S:-5}"
+CURL_MAX_S="${CI_E2E_CURL_MAX_TIME_S:-20}"
+IN_CANCEL_TRAP=0
 
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-300}"
 STATUS_CONTEXT="${STATUS_CONTEXT:-ci-e2e/kernelforge}"
@@ -73,7 +89,8 @@ gh_status_on() {
 post_status() { # state description
   gh_status_on || return 0
   local desc="${2:0:139}" code
-  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+  code="$(curl -sS --connect-timeout "$CURL_CONNECT_S" --max-time "$CURL_MAX_S" \
+    -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -184,7 +201,7 @@ body="$(jq -n \
    + (if $uname == "" then {} else {user_name:$uname} end)')"
 
 echo "[forge-ci-e2e] submitting: ref=$HEAD_REF sha=$HEAD_SHA gpus=$GPUS max_hours=$MAX_HOURS" \
-  "deadline=${DEADLINE_SEC}s poll=${POLL_MAX}x${POLL_INTERVAL_S}s workspace=$WORKSPACE"
+  "deadline=${DEADLINE_SEC}s queue=${QUEUE_MAX}x${POLL_INTERVAL_S}s run=${RUN_MAX}x${POLL_INTERVAL_S}s workspace=$WORKSPACE"
 resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
   "${auth[@]}" -H "Content-Type: application/json" -d "$body")"
 code="$(printf '%s' "$resp" | tail -n1)"
@@ -205,18 +222,77 @@ echo "$UID_" > "${E2E_UID_FILE:-${RUNNER_TEMP:-/tmp}/forge_e2e_session_uid}" 2>/
 
 post_status "pending" "submitted; uid=${UID_}; ref=${HEAD_REF}; sha=${HEAD_SHA:0:12}"
 last_push="$(date +%s)"
-cleanup() { curl -sS "${tls[@]}" -X DELETE "$API/$UID_" "${auth[@]}" >/dev/null 2>&1 || true; }
-trap 'echo "[forge-ci-e2e] cancelled; deleting workload $UID_"; post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"; cleanup; exit 1' INT TERM
+# A swallowed failure here is how a superseded or timed-out run leaks a workload: the
+# backend dispatches it hours later and it burns a full GPU slot nobody is watching.
+cleanup() {
+  local resp code attempt attempts=2
+  # On the trap path there is no room for a second round trip; the timeout paths have
+  # no deadline, so they keep the retry that rides out a backend blip.
+  if [ "$IN_CANCEL_TRAP" = 1 ]; then attempts=1; fi
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    resp="$(curl -sS "${tls[@]}" --connect-timeout "$CURL_CONNECT_S" --max-time "$CURL_MAX_S" \
+      -w $'\n%{http_code}' -X DELETE "$API/$UID_" "${auth[@]}" 2>&1 || true)"
+    # resp carries curl's stderr too; only the -w status line is bare digits.
+    code="$(printf '%s\n' "$resp" | grep -oE '^[0-9]{3}$' | tail -n1)"
+    case "$code" in
+      2*) echo "[forge-ci-e2e] workload $UID_ cancelled (HTTP $code)"; return 0 ;;
+    esac
+    echo "[forge-ci-e2e] cancel attempt $attempt/$attempts for $UID_ failed (HTTP ${code:-none}): $(printf '%s' "$resp" | sed '$d' | head -c 300)" >&2
+    if [ "$attempt" -lt "$attempts" ]; then sleep 2; fi
+  done
+  summary "⚠️ **workload \`$UID_\` was NOT reclaimed** (last HTTP ${code:-none}) — it may still be dispatched and hold a GPU. Cancel it manually."
+  return 1
+}
+# A run timeout leaves a dispatched workload with on-cluster state, so it is kept by
+# default. A queue timeout has none — nothing was ever dispatched — and cancels
+# unconditionally instead; see the queue-timeout branch below.
+run_timeout_cleanup() {
+  if [ "${CI_E2E_DELETE_ON_TIMEOUT:-0}" = "1" ]; then
+    cleanup || true
+  else
+    summary "workload \`$UID_\` kept for triage"
+  fi
+}
+on_cancel() {
+  # A SIGTERM arriving mid-handler must not restart the handler and spend the window twice.
+  trap '' INT TERM
+  IN_CANCEL_TRAP=1
+  CURL_CONNECT_S=2
+  CURL_MAX_S=3
+  echo "[forge-ci-e2e] cancelled; deleting workload $UID_"
+  post_status "error" "cancelled; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+  cleanup || true
+  exit 1
+}
+trap on_cancel INT TERM
 
 i=0
+queue_polls=0
+run_polls=0
+dispatched=0
 prev_phase=""
-while [ "$i" -lt "$POLL_MAX" ]; do
+while : ; do
   i=$((i + 1))
   detail="$(curl -sS "${tls[@]}" "$API/$UID_" "${auth[@]}" || true)"
   phase="$(printf '%s' "$detail" | jq -r '.orchestration.phase // "Unknown"' 2>/dev/null || echo Unknown)"
+  # A failed poll leaves $detail empty, and jq exits 0 printing nothing on empty input, so
+  # neither the `//` default nor the `||` fallback fires -- without this the empty phase
+  # latches `dispatched` and a still-queued workload is judged as a hung run.
+  phase="${phase:-Unknown}"
   jobref="$(printf '%s' "$detail" | jq -r '.dispatches[-1].platform_ref // "-"' 2>/dev/null || echo -)"
   node="$(printf '%s' "$detail" | jq -r '.dispatches[-1].nodes // "-"' 2>/dev/null || echo -)"
-  echo "[forge-ci-e2e] poll $i/$POLL_MAX phase=$phase node=$node job=$jobref uid=$UID_"
+  # Unknown is a transient API read, not evidence of a slot; only a real phase latches.
+  case "$phase" in
+    Queued|Pending|Unknown) ;;
+    *) dispatched=1 ;;
+  esac
+  if [ "$dispatched" = 0 ]; then
+    queue_polls=$((queue_polls + 1))
+    echo "[forge-ci-e2e] poll $i queue=$queue_polls/$QUEUE_MAX phase=$phase node=$node job=$jobref uid=$UID_"
+  else
+    run_polls=$((run_polls + 1))
+    echo "[forge-ci-e2e] poll $i run=$run_polls/$RUN_MAX phase=$phase node=$node job=$jobref uid=$UID_"
+  fi
   if [ "$phase" != "$prev_phase" ]; then
     echo "[forge-ci-e2e] phase ${prev_phase:-<start>} -> $phase"
     prev_phase="$phase"
@@ -236,6 +312,23 @@ while [ "$i" -lt "$POLL_MAX" ]; do
       report_upsert "❌ Failed"
       exit 1 ;;
   esac
+  if [ "$dispatched" = 0 ] && [ "$queue_polls" -ge "$QUEUE_MAX" ]; then
+    err="never dispatched: still waiting for a GPU after $((QUEUE_MAX * POLL_INTERVAL_S))s"
+    summary "❌ **FAIL (queue timeout)** — ${err}. session_id=\`$UID_\`"
+    summary "The tested commit was never run; the GPU pool had no free slot."
+    post_status "failure" "queue timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "❌ Queue timeout"
+    cleanup || true
+    exit 1
+  fi
+  if [ "$dispatched" = 1 ] && [ "$run_polls" -ge "$RUN_MAX" ]; then
+    err="not terminal after $((RUN_MAX * POLL_INTERVAL_S))s of running"
+    summary "❌ **FAIL (run timeout)** — ${err}. session_id=\`$UID_\`"
+    post_status "failure" "run timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
+    report_upsert "❌ Run timeout"
+    run_timeout_cleanup
+    exit 1
+  fi
   now_s="$(date +%s)"
   if [ $((now_s - last_push)) -ge "$STATUS_INTERVAL_S" ]; then
     post_status "pending" "running ${phase}; job=${jobref}; uid=${UID_}; sha=${HEAD_SHA:0:12}"
@@ -243,13 +336,3 @@ while [ "$i" -lt "$POLL_MAX" ]; do
   fi
   sleep "$POLL_INTERVAL_S"
 done
-
-summary "❌ **FAIL (timeout)** — workload did not reach terminal state. session_id=\`$UID_\`"
-post_status "failure" "timeout; uid=${UID_}; sha=${HEAD_SHA:0:12}"
-report_upsert "❌ Timeout"
-if [ "${CI_E2E_DELETE_ON_TIMEOUT:-0}" = "1" ]; then
-  cleanup
-else
-  summary "workload \`$UID_\` kept for triage"
-fi
-exit 1
