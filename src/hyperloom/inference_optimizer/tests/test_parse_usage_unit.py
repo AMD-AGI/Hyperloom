@@ -256,6 +256,50 @@ def test_parse_turn_usages_none_when_no_per_message_usage(tmp_path):
     assert pu.parse_claude_stream_json_turn_usages(log) == []
 
 
+def test_parse_turn_usages_carries_call_id_and_model(tmp_path):
+    """Identity travels with the counters: the row is priceable and joinable."""
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"id": "msg_1", "model": "claude-opus-5", '
+        '"usage": {"input_tokens": 10, "output_tokens": 1}}}\n'
+        '{"type": "assistant", "message": {"id": "msg_2", "model": "claude-opus-5", '
+        '"usage": {"input_tokens": 20, "output_tokens": 2}}}\n'
+        '{"type": "result", "usage": {"output_tokens": 500}}\n',
+        encoding="utf-8",
+    )
+    usages = pu.parse_claude_stream_json_turn_usages(log)
+    assert [u["call_id"] for u in usages] == ["msg_1", "msg_2"]
+    assert [u["model"] for u in usages] == ["claude-opus-5", "claude-opus-5"]
+
+
+def test_parse_turn_usages_omits_identity_keys_the_log_does_not_name(tmp_path):
+    """A missing model is an absent key, never an empty string that prices to 0."""
+    log = tmp_path / "p.log"
+    log.write_text(
+        '{"type": "assistant", "message": {"id": "msg_1", "usage": {"input_tokens": 10}}}\n',
+        encoding="utf-8",
+    )
+    (usage,) = pu.parse_claude_stream_json_turn_usages(log)
+    assert usage["call_id"] == "msg_1"
+    assert "model" not in usage
+
+
+def test_parse_turn_usages_identity_survives_block_collapse(tmp_path):
+    """The kept line of a multi-block response is the one carrying identity."""
+    block = (
+        '{{"type": "assistant", "message": {{"id": "msg_1", "model": "claude-opus-5", '
+        '"content": [{{"type": "{kind}"}}], "usage": {{"input_tokens": 10}}}}}}\n'
+    )
+    log = tmp_path / "p.log"
+    log.write_text(
+        block.format(kind="thinking") + block.format(kind="text"),
+        encoding="utf-8",
+    )
+    (usage,) = pu.parse_claude_stream_json_turn_usages(log)
+    assert usage["call_id"] == "msg_1"
+    assert usage["model"] == "claude-opus-5"
+
+
 # ---- parse_claude_stream_json_tool_calls ----
 
 
