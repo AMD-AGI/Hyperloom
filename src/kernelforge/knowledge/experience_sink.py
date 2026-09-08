@@ -17,10 +17,13 @@ Identity is deterministic and never LLM-inferred. Only the free-text experience
 (strategy / recipe / lessons) and the coarse ``category`` bucket come from a
 single best-effort LLM call.
 
-Write policy: only record a run that beat its own baseline (speedup > 1.0) and
-produced a diff. Losing to a previously recorded run is not a reason to discard
-the evidence, so the record is still written; only the champion pointer is
-withheld.
+Write policy: record any run that produced a diff and improved on the start it
+was given. Losing to the source baseline is not a reason to discard the
+evidence -- an operator that cannot yet beat its baseline is exactly the one
+whose progress has to survive to the next run, and withholding it made every
+such run restart from the same losing seed. Only the champion pointer is gated
+on speedup, and a run that merely reproduces the solution it warm-started from
+is still refused: that is a second copy, not progress.
 
 Everything here is best-effort: if the store is unavailable, or the LLM
 summarization fails, the run is simply not mirrored - it never raises into the
@@ -706,8 +709,13 @@ def _write_run_experience_impl(
     this_speedup = float(mean_case_speedup)
     if not math.isfinite(this_speedup) or this_speedup <= 0.0:
         return {"written": False, "reason": "invalid_mean_case_speedup"}
-    if this_speedup <= 1.0:
-        return {"written": False, "reason": "no_improvement"}
+    # Losing to the source baseline is deliberately not a refusal. An operator
+    # whose best port is still slower than what ships is the one that most needs
+    # its progress carried forward, and refusing it made every later run read the
+    # same losing seed and repeat the same climb: one operator measured here
+    # spent 48h reaching 0.9887x, had it discarded for missing 1.0, and the next
+    # run started again from the 0.0047x record the first one had read.
+    #
     # A warm-started run begins already holding a recorded solution. Recording it
     # again under this run's id would not be a new solution, just a second copy
     # of the one it started from, and enough copies crowd the ranking a later

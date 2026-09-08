@@ -640,6 +640,50 @@ def test_warm_start_stops_evaluating_once_the_top_claim_is_confirmed(
     assert len(warm["measured_writebacks"]) == 1
 
 
+def test_warm_start_does_not_pay_to_measure_a_port_that_lost_badly(
+    monkeypatch,
+    tmp_path,
+):
+    """A claim far under the source baseline is not worth a driver trial.
+
+    Records like these exist because a correct port is banked whatever it
+    measured, which is what lets a losing operator carry its progress forward.
+    Reading them back is fine; starting a run from one is not, and each trial
+    costs a compile, a correctness suite and a benchmark.
+    """
+    _publish_candidate(
+        tmp_path,
+        "producer-crawling",
+        optimized_source=SLOWER_SOURCE,
+        claimed_speedup=0.1,
+    )
+    _publish_candidate(
+        tmp_path,
+        "producer-limping",
+        optimized_source=INFLATED_SOURCE,
+        claimed_speedup=0.2,
+    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
+    pristine = kernel.read_text()
+    measured = _install_driver_doubles(monkeypatch, kernel)
+
+    warm = _warm_start(consumer, kernel)
+
+    # Not a warm start with nothing adopted -- no warm start at all, and the
+    # author is not asked to read a port that lost by two orders of magnitude.
+    assert warm == {
+        "candidate": False,
+        "read_reason": "hit",
+        "read_error": "",
+    }
+    assert not (consumer / "forge_experiments" / "kb_references" / "index.md").exists()
+    # Nothing was built, so nothing was timed and the workspace is untouched for
+    # the agent that follows.
+    assert measured == []
+    assert kernel.read_text() == pristine
+    assert _git(consumer, "rev-parse", "HEAD") == base
+
+
 def test_warm_start_evaluates_no_more_candidates_than_the_bound(
     monkeypatch,
     tmp_path,
@@ -658,13 +702,15 @@ def test_warm_start_evaluates_no_more_candidates_than_the_bound(
             claimed_speedup=claim,
         )
     monkeypatch.setattr(integration, "_WARMSTART_TOP_K", 4)
+    # Pin the bound below the candidate count so it is the bound under test and
+    # not the deployed value, which is free to move with the hardware budget.
+    monkeypatch.setattr(integration, "_WARMSTART_MAX_MEASURED_CANDIDATES", 3)
     consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
 
     assert warm["num_references"] == 4
-    assert integration._WARMSTART_MAX_MEASURED_CANDIDATES == 3
     assert len(warm["measured_writebacks"]) == 3
     # Three measured candidates, then the field is closed: the fourth is never
     # built or benchmarked even though no claim was confirmed.

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.config import Config
+from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.experience_reader import sanitize_read_error
 from kernelforge.knowledge.experience_store import knowledge_config_from_runtime
 from kernelforge.loop.validation import run_validation_pipeline
@@ -216,17 +217,32 @@ async def try_flydsl_kb_warmstart(
     *,
     source_ms: float | None,
     framework: str = "",
-    top_k: int = 3,
+    top_k: int | None = None,
     validation_timeout_sec: int = 1800,
     stop_at_unix: float | None = None,
 ) -> RewriteKbReadResult:
-    """Try top-3 candidates; correctness alone permits skipping PORT."""
-    del source_ms  # Performance is measured for context, not used as the PORT gate.
+    """Measure the admissible candidates and skip PORT with the fastest.
+
+    Correctness is what admits a candidate; performance is what chooses between
+    the admitted ones. Taking the first that merely passed was wrong once
+    candidates could come from tasks that scored different cases: a claim is
+    computed over whatever cases its producing task scored, so it does not order
+    candidates for *this* task. Only a measurement on this task's own driver
+    does, which is why every survivor is timed before one is adopted.
+
+    Two bounds keep that affordable. A candidate claiming less than
+    ``warmstart_policy.min_claimed_speedup()`` is skipped whole -- not
+    downloaded, not admitted, not offered as reference material -- because it is
+    a port that lost badly and one trial costs a compile, a correctness suite
+    and a benchmark. And the field closes after
+    ``warmstart_policy.budget_sec()``, adopting the best measured so far.
+    """
+    del source_ms  # The claim is not the gate; this task's own timing is.
     plan = _read_top_candidates(
         spec,
         config,
         framework=framework,
-        top_k=top_k,
+        top_k=warmstart_policy.top_k() if top_k is None else top_k,
     )
     result = RewriteKbReadResult(
         read_reason=plan.read_reason,
@@ -237,10 +253,40 @@ async def try_flydsl_kb_warmstart(
     driver_hash = _sha256(driver_path)
     references: list[dict] = []
 
-    for candidate in plan.candidates:
+    # Survivors of the whole gauntlet, with what this task's driver timed them
+    # at. The winner is chosen after the field closes, not on the way through.
+    measured: list[dict] = []
+    search_deadline = time.monotonic() + warmstart_policy.budget_sec()
+
+    for index, candidate in enumerate(plan.candidates):
         remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
         if remaining is not None and remaining <= 0:
             result.read_reason = "deadline"
+            break
+        # Skipped whole: not downloaded, not admitted, and not added to
+        # ``references``. A port this far behind the source baseline is not
+        # instructive, and one trial costs a compile, a correctness suite and a
+        # benchmark.
+        if warmstart_policy.below_floor(candidate["speedup"]):
+            result.attempts.append(
+                {
+                    "solution_slug": candidate["solution_slug"],
+                    "speedup": candidate["speedup"],
+                    "reason": "below_claim_floor",
+                }
+            )
+            continue
+        # The candidate count does not bound wall time: one trial is minutes on
+        # the heaviest kernels. Whatever has been measured already still wins
+        # below.
+        if time.monotonic() >= search_deadline:
+            result.attempts.append(
+                {
+                    "solution_slug": candidate["solution_slug"],
+                    "speedup": candidate["speedup"],
+                    "reason": "search_budget_spent",
+                }
+            )
             break
         attrs = candidate["attrs"]
         attempt = {
@@ -294,18 +340,19 @@ async def try_flydsl_kb_warmstart(
                             )
                             candidate_ms = benched.timing_ms if benched.ok else None
                         snr = validation.results[-1].snr_db if validation.results else None
-                        attempt.update(
-                            reason="applied",
-                            best_ms=candidate_ms,
-                        )
+                        attempt.update(reason="measured", best_ms=candidate_ms)
                         result.attempts.append(attempt)
-                        result.applied = True
-                        result.read_reason = "applied"
-                        result.solution_slug = candidate["solution_slug"]
-                        result.best_ms = candidate_ms
-                        result.snr_db = snr
-                        result.reference_context = _reference_context(references)
-                        return result
+                        measured.append(
+                            {
+                                "index": index,
+                                "candidate": candidate,
+                                "content": content,
+                                "ms": candidate_ms,
+                                "snr_db": snr,
+                                "attempt": attempt,
+                            }
+                        )
+                        continue
             except Exception as error:  # noqa: BLE001 - candidate becomes reference
                 reason = f"validation_error:{type(error).__name__}"
 
@@ -319,6 +366,31 @@ async def try_flydsl_kb_warmstart(
                 "content": content,
             }
         )
+
+    if measured:
+        # Fastest on this task's own driver. A survivor whose benchmark failed
+        # is still adoptable -- it passed correctness -- but it ranks behind
+        # every timed one, because nothing is known about its speed.
+        winner = min(
+            measured,
+            key=lambda item: (
+                item["ms"] is None,
+                item["ms"] if item["ms"] is not None else 0.0,
+                item["index"],
+            ),
+        )
+        Path(spec.flydsl_kernel).write_bytes(winner["content"])
+        for item in measured:
+            item["attempt"]["reason"] = (
+                "applied" if item is winner else f"outperformed_by_rank_{winner['index'] + 1}"
+            )
+        result.applied = True
+        result.read_reason = "applied"
+        result.solution_slug = winner["candidate"]["solution_slug"]
+        result.best_ms = winner["ms"]
+        result.snr_db = winner["snr_db"]
+        result.reference_context = _reference_context(references)
+        return result
 
     if original is None:
         Path(spec.flydsl_kernel).unlink(missing_ok=True)
@@ -340,14 +412,29 @@ def write_flydsl_kb_solution(
     best_commit: str = "",
     framework: str = "",
     snr_db: float | None = None,
-    allow_non_improving: bool = False,
+    session_digest: str = "",
+    content_override: bytes | None = None,
 ) -> dict:
     """Record a validated FlyDSL port as a candidate under its identity.
 
-    ``allow_non_improving`` is used after a real PORT session: correctness makes
-    that artifact reusable even when it does not beat the source baseline. Such
-    a candidate is recorded but never promoted, so it can be replayed without
-    ever being mistaken for the identity's best result.
+    Speed is not a condition of recording. Correctness makes an artifact
+    reusable, and an operator whose best port still loses to the source baseline
+    is precisely the one whose progress has to reach the next run: gating the
+    write on beating the baseline meant a warm-started run that fell short
+    banked nothing, so the run after it read the same losing seed and repeated
+    the same climb. Only the champion pointer stays gated on speedup.
+
+    ``session_digest`` replaces the artifact digest that normally makes the
+    candidate's name stable. That name changes with the artifact, so a caller
+    publishing on every KEEP would file one record per KEEP and bury the
+    identity's history under a single run; passing a digest stable for the run
+    makes each publication replace the last. It substitutes for the digest
+    rather than for the whole name so the identity fingerprint survives -- ids
+    partition artifact storage, and one that repeated across identities would
+    let two of them collide.
+
+    ``content_override`` supplies the kernel bytes instead of reading the
+    workspace, for a caller publishing while an agent is still editing there.
 
     Never raises, and the returned reason is persisted by the rewrite runner, so
     a store exception is redacted and bounded the way the read side above does
@@ -361,10 +448,12 @@ def write_flydsl_kb_solution(
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
     speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
-    if not allow_non_improving and (speedup is None or speedup <= 1.0):
-        return {"written": False, "reason": "no_improvement"}
     try:
-        content = Path(spec.flydsl_kernel).read_bytes()
+        content = (
+            content_override
+            if content_override is not None
+            else Path(spec.flydsl_kernel).read_bytes()
+        )
         identity, canonical_id, signature, implementation = resolve_identity(
             spec,
             framework=framework,
@@ -375,7 +464,7 @@ def write_flydsl_kb_solution(
         session_id = candidate_session_id(
             canonical_id,
             identity.kernel_name,
-            best_commit or content_hash,
+            session_digest or best_commit or content_hash,
         )
         knowledge = {
             "producer": identity.producer,

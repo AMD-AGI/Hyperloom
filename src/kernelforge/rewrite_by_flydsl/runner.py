@@ -11,6 +11,7 @@ the optimization is delegated to forge-loop unchanged.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import subprocess
 import time
@@ -455,7 +456,6 @@ def run_rewrite(
             best_commit=port_commit,
             framework=framework,
             snr_db=port.snr_db,
-            allow_non_improving=True,
         )
         print(
             f"  [forge-rewrite] PORT KB publish: {port_kb_write.get('reason') or port_kb_write.get('solution')}",
@@ -493,6 +493,54 @@ def run_rewrite(
     )
 
     # (6) OPTIMIZE: reuse forge-loop over the FlyDSL kernel (unchanged).
+    #
+    # Publish every KEEP forge-loop records, not just the run's final best. An
+    # OPTIMIZE session can be terminated at its cutoff or killed outright, and
+    # only banking at the end meant losing every improvement the session had
+    # already verified. forge-loop cannot do this itself: it runs here under
+    # --no-experience-kb because the rewrite identity is not its own, so the
+    # rewrite layer watches its result file and publishes to its own store.
+    #
+    # Each publication replaces the previous one instead of accumulating a
+    # record per KEEP, by naming the candidate after the forge-loop run rather
+    # than after the artifact.
+    optimize_session_digest = ""
+
+    def _publish_keep(payload: dict) -> None:
+        nonlocal optimize_session_digest
+        commit = str(payload.get("best_commit") or "")
+        # Read the kernel out of the commit, never off disk: the workspace still
+        # belongs to the running agent, and the best is only restored there once
+        # OPTIMIZE is over.
+        shown = _git(workspace, "show", f"{commit}:{spec.flydsl_kernel_relpath}")
+        if shown.returncode != 0 or not shown.stdout.strip():
+            print(
+                f"  [forge-rewrite] KEEP publish skipped: {commit[:12]} has no "
+                f"{spec.flydsl_kernel_relpath}",
+                flush=True,
+            )
+            return
+        optimize_session_digest = hashlib.sha256(
+            str(payload.get("experiment_id") or commit).encode()
+        ).hexdigest()
+        write = write_flydsl_kb_solution(
+            spec,
+            driver_path,
+            config,
+            source_ms=source_ms,
+            flydsl_best_ms=payload.get("best_ms"),
+            best_commit=commit,
+            framework=framework,
+            snr_db=port.snr_db,
+            session_digest=optimize_session_digest,
+            content_override=shown.stdout.encode(),
+        )
+        print(
+            f"  [forge-rewrite] KEEP KB publish ({commit[:12]}): "
+            f"{write.get('reason') or write.get('solution')}",
+            flush=True,
+        )
+
     opt: dict = {}
     if time.time() < search_stop_unix:
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
@@ -508,6 +556,7 @@ def run_rewrite(
             profile_timeout_sec=profile_timeout_sec,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
+            on_new_best=_publish_keep if rewrite_kb_enabled else None,
         )
     else:
         print(
@@ -534,7 +583,10 @@ def run_rewrite(
             best_commit=str(opt.get("best_commit") or ""),
             framework=framework,
             snr_db=port.snr_db,
-            allow_non_improving=port.attempts > 0,
+            # Replace this run's KEEP record rather than adding a sibling to it.
+            # Empty when OPTIMIZE published nothing, which falls back to naming
+            # the candidate after the artifact.
+            session_digest=optimize_session_digest,
         )
     else:
         kb_write = {"written": False, "reason": "disabled"}

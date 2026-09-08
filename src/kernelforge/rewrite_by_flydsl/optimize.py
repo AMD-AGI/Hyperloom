@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from kernelforge.llm.git import git
 from kernelforge.config import Config
@@ -37,11 +38,40 @@ _RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
 # later hard-killed. Used to decide whether a --result-json file belongs to THIS run.
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
 
+# How often the supervising loop wakes to check on forge-loop. It also floors
+# how often the result file is read for new bests: asking more often than the
+# loop itself ticks cannot observe anything sooner.
+_TICK_SEC = 0.1
+
 
 def _announced_experiment_id(stdout_text: str) -> str | None:
     """The experiment_id forge-loop announced on stdout this run, or None."""
     m = _EXPERIMENT_RE.search(stdout_text)
     return m.group(1) if m else None
+
+
+def _result_for_this_run(result_json: str, stdout_text: str) -> dict | None:
+    """Parse ``--result-json`` when it belongs to the run producing this output.
+
+    forge-loop refreshes this file on every KEEP, not only at the end, which is
+    what lets a caller observe the KEEP stream without the loop knowing anything
+    about the caller's own store. A file left behind by an earlier run is
+    rejected on the experiment id, the same key the post-run parse uses; before
+    the loop has announced one there is nothing to compare against and the file
+    is not trusted yet.
+    """
+    announced = _announced_experiment_id(stdout_text)
+    if not announced:
+        return None
+    try:
+        payload = json.loads(Path(result_json).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("experiment_id") or "") != announced:
+        return None
+    return payload
 
 
 def _forge_loop_argv() -> list[str]:
@@ -175,11 +205,24 @@ def run_optimize(
     result_json: str | None = None,
     deadline_unix: float | None = None,
     stop_at_unix: float | None = None,
+    on_new_best: Callable[[dict], None] | None = None,
+    new_best_poll_sec: float = 5.0,
 ) -> dict:
     """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
 
     Returns {} when forge-loop cannot be launched or its result cannot be parsed
     (the caller then reports flydsl_best_ms as unknown).
+
+    ``on_new_best`` is called with the parsed result whenever forge-loop records
+    a new best, which it does on every KEEP. It exists so the rewrite layer can
+    publish each KEEP to its own KB without forge-loop having to know about that
+    store: the loop runs here with ``--no-experience-kb`` precisely because the
+    two address different identities, and reaching into the loop to publish
+    would undo that separation. The callback is polled rather than pushed, so a
+    KEEP is observed within ``new_best_poll_sec``; the same callback is invoked
+    once more after the loop exits, so the last KEEP cannot be missed by timing.
+    Anything it raises is logged and swallowed -- publishing is not worth losing
+    an optimization run over.
     """
     if result_json is None:
         result_json = str(Path(experiments_dir) / "forge_loop_result.json")
@@ -277,6 +320,29 @@ def run_optimize(
             daemon=True,
         )
         stream_thread.start()
+        published_commit = ""
+
+        def _publish_new_best() -> str:
+            """Hand the caller the current best once per distinct commit."""
+            if on_new_best is None:
+                return published_commit
+            payload = _result_for_this_run(result_json, "".join(collected))
+            if payload is None:
+                return published_commit
+            commit = str(payload.get("best_commit") or "")
+            if not commit or commit == published_commit:
+                return published_commit
+            try:
+                on_new_best(payload)
+            except Exception as error:  # noqa: BLE001 - publishing never breaks OPTIMIZE
+                log.warning(
+                    "optimize: new-best callback failed (%s: %s)",
+                    type(error).__name__,
+                    error,
+                )
+            return commit
+
+        next_poll = time.monotonic()
         while _poll_process(proc) is None:
             if stop_at_unix and time.time() >= stop_at_unix:
                 terminated_for_deadline = True
@@ -287,9 +353,15 @@ def run_optimize(
                 )
                 _terminate_process_group(proc)
                 break
-            time.sleep(0.1)
+            if on_new_best is not None and time.monotonic() >= next_poll:
+                published_commit = _publish_new_best()
+                next_poll = time.monotonic() + max(_TICK_SEC, new_best_poll_sec)
+            time.sleep(_TICK_SEC)
         _wait_process(proc)
         stream_thread.join(timeout=5.0)
+        # The loop may have recorded a KEEP between the last poll and its exit,
+        # including one it produced while being terminated for the deadline.
+        published_commit = _publish_new_best()
     except Exception as e:  # noqa: BLE001 - a launch/stream failure must not crash the whole rewrite pipeline
         # Honor this function's contract ("Returns {} when forge-loop cannot be
         # launched"): a missing kernelforge on PATH, a bad interpreter, or a

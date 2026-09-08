@@ -12,6 +12,7 @@ Here we cover the orchestration stages by mocking their external processes:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -197,6 +198,148 @@ def test_optimize_falls_back_to_stdout_sentinel(tmp_path, monkeypatch, capsys):
     out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(rj))
     assert out["best_ms"] == 0.7
     assert "__FORGE_RESULT__" not in capsys.readouterr().out
+
+
+class _KeepingProc:
+    """A forge-loop double that records a new best on each supervisor tick.
+
+    forge-loop refreshes ``--result-json`` on every KEEP, so a run that improves
+    several times rewrites that file several times before it exits.
+    """
+
+    def __init__(self, result_json, commits, announced="EXP-KEEP"):
+        self.stdout = iter([f"Experiment: {announced}\n"])
+        self.returncode = None
+        self._result_json = Path(result_json)
+        self._commits = list(commits)
+        self._announced = announced
+
+    def poll(self):
+        if self._commits:
+            best_ms, commit = self._commits.pop(0)
+            self._result_json.write_text(
+                json.dumps(
+                    {
+                        "experiment_id": self._announced,
+                        "best_ms": best_ms,
+                        "best_commit": commit,
+                    }
+                )
+            )
+            return None
+        self.returncode = 0
+        return 0
+
+    def wait(self, timeout=None):
+        del timeout
+        self.returncode = 0
+        return 0
+
+
+def test_optimize_hands_over_every_new_best_exactly_once(tmp_path, monkeypatch):
+    """A KEEP the loop has already verified must not wait for the loop to end.
+
+    An OPTIMIZE session can be cut off at its deadline or killed outright, so a
+    caller that only banks the final result loses every improvement the session
+    had already proven.
+    """
+    rj = tmp_path / "res.json"
+    # Two ticks report the same commit: a KEEP is handed over once, not per poll.
+    proc = _KeepingProc(rj, [(9.0, "c1"), (9.0, "c1"), (7.0, "c2"), (5.0, "c3")])
+    monkeypatch.setattr(optimize.subprocess, "Popen", lambda *a, **k: proc)
+    # Restoring the best kernel shells out to git, which cannot run while Popen
+    # is a double; it is not what this test is about.
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    seen = []
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=lambda payload: seen.append(
+            (payload["best_commit"], payload["best_ms"])
+        ),
+        new_best_poll_sec=0.0,
+    )
+
+    assert [commit for commit, _ms in seen] == ["c1", "c2", "c3"]
+    assert seen[-1] == ("c3", 5.0)
+    assert out["best_commit"] == "c3"
+
+
+def test_optimize_hands_over_a_best_recorded_after_the_last_poll(tmp_path, monkeypatch):
+    """The final KEEP can land between the last poll and the loop's exit."""
+    rj = tmp_path / "res.json"
+    rj.write_text(json.dumps({"experiment_id": "EXP-LATE", "best_ms": 4.0, "best_commit": "final"}))
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-LATE\n"]),
+    )
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    seen = []
+
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=lambda payload: seen.append(payload["best_commit"]),
+    )
+
+    assert seen == ["final"]
+
+
+def test_optimize_never_hands_over_another_run_s_result(tmp_path, monkeypatch):
+    """A stale result file must not be published as this run's progress."""
+    rj = tmp_path / "res.json"
+    rj.write_text(json.dumps({"experiment_id": "PREVIOUS", "best_ms": 1.0, "best_commit": "stale"}))
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-NOW\n"]),
+    )
+    seen = []
+
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=lambda payload: seen.append(payload["best_commit"]),
+    )
+
+    assert seen == []
+
+
+def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch):
+    """Publishing is best-effort; it must not cost the optimization run."""
+    rj = tmp_path / "res.json"
+    rj.write_text(json.dumps({"experiment_id": "EXP-RAISE", "best_ms": 4.0, "best_commit": "c1"}))
+    monkeypatch.setattr(
+        optimize.subprocess,
+        "Popen",
+        _fake_popen(["Experiment: EXP-RAISE\n"]),
+    )
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+
+    def explode(_payload):
+        raise RuntimeError("store unreachable")
+
+    out = optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        result_json=str(rj),
+        on_new_best=explode,
+    )
+
+    assert out["best_ms"] == 4.0
 
 
 def test_optimize_argv_falls_back_to_console_script(monkeypatch):
@@ -984,8 +1127,125 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
 
     assert out["port_ok"] is True
     assert len(writes) == 2
-    assert writes[0]["allow_non_improving"] is True
+    # The port is slower than the source it replaces (1.5 ms against 1.0 ms) and
+    # is published anyway: correctness is what makes it reusable, and banking it
+    # is what lets the next run skip PORT.
     assert writes[0]["flydsl_best_ms"] == 1.5
+    assert writes[0]["source_ms"] == 1.0
+
+
+def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypatch):
+    """Each KEEP is banked, from the commit, under one name for the run.
+
+    The workspace still belongs to the running agent while OPTIMIZE is going,
+    so the kernel has to come out of the commit that was kept. And the run's
+    publications have to share a name, or an identity's history would be buried
+    under one run's worth of KEEPs.
+    """
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+
+    def fake_git(_workspace, *args):
+        if args and args[0] == "show":
+            commit = str(args[1]).split(":")[0]
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=f"import flydsl\n# kept at {commit}\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_git", fake_git)
+
+    def fake_optimize(*_args, **kwargs):
+        publish = kwargs["on_new_best"]
+        publish({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
+        publish({"experiment_id": "EXP", "best_ms": 0.7, "best_commit": "c2"})
+        return {"best_ms": 0.7, "best_commit": "c2", "experiment_id": "EXP"}
+
+    monkeypatch.setattr(runner, "run_optimize", fake_optimize)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    # The PORT publish, then one per KEEP, then the run's final result.
+    port, first_keep, second_keep, final = writes
+    assert port["best_commit"] == ""
+    # The PORT publish predates OPTIMIZE, so it is named after its artifact.
+    assert "session_digest" not in port
+
+    assert [first_keep["best_commit"], second_keep["best_commit"]] == ["c1", "c2"]
+    assert first_keep["content_override"] == b"import flydsl\n# kept at c1\n"
+    assert second_keep["content_override"] == b"import flydsl\n# kept at c2\n"
+    assert [first_keep["flydsl_best_ms"], second_keep["flydsl_best_ms"]] == [0.9, 0.7]
+
+    # One name for the whole run, so each publication replaces the last rather
+    # than filing a sibling record.
+    run_digest = hashlib.sha256(b"EXP").hexdigest()
+    assert first_keep["session_digest"] == run_digest
+    assert second_keep["session_digest"] == run_digest
+    assert final["session_digest"] == run_digest
+
+
+def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkeypatch):
+    """An unreadable commit costs the publication, not the run."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
+    monkeypatch.setattr(
+        runner,
+        "_git",
+        lambda *args: subprocess.CompletedProcess(args, 128, stdout="", stderr="bad object"),
+    )
+
+    def fake_optimize(*_args, **kwargs):
+        kwargs["on_new_best"]({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "gone"})
+        return {"best_ms": 0.9, "best_commit": "gone", "experiment_id": "EXP"}
+
+    monkeypatch.setattr(runner, "run_optimize", fake_optimize)
+    writes = []
+
+    def capture_write(*_args, **kwargs):
+        writes.append(kwargs)
+        return {"written": True, "solution": "rewrite/solution"}
+
+    monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
+
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert out["port_ok"] is True
+    # The PORT publish and the final one; the KEEP had nothing to publish, and
+    # the final write falls back to naming the record after the artifact.
+    assert len(writes) == 2
+    assert not writes[1]["session_digest"]
 
 
 def test_run_rewrite_port_failure_short_circuits(tmp_path, monkeypatch, capsys):

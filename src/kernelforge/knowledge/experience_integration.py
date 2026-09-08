@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from kernelforge.llm.workspace_policy import (
     tracked_editable_paths,
 )
 from kernelforge.llm.git import git
+from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
 )
@@ -40,16 +42,20 @@ from kernelforge.mcp_server.tools.bench import (
     calculate_measurement_case_speedups,
 )
 
-# How many best-ranked prior solutions to read for warm-start. More than one so
-# a champion that fails to apply -- a signature mismatch, a patch that no longer
-# lands -- still leaves something to fall back to, and so a record whose claim
-# does not survive measurement can lose to one that does.
-_WARMSTART_TOP_K = 3
-
-# How many candidates one warm start may fully evaluate. Each evaluation costs a
-# correctness run plus KEEP_MEASUREMENT_COUNT benchmark runs on the real driver,
-# so the search for the best measured start is bounded, not exhaustive.
-_WARMSTART_MAX_MEASURED_CANDIDATES = 3
+# How many best-ranked prior solutions to read for warm-start, and how many of
+# them one warm start may fully evaluate. More than one so a champion that fails
+# to apply -- a signature mismatch, a patch that no longer lands -- still leaves
+# something to fall back to, and so a record whose claim does not survive
+# measurement can lose to one that does.
+#
+# The two are equal on purpose: reading more than can be evaluated only pays for
+# ranked metadata nothing will act on. Each evaluation costs a correctness run
+# plus KEEP_MEASUREMENT_COUNT benchmark runs on the real driver, so the search is
+# bounded by ``warmstart_policy.budget_sec()`` as well as by this count -- on the
+# heaviest kernels one candidate is minutes, and the count alone would let a
+# well-populated identity spend hours before the agent's first edit.
+_WARMSTART_TOP_K = warmstart_policy.top_k()
+_WARMSTART_MAX_MEASURED_CANDIDATES = _WARMSTART_TOP_K
 
 # How much of the speedup a candidate was ranked on its own measurement has to
 # reproduce for that ranking to count as honest. A confirmed top candidate is
@@ -1227,6 +1233,13 @@ def kb_warmstart(
     verified better start. The search stops early once a candidate reproduces
     the value it was ranked on.
 
+    Two bounds keep that search affordable. A candidate claiming less than
+    ``warmstart_policy.min_claimed_speedup()`` is skipped without being measured
+    or offered as reference material -- it is a port that lost badly, and one
+    costs a compile, a correctness suite and a benchmark. And the whole field
+    closes after ``warmstart_policy.budget_sec()``, since the candidate count
+    alone does not bound wall time when a single kernel takes minutes to build.
+
     Every measurement is written back to its own KB record so the next run ranks
     that record on evidence, including the measurement of a candidate this run
     then rejected: a record only loses the gate by promising more than this
@@ -1290,6 +1303,20 @@ def kb_warmstart(
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
+        # Drop the catastrophic ports here, at the boundary, so the floor governs
+        # what gets measured, what the author is shown and what the index records
+        # alike. These records exist because a correct port is banked whatever it
+        # measured -- that is what carries a losing operator's progress forward
+        # -- but starting a run from one, or asking the author to read one, buys
+        # nothing.
+        admissible = [sol for sol in sols if not warmstart_policy.below_floor(_ranked_speedup(sol))]
+        if len(admissible) != len(sols):
+            print(
+                f"  [kb] warm-start ignoring {len(sols) - len(admissible)} candidate(s) "
+                f"claiming under {warmstart_policy.min_claimed_speedup():.2f}x",
+                flush=True,
+            )
+        sols = admissible
         if not sols:
             _clear_kb_references(workspace_dir)
             return {
@@ -1362,10 +1389,24 @@ def kb_warmstart(
                 source_files,
                 driver,
             )
+            search_deadline = time.monotonic() + warmstart_policy.budget_sec()
             for idx, sol in enumerate(sols):
                 if len(measurements) >= _WARMSTART_MAX_MEASURED_CANDIDATES:
                     statuses[idx] = "not_attempted_after_apply"
                     continue
+                # The count alone does not bound this search: one candidate is
+                # minutes on the heaviest kernels. On expiry the field closes and
+                # the best already measured is adopted below.
+                if time.monotonic() >= search_deadline:
+                    for later_index in range(idx, len(statuses)):
+                        statuses[later_index] = "not_attempted_search_budget"
+                    print(
+                        "  [kb] warm-start search budget spent after "
+                        f"{len(measurements)} measured candidate(s); "
+                        "adopting the best of them",
+                        flush=True,
+                    )
+                    break
                 pre_untracked = _untracked_files(workspace_dir)
                 trial = _try_apply_candidate(
                     sol,
