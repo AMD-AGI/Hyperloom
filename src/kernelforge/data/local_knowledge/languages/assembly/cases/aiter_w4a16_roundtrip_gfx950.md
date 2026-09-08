@@ -47,21 +47,23 @@ FlyDSL installation or JIT cache is not required for assembly replacement.
   `shuffle_scale_for_int4` packs adjacent groups into dwords using
   `[E, G/2, N, 2]`. Use `moe_sorting` to generate the padded token/slot IDs,
   expert IDs, routing weights, and valid count.
-- Compute the oracle from the original unpacked weights and scales with
-  FP32 PyTorch matrix multiplication, SiLU, multiplication, and BF16 output.
-  The regression uses nonuniform power-of-two scales so dequantization is
-  exact; arbitrary scales require checking the kernel's BF16 rounding policy.
+- Compute the oracle from the original unpacked weights and scales. Round
+  dequantized weights to BF16 before FP32 PyTorch matrix multiplication,
+  SiLU, multiplication, and BF16 output: this kernel rounds its matrix
+  operands to BF16. Nonuniform power-of-two scales make dequantization exact;
+  ordinary random BF16 scales additionally exercise that rounding policy.
 - Test the original kernel first, then require bitwise equality between it
   and the unedited assembly. Keep the independent oracle unchanged. A
   disposable edit reversing the sign of the SiLU exponential must fail it.
 - Rebind all input/output pointers and token counts, including partially
-  filled tiles and inactive experts. Retain tensor ownership because the
-  launch arguments are pointers. Check reference/old/new candidate isolation
-  and nondefault-stream graph replay.
+  filled tiles and inactive experts, with random, balanced, and concentrated
+  routes. Retain tensor ownership because the launch arguments are pointers.
+  Check input preservation, reference/old/new candidate isolation, and
+  nondefault-stream graph replay.
 
 The optional regression is
 `src/kernelforge/tests/test_assembly_aiter_moe_gpu.py`. It compiles the installed
-kernel and covers token counts 1, 37, 65, and 257. Its synthetic-oracle
+kernel and covers token counts 1, 37, 65, 129, and 257. Its synthetic-oracle
 tolerances are not permission to relax a campaign's protected driver.
 
 ## An instruction reduction without a useful latency reduction
@@ -83,8 +85,9 @@ inputs were reused, so this measures warm repeated-kernel execution.
 | 129 / 7168 / 2048 / 8 / 2 | 144.197 us | 144.164 us | 144.194 us |
 
 Both edits passed bitwise comparison, including new inputs, but the change
-was approximately +/-0.02% and is not a useful improvement. Reject it under
-a 3% improvement gate. A fresh-process rebuild with an empty cache reproduced
+was approximately +/-0.02% and is not a useful improvement. It did not meet
+the experiment's 3% target; Forge's actual KEEP threshold accounts for
+measurement noise. A fresh-process rebuild with an empty cache reproduced
 the larger case's assembly hashes and all correctness checks; the tiny timing
 difference reversed sign, reinforcing the lack of a meaningful gain.
 The smaller specialization declared 508 bytes of

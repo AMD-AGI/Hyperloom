@@ -1666,6 +1666,7 @@ def forge_loop(
         target_functions=target_functions_list,
         profiling_enabled=profiling_enabled,
         agent_backend=selected_runtime.provider,
+        commit_new_paths=iter_config.commit_new_paths,
         usage=usage,
     )
     effective_implementer = getattr(
@@ -1704,6 +1705,7 @@ def forge_loop(
             "bench_repeat": bench_repeat,
             "permission_mode": permission_mode,
             "task_type": task_type,
+            "commit_new_paths": iter_config.commit_new_paths,
             # Function names, not paths: nothing to rebind onto a lane.
             "target_functions": target_functions_list,
             "agent_backend": selected_runtime.provider,
