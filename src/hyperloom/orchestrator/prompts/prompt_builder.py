@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from typing import Any
 from pathlib import Path
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -28,7 +29,9 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
+from hyperloom.common.perf_metric import is_agentx_mode
 from . import read_rules_fragment as _read_rules_fragment
+from .agentx_context import corpus_lines, grading_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
@@ -116,6 +119,7 @@ def _section_session_context(
     framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
     benchmark_mode: str = "",
+    agentx_corpus_shape: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
@@ -132,14 +136,14 @@ def _section_session_context(
         framework_source_roots (tuple[str, ...] | None): Optional framework
             source roots; a PolicyGate-default note is shown when empty.
         benchmark_mode (str): ``"agentx"`` or ``""``/``"synthetic"``; injects
-            an AgentX workload and grading summary when set.
+            the AgentX workload and grading blocks when it names AgentX.
+        agentx_corpus_shape (Mapping[str, Any] | None): The session's
+            ``agentx_corpus_shape``, supplying the corpus numbers.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
         awareness.
     """
-    from hyperloom.common.perf_metric import AGENTX_KEEP_THRESHOLD_FLOOR_PCT, is_agentx_mode
-
     obj = f"{objective_kind}"
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
@@ -156,26 +160,7 @@ def _section_session_context(
         f"- framework_source_roots: {roots_line}",
     ]
     if is_agentx_mode(benchmark_mode):
-        lines += [
-            "",
-            "**Workload: AgentX agentic trace replay** — the corpus fixes the",
-            "request shape; ISL/OSL in state are inert placeholders, not the real shape.",
-            "- corpus : semianalysis_cc_traces_weka_062126, 393 traces, 3600 s window",
-            "- input/req : p50 95k   p90 163k   p99 506k tokens",
-            "- output/req: p50 333   p90 1874   p99 6386 tokens",
-            "- prefix cache hit ~97.5%: most input tokens are cache hits, so",
-            "  prefill compute is far smaller than the token count suggests",
-            "- decode is ~94% of user-visible time (TTFT 0.55 s of a 9.15 s mean E2EL)",
-            "",
-            "**Grading: E2E normalised interactivity P90 (slow tail)**",
-            "= 1 / P90({E2EL_i / OSL_i}) = P10 of per-request OSL/E2EL_s (tok/s/user).",
-            "This is the axis InferenceX ranks a submission on (MODELS.md:78).",
-            f"KEEP: interactivity gain >= {AGENTX_KEEP_THRESHOLD_FLOOR_PCT:.0f}%",
-            "AND per-chip token throughput not worse than the noise band.",
-            "REVERT: both axes worse. RECORDED: neither dominates (stored, not promoted).",
-            "Output throughput is measured but is NOT the objective; a win that only",
-            "speeds up the fastest users does not move the graded number.",
-        ]
+        lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines()]
     lines += [
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",
@@ -990,6 +975,7 @@ def build_orchestration_prompt(
     framework_source_roots: tuple[str, ...] | None = None,
     references_dir: Path | None = None,
     benchmark_mode: str = "",
+    agentx_corpus_shape: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1066,6 +1052,7 @@ def build_orchestration_prompt(
             framework_agent_phase_enabled=framework_agent_phase_enabled,
             framework_source_roots=framework_source_roots,
             benchmark_mode=benchmark_mode,
+            agentx_corpus_shape=agentx_corpus_shape,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(

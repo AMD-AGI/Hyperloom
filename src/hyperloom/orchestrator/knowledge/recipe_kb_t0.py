@@ -974,20 +974,11 @@ def run_t0_anchor(
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
 
-    # Block KB reads under AgentX.  The recipe identity has no mode or workload
-    # dimension: a synthetic 1024/1024 warm-start recipe would pass the shape
-    # gate and be applied to a ~114k/806 agentic workload, tuning for the wrong
-    # regime.  Writes are already blocked by agentx_kb_write_blocked; this
-    # makes reads symmetric and is tracked separately so each site is explicit.
-    from hyperloom.orchestrator.actions.executors._workload_envs import (
-        agentx_kb_write_blocked,
-    )
+    # The warm-start read is the fourth Recipe sink; see agentx_kb_blocked.
+    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_kb_blocked
 
-    if agentx_kb_write_blocked(shared_state):
-        log.info(
-            "run_t0_anchor: skipping (AgentX); recipe KB has no mode dimension, "
-            "and a synthetic warm-start would tune for the wrong corpus shape."
-        )
+    if agentx_kb_blocked(shared_state):
+        log.info("run_t0_anchor: skipping (AgentX); the recipe identity has no mode dimension")
         return
 
     sd = Path(session_dir)
@@ -1124,15 +1115,15 @@ def run_t0_anchor(
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
 
-        # Third Recipe sink; see agentx_kb_write_blocked. _build_t0_trace_extras
+        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras
         # copies SharedState.isl/osl into the row, which under AgentX are the
         # inert 1024/1024 placeholders -- so anchoring here mis-tags the
         # cross-session row exactly as the CLOSE-time write would.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
+            agentx_kb_blocked,
         )
 
-        if agentx_kb_write_blocked(shared_state):
+        if agentx_kb_blocked(shared_state):
             log.info(
                 "T0 anchor: skipping put_recipe (AgentX); the recipe row has no "
                 "mode or workload dimension and isl/osl are placeholders here."

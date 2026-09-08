@@ -77,12 +77,12 @@ def _full_measurement(*, total: float, output: float, intvty: float) -> dict[str
 
 # --- both sides, one axis ---
 
+
 def test_agentx_reads_both_sides_on_the_intvty_axis(monkeypatch):
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=26500.0, output=190.0, intvty=24.0),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=26500.0, output=190.0, intvty=24.0), keep_threshold_pct=2.0
     )
 
     assert graded.objective == GRADED_INTVTY
@@ -97,8 +97,7 @@ def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # +10% interactivity, same tput
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=25984.0, output=183.0, intvty=24.8),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=25984.0, output=183.0, intvty=24.8), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_KEEP
 
@@ -108,8 +107,7 @@ def test_agentx_revert_when_both_axes_worse(monkeypatch):
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=20000.0, output=130.0, intvty=15.0),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=20000.0, output=130.0, intvty=15.0), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_REVERT
 
@@ -120,14 +118,13 @@ def test_agentx_recorded_when_neither_dominates(monkeypatch):
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # +1% intvty (below 2% floor), tput roughly same
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=25984.0, output=183.0, intvty=22.79),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=25984.0, output=183.0, intvty=22.79), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_RECORDED
 
 
 def test_a_candidate_without_the_graded_axes_degrades_both_sides_together(monkeypatch):
-    """Dropping only the candidate would divide it by a ~140x larger reference."""
+    """Degrading one side alone would grade an output figure against interactivity."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(state, {"output_throughput": 190.0})
@@ -171,6 +168,7 @@ def test_a_scriptable_framework_keeps_output_grading_under_agentx(monkeypatch):
 
 # --- the interactivity constraint travels with the objective ---
 
+
 def test_an_interactivity_regression_with_tput_win_is_recorded(monkeypatch):
     """Intvty regresses BUT tput wins -> RECORDED (neither dominates the other).
 
@@ -183,11 +181,10 @@ def test_an_interactivity_regression_with_tput_win_is_recorded(monkeypatch):
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # Large tput win but interactivity crashes
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=40000.0, output=190.0, intvty=10.0),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=40000.0, output=190.0, intvty=10.0), keep_threshold_pct=2.0
     )
 
-    assert graded.graded_on_total
+    assert graded.graded_on_intvty
     assert graded.verdict == VERDICT_RECORDED  # not REVERT — tput won
 
 
@@ -197,23 +194,24 @@ def test_both_axes_worse_is_revert(monkeypatch):
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # Both regress strongly beyond the 5% noise band
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=18000.0, output=100.0, intvty=10.0),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=18000.0, output=100.0, intvty=10.0), keep_threshold_pct=2.0
     )
-    assert graded.graded_on_total
-    assert graded.vetoed is True
+    assert graded.graded_on_intvty
+    assert graded.verdict == VERDICT_REVERT
 
 
-def test_the_veto_never_fires_on_the_output_axis(monkeypatch):
-    """The constraint belongs to the total objective."""
+def test_a_collapsed_interactivity_does_not_block_a_synthetic_run(monkeypatch):
+    """The interactivity axis belongs to the AgentX objective and only to it."""
     _synthetic(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(state, _full_measurement(total=40000.0, output=190.0, intvty=1.0))
 
-    assert graded.vetoed is False
+    assert graded.objective == GRADED_OUTPUT
+    assert graded.verdict == VERDICT_KEEP
 
 
 # --- grading against the session baseline ---
+
 
 def test_cumulative_gain_reads_the_baseline_on_the_graded_axis(monkeypatch):
     _agentx(monkeypatch)
@@ -246,6 +244,7 @@ def test_cumulative_gain_falls_back_to_baseline_tput_together(monkeypatch):
 
 # --- the anchor chokepoint stays on the output axis ---
 
+
 @pytest.mark.parametrize("agentx", [True, False])
 def test_the_anchor_chokepoint_is_the_output_axis_on_every_session(monkeypatch, agentx):
     _agentx(monkeypatch) if agentx else _synthetic(monkeypatch)
@@ -262,6 +261,7 @@ def test_the_anchor_falls_back_to_the_baseline_before_any_layer_lands(monkeypatc
 
 
 # --- a KEEP must not strip the axes off the anchor ---
+
 
 def test_graded_axes_survive_a_winner_record(monkeypatch):
     """The defect this guards: AgentX grading dies after the first KEEP.
@@ -280,15 +280,13 @@ def test_graded_axes_survive_a_winner_record(monkeypatch):
 
 
 def test_graded_axes_of_omits_what_was_not_measured():
-    # output_throughput IS included now (used as secondary context on KEEP records).
-    assert graded_axes_of({"output_throughput": 190.0}) == {"output_throughput": 190.0}
+    assert graded_axes_of({"output_throughput": 190.0}) == {}
     assert graded_axes_of({"total_token_throughput": 26500.0}) == {"total_throughput": 26500.0}
     assert graded_axes_of(None) == {}
-    # e2e_norm_intvty_p90 absent -> no intvty key
-    assert "e2e_norm_intvty_p90" not in graded_axes_of({"output_throughput": 190.0})
 
 
 # --- the persisted marker reaches the chokepoint ---
+
 
 def test_a_round_without_the_env_var_still_grades_on_intvty(monkeypatch):
     """A re-baseline or integrate round can be driven from a shell that never saw it.
@@ -300,8 +298,7 @@ def test_a_round_without_the_env_var_still_grades_on_intvty(monkeypatch):
     _synthetic(monkeypatch)
     state = _State(current_best=dict(_ANCHOR), benchmark_mode="agentx")
     graded = resolve_graded_comparison(
-        state, _full_measurement(total=27000.0, output=190.0, intvty=23.0),
-        keep_threshold_pct=2.0
+        state, _full_measurement(total=27000.0, output=190.0, intvty=23.0), keep_threshold_pct=2.0
     )
     assert graded.objective == GRADED_INTVTY
     assert graded.candidate == pytest.approx(23.0)

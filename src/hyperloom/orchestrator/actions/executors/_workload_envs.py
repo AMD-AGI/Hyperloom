@@ -177,37 +177,8 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     return {**os.environ, "CONC": str(conc)}
 
 
-def agentx_corpus_isl_mean(shared_state: Any = None) -> int:
-    """Return the mean ISL for the active AgentX corpus (for arithmetic readers).
-
-    Reads from ``SharedState.agentx_corpus_shape`` when available; falls back to
-    the canonical constant.  Arithmetic readers (roofline, context-length cap, etc.)
-    must call this instead of reading ``state.isl`` under AgentX.
-    """
-    shape = getattr(shared_state, "agentx_corpus_shape", None) or {}
-    isl_dist = shape.get("isl") or {}
-    avg = isl_dist.get("avg") if isinstance(isl_dist, dict) else None
-    if isinstance(avg, (int, float)) and avg > 0:
-        return int(avg)
-    from hyperloom.inference_optimizer.agentx.mapping import CANONICAL_ISL
-
-    return CANONICAL_ISL["avg"]
-
-
-def agentx_corpus_osl_mean(shared_state: Any = None) -> int:
-    """Return the mean OSL for the active AgentX corpus (for arithmetic readers)."""
-    shape = getattr(shared_state, "agentx_corpus_shape", None) or {}
-    osl_dist = shape.get("osl") or {}
-    avg = osl_dist.get("avg") if isinstance(osl_dist, dict) else None
-    if isinstance(avg, (int, float)) and avg > 0:
-        return int(avg)
-    from hyperloom.inference_optimizer.agentx.mapping import CANONICAL_OSL
-
-    return CANONICAL_OSL["avg"]
-
-
-def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
-    """Whether an agentic measurement must stay out of the cross-session KB.
+def agentx_kb_blocked(shared_state: Any = None) -> bool:
+    """Whether an AgentX session must not exchange recipes with the shared KB.
 
     The recipe canonical id is a seven-tuple of model / hardware / framework /
     precision identity: no workload, no mode. Row workload tags are copied from
@@ -218,15 +189,20 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     shape filter then matches positively. The store is machine-global and
     ``--reset-state`` does not clear it, so the damage outlives its session.
 
+    Reads are blocked for the mirror-image reason: a recipe validated on the
+    synthetic 1024/1024 shape passes the donor shape gate for an AgentX session
+    and would warm-start it onto tuning for the wrong regime.
+
     One helper rather than a gate per sink: there are three writers (CLOSE
-    finalize, the runtime amend, and the T0 anchor), they were not all found at
-    once, and a fourth should have something obvious to call.
+    finalize, the runtime amend, and the T0 anchor) plus the T0 warm-start read,
+    they were not all found at once, and a fifth should have something obvious
+    to call.
 
     Args:
         shared_state: Session state, when the caller has one.
 
     Returns:
-        True when the caller must skip its Recipe KB write.
+        True when the caller must skip its Recipe KB exchange.
     """
     return agentx_active(shared_state)
 

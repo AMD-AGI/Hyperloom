@@ -31,6 +31,10 @@ log = logging.getLogger(__name__)
 
 ACCURACY_THRESHOLD = 0.05  # allowed deviation
 
+# Upstream rejects an AgentX submission whose error rate over completed
+# requests exceeds this (InferenceX ``validate_agentic_result.py``).
+AGENTX_ERROR_RATE_THRESHOLD = 0.10
+
 # Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the
 # enablement KEEP gate so the two never diverge.
 #
@@ -535,6 +539,30 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
+def parse_agentx_error_rate(workspace: Path | str) -> float | None:
+    """Read ``request_error_rate`` from the most recent aiperf result.
+
+    Args:
+        workspace (Path | str): The benchmark workspace to search recursively
+            for ``inferencex_result.json``.
+
+    Returns:
+        float | None: The rate, or ``None`` when no result reported one.
+    """
+    workspace = Path(workspace)
+    results = [Path(f) for f in glob.glob(str(workspace / "**" / "inferencex_result.json"), recursive=True)]
+    if not results:
+        return None
+    latest = max(results, key=lambda p: p.stat().st_mtime)
+    try:
+        data = json.loads(latest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("accuracy_gate: unreadable %s: %s", latest, exc)
+        return None
+    rate = data.get("request_error_rate")
+    return float(rate) if isinstance(rate, (int, float)) else None
+
+
 def quality_gate_passed(
     quality_gate: dict[str, Any] | None,
     require: bool = False,
@@ -621,39 +649,22 @@ def parse_eval_results(
 
     scriptable = framework_registry.is_scriptable(framework)
 
-    # AgentX validity check: post-hoc error-rate gate mirroring the upstream
-    # hard gate (error_rate <= 0.10 over completed requests).
-    # aiperf_client.sh already applies a live abort threshold, but the
-    # post-hoc check catches runs that squeaked under the live gate.
-    # Reads ``request_error_rate`` from the inferencex_result.json in the
-    # workspace.  A missing field is treated as valid (pass).
-    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_active as _agentx_active
+    # AgentX has no lm-eval; its correctness signal is the error rate upstream
+    # gates a submission on. Fails closed like the scriptable gate below: a run
+    # that reported no rate is not comparable, and treating that as a pass is
+    # how an incomparable measurement reaches the leaderboard set.
+    # Function-local: _workload_envs imports this module at load time.
+    from ._workload_envs import agentx_active
 
-    if _agentx_active():
-        _err_rate: float | None = None
-        for _rf in sorted(workspace.rglob("inferencex_result.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-            try:
-                import json
-
-                _data = json.loads(_rf.read_text())
-                _err_rate = float(_data.get("request_error_rate") or 0.0)
-                break
-            except Exception:  # noqa: BLE001
-                continue
-        # Upstream threshold: error_rate > 0.10 is a hard gate.
-        _AGENTX_ERROR_RATE_THRESHOLD = 0.10
-        passed = _err_rate is None or _err_rate <= _AGENTX_ERROR_RATE_THRESHOLD
-        log.info(
-            "accuracy_gate (AgentX): request_error_rate=%s passed=%s",
-            _err_rate,
-            passed,
-        )
+    if agentx_active():
+        rate = parse_agentx_error_rate(workspace)
+        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD
+        log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
         return {
             "accuracy": 1.0 if passed else 0.0,
             "task": "agentx_error_rate",
             "metric": "request_error_rate",
-            "error_rate": _err_rate,
-            "threshold": _AGENTX_ERROR_RATE_THRESHOLD,
+            "error_rate": rate,
         }
 
     # Scriptable quality gate first: map passed->1.0 / fail->0.0.

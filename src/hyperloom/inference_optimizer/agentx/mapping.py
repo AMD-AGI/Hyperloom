@@ -17,32 +17,18 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-# Canonical corpus constants derived from the full 393-entry, 3600s corpus
-# (semianalysis_cc_traces_weka_062126).  These are used to seed
-# SharedState.agentx_corpus_shape before the first measurement so semantic
-# consumers have something to render immediately.  Measured values from a
-# real aiperf export overwrite them after each run.
-#
-# Sources: measured from Kimi-K3 session 20260831T124523Z (825 requests,
-# 3600 s window) and MiniMax-M3 sessions (1033-1097 requests, 3600 s).
+# The canonical corpus, measured from Kimi-K3 session 20260831T124523Z (825
+# requests over the 3600s window). Seeds ``SharedState.agentx_corpus_shape``
+# so semantic consumers have a shape before the first measurement replaces it.
 CANONICAL_CORPUS_LOADER = "semianalysis_cc_traces_weka_062126"
 CANONICAL_CORPUS_ENTRIES = 393
 CANONICAL_CORPUS_DURATION_S = 3600
-CANONICAL_ISL = {
-    "avg": 113814,
-    "p50": 94821,
-    "p75": 119126,
-    "p90": 163328,
-    "p99": 506158,
-}
-CANONICAL_OSL = {
-    "avg": 806,
-    "p50": 333,
-    "p75": 801,
-    "p90": 1874,
-    "p99": 6386,
-}
+CANONICAL_ISL = {"avg": 113814, "p50": 94821, "p75": 119126, "p90": 163328, "p99": 506158}
+CANONICAL_OSL = {"avg": 806, "p50": 333, "p75": 801, "p90": 1874, "p99": 6386}
 CANONICAL_PREFIX_CACHE_HIT = 0.975
+
+# Percentiles carried forward from the aiperf sequence-length distributions.
+_SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
 
 
 def stat(m: Mapping[str, Any], key: str, sub: str = "avg", default: float = 0.0) -> Any:
@@ -159,9 +145,6 @@ def map_aiperf(
         "p90_tpot_ms": stat(m, "inter_token_latency", "p90"),
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
-        # Renamed from intvty_p90_tok_s_user to make the slow-tail semantics
-        # unambiguous.  ``e2e_norm_intvty_p90`` matches the field name the
-        # grading layer reads from perf snapshots.
         "e2e_norm_intvty_p90": intvty_p90,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
@@ -177,65 +160,46 @@ def map_aiperf(
         # slip into the leaderboard-comparable set.
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
-        # Corpus shape from this run — used by map_corpus_shape.
-        "_corpus_shape_raw": {
-            "isl": m.get("input_sequence_length"),
-            "osl": m.get("output_sequence_length"),
-            "completed": rc,
-            "duration_s": stat(m, "benchmark_duration"),
-            "theoretical_prefix_cache_hit": stat(m, "theoretical_prefix_cache_hit"),
-            "error_request_count": stat(m, "error_request_count"),
-            "request_error_rate": stat(m, "request_error_rate"),
-        },
+        # Upstream's hard validity gate is error_rate <= 0.10 over completed
+        # requests; the AgentX accuracy gate reads this field.
+        "request_error_rate": stat(m, "request_error_rate"),
+        # Corpus shape. A single ISL/OSL scalar cannot describe this workload
+        # (p50 95k, p99 506k), so the distributions travel instead.
+        "corpus_loader": _corpus_loader(d),
+        "isl_distribution": _distribution(m.get("input_sequence_length")),
+        "osl_distribution": _distribution(m.get("output_sequence_length")),
     }
 
 
-def map_corpus_shape(
-    result: Mapping[str, Any],
-    *,
-    corpus_loader: str = CANONICAL_CORPUS_LOADER,
-) -> dict[str, Any]:
-    """Extract a corpus-shape summary from a mapped aiperf result.
+def _corpus_loader(export: Mapping[str, Any]) -> str:
+    """The dataset loader aiperf replayed, from ``metadata.dataset.loader``."""
+    dataset = (export.get("metadata") or {}).get("dataset")
+    return str((dataset or {}).get("loader") or "")
 
-    The raw distribution dicts from aiperf carry avg/p50/p75/p90/p99/p99/std;
-    we forward the subset that semantic consumers need.
+
+def _distribution(metric: Any) -> dict[str, int]:
+    """Project an aiperf sequence-length metric onto :data:`_SHAPE_PERCENTILES`."""
+    if not isinstance(metric, dict):
+        return {}
+    return {key: int(metric[key]) for key in _SHAPE_PERCENTILES if isinstance(metric.get(key), (int, float))}
+
+
+def map_corpus_shape(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a ``SharedState.agentx_corpus_shape`` record from a mapped result.
 
     Args:
         result: The dict returned by :func:`map_aiperf`.
-        corpus_loader: Corpus loader name; defaults to the canonical full corpus.
 
     Returns:
-        A dict suitable for ``SharedState.agentx_corpus_shape``.
+        The measured corpus shape.
     """
-    raw = result.get("_corpus_shape_raw") or {}
-
-    def _dist(v: Any) -> dict[str, Any] | None:
-        if not isinstance(v, dict):
-            return None
-        out: dict[str, Any] = {}
-        for k in ("avg", "p50", "p75", "p90", "p99"):
-            val = v.get(k)
-            if val is not None:
-                out[k] = int(val) if isinstance(val, (int, float)) else val
-        return out or None
-
-    shape: dict[str, Any] = {"corpus_loader": corpus_loader}
-    isl_dist = _dist(raw.get("isl"))
-    if isl_dist:
-        shape["isl"] = isl_dist
-    osl_dist = _dist(raw.get("osl"))
-    if osl_dist:
-        shape["osl"] = osl_dist
-    completed = raw.get("completed")
-    if completed:
-        shape["completed_requests"] = int(completed)
-    duration = raw.get("duration_s")
-    if duration:
-        shape["duration_s"] = float(duration)
-    pch = raw.get("theoretical_prefix_cache_hit")
-    if pch is not None:
-        shape["prefix_cache_hit"] = float(pch)
-    err_rate = raw.get("request_error_rate")
-    if err_rate is not None:
-        shape["request_error_rate"] = float(err_rate)
-    return shape
+    return {
+        "corpus_loader": str(result.get("corpus_loader") or ""),
+        "isl": dict(result.get("isl_distribution") or {}),
+        "osl": dict(result.get("osl_distribution") or {}),
+        "completed_requests": int(result.get("completed") or 0),
+        "duration_s": float(result.get("duration") or 0.0),
+        "prefix_cache_hit": float(result.get("theoretical_prefix_cache_hit") or 0.0),
+        "request_error_rate": float(result.get("request_error_rate") or 0.0),
+        "source": "measured",
+    }

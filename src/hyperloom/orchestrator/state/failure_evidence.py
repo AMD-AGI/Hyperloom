@@ -18,10 +18,8 @@ FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
 
 # Variant outcomes that produced no usable measurement, so they need evidence.
+# ``RECORDED`` is deliberately absent: it was measured, just not promoted.
 UNMEASURED_OUTCOMES: frozenset[str] = frozenset({"FAILED", "KILLED_OVERTIME"})
-
-# AgentX 2-D verdict: measured but neither axis dominated; stored, not promoted.
-OUTCOME_RECORDED: str = "RECORDED"
 
 # Matches every character replaced by ``_`` in a variant-name slug.
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")

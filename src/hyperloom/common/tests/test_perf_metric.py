@@ -17,9 +17,7 @@ from hyperloom.common.perf_metric import (
     passes_tput_guard,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
-    total_tput_grading_enabled,
     total_tput_of,
-    total_tput_serving_grading_enabled,
 )
 
 _KEEP_THRESHOLD_PCT = 1.0
@@ -164,7 +162,6 @@ def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     assert intvty_grading_enabled() is True
-    assert total_tput_grading_enabled() is True  # deprecated alias
 
 
 def test_a_synthetic_run_still_grades_on_output(monkeypatch):
@@ -195,11 +192,11 @@ def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
 
 # --- the persisted marker ---
 
+
 def test_the_persisted_benchmark_mode_enables_grading_without_the_env_var(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     assert intvty_grading_enabled(benchmark_mode="agentx") is True
-    assert total_tput_serving_grading_enabled(benchmark_mode="AgentX") is True
     assert intvty_serving_grading_enabled(benchmark_mode="AgentX") is True
 
 
@@ -223,6 +220,7 @@ def test_a_scriptable_framework_still_grades_on_output_under_the_marker(monkeypa
 
 
 # --- resolve_grading_anchor_perf ---
+
 
 class _State:
     def __init__(self, current_best=None, baseline_perf=None):
@@ -262,6 +260,7 @@ def test_anchor_perf_returns_missing_reason_when_both_absent():
 
 
 # --- output_tput_of ---
+
 
 def test_output_tput_of_prefers_the_measurement_field_over_tput():
     assert output_tput_of({**_BASELINE, "tput": 1.0}) == pytest.approx(_BASELINE["output_throughput"])

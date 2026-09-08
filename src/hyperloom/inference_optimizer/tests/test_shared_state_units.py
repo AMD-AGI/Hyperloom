@@ -243,6 +243,9 @@ class TestProfileWorkloadContext:
                 "conc": "128",
             }
         ) == {
+            # A synthetic session stamps the empty mode; AgentX stamps "agentx"
+            # so an agentic trace is never reused for a synthetic profile.
+            "benchmark_mode": "",
             "framework": "sglang",
             "precision": "fp8",
             "model_path": "/models/new",

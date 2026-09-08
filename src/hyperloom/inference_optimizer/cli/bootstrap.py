@@ -125,12 +125,7 @@ def agentx_state_is_stale(state: Any) -> str:
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
-    """Return a canonical corpus-shape dict for seeding AgentX sessions.
-
-    Populated from the ``semianalysis_cc_traces_weka_062126`` constants in
-    :mod:`hyperloom.inference_optimizer.agentx.mapping`.  Overwritten with
-    measured values after the first aiperf run.
-    """
+    """Return the canonical corpus shape, until a measurement replaces it."""
     from hyperloom.inference_optimizer.agentx.mapping import (
         CANONICAL_CORPUS_DURATION_S,
         CANONICAL_CORPUS_ENTRIES,
@@ -142,12 +137,12 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
 
     return {
         "corpus_loader": CANONICAL_CORPUS_LOADER,
-        "completed_requests": CANONICAL_CORPUS_ENTRIES,
+        "corpus_entries": CANONICAL_CORPUS_ENTRIES,
         "duration_s": float(CANONICAL_CORPUS_DURATION_S),
         "isl": dict(CANONICAL_ISL),
         "osl": dict(CANONICAL_OSL),
         "prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
-        "source": "canonical_seed",
+        "source": "canonical",
     }
 
 

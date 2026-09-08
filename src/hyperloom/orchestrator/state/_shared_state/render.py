@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
 
@@ -862,14 +863,9 @@ class _RenderMixin:
         tput = entry.get("tput") or entry.get("output_throughput")
         gain_s = f"{gain:+.2f}%" if isinstance(gain, (int, float)) else " no_meas"
         tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
-        # Show which axis the gain was computed on so the agent knows whether
-        # it is looking at interactivity (AgentX) or output throughput (synthetic).
+        # The gain column is meaningless without the axis it was taken on.
         graded_obj = str(entry.get("graded_objective") or "").strip()
-        if graded_obj and graded_obj != "output_throughput":
-            # Abbreviate e2e_norm_intvty_p90 -> intvty_p90 for readability.
-            graded_obj_s = f" [{graded_obj.replace('e2e_norm_intvty_p90', 'intvty_p90')}]"
-        else:
-            graded_obj_s = ""
+        graded_obj_s = f" [{graded_obj}]" if graded_obj and graded_obj != GRADED_OUTPUT else ""
         args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
         envs = entry.get("extra_envs") or {}
         envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""

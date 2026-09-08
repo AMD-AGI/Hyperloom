@@ -53,6 +53,17 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             reasons = [str(reasons)]
         return bool(md.get("submission_valid")), [str(r) for r in reasons]
 
+    _SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
+
+    def _distribution(metric):
+        if not isinstance(metric, dict):
+            return {}
+        return {k: int(metric[k]) for k in _SHAPE_PERCENTILES if isinstance(metric.get(k), (int, float))}
+
+    def _corpus_loader(export):
+        dataset = (export.get("metadata") or {}).get("dataset")
+        return str((dataset or {}).get("loader") or "")
+
     def map_aiperf(export, *, noncanonical_reasons=None):
         d = export
         _verdict, _reasons = _submission_outcome(d)
@@ -100,6 +111,10 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "theoretical_prefix_cache_hit": _stat(m, "theoretical_prefix_cache_hit"),
             "submission_valid": _verdict,
             "submission_invalid_reasons": _reasons,
+            "request_error_rate": _stat(m, "request_error_rate"),
+            "corpus_loader": _corpus_loader(d),
+            "isl_distribution": _distribution(m.get("input_sequence_length")),
+            "osl_distribution": _distribution(m.get("output_sequence_length")),
         }
 
 

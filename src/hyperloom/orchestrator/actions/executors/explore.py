@@ -38,11 +38,10 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_OUTPUT,
     VERDICT_RECORDED,
     VERDICT_REVERT,
-    intvty_serving_grading_enabled,
-    perf_snapshot_from_mapping,
-    resolve_grading_anchor_perf,
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -54,7 +53,6 @@ from ...state.failure_evidence import (
 )
 from ...state.shared_state import (
     first_positive_tput,
-    framework_is_scriptable,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
     stack_base_params,
@@ -1102,17 +1100,6 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
-        grade_on_total = intvty_serving_grading_enabled(
-            scriptable=framework_is_scriptable(framework),
-            benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
-        )
-        _anchor_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_total else (None, "")
-        if grade_on_total and _anchor_reason:
-            log.info(
-                "explore: total-throughput grading unavailable (%s); grading this round on output throughput",
-                _anchor_reason,
-            )
-        _running_base_perf_unused = _anchor_perf  # retained for reference only; grading via resolve_graded_comparison
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a cold decision round instead of
@@ -1536,30 +1523,28 @@ class ExploreExecutor:
                         )
                         continue
 
-                    # Decision-round gain is the gate: a variant KEEPs when it
-                    # clears keep_threshold and the accuracy gate. Under AgentX
-                    # grading the objective is E2E normalised interactivity P90
-                    # (slow tail) with per-chip throughput as a secondary guard.
-                    # resolve_graded_comparison applies the AgentX keep-threshold
-                    # floor and returns a 3-way verdict (KEEP/REVERT/RECORDED).
+                    # A variant KEEPs when it clears the graded verdict and the
+                    # accuracy gate. The axes and the threshold floor belong to
+                    # resolve_graded_comparison, which every lane shares.
                     variant_meas = {
-                        "output_throughput": r.output_throughput,
+                        GRADED_OUTPUT: r.output_throughput,
                         "input_throughput": r.input_throughput,
                         "total_throughput": r.total_token_throughput,
-                        "e2e_norm_intvty_p90": r.intvty_p90,
+                        GRADED_INTVTY: r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                     }
-                    graded = resolve_graded_comparison(
-                        ss, variant_meas, keep_threshold_pct=keep_threshold_pct
-                    )
-                    _graded_on_total = graded.graded_on_total
+                    graded = resolve_graded_comparison(ss, variant_meas, keep_threshold_pct=keep_threshold_pct)
+                    _graded_on_intvty = graded.graded_on_intvty
                     if graded.degrade_reason:
                         log.info(
-                            "explore: variant %r missing graded axes (%s); "
-                            "grading on output throughput",
+                            "explore: variant %r graded on output throughput (%s)",
                             gv.name,
                             graded.degrade_reason,
                         )
+                    axes = (
+                        f"intvty {graded.reference:.1f}->{graded.candidate:.1f} "
+                        f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
+                    )
                     gain: float | None
                     outcome = "FAILED"
                     reason: str = ""
@@ -1569,30 +1554,14 @@ class ExploreExecutor:
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
-                        reason = "intvty_regression" if _graded_on_total else "gain_below_threshold"
-                        if _graded_on_total:
-                            log.info(
-                                "explore: variant %r REVERT — both axes regressed "
-                                "(intvty %.1f->%.1f, tput %.1f->%.1f)",
-                                gv.name,
-                                graded.reference,
-                                graded.candidate,
-                                graded.tput_reference,
-                                graded.tput_candidate,
-                            )
+                        if _graded_on_intvty:
+                            reason = f"both_axes_regressed ({axes})"
+                        else:
+                            reason = "gain_below_threshold"
                     elif graded.verdict == VERDICT_RECORDED:
                         gain = gain_pct(graded.candidate, graded.reference)
                         outcome = "RECORDED"
-                        reason = "neither_dominates"
-                        log.info(
-                            "explore: variant %r RECORDED — neither axis dominates "
-                            "(intvty %.1f->%.1f, tput %.1f->%.1f)",
-                            gv.name,
-                            graded.reference,
-                            graded.candidate,
-                            graded.tput_reference,
-                            graded.tput_candidate,
-                        )
+                        reason = f"neither_dominates ({axes})"
                     else:
                         gain = gain_pct(graded.candidate, graded.reference)
                     if outcome == "FAILED" and not reason:
@@ -1657,7 +1626,7 @@ class ExploreExecutor:
                         "e2e_norm_intvty_p90": r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
-                        "graded_objective": "e2e_norm_intvty_p90" if _graded_on_total else "output_throughput",
+                        "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -1735,7 +1704,7 @@ class ExploreExecutor:
                             # gain from a gain that also had a kernel running.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
-                            "graded_objective": "total_throughput" if _graded_on_total else "output_throughput",
+                            "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
                             # The verdict this KEEP rests on. ``None`` means the
                             # variant was not gated (not high-risk, or no
                             # baseline to compare against) rather than that it
@@ -1768,12 +1737,6 @@ class ExploreExecutor:
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
-                        cand_snap = perf_snapshot_from_mapping(variant_meas)
-                        if grade_on_total and not cand_snap and _graded_on_total:
-                            log.info(
-                                "explore: KEEP %r graded on output throughput (axes missing in cand_snap)",
-                                gv.name,
-                            )
 
                         winners.append(keep_entry)
                         winners_history_update.append(

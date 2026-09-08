@@ -1303,15 +1303,22 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
             {"arm": arm, "conc": 8, "status": "succeeded", "output_throughput": out, "total_token_throughput": total}
         ]
 
+    def _intvty_pts(self, arm: str, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
     def test_agentx_grades_on_e2e_norm_intvty_p90(self):
         """AgentX grades on the slow-tail interactivity axis."""
-        pts_with_intvty = lambda arm, intvty, total: [
-            {"arm": arm, "conc": 8, "status": "succeeded",
-             "e2e_norm_intvty_p90": intvty, "total_token_throughput": total}
-        ]
-        comparison, summary = _build_comparison(
-            pts_with_intvty("baseline", 22.5, 20000.0),
-            pts_with_intvty("optimized", 24.0, 21000.0),
+        _comparison, summary = _build_comparison(
+            self._intvty_pts("baseline", 22.5, 20000.0),
+            self._intvty_pts("optimized", 24.0, 21000.0),
             metric_key=graded_metric_key(benchmark_mode="agentx"),
         )
         assert summary["metric"] == "e2e_norm_intvty_p90"
@@ -1336,6 +1343,7 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
         from hyperloom.common.perf_metric import INTVTY_V1
+
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", INTVTY_V1)
         assert graded_metric_key(benchmark_mode="synthetic") == "e2e_norm_intvty_p90"
 
@@ -1641,6 +1649,7 @@ class TestTheChartFollowsTheGradedAxis:
         # AgentX chart: x = interactivity, y = total_token_throughput / tp.
         # Synthetic chart: x = output_throughput / conc, y = output_throughput / tp.
         from hyperloom.common.perf_metric import GRADED_OUTPUT
+
         if chart_metric != GRADED_OUTPUT:
             # AgentX: y is total throughput per chip
             assert ys == [pytest.approx(25984.8 / 8.0)]

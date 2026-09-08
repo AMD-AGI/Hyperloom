@@ -20,7 +20,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from .agentx_context import corpus_lines, grading_lines
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -110,16 +112,14 @@ def _is_atom(inp: SpecialistPromptInputs) -> bool:
 
 
 def _is_agentx(inp: SpecialistPromptInputs) -> bool:
-    """True when the session is an AgentX agentic trace replay.
+    """True when the session replays the AgentX agentic trace corpus.
 
     Args:
         inp: The specialist prompt inputs.
 
     Returns:
-        True when ``benchmark_mode`` is ``"agentx"``.
+        True when ``benchmark_mode`` names the agentic workload.
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
-
     return is_agentx_mode(inp.benchmark_mode)
 
 
@@ -287,15 +287,11 @@ def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
     if _is_agentx(inp):
         base += [
             "",
-            "**AgentX corpus shape — revise your OSL intuitions**",
-            "This is an agentic trace replay: output p50=333, p90=1874, p99=6386 tokens.",
-            "Prefix cache hit ~97.5%, so prefill compute is small despite ~114k ISL.",
-            "Decode is ~94% of user-visible time (TTFT ~0.55 s / E2EL ~9.15 s).",
-            "- DO target: long-KV decode GEMMs, MoE expert dispatch,",
-            "  attention backends that amortise TTFT over long outputs.",
-            "- DO NOT apply 'short-OSL decode' tuning (tile-size shrink, MLA",
-            "  overhead avoidance for short sequences) — the p90 output is 1874",
-            "  tokens, not the 1024 shown in state.isl/osl.",
+            "**The short-OSL advice above does not apply to this workload.** See the",
+            "corpus shape in Section 2: outputs run long and the prefill is mostly a",
+            "cache hit, so tile-size shrink and MLA-overhead avoidance target the",
+            "wrong regime. Aim at long-KV decode GEMMs, MoE expert dispatch, and",
+            "attention backends that amortise TTFT over a long output.",
         ]
     return base
 
@@ -884,9 +880,12 @@ class SpecialistPromptInputs:
     # ``framework_version`` is the precise install version (empty => no note).
     framework: str = ""
     framework_version: str = ""
-    # Benchmark mode: ``"agentx"`` for agentic trace replay, ``""`` / ``"synthetic"``
-    # for fixed-ISL/OSL synthetic workloads.  Drives AgentX-specific prompt sections.
+    # ``"agentx"`` for agentic trace replay, else synthetic; selects the
+    # workload and grading blocks. ``agentx_corpus_shape`` supplies their
+    # numbers, mirrored from SharedState so the prompt describes the corpus the
+    # session actually replayed.
     benchmark_mode: str = ""
+    agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
 
     # Gap statement
     gap_canonical_id: str = ""
@@ -1356,20 +1355,9 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
     if inp.conc > 0:
         workload_rows.append(f"- concurrency: {inp.conc}")
     if _is_agentx(inp):
-        # Under AgentX state.isl/osl are inert 1024/1024 placeholders.
-        # Show the corpus distribution instead so proposals aim at the right
-        # shape (~114k/806 per-request, not 1:1).
-        workload_rows += [
-            "- workload: **AgentX agentic trace replay** (corpus fixes request shape)",
-            "- input/req : p50 95k   p90 163k   p99 506k tokens",
-            "- output/req: p50 333   p90 1874   p99 6386 tokens",
-            "- prefix cache hit ~97.5%: ~97.5% of input tokens are cache hits;",
-            "  actual prefill compute is far smaller than the ISL count suggests",
-            "- decode is ~94% of user-visible time (TTFT ~0.55 s of ~9.15 s mean E2EL)",
-            "- objective: E2E normalised interactivity P90 (slow tail) — NOT output tput",
-            "  KEEP = interactivity gain >= 2% AND per-chip tput not regressed",
-            "  Focus: long-KV decode kernels, low-batch GEMM, prefix-cache IO, MoE expert dispatch",
-        ]
+        # The corpus fixes the request shape, so ISL/OSL carry no information.
+        workload_rows += corpus_lines(inp.agentx_corpus_shape)
+        workload_rows += grading_lines()
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")

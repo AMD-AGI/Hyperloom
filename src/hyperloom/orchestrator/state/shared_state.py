@@ -183,17 +183,18 @@ def resolve_graded_comparison(
     against_baseline: bool = False,
     keep_threshold_pct: float = 0.0,
 ) -> "GradedComparison":
-    """Resolve what a KEEP decision grades and compute the 2-D verdict.
+    """Resolve what a KEEP decision grades, and the verdict on that pair.
 
-    Under AgentX grading the objective is E2E normalised interactivity P90
-    (slow tail).  A candidate KEEP when its interactivity gain clears
-    ``keep_threshold_pct`` **and** per-chip token throughput does not regress
-    beyond the noise band.  Both axes worse -> REVERT.  Neither dominates ->
-    RECORDED (measured, stored, not promoted).
+    Under AgentX both sides come from perf snapshots, which exist only when
+    both graded axes are present, so a lane cannot half-apply the objective.
+    When either side cannot supply them both degrade to output throughput
+    together and ``degrade_reason`` names why.
 
-    When either side cannot supply the graded axes the comparison degrades to
-    output throughput and ``degrade_reason`` names why.  The degrade is never
-    silent and never one-sided.
+    The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the
+    threshold with throughput inside the noise band, REVERT needs both axes
+    outside it, and anything else is RECORDED. ``keep_threshold_pct`` is
+    floored at :data:`AGENTX_KEEP_THRESHOLD_FLOOR_PCT` here because this is the
+    one place every lane's threshold passes through.
 
     Args:
         state: The session state (``current_best`` / ``baseline_tput`` /
@@ -201,7 +202,7 @@ def resolve_graded_comparison(
         measurement: The candidate's measurement mapping.
         against_baseline: Grade against the session baseline (cumulative
             realized gain) rather than the recipe the candidate was composed on.
-        keep_threshold_pct: Minimum interactivity gain to KEEP (>= 0).
+        keep_threshold_pct: Minimum gain to KEEP.
 
     Returns:
         A :class:`GradedComparison` whose ``candidate`` and ``reference`` are
@@ -238,18 +239,14 @@ def resolve_graded_comparison(
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
         if ref_perf and cand_perf:
-            # Apply the AgentX floor on keep_threshold.
-            effective_threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
-            intvty_gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
-            intvty_ok = passes_intvty_gate(cand_perf, ref_perf)
-            tput_ok = passes_tput_guard(cand_perf, ref_perf)
-            # 2-D domination verdict.
-            if intvty_gain is not None and intvty_gain >= effective_threshold and tput_ok:
+            gain = gain_pct(intvty_of(cand_perf), intvty_of(ref_perf))
+            threshold = max(keep_threshold_pct, AGENTX_KEEP_THRESHOLD_FLOOR_PCT)
+            tput_holds = passes_tput_guard(cand_perf, ref_perf)
+            if gain is not None and gain >= threshold and tput_holds:
                 verdict = VERDICT_KEEP
-            elif not intvty_ok and not tput_ok:
+            elif not passes_intvty_gate(cand_perf, ref_perf) and not tput_holds:
                 verdict = VERDICT_REVERT
             else:
-                # Neither strictly dominates: store, do not promote.
                 verdict = VERDICT_RECORDED
             return GradedComparison(
                 objective=GRADED_INTVTY,
@@ -264,20 +261,13 @@ def resolve_graded_comparison(
     reference = (
         float(getattr(state, "baseline_tput", 0.0) or 0.0) if against_baseline else resolve_grading_anchor_tput(state)
     )
-    cand_output = output_tput_of(measurement)
-    if reference > 0:
-        output_gain = gain_pct(cand_output, reference)
-        if output_gain is not None and output_gain >= keep_threshold_pct:
-            verdict = VERDICT_KEEP
-        else:
-            verdict = VERDICT_REVERT
-    else:
-        verdict = VERDICT_REVERT
+    candidate = output_tput_of(measurement)
+    gain = gain_pct(candidate, reference) if reference > 0 else None
     return GradedComparison(
         objective=GRADED_OUTPUT,
-        candidate=cand_output,
+        candidate=candidate,
         reference=reference,
-        verdict=verdict,
+        verdict=VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT,
         degrade_reason=degrade_reason,
     )
 

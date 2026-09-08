@@ -183,10 +183,8 @@ def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
     spec.loader.exec_module(mod)
 
     export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
-    # _corpus_shape_raw is a private key added by the package path only.
-    _public = lambda r: {k: v for k, v in r.items() if not k.startswith("_")}
-    assert _public(mod.map_aiperf(export, noncanonical_reasons=["entries=50"])) == _public(
-        map_aiperf(export, noncanonical_reasons=["entries=50"])
+    assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"]) == map_aiperf(
+        export, noncanonical_reasons=["entries=50"]
     )
     assert mod.map_aiperf(export, noncanonical_reasons=["entries=50"])["submission_valid"] is False
 
@@ -207,5 +205,4 @@ def test_vendored_asset_fallback_matches_package(monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    _public = lambda r: {k: v for k, v in r.items() if not k.startswith("_")}
-    assert _public(mod.map_aiperf(_sample())) == _public(map_aiperf(_sample()))
+    assert mod.map_aiperf(_sample()) == map_aiperf(_sample())

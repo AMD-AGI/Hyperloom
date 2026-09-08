@@ -389,6 +389,7 @@ def _build_orchestration_prompt(
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
     benchmark_mode: str = "",
+    agentx_corpus_shape: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides).
 
@@ -427,6 +428,7 @@ def _build_orchestration_prompt(
         phase=phase,
         transport=transport,
         benchmark_mode=benchmark_mode,
+        agentx_corpus_shape=agentx_corpus_shape,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_source_file_allowlist(),
     )
@@ -2831,6 +2833,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             phase=_initial_phase,
             transport=_orch_transport,
             benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2850,6 +2853,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         max_minutes=max_minutes_for_prompt,
         transport=_orch_transport,
         benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
