@@ -1003,38 +1003,6 @@ def _profile_capture_window(
     return delay_iters, max_iters
 
 
-def agentx_profile_env_overlay(envs: Mapping[str, Any], *, framework: str) -> dict[str, str]:
-    """Project the capture policy onto an AgentX recipe without changing its workload.
-
-    Existing materialized bounds remain authoritative. Only absent bounds are
-    derived from this owner's policy; the caller binds that projection into its
-    client identity separately from the original recipe's digest.
-    """
-    if str(framework).strip().lower() != "sglang":
-        return {}
-    raw_body = str(envs.get("PROFILE_EXTRA_BODY") or "").strip()
-    try:
-        body = json.loads(raw_body) if raw_body else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError("PROFILE_EXTRA_BODY must be a JSON object with a positive integer num_steps") from exc
-    if not isinstance(body, dict):
-        raise ValueError("PROFILE_EXTRA_BODY must be a JSON object with a positive integer num_steps")
-    if "num_steps" in body:
-        steps = body["num_steps"]
-        if isinstance(steps, bool) or not isinstance(steps, int) or steps <= 0:
-            raise ValueError("PROFILE_EXTRA_BODY num_steps must be a positive integer")
-        return {}
-    cap, cap_explicit = _profile_steps_cap(envs)
-    delay_iters, max_iters = _profile_capture_window(
-        envs,
-        agentx=True,
-        cap=cap,
-        cap_explicit=cap_explicit,
-    )
-    body.update(start_step=delay_iters, num_steps=max_iters)
-    return {"PROFILE_EXTRA_BODY": json.dumps(body)}
-
-
 def materialize_config_with_envs(
     config_path: Path,
     output_dir: Path,

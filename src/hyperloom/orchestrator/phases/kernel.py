@@ -736,95 +736,6 @@ class KernelPhase(PhaseHandler):
             log.warning("geak handoff: could not read recipe %r", recipe_path, exc_info=True)
         return {}
 
-    @staticmethod
-    def _agentx_geak_handoff(recipe_path: str, *, required: bool) -> dict[str, Any]:
-        """Bind GEAK's AgentX replay to the saved recipe and deployed client."""
-        import yaml
-
-        try:
-            recipe = Path(recipe_path).expanduser().resolve()
-            raw_recipe = recipe.read_bytes()
-            config = yaml.safe_load(raw_recipe.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-            if required:
-                raise ValueError(f"AgentX replay requires a readable materialized recipe: {recipe_path!r}") from exc
-            return {}
-        benchmark = config.get("benchmark") if isinstance(config, Mapping) else None
-        benchmark = benchmark if isinstance(benchmark, Mapping) else {}
-        script = str(benchmark.get("benchmark_script") or "")
-        if Path(script).name != "aiperf_client.sh":
-            if required:
-                raise ValueError("AgentX replay requires benchmark.benchmark_script=aiperf_client.sh")
-            return {}
-        envs = benchmark.get("envs")
-        if not isinstance(envs, Mapping) or not envs:
-            raise ValueError("AgentX replay requires the materialized benchmark.envs")
-        client_env = {str(key): str(value) for key, value in envs.items()}
-        workload: dict[str, int] = {}
-        for key in ("ISL", "OSL", "CONC"):
-            try:
-                value = int(client_env.get(key, ""))
-            except ValueError as exc:
-                raise ValueError(f"AgentX replay requires a materialized positive {key}") from exc
-            if value <= 0:
-                raise ValueError(f"AgentX replay requires a materialized positive {key}")
-            workload[key.lower()] = value
-        client = Path(script).expanduser()
-        inferencex = str(benchmark.get("inferencex_path") or "").strip()
-        if not client.is_absolute():
-            if not inferencex:
-                raise ValueError(
-                    "AgentX replay cannot locate the materialized client without benchmark.inferencex_path"
-                )
-            root = Path(inferencex).expanduser()
-            if not root.is_absolute():
-                root = recipe.parent / root
-            client = root / "benchmarks" / client
-        client = client.resolve()
-        framework = str(benchmark.get("framework") or "").strip().lower()
-        runner_type = str(benchmark.get("runner_type") or "").strip().lower()
-        server_script = client_env.get("AGENTX_SERVER_SCRIPT", "").strip()
-        if not server_script:
-            if framework not in {"sglang", "vllm"} or not runner_type:
-                raise ValueError("AgentX replay requires the materialized server framework and runner_type")
-            server_script = f"{framework}_{runner_type}.sh"
-        server = Path(server_script).expanduser()
-        if not server.is_absolute():
-            server = client.parent / server
-        server = server.resolve()
-        if server == client:
-            raise ValueError("AgentX launch_server_script must be distinct from aiperf_client.sh")
-        if not server.is_file():
-            raise ValueError(f"AgentX materialized server script is missing: {server}")
-        try:
-            client_digest = hashlib.sha256(client.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise ValueError(f"AgentX materialized client script is unreadable: {client}") from exc
-        from ..actions.executors._workload_envs import agentx_profile_env_overlay
-
-        client_env.update(agentx_profile_env_overlay(client_env, framework=framework))
-        client_config = {"argv": ["bash", str(client)], "cwd": str(client.parent), "env": client_env}
-        config_digest = hashlib.sha256(
-            json.dumps(client_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        client_config["workload_identity"] = {
-            "benchmark_mode": "agentx",
-            "recipe_sha256": hashlib.sha256(raw_recipe).hexdigest(),
-            "client_sha256": client_digest,
-            "client_config_digest": f"sha256:{config_digest}",
-        }
-        return {
-            "benchmark_mode": "agentx",
-            "bench_client": "agentx",
-            "bench_client_config": client_config,
-            "launch_server_script": str(server),
-            "model_path": str(benchmark.get("model") or ""),
-            "framework": framework,
-            "gpu_type": runner_type,
-            "inferencex_path": inferencex,
-            "workload": workload,
-        }
-
     @classmethod
     def _resolve_bench_protocol(cls, recipe_path: str, *, envs: dict[str, Any] | None = None) -> dict[str, Any]:
         """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
@@ -951,22 +862,7 @@ class KernelPhase(PhaseHandler):
         from ..actions.executors._workload_envs import agentx_enabled
 
         benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
-        try:
-            agentx_handoff = self._agentx_geak_handoff(
-                str(getattr(state, "baseline_config_path", "") or ""),
-                required=is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled(),
-            )
-        except ValueError as exc:
-            log.error("GEAK AgentX handoff unavailable: %s", exc)
-            state.geak_result = {
-                "status": "error",
-                "error_class": "agentx_handoff_unavailable",
-                "error": str(exc),
-            }
-            self._record_phase_entry_evidence(geak=state.geak_result)
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
-            state.save(self.session_dir)
-            return
+        agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -1023,6 +919,9 @@ class KernelPhase(PhaseHandler):
             reference_verification_status = "verified_declared_only"
         else:
             reference_verification_status = "unverified"
+        if agentx:
+            # Matching launch identities do not make AgentX and GEAK's proxy workload comparable.
+            reference_verification_status = "unverified_workload"
         reference_verified = reference_verification_status == "verified_observed"
         observed_identity = str(measurement.get("observed_launch_identity") or "")
         if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
@@ -1037,19 +936,14 @@ class KernelPhase(PhaseHandler):
             ).encode("utf-8")
             observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
         same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
-        workload = agentx_handoff.get("workload") or {
+        workload = {
             "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
             "conc": int(getattr(state, "conc", 0) or int(os.environ.get("CONC", "64"))),
         }
         _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
-        if agentx_handoff:
-            _recipe_envs = agentx_handoff["bench_client_config"]["env"]
-            bench_protocol = {}
-        else:
-            # Synthetic traffic keeps its existing recipe/process-env protocol.
-            _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
-            bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
+        _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
+        bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
         # The run's ACTUAL GPU pin (issue #1312). GEAK launches full servers
         # out-of-process and writes its own visible-devices mask for each one;
         # with no pin in the handoff it defaults to physical GPU 0 and collides
@@ -1103,17 +997,17 @@ class KernelPhase(PhaseHandler):
             # ``gpu_ids`` exactly as before.
             "schema_version": 3,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
-            "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
+            "framework": str(getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "") or "sglang"),
             "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
             "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
             "launch_recipe": str(getattr(state, "baseline_config_path", "") or ""),
-            "raw_baseline_tput": float(getattr(state, "baseline_tput", 0.0) or 0.0),
-            # Orchestrator throughput of the SAME config GEAK seeds its baseline
-            # with, so run_e2e can compute a pure measurement divergence. 0.0 =>
-            # no accepted config yet (falls back to raw baseline downstream).
+            # GEAK may fall back to this value when no same-config reference exists.
+            # Canonical AgentX throughput is not comparable to its proposal proxy.
+            "raw_baseline_tput": 0.0 if agentx else float(getattr(state, "baseline_tput", 0.0) or 0.0),
+            # Zero means there is no verified performance reference for GEAK's workload.
             "orchestrator_best_tput_same_config": same_config_tput,
             "same_config_reference_status": "verified" if reference_verified else "unverified",
             "same_config_reference_identity": measured_identity,
@@ -1139,8 +1033,8 @@ class KernelPhase(PhaseHandler):
             # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the
             # in-progress on-disk artifacts while a new cycle gets a fresh dir.
             "eval_dir": str(self.session_dir / "geak" / f"e2e_cycle{int(getattr(state, 'macro_cycle', 0) or 0)}"),
-            # Align GEAK's bench CLIENT to Hyperloom's exact one so final/sweep
-            # numbers are cross-harness comparable.
+            # GEAK owns its supported native/InferenceX client selection.
+            # Its AgentX-session measurements are proposal proxies, not canonical results.
             "bench_client": "auto",
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # The serving/optimization device set, as HIP-level ids (what the
@@ -1167,18 +1061,23 @@ class KernelPhase(PhaseHandler):
         # Full layered environment and its matching measurement identity.
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
-        handoff.update(agentx_handoff)
         from hyperloom.common.perf_metric import total_tput_serving_grading_enabled
         from ..state.shared_state import framework_is_scriptable
 
         handoff["e2e_metric"] = (
             "total"
-            if total_tput_serving_grading_enabled(
+            if not agentx
+            and total_tput_serving_grading_enabled(
                 scriptable=framework_is_scriptable(handoff["framework"]),
-                benchmark_mode=str(handoff.get("benchmark_mode") or benchmark_mode),
+                benchmark_mode=benchmark_mode,
             )
             else "output"
         )
+        if agentx:
+            log.info(
+                "GEAK uses output throughput only as a proposal proxy; "
+                "canonical AgentX validation remains in Hyperloom."
+            )
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)

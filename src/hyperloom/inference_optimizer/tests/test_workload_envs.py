@@ -434,65 +434,6 @@ def test_the_iters_override_keeps_the_delay_an_agentx_run_needs_at_zero(monkeypa
     assert "--profiler-config.max_iterations 128" in args
 
 
-@pytest.mark.parametrize(
-    ("policy_env", "expected_steps"),
-    [
-        ({}, 8),
-        ({"HYPERLOOM_PROFILE_MAX_STEPS_CAP": "4"}, 4),
-        ({"HYPERLOOM_PROFILE_MAX_STEPS_CAP": "64"}, 8),
-        ({"HYPERLOOM_PROFILE_MAX_ITERS": "12"}, 12),
-    ],
-    ids=["default", "smaller_cap", "agentx_cap", "explicit_steps"],
-)
-def test_agentx_profile_overlay_reuses_materializer_step_policy(monkeypatch, tmp_path, policy_env, expected_steps):
-    import json
-
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    for key, value in policy_env.items():
-        monkeypatch.setenv(key, value)
-    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
-    materialized = _materialize(src, tmp_path / "out")
-    materialized_body = json.loads(materialized["envs"]["PROFILE_EXTRA_BODY"])
-    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "999")
-    saved = {**policy_env, "CONC": "6", "OSL": "1536", "NUM_PROMPTS": "73", "AGENTX_DURATION": "3600"}
-    before = dict(saved)
-
-    overlay = we.agentx_profile_env_overlay(saved, framework="sglang")
-
-    assert set(overlay) == {"PROFILE_EXTRA_BODY"}
-    body = json.loads(overlay["PROFILE_EXTRA_BODY"])
-    assert body == {"start_step": 0, "num_steps": expected_steps}
-    assert materialized_body["start_step"] == body["start_step"]
-    assert materialized_body["num_steps"] == body["num_steps"]
-    assert saved == before
-
-
-def test_agentx_profile_overlay_preserves_a_valid_materialized_body():
-    saved_body = '{"num_steps": 5, "start_step": 0, "merge_profiles": false}'
-
-    overlay = we.agentx_profile_env_overlay(
-        {"PROFILE_EXTRA_BODY": saved_body, "HYPERLOOM_PROFILE_MAX_ITERS": "12"}, framework="sglang"
-    )
-
-    assert overlay == {}
-
-
-@pytest.mark.parametrize(
-    "invalid_body",
-    ["{invalid", "[]", '{"num_steps": 0}', '{"num_steps": -1}', '{"num_steps": true}', '{"num_steps": "8"}'],
-)
-def test_agentx_profile_overlay_rejects_explicit_invalid_bounds(invalid_body):
-    with pytest.raises(ValueError, match="PROFILE_EXTRA_BODY"):
-        we.agentx_profile_env_overlay({"PROFILE_EXTRA_BODY": invalid_body}, framework="sglang")
-
-
-def test_agentx_profile_overlay_does_not_supply_sglang_body_to_vllm():
-    assert we.agentx_profile_env_overlay({}, framework="vllm") == {}
-
-
 def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
