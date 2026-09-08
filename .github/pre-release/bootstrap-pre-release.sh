@@ -471,13 +471,19 @@ run_leg() {
       if [ -f "$state_json" ]; then
         publish_state_for_poll "$state_json" "$real_sdir" "$session"
       fi
-      if [ -f "$final_json" ]; then
-        log "leg $leg final.json present after ${elapsed}s; demo complete"
+      # stop_reason is stamped on the transition INTO close and final.json by its
+      # first step, so neither means the run is over. close_sequence_done is set
+      # once the sequence ends; exiting before it kills the pod mid-closeout.
+      local stop="" close_done="false"
+      if [ -f "$state_json" ]; then
+        stop="$(jq -r '.stop_reason // ""' "$state_json" 2>/dev/null || echo "")"
+        close_done="$(jq -r '.close_sequence_done // false' "$state_json" 2>/dev/null || echo "false")"
+      fi
+      if [ -f "$final_json" ] && [ "$close_done" = "true" ]; then
+        log "leg $leg final.json present and close sequence done after ${elapsed}s; demo complete"
         return 0
       fi
-      local stop=""
-      [ -f "$state_json" ] && stop="$(jq -r '.stop_reason // ""' "$state_json" 2>/dev/null || echo "")"
-      if [ -n "$stop" ]; then
+      if [ -n "$stop" ] && [ "$close_done" = "true" ]; then
         if is_clean_stop_reason "$stop"; then
           log "leg $leg state.json stop_reason='$stop' after ${elapsed}s; demo complete"
           return 0

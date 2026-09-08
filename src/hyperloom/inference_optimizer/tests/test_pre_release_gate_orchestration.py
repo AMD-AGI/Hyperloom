@@ -171,6 +171,28 @@ def test_poll_exits_when_a_newer_run_is_queued(poll_script: str, workflow: dict)
     assert "HEAD_REF:" in run_env
 
 
+def test_a_clean_stop_reason_alone_never_means_the_run_finished() -> None:
+    """stop_reason is stamped entering CLOSE; only close_sequence_done proves it finished.
+
+    Any script that judges completion from the clean-terminal vocabulary must
+    consult the completion flag too, or it will treat the transition as the end
+    and tear the pod down mid-closeout.
+    """
+    assert _GITHUB is not None
+    offenders = [
+        path.relative_to(_GITHUB).as_posix()
+        for path in sorted(_GITHUB.rglob("*.sh"))
+        if "sweep_done" in (text := path.read_text(encoding="utf-8")) and "close_sequence_done" not in text
+    ]
+    assert offenders == []
+
+
+def test_bootstrap_does_not_exit_on_final_json_alone(bootstrap_script: str) -> None:
+    """final.json is written by the first CLOSE step, long before the sequence ends."""
+    assert 'if [ -f "$final_json" ]; then' not in bootstrap_script
+    assert 'if [ -f "$final_json" ] && [ "$close_done" = "true" ]; then' in bootstrap_script
+
+
 def test_poll_passes_on_clean_terminal_stop_reason_not_gain(poll_script: str) -> None:
     """Gate PASS aligns with optimize CLI exit 0, not cumulative_gain vs TARGET_GAIN."""
     assert "is_clean_stop_reason" in poll_script
