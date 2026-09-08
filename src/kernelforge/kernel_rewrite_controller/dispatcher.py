@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,48 @@ def _failure_detail(outcome: ForgeLoopOutcome) -> str:
     return "forge-loop produced no validated improvement"
 
 
+def _visible_gpu_count() -> int:
+    """How many GPUs this dispatch can actually give a task, or 0 if unknown.
+
+    The masking variables come first because they are what really bounds the
+    child, and reading them costs nothing. ``torch`` is the fallback rather than
+    the first answer: importing it here is seconds of work the single-rank path
+    should not pay.
+    """
+    for variable in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        raw = os.environ.get(variable)
+        if raw is None:
+            continue
+        entries = [item for item in raw.split(",") if item.strip()]
+        # An empty mask means no GPU at all, which is a real answer.
+        return len(entries)
+    try:
+        import torch
+
+        return int(torch.cuda.device_count())
+    except Exception:  # noqa: BLE001 - no torch, no driver, no answer
+        return 0
+
+
+def _insufficient_gpus(task: KernelRewriteTask) -> str:
+    """Why this machine cannot run the task's ranks, or "" when it can.
+
+    Silence when the count cannot be established: refusing on an answer nobody
+    gave would ground every task on a host this cannot read.
+
+    Worth its own check rather than leaving it to the run: two ranks sharing one
+    device do not fail, they deadlock inside the collective and take the whole
+    budget with them, and the per-rank device check cannot report what a hung
+    process never got to write.
+    """
+    if task.world_size <= 1:
+        return ""
+    visible = _visible_gpu_count()
+    if visible and visible < task.world_size:
+        return f"task declares {task.world_size} ranks but only {visible} GPU(s) are visible to this dispatch"
+    return ""
+
+
 def _keep_preparation_audit(
     layout: ControllerLayout,
     task: KernelRewriteTask,
@@ -122,6 +165,19 @@ def dispatch_single_task(
 
     task = parsed.task
     state_store = TaskStateStore(task_path)
+    # Before the worktree, so a task this host cannot run never takes the lock
+    # on a repository another one could have borrowed.
+    starved = _insufficient_gpus(task)
+    if starved:
+        state_store.transition(TASK_STATUS_SKIPPED, reason=starved)
+        return SingleTaskResult(
+            task=task,
+            worktree=None,
+            forge_outcome=None,
+            patch_path=None,
+            status=TASK_STATUS_SKIPPED,
+            reason=starved,
+        )
     state_store.transition(
         TASK_STATUS_RUNNING,
         workspace_dir=str(operator_workspace(task, layout)),

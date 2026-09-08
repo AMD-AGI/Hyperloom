@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_rewrite_controller._collective_names import looks_like_multi_rank_operator
 from kernelforge.kernel_rewrite_controller.contracts import (
     TASK_SCHEMA_VERSION,
     KernelRewriteTask,
@@ -176,6 +177,17 @@ def parse_task_payload(
     world_size_raw = payload.get("world_size", 1)
     if isinstance(world_size_raw, bool) or not isinstance(world_size_raw, int) or world_size_raw < 1:
         raise TaskContractError("world_size must be an integer >= 1")
+    if world_size_raw > 1 and not looks_like_multi_rank_operator(operator_name, identity.kernel_name):
+        # A rank count on an operator that reads as ordinary single-GPU work is
+        # almost always a mistake, and an expensive one: the campaign runs to
+        # its budget before the measurement is found to describe nothing.
+        raise TaskContractError(
+            f"world_size {world_size_raw} declares a multi-rank operator, but neither "
+            f"operator_name {operator_name!r} nor identity.kernel_name {identity.kernel_name!r} "
+            "names one. Name the collective it performs (all_reduce, all_gather, "
+            "reduce_scatter, all_to_all, broadcast, send/recv, an EP dispatch/combine, or a "
+            "vendor comms symbol), or carry the parallelism as a suffix such as '_tp8'."
+        )
 
     return KernelRewriteTask(
         identity=identity,

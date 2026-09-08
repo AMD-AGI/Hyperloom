@@ -268,11 +268,21 @@ def test_world_size_defaults_to_one(task_dir: Path) -> None:
 
 
 def test_world_size_is_parsed_when_present(task_dir: Path, task_payload: dict) -> None:
-    _write_payload(task_dir, {**task_payload, "world_size": 8})
-    result = load_task(task_dir, expected_base_commit=BASE_COMMIT)
-    assert result.ok is True
-    assert result.task is not None
-    assert result.task.world_size == 8
+    # Named for the collective it performs: a rank count is only accepted on an
+    # operator that reads as one (see test_multi_rank_constraints).
+    collective = "custom_all_reduce_tp8"
+    task = parse_task_payload(
+        {
+            **task_payload,
+            "operator_name": collective,
+            "identity": {**task_payload["identity"], "kernel_name": collective},
+            "world_size": 8,
+        },
+        task_dir=task_dir,
+        expected_base_commit=BASE_COMMIT,
+        enforce_directory_identity=False,
+    )
+    assert task.world_size == 8
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "4"])
