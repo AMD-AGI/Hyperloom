@@ -96,6 +96,49 @@ TABLE_TO_TUNER: dict[str, tuple[str, str]] = {
     "tuned_fmoe.csv": ("fmoe_ck", "AITER_CONFIG_FMOE"),
 }
 
+# The name a table has in an aiter miss line is not always the name it has in
+# ``TABLE_TO_TUNER``, for two reasons that compose:
+#
+# * A tuner's artifact is named after the tuner, not after the table the runtime
+#   looks it up in -- ``sglang_dense_bf16`` writes ``tuned_dense_bf16.csv`` for
+#   what aiter calls ``bf16_tuned_gemm.csv``.
+# * Deploy merges the candidate into the bundled default and lands the result as
+#   ``merged_<artifact>.csv``.
+#
+# So once we have deployed anything, the runtime misses against a name no map
+# here has ever heard of, and the demand entry it produces claims no owner. That
+# is not hypothetical: across the fleet's 0903-0906 serving logs,
+# ``merged_tuned_dense_bf16.csv`` accounts for 28,818 misses, all of them filed
+# as ownerless, while ``sglang_dense_bf16`` owns precisely that table. Anything
+# reading ``tuner is None`` as "nothing implements this" -- coverage gaps most of
+# all -- is then reading our own artifact as a hole in our coverage.
+ARTIFACT_TABLE_ALIASES: dict[str, str] = {
+    # Verified against each tuner's write path rather than inferred from its
+    # name: ``_aiter_dense_common.py`` writes ``tuned_{tuner_name}.csv`` and
+    # ``sglang_dense_bf16.py`` / ``fmoe_ck.py`` name theirs directly. ``fmoe_ck``
+    # needs no entry -- it writes ``tuned_fmoe.csv``, which is already the key.
+    "tuned_dense_bf16.csv": "bf16_tuned_gemm.csv",
+    "tuned_a8w8.csv": "a8w8_tuned_gemm.csv",
+    "tuned_a8w8_blockscale.csv": "a8w8_blockscale_tuned_gemm.csv",
+    "tuned_a8w8_bpreshuffle.csv": "a8w8_bpreshuffle_tuned_gemm.csv",
+    "tuned_a8w8_blockscale_bpreshuffle.csv": "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
+    "tuned_a4w4_blockscale.csv": "a4w4_blockscale_tuned_gemm.csv",
+}
+
+
+def canonical_table_name(name: str) -> str:
+    """The ``TABLE_TO_TUNER`` key for a table name as the runtime printed it.
+
+    Basename, minus the deploy-time ``merged_`` prefix, then through the artifact
+    aliases. Names that are already keys pass through untouched, and a genuinely
+    unknown name is returned as its own basename so it stays legible in a report.
+    """
+    base = str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if base.startswith("merged_"):
+        base = base[len("merged_") :]
+    return ARTIFACT_TABLE_ALIASES.get(base, base)
+
+
 KEY_FIELDS = ("M", "N", "K", "dtype", "otype", "bias", "scaleAB", "bpreshuffle")
 
 SCHEMA_VERSION = "gemm_demand/v1"
@@ -254,7 +297,7 @@ def parse_log(text: str) -> dict[str, Any]:
                 table_path = (m.group("miss_table") or "").strip()
                 if table_path:
                     consulted.add(table_path)
-                base = table_path.rsplit("/", 1)[-1]
+                base = canonical_table_name(table_path)
                 tuner, env = TABLE_TO_TUNER.get(base, (None, None))
                 d = demands.get(base)
                 if d is None:
