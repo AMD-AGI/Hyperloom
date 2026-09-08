@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The `learning/` tuning database, the tracker's scoring layer, and the
   fusion reachability island are gone — KernelForge loses ~1.4k lines of
-  production code with no behaviour change.**
+  production code.**
   Each had been superseded in place rather than deleted: `learning/` (4 files)
   wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
   `False` since `knowledge/experience_sink.py` took over the same job, and its
@@ -23,6 +23,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (`unreached_fusion_symbols` and its six private helpers) whose only
   references were each other's definitions; `fused_symbol_invocation_evidence`,
   which `fusion/command.py` does call, is untouched.
+
+  The one observable difference is at the end of a `forge-loop` run: it no
+  longer writes lesson markdown under the writable knowledge base's `learned/`
+  directory, and no longer prints `Lessons learned: N`. Nothing read that
+  directory, and the `Transfer rules discovered: N` line beside it was already
+  unreachable because it derives from the tuning DB whose writes are disabled.
+  Everything else here has no reachable call site.
 
   `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
   it unreachable — its gate fires only for tables the dispatcher has no entry
