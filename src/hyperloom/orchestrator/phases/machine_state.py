@@ -1726,8 +1726,8 @@ def compute_plateau_kernel(
 
 # Statuses on last_conc_sweep that exit_normal_sweep already treats as SWEEP
 # closeout. skip_to_close must not override those: the LLM emits it when the
-# sweep was refused, and mapping that to robustness_escalated turns a
-# successful run into a CI failure.
+# sweep was refused, and SWEEP's own exit names why the run ended where the
+# escalation hint only records that the model asked to stop.
 _SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 

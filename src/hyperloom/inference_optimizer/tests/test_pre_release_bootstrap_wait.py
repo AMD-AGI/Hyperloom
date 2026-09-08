@@ -145,16 +145,25 @@ _MID_CLOSE = {"stop_reason": "sweep_done", "close_sequence_done": False}
 _CLOSED = {"stop_reason": "sweep_done", "close_sequence_done": True}
 
 
-def test_a_stop_reason_mid_closeout_does_not_end_the_leg(tmp_path: Path) -> None:
-    code, out = _run(tmp_path, snapshots=[_MID_CLOSE, _MID_CLOSE], final_json=False, loop=_wait_loop())
-    assert code == 42, f"the loop returned during the closeout instead of waiting:\n{out}"
-    assert "STILL_WAITING" in out
+def test_the_loop_waits_out_the_closeout_before_ending_the_leg(tmp_path: Path) -> None:
+    """Pin the pass the loop returns on, not merely that it did not return early.
+
+    The loop logs the pass it finished on, and the harness advances that counter
+    once per pass, so the number says how long it waited. Asserting it exactly
+    proves the loop read all three snapshots and returned on the one that flipped
+    close_sequence_done -- an assertion that it "did not return" would also hold
+    if the loop never managed to read state at all.
+    """
+    code, out = _run(tmp_path, snapshots=[_MID_CLOSE, _MID_CLOSE, _CLOSED], final_json=False, loop=_wait_loop())
+    assert code == 0, f"the loop never finished:\n{out}"
+    assert "[log] leg testleg state.json stop_reason='sweep_done' after 2s; demo complete" in out
 
 
 def test_final_json_mid_closeout_does_not_end_the_leg(tmp_path: Path) -> None:
-    # final.json exists from CLOSE step 1 onward, long before the sequence ends.
-    code, out = _run(tmp_path, snapshots=[_MID_CLOSE, _MID_CLOSE], final_json=True, loop=_wait_loop())
-    assert code == 42, f"the loop returned on final.json alone:\n{out}"
+    """final.json exists from CLOSE step 1 onward, long before the sequence ends."""
+    code, out = _run(tmp_path, snapshots=[_MID_CLOSE, _MID_CLOSE, _CLOSED], final_json=True, loop=_wait_loop())
+    assert code == 0, f"the loop never finished:\n{out}"
+    assert "[log] leg testleg final.json present and close sequence done after 2s; demo complete" in out
 
 
 def test_the_leg_ends_once_the_close_sequence_is_done(tmp_path: Path) -> None:

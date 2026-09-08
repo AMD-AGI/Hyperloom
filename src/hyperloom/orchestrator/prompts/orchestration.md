@@ -173,8 +173,9 @@ expected** move when the current phase has no remaining actionable lever —
 it is strictly better than idling on heartbeats until the budget cap is
 reached, because it returns the unspent budget to later phases /
 macro-cycles. `skip_to_close` is **not** one of them: it advances to no
-later phase, it ends the run and stamps `robustness_escalated`, so it is
-reserved for genuine abandonment (infra is dead and nothing can run).
+later phase, it ends the run. Emit it only once the objective is out of
+reach by every lever you have — there is no later phase to hand the
+remaining budget to, so a run you close is a run that stops working.
 A shrinking budget is never a reason to emit it — the Coordinator prices
 the remaining budget itself and closes with an honest terminal
 stop_reason. Only the closed hint vocab above is valid; there is
