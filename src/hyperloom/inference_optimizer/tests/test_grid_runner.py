@@ -2187,7 +2187,7 @@ class TestSessionBudgetWarmupRounds:
 
         async def slow_restart(**_kwargs):
             restarts.append(time.monotonic())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(3.0)
 
         monkeypatch.setattr(mnsl, "restart_server_for_round", slow_restart)
         recorded: list[dict] = []
@@ -2202,8 +2202,8 @@ class TestSessionBudgetWarmupRounds:
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
                 variant_timeout_sec=600,
-                session_deadline_sec=time.monotonic() + 1.3,
-                variant_expected_sec=0.6,
+                session_deadline_sec=time.monotonic() + 6.0,
+                variant_expected_sec=2.0,
             )
 
         assert restarts, "the restart never ran, so this is not the case under test"
