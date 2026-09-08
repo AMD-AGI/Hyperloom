@@ -2748,7 +2748,13 @@ def _run_rewrite_via_cli(
     _apply_gpu_type_env(env, gpu_type)
     _apply_kernel_backend_env(env)
     # Same provider pin the generic loop applies through argv, which this command has no options for: it takes no
-    # --agent-backend, so its Config reads these.
+    # --agent-backend, so its Config reads these. Without them an OpenAI-only deployment resolves "auto" to the claude
+    # provider and every session fails "Not logged in", after the whole budget.
+    #
+    # forge-rewrite-by-flydsl accepts --model, which sits above every environment variable. KernelForge now reads the
+    # same ladder Hyperloom publishes (CLAUDE_MODEL / CODEX_MODEL), so passing the id explicitly is no longer required
+    # for it to be honoured -- it is kept because resolving here is what puts the concrete id in this process's logs
+    # and payload, rather than leaving it to be re-derived inside a subprocess nobody is reading.
     from hyperloom.common.llm_config import resolve_forge_llm_model
 
     if _openai_only_provider():
@@ -3489,7 +3495,13 @@ def _run_vendor_playbook_loop_via_cli(
     cmd += ["--gpu-type", _known_gpu_model(gpu_type)]
     if _openai_only_provider():
         cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
-        codex_model = (os.environ.get("CODEX_MODEL") or "").strip()
+        # The shared ladder, not a bare CODEX_MODEL read: this path used to be
+        # the one Forge launch site that ignored FORGE_CODEX_MODEL, so a box
+        # configured the documented way ran the vendor playbook on the provider
+        # default while every other Forge surface honoured the operator's id.
+        from hyperloom.common.llm_config import resolve_forge_llm_model
+
+        codex_model = resolve_forge_llm_model("codex", env=os.environ)
         if codex_model:
             cmd += ["--model", codex_model]
     if program_md_file and Path(program_md_file).exists():

@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import click
 
+from kernelforge.config import resolve_agent_model
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
@@ -84,7 +85,16 @@ _AGENT_SANDBOX_MODES = frozenset({"workspace-write", "read-only", "bypass"})
 def _credential_shape() -> tuple[bool, bool]:
     """Return whether OpenAI-side and Anthropic-side credentials are configured."""
     openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-    anthropic = any(os.environ.get(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) or any(
+    anthropic = any(
+        os.environ.get(name, "").strip()
+        # A subscription token carries its own endpoint, so it is a complete
+        # Anthropic side on its own -- which is what Hyperloom's own credential
+        # preflight (agents/kernel/scripts/install.sh) already counts it as.
+        # Leaving it out here meant a box configured only that way was told it
+        # had "no OpenAI or Anthropic credentials" while the Claude CLI on it
+        # would have authenticated fine.
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    ) or any(
         os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
         for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
     )
@@ -118,8 +128,10 @@ def _resolve_agent_choice(
         provider = get_agent_provider(requested).name
 
     registration = get_agent_provider(provider)
-    provider_env = "CODEX_MODEL" if provider == "codex" else "CLAUDE_MODEL"
-    model = str(llm_model or "").strip() or os.environ.get(provider_env, "").strip() or registration.default_model
+    # The same ladder forge-loop reads. Reading only CLAUDE_MODEL / CODEX_MODEL
+    # here meant an operator who set the documented FORGE_CLAUDE_MODEL had it
+    # honoured by forge-loop and silently ignored by forge-fusion.
+    model = str(llm_model or "").strip() or resolve_agent_model(provider) or registration.default_model
     return provider, model
 
 

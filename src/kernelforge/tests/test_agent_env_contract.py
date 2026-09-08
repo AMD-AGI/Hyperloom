@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Forge reads the environment contract Hyperloom publishes, not its own.
+
+Forge does not ship next to Hyperloom any more, it ships inside it, and an
+operator configuring a box should not have to learn a second vocabulary for the
+same decision. These tests pin the ladder so a future call site cannot quietly
+mint a third spelling.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from kernelforge.config import Config, resolve_agent_model, resolve_agent_reasoning_effort
+
+_MODEL_VARS = (
+    "FORGE_AGENT_MODEL",
+    "FORGE_CLAUDE_MODEL",
+    "FORGE_CODEX_MODEL",
+    "CLAUDE_MODEL",
+    "CODEX_MODEL",
+    "KERNEL_AGENTS_MODEL",
+)
+_EFFORT_VARS = ("FORGE_AGENT_REASONING_EFFORT", "HYPERLOOM_REASONING_EFFORT")
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    """Start from an environment that names no model and no effort."""
+    for name in (*_MODEL_VARS, *_EFFORT_VARS):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_nothing_configured_defers_to_the_provider(clean_env) -> None:
+    """No env var set means no model, so the provider default stands."""
+    assert resolve_agent_model("claude") == ""
+    assert resolve_agent_model("codex") == ""
+
+
+def test_orchestration_model_is_inherited(clean_env) -> None:
+    """The value every Hyperloom component already reads reaches Forge."""
+    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.6")
+    assert resolve_agent_model("claude") == "claude-opus-5"
+    assert resolve_agent_model("codex") == "gpt-5.6"
+    # An unrecognised backend reads the Claude ladder, which is both what
+    # ``auto`` resolves to here and what Hyperloom's resolver does.
+    assert resolve_agent_model("auto") == "claude-opus-5"
+
+
+def test_forge_specific_model_outranks_orchestration(clean_env) -> None:
+    """``FORGE_*`` is how a deployment gives Forge a different model."""
+    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
+    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.6")
+    clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
+    assert resolve_agent_model("claude") == "claude-sonnet-5"
+    assert resolve_agent_model("codex") == "gpt-5.5"
+
+
+def test_provider_neutral_model_outranks_everything(clean_env) -> None:
+    """``FORGE_AGENT_MODEL`` names one model whichever backend answers."""
+    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
+    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
+    clean_env.setenv("FORGE_AGENT_MODEL", "claude-opus-4-8")
+    assert resolve_agent_model("claude") == "claude-opus-4-8"
+    assert resolve_agent_model("codex") == "claude-opus-4-8"
+
+
+def test_the_removed_alias_is_no_longer_read(clean_env) -> None:
+    """``KERNEL_AGENTS_MODEL`` is gone, not merely deprecated.
+
+    Nothing in this repository or in Hyperloom ever set it -- it was only ever
+    read -- so keeping a spelling that no producer writes just gave the ladder a
+    fourth rung to explain.
+    """
+    clean_env.setenv("KERNEL_AGENTS_MODEL", "claude-opus-4-5")
+    assert resolve_agent_model("claude") == ""
+
+
+def test_model_ladder_reaches_config(clean_env) -> None:
+    """``Config.from_env`` uses the ladder for the backend it was given."""
+    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
+    clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
+    assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_model == "claude-sonnet-5"
+    assert Config.from_env(agent_backend="codex", workspace="/tmp").agent_model == "gpt-5.5"
+    # An explicit override still outranks the environment entirely.
+    override = Config.from_env(agent_backend="claude", agent_model="claude-opus-5", workspace="/tmp")
+    assert override.agent_model == "claude-opus-5"
+
+
+def test_effort_defaults_to_high(clean_env) -> None:
+    """Unset means the campaign default, unchanged."""
+    assert resolve_agent_reasoning_effort() == "high"
+
+
+def test_hyperloom_effort_is_honoured(clean_env) -> None:
+    """A box that names an effort once means it for Forge too."""
+    clean_env.setenv("HYPERLOOM_REASONING_EFFORT", "medium")
+    assert resolve_agent_reasoning_effort() == "medium"
+    assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_reasoning_effort == "medium"
+
+
+def test_forge_effort_outranks_the_project_wide_one(clean_env) -> None:
+    """Forge can still be turned up or down on its own."""
+    clean_env.setenv("HYPERLOOM_REASONING_EFFORT", "medium")
+    clean_env.setenv("FORGE_AGENT_REASONING_EFFORT", "low")
+    assert resolve_agent_reasoning_effort() == "low"

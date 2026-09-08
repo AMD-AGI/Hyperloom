@@ -206,6 +206,31 @@ for the user-facing summary.
 
 ### Changed
 
+- **Forge reads Hyperloom's environment contract instead of its own.** Forge
+  does not ship next to Hyperloom any more, it ships inside it, and an operator
+  configuring one box was being asked to learn two vocabularies for the same
+  decision. `Config.from_env` now walks the ladder
+  `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
+  `FORGE_AGENT_MODEL`, then `FORGE_CLAUDE_MODEL`/`FORGE_CODEX_MODEL`, then
+  `CLAUDE_MODEL`/`CODEX_MODEL` -- reimplemented rather than imported, because
+  this package does not depend on `hyperloom`. Reasoning effort falls back to
+  the project-wide `HYPERLOOM_REASONING_EFFORT` when
+  `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
+  is not silently contradicted by the component doing most of the spending.<br/>
+  **Three surfaces were reading a different ladder than the one they
+  documented.** `forge-fusion`'s `_resolve_agent_choice` read only
+  `CLAUDE_MODEL`/`CODEX_MODEL`, so an operator who set the documented
+  `FORGE_CLAUDE_MODEL` had it honoured by `forge-loop` and ignored by fusion.
+  Hyperloom's own `_run_vendor_playbook_loop_via_cli` read a bare `CODEX_MODEL`,
+  making it the one Forge launch site that ignored `FORGE_CODEX_MODEL`. And
+  `_credential_shape` did not count `CLAUDE_CODE_OAUTH_TOKEN`, so a box holding
+  a subscription token was told it had no Anthropic credentials while the Claude
+  CLI on it would have authenticated fine -- Hyperloom's own credential
+  preflight has always counted that token as a complete Anthropic side.<br/>
+  **Removed:** `KERNEL_AGENTS_MODEL`. Nothing in either repository ever set it;
+  it was only ever read, so it gave the ladder a rung to explain and nothing to
+  configure. Use `FORGE_AGENT_MODEL`.
+
 - **An agent session's reasoning effort is now the operator's decision, not the
   call site's.** `AgentRunSpec.resolved()` used to let a spec's own
   `reasoning_effort` outrank the runtime's, and two thirds of the sessions in

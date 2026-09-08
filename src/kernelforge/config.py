@@ -35,6 +35,58 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def resolve_agent_model(agent_backend: str) -> str:
+    """Resolve the model id from the environment ladder Hyperloom publishes.
+
+    Forge no longer ships alongside Hyperloom, it ships *inside* it, and an
+    operator configuring a box should not have to learn a second vocabulary for
+    the same decision. The ladder is the one
+    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` documents, and
+    it is reimplemented rather than imported because this package does not
+    depend on ``hyperloom``:
+
+    1. ``FORGE_AGENT_MODEL`` -- provider-neutral, this package's own, and still
+       the way to name a model without caring which backend answers;
+    2. ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL`` -- the forge counterpart
+       of ``GEAK_CLAUDE_MODEL``;
+    3. ``CLAUDE_MODEL`` / ``CODEX_MODEL`` -- the orchestration-side value every
+       Hyperloom component inherits from.
+
+    A backend of ``auto`` reads the Claude ladder, matching both the default
+    provider selection here and what ``resolve_forge_llm_model`` does with a
+    backend it does not recognise.
+    """
+    explicit = os.getenv("FORGE_AGENT_MODEL", "").strip()
+    if explicit:
+        return explicit
+    if (agent_backend or "").strip().lower() == "codex":
+        ladder = ("FORGE_CODEX_MODEL", "CODEX_MODEL")
+    else:
+        ladder = ("FORGE_CLAUDE_MODEL", "CLAUDE_MODEL")
+    for name in ladder:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_agent_reasoning_effort() -> str:
+    """Resolve the reasoning effort, honouring Hyperloom's project-wide value.
+
+    ``HYPERLOOM_REASONING_EFFORT`` already sets the effort for Hyperloom's own
+    LLM calls; a box that sets it means it for the whole run, and a Forge
+    campaign that ignored it would be the one component quietly running at a
+    different depth than the operator asked for.
+    ``FORGE_AGENT_REASONING_EFFORT`` stays above it for the run that wants Forge
+    specifically turned up or down.
+    """
+    return (
+        os.getenv("FORGE_AGENT_REASONING_EFFORT", "").strip()
+        or os.getenv("HYPERLOOM_REASONING_EFFORT", "").strip()
+        or "high"
+    )
+
+
 def _env_json_object(name: str) -> dict:
     """Parse one optional JSON object environment variable."""
     raw = os.getenv(name, "").strip()
@@ -209,19 +261,14 @@ class Config:
                 gbrain_base_url=overrides.get("gbrain_url"),
                 gbrain_token=overrides.get("gbrain_token"),
             )
+        agent_backend = overrides.get("agent_backend", os.getenv("FORGE_AGENT_BACKEND", "auto"))
         return cls(
             gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
             gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
             producer=str(overrides.get("producer", "")).strip().lower(),
             workspace=overrides.get("workspace", os.getenv("KERNEL_WORKSPACE", "")),
-            agent_backend=overrides.get(
-                "agent_backend",
-                os.getenv("FORGE_AGENT_BACKEND", "auto"),
-            ),
-            agent_model=overrides.get(
-                "agent_model",
-                os.getenv("FORGE_AGENT_MODEL", "").strip() or os.getenv("KERNEL_AGENTS_MODEL", "").strip(),
-            ),
+            agent_backend=agent_backend,
+            agent_model=overrides.get("agent_model", resolve_agent_model(agent_backend)),
             agent_cli=overrides.get("agent_cli", os.getenv("FORGE_AGENT_CLI", "")),
             agent_timeout_sec=int(
                 overrides.get(
@@ -229,10 +276,7 @@ class Config:
                     os.getenv("FORGE_AGENT_TIMEOUT_SEC", "1800"),
                 )
             ),
-            agent_reasoning_effort=overrides.get(
-                "agent_reasoning_effort",
-                os.getenv("FORGE_AGENT_REASONING_EFFORT", "high"),
-            ),
+            agent_reasoning_effort=overrides.get("agent_reasoning_effort", resolve_agent_reasoning_effort()),
             agent_context_window=overrides.get(
                 "agent_context_window",
                 os.getenv("FORGE_CLAUDE_CONTEXT_WINDOW", "").strip() or os.getenv("CLAUDE_CONTEXT_WINDOW", "").strip(),
