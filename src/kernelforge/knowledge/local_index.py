@@ -164,6 +164,27 @@ def _flat_listing(folder: Path) -> str:
     return "\n".join(out)
 
 
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading ``---`` YAML block from a knowledge map.
+
+    The block carries title/kind/scope/updated -- metadata describing the file
+    to whoever maintains the KB. It is not navigation: nothing downstream
+    reads it, and an agent handed it learns nothing it cannot see from the H1
+    on the next line. It is inlined into every implementer, specialist,
+    orchestration and analysis prompt, so it is paid for once per map per
+    session and then again on every turn that re-reads the prefix.
+    """
+    if not text.startswith("---"):
+        return text
+    lines = text.split("\n")
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[index + 1 :]).lstrip("\n")
+    # An opening fence with no close is not front matter; leave it alone
+    # rather than swallow the whole map.
+    return text
+
+
 def _render_level(root: Path, rel: str) -> str:
     """Render one knowledge level as a titled section."""
     folder = root / rel
@@ -173,7 +194,7 @@ def _render_level(root: Path, rel: str) -> str:
     index = folder / "INDEX.md"
     if index.is_file():
         try:
-            body = index.read_text(encoding="utf-8", errors="replace").strip()
+            body = _strip_frontmatter(index.read_text(encoding="utf-8", errors="replace").strip()).strip()
         except OSError:
             body = ""
         if body:
