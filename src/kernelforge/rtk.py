@@ -36,6 +36,7 @@ automatically. If not, commands run directly with no RTK overhead.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 from typing import Sequence
 
@@ -109,6 +110,13 @@ def err_wrap(cmd: Sequence[str]) -> list[str]:
     preserves the inner command's exit status, so a caller still branches on
     ``returncode``, and tees the untrimmed output to a file whose path it prints.
 
+    Each argument is shell-quoted on the way in. ``rtk err`` joins what it is
+    given into one line and hands that to ``sh``, so an argument carrying a space
+    or a metacharacter would otherwise be re-split into a different command --
+    ``ls "/a b"`` becomes two failed lookups, and ``sh -c "for …; do …; done"``
+    becomes a syntax error. Quoting each argument first survives that round trip
+    and is a no-op for the ordinary ``["ninja", "-j4"]``.
+
     Examples:
         err_wrap(["ninja", "-j4"])   → ["rtk", "err", "ninja", "-j4"]
 
@@ -117,7 +125,7 @@ def err_wrap(cmd: Sequence[str]) -> list[str]:
     """
     if _RTK_PATH is None or not cmd:
         return list(cmd)
-    return [_RTK_PATH, "err", *cmd]
+    return [_RTK_PATH, "err", *(shlex.quote(str(arg)) for arg in cmd)]
 
 
 def smart_wrap(cmd: Sequence[str]) -> list[str]:

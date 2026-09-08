@@ -10,7 +10,9 @@ gets handed to the agent when a build fails.
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import subprocess
 
 import pytest
 
@@ -86,3 +88,88 @@ def test_the_prompt_asks_for_filters_that_exist() -> None:
     assert "rtk test" in guidance, "test runs need the command-agnostic failure filter"
     for dead in ("`rtk ninja", "`rtk cmake", "`rtk rocprofv3"):
         assert dead not in guidance, f"{dead}` is a passthrough: rtk ships no filter for it"
+
+
+# ─── the wiring, executed rather than asserted about ───
+
+
+_NOISY_BUILD = (
+    "sh",
+    "-c",
+    'for i in $(seq 1 400); do echo "[$i/400] Compiling object_$i.cpp"; done; '
+    "echo 'src/kernel.cpp:12:5: error: no matching function for call to bar()' >&2; "
+    "exit 7",
+)
+
+
+def _rtk_on_path() -> bool:
+    import shutil
+
+    return shutil.which("rtk") is not None
+
+
+@pytest.mark.skipif(not _rtk_on_path(), reason="rtk is not installed on this machine")
+def test_the_wrapped_build_actually_shrinks_and_keeps_the_diagnostic() -> None:
+    """Run the real wrapper on a real noisy build, rather than assert about it.
+
+    The forge-loop hands ``err_wrap(build_command)`` to ``subprocess`` and reads
+    the tail of what comes back. This runs that exact path: the 400 progress
+    lines have to go, the compiler error has to survive, and the inner exit
+    status has to reach the caller -- the loop branches on it to decide BUILD
+    FAILED.
+    """
+    importlib.reload(rtk)
+    raw = subprocess.run(_NOISY_BUILD, capture_output=True)
+    wrapped = subprocess.run(rtk.err_wrap(list(_NOISY_BUILD)), capture_output=True)
+
+    assert wrapped.returncode == 7, "the inner exit status must survive the wrapper"
+    raw_size = len(raw.stdout) + len(raw.stderr)
+    tail = _build_failure_tail(wrapped.stdout, wrapped.stderr, 500)
+    assert "no matching function" in tail, f"the one line worth reading was dropped: {tail!r}"
+    assert "Compiling object_200" not in tail
+    filtered = len(wrapped.stdout) + len(wrapped.stderr)
+    assert filtered < raw_size / 5, f"{raw_size} -> {filtered} bytes is not a useful reduction"
+
+
+@pytest.mark.skipif(not _rtk_on_path(), reason="rtk is not installed on this machine")
+def test_a_succeeding_build_is_not_reported_as_a_failure() -> None:
+    """A clean build must still exit 0 through the wrapper."""
+    importlib.reload(rtk)
+    ok = ("sh", "-c", "echo building; echo done")
+    result = subprocess.run(rtk.err_wrap(list(ok)), capture_output=True)
+    assert result.returncode == 0
+
+
+@pytest.mark.skipif(not _rtk_on_path(), reason="rtk is not installed on this machine")
+@pytest.mark.parametrize(
+    "cmd, expected_code",
+    [
+        (["sh", "-c", "for i in 1 2; do echo $i; done; exit 5"], 5),
+        (["python3", "-c", "print('one two'); import sys; sys.exit(3)"], 3),
+        (["false"], 1),
+        (["true"], 0),
+    ],
+)
+def test_the_wrapper_runs_the_command_it_was_given(cmd: list[str], expected_code: int) -> None:
+    """The wrapped command must be the same command, not a re-split lookalike.
+
+    ``rtk err`` joins its arguments into one line for ``sh``. Handed a raw argv
+    it re-splits any argument holding a space or a metacharacter, which turns
+    ``sh -c "for …; do …; done"`` into a syntax error and a build flag like
+    ``-DCMAKE_CXX_FLAGS=-O3 -g`` into two flags. Matching exit status against a
+    direct run is the check that the round trip changed nothing.
+    """
+    importlib.reload(rtk)
+    direct = subprocess.run(cmd, capture_output=True)
+    assert direct.returncode == expected_code, "the fixture itself is wrong"
+    assert subprocess.run(rtk.err_wrap(cmd), capture_output=True).returncode == expected_code
+
+
+@pytest.mark.skipif(not _rtk_on_path(), reason="rtk is not installed on this machine")
+def test_an_argument_holding_a_space_stays_one_argument(tmp_path) -> None:
+    """A path with a space must reach the command whole."""
+    importlib.reload(rtk)
+    folder = tmp_path / "has space"
+    folder.mkdir()
+    (folder / "f.txt").write_text("x")
+    assert subprocess.run(rtk.err_wrap(["ls", str(folder)]), capture_output=True).returncode == 0
