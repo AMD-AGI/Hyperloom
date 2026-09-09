@@ -797,7 +797,10 @@ PY
       # holding the old one. pip resolves `[llm,forge]` against the already
       # installed distribution -- verified to need no index for the top-level
       # package -- so this is a metadata read, not a reinstall.
-      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      # REPO_ROOT is the `pip install --target` dir, which is not on the default
+      # sys.path; without it pip misses the wheel and resolves it off the index.
+      env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
         "hyperloom-inference_optimizer[llm,forge]"
       # web extra only when critic web tools are enabled (off by default).
       if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
