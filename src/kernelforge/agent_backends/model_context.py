@@ -25,8 +25,7 @@ rejects every bracketed id in its catalog:
 
 Since the suffix is validated rather than ignored, an unconditional one is not
 a degradation but a hard failure of every session, which is why the window is
-named by :envvar:`FORGE_CLAUDE_CONTEXT_WINDOW` / :envvar:`CLAUDE_CONTEXT_WINDOW`
-and is absent by default. An operator on a gateway that publishes a windowed id
+named by :envvar:`CLAUDE_CONTEXT_WINDOW` and is absent by default. An operator on a gateway that publishes a windowed id
 sets it once, for the whole campaign, and gets upstream's behaviour.
 
 The Codex line has no such spelling, so a Codex id is returned untouched:

@@ -230,7 +230,7 @@ optimization. Model names must exist in your key's catalog:
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
 | GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | For example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Forge (fusion / rewrite / collective) | `FORGE_AGENT_MODEL` | For example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` / `CODEX_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
+| Forge (fusion / rewrite / collective) | `CLAUDE_MODEL` / `CODEX_MODEL` | For example `claude-opus-5` / `gpt-5.6-sol` | Forge reads the platform variable for the backend it is on; it has no model variable of its own. |
 
 - Do *not* append effort/thinking suffixes (for example
   `claude-opus-4-7-thinking-xhigh`); the gateway returns `Invalid model name`

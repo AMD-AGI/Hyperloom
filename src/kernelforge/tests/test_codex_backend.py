@@ -694,7 +694,7 @@ def test_config_loads_generic_provider_runtime(
 ) -> None:
     """Load provider-neutral model and sandbox settings from environment."""
     monkeypatch.setenv("FORGE_AGENT_BACKEND", "codex")
-    monkeypatch.setenv("FORGE_AGENT_MODEL", "gpt-test-codex")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-test-codex")
     monkeypatch.setenv("FORGE_AGENT_SANDBOX_MODE", "workspace-write")
 
     config = Config.from_env()

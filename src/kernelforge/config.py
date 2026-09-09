@@ -45,30 +45,25 @@ def resolve_agent_model(agent_backend: str) -> str:
 
     Forge no longer ships alongside Hyperloom, it ships *inside* it, and an
     operator configuring a box should not have to learn a second vocabulary for
-    the same decision. The ladder is the one
-    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` documents, and
-    it is reimplemented rather than imported because this package does not
-    depend on ``hyperloom``:
+    the same decision. There is exactly one rung, and it is the platform's:
+    ``CLAUDE_MODEL`` / ``CODEX_MODEL``, the same pair
+    :func:`hyperloom.common.llm_config.resolve_forge_llm_model` reads. It is
+    reimplemented rather than imported because this package does not depend on
+    ``hyperloom``.
 
-    1. ``FORGE_AGENT_MODEL`` -- provider-neutral, this package's own, and still
-       the way to name a model without caring which backend answers;
-    2. ``CLAUDE_MODEL`` / ``CODEX_MODEL`` -- the orchestration-side value every
-       Hyperloom component inherits from.
-
-    There is deliberately no Forge-private per-provider variable between the
-    two. Forge used to read ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``
-    first, from when it was a separate project that had to name its own
-    settings; inside Hyperloom that is one component spelling a platform
-    setting a second way, and a second spelling is only ever a second place for
-    a box to be misconfigured.
+    Forge used to consult private variables above that pair -- first
+    ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL``, then a provider-neutral
+    ``FORGE_AGENT_MODEL`` -- from when it was a separate project that had to
+    name its own settings. Inside Hyperloom every one of those is a second
+    spelling of a setting the platform already names, and a second spelling is
+    only ever a second place for a box to be misconfigured. The Hyperloom-side
+    resolver never had them, so deleting them is what makes the two ladders the
+    same ladder rather than two that agree by coincidence.
 
     A backend of ``auto`` reads the Claude variable, matching both the default
     provider selection here and what ``resolve_forge_llm_model`` does with a
     backend it does not recognise.
     """
-    explicit = os.getenv("FORGE_AGENT_MODEL", "").strip()
-    if explicit:
-        return explicit
     if (agent_backend or "").strip().lower() == "codex":
         return os.getenv("CODEX_MODEL", "").strip()
     return os.getenv("CLAUDE_MODEL", "").strip()
@@ -296,7 +291,7 @@ class Config:
             agent_reasoning_effort=overrides.get("agent_reasoning_effort", resolve_agent_reasoning_effort()),
             agent_context_window=overrides.get(
                 "agent_context_window",
-                os.getenv("FORGE_CLAUDE_CONTEXT_WINDOW", "").strip() or os.getenv("CLAUDE_CONTEXT_WINDOW", "").strip(),
+                os.getenv("CLAUDE_CONTEXT_WINDOW", "").strip(),
             ),
             agent_sandbox_mode=overrides.get(
                 "agent_sandbox_mode",

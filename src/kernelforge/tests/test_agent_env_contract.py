@@ -18,6 +18,7 @@ from kernelforge.config import Config, resolve_agent_model, resolve_agent_reason
 _MODEL_VARS = (
     "FORGE_AGENT_MODEL",
     "FORGE_CLAUDE_MODEL",
+    "CLAUDE_CONTEXT_WINDOW",
     "FORGE_CODEX_MODEL",
     "CLAUDE_MODEL",
     "CODEX_MODEL",
@@ -51,30 +52,38 @@ def test_orchestration_model_is_inherited(clean_env) -> None:
     assert resolve_agent_model("auto") == "claude-opus-5"
 
 
-def test_the_forge_private_per_provider_vars_are_not_read(clean_env) -> None:
-    """``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL`` are gone, not deprecated.
+def test_the_forge_private_model_vars_are_not_read(clean_env) -> None:
+    """Forge has no model variable of its own -- none of the three is read.
 
-    They were Forge naming its own settings back when it was a separate
-    project. Inside Hyperloom they were a second spelling of ``CLAUDE_MODEL`` /
-    ``CODEX_MODEL``, and a second spelling of one setting is only ever a second
-    place for a box to be misconfigured. A run that needs Forge on a different
-    model than orchestration says so with ``FORGE_AGENT_MODEL``.
+    ``FORGE_CLAUDE_MODEL`` / ``FORGE_CODEX_MODEL`` were Forge naming its own
+    settings back when it was a separate project, and ``FORGE_AGENT_MODEL`` was
+    the provider-neutral one above them. Inside Hyperloom each is a second
+    spelling of ``CLAUDE_MODEL`` / ``CODEX_MODEL``, and a second spelling of one
+    setting is only ever a second place for a box to be misconfigured. The
+    Hyperloom-side resolver reads only the platform pair, so Forge reading more
+    than that is the two ladders disagreeing.
     """
-    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
-    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
-    clean_env.setenv("CODEX_MODEL", "gpt-5.6")
-    clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
-    assert resolve_agent_model("claude") == "claude-opus-5"
-    assert resolve_agent_model("codex") == "gpt-5.6"
-
-
-def test_provider_neutral_model_outranks_everything(clean_env) -> None:
-    """``FORGE_AGENT_MODEL`` names one model whichever backend answers."""
     clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
     clean_env.setenv("CODEX_MODEL", "gpt-5.6")
     clean_env.setenv("FORGE_AGENT_MODEL", "claude-opus-4-8")
-    assert resolve_agent_model("claude") == "claude-opus-4-8"
-    assert resolve_agent_model("codex") == "claude-opus-4-8"
+    clean_env.setenv("FORGE_CLAUDE_MODEL", "claude-sonnet-5")
+    clean_env.setenv("FORGE_CODEX_MODEL", "gpt-5.5")
+    assert resolve_agent_model("claude") == "claude-opus-5"
+    assert resolve_agent_model("codex") == "gpt-5.6"
+    assert resolve_agent_model("auto") == "claude-opus-5"
+
+
+def test_the_context_window_has_one_spelling(clean_env) -> None:
+    """``CLAUDE_CONTEXT_WINDOW`` names the window; Forge adds no second name.
+
+    The window is absent by default because the gateway Hyperloom deploys
+    against rejects every bracketed model id. Being off by default is exactly
+    why a Forge-private duplicate was worth deleting rather than keeping: a
+    second name nobody sets is a second name nobody notices is wrong.
+    """
+    assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_context_window == ""
+    clean_env.setenv("CLAUDE_CONTEXT_WINDOW", "1m")
+    assert Config.from_env(agent_backend="claude", workspace="/tmp").agent_context_window == "1m"
 
 
 def test_the_removed_alias_is_no_longer_read(clean_env) -> None:

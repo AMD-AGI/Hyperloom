@@ -237,9 +237,8 @@ for the user-facing summary.
   configuring one box was being asked to learn two vocabularies for the same
   decision. `Config.from_env` now walks the ladder
   `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
-  `FORGE_AGENT_MODEL`, then `CLAUDE_MODEL`/`CODEX_MODEL` -- reimplemented
-  rather than imported, because
-  this package does not depend on `hyperloom`. Reasoning effort falls back to
+  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it -- reimplemented rather
+  than imported, because this package does not depend on `hyperloom`. Reasoning effort falls back to
   the project-wide `HYPERLOOM_REASONING_EFFORT` when
   `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
   is not silently contradicted by the component doing most of the spending.<br/>
@@ -253,19 +252,24 @@ for the user-facing summary.
   a subscription token was told it had no Anthropic credentials while the Claude
   CLI on it would have authenticated fine -- Hyperloom's own credential
   preflight has always counted that token as a complete Anthropic side.<br/>
-  **Removed:** `FORGE_CLAUDE_MODEL` and `FORGE_CODEX_MODEL`. They date from
-  when Forge was a separate project that had to name its own settings; inside
-  Hyperloom they were one component's second spelling of `CLAUDE_MODEL` /
-  `CODEX_MODEL`, and a second spelling of one setting is only ever a second
-  place for a box to be misconfigured -- a deployment that set one and not the
-  other silently ran Forge on a different model than everything else. A run
-  that genuinely needs Forge on its own model still says so with
-  `FORGE_AGENT_MODEL`, which is provider-neutral and therefore does not
-  reintroduce the pair. Dropped from the resolver on both sides, from the Ray
-  and Slurm environment allowlists, and from both env templates.<br/>
-  **Removed:** `KERNEL_AGENTS_MODEL`. Nothing in either repository ever set it;
-  it was only ever read, so it gave the ladder a rung to explain and nothing to
-  configure. Use `FORGE_AGENT_MODEL`.
+  **BREAKING -- removed, with no deprecation window: `FORGE_CLAUDE_MODEL`,
+  `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL`, and `KERNEL_AGENTS_MODEL`. Forge no
+  longer has a model variable of its own; set `CLAUDE_MODEL` / `CODEX_MODEL`.**
+  The per-provider pair dated from when Forge was a separate project that had
+  to name its own settings; inside Hyperloom it was one component's second
+  spelling of a platform setting, and a deployment that set one and not the
+  other silently ran Forge on a different model than everything else.
+  `FORGE_AGENT_MODEL` was the provider-neutral rung above them, and it has the
+  same problem for the same reason: the Hyperloom-side resolver
+  (`resolve_forge_llm_model`) never read it, so as long as it existed the two
+  ladders agreed only by coincidence. Deleting it is what makes them one
+  ladder. `KERNEL_AGENTS_MODEL` was never set by anything in either repository
+  -- only read -- so it was a rung to explain with nothing to configure. All
+  four are dropped from the resolver on both sides, from the Ray and Slurm
+  environment allowlists, and from both env templates. A box that had been
+  relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
+  through to the provider default rather than failing, so **check your
+  deployment's env rather than waiting for an error.**
 
 - **An agent session's reasoning effort is now the operator's decision, not the
   call site's.** `AgentRunSpec.resolved()` used to let a spec's own
@@ -286,8 +290,9 @@ for the user-facing summary.
   `400 Invalid model name`, and `/v1/models` publishes 23 ids of which none is
   windowed. Applying a suffix unconditionally would fail every
   Hyperloom-launched session at the startup probe. Set
-  `FORGE_CLAUDE_CONTEXT_WINDOW` (or `CLAUDE_CONTEXT_WINDOW`) on a deployment
-  whose gateway does publish windowed ids. A cross-provider or cross-backend
+  `CLAUDE_CONTEXT_WINDOW` on a deployment whose gateway does publish windowed
+  ids -- one spelling only, for the same reason the Forge-private model
+  variables are gone. A cross-provider or cross-backend
   fallback rebuilds the runtime, and carries the window across with it.<br/>
   **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
   so it answered "some configuration works" rather than "this one does"; it now
