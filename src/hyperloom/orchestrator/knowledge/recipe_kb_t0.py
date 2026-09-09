@@ -856,6 +856,14 @@ def run_t0_anchor(
     emit = on_status or _default_status_emitter
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
+
+    # The warm-start read is the fourth Recipe sink; see agentx_kb_blocked.
+    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_kb_blocked
+
+    if agentx_kb_blocked(shared_state):
+        log.info("run_t0_anchor: skipping (AgentX); the recipe identity has no mode dimension")
+        return
+
     sd = Path(session_dir)
 
     sid = (getattr(shared_state, "recipe_kb_session_id", "") or "").strip()
@@ -988,14 +996,14 @@ def run_t0_anchor(
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
 
-        # Third Recipe sink; see agentx_kb_write_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
+        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
         # row, which under AgentX are the inert 1024/1024 placeholders -- so anchoring here mis-tags the cross-session
         # row exactly as the CLOSE-time write would.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
+            agentx_kb_blocked,
         )
 
-        if agentx_kb_write_blocked(shared_state):
+        if agentx_kb_blocked(shared_state):
             log.info(
                 "T0 anchor: skipping put_recipe (AgentX); the recipe row has no "
                 "mode or workload dimension and isl/osl are placeholders here."

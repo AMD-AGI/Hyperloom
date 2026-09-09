@@ -196,12 +196,12 @@ class ProposalsCollaborator:
         config = getattr(getattr(self, "knowledge_plane", None), "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
-        # See agentx_kb_write_blocked for why; this is one of three sinks.
+        # See agentx_kb_blocked for why; this is one of three sinks.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
+            agentx_kb_blocked,
         )
 
-        if agentx_kb_write_blocked(self.shared_state):
+        if agentx_kb_blocked(self.shared_state):
             log.info(
                 "_kb_amend_recipe: skipped (AgentX). The recipe KB has no mode or "
                 "workload dimension, so an agentic-replay throughput would overwrite "

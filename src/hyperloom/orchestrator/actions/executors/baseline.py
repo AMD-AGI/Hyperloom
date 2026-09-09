@@ -3885,7 +3885,13 @@ class BaselineExecutor:
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
             # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
             eval_search_root = result_dir
-            eval_data = parse_eval_results(eval_search_root, framework=eval_framework)
+            eval_data = parse_eval_results(
+                eval_search_root,
+                framework=eval_framework,
+                benchmark_mode=str(
+                    getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
+                ),
+            )
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
                 result["accuracy_task"] = eval_data.get("task", "gsm8k")

@@ -47,6 +47,7 @@ from ...state.shared_state import (
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.perf_metric import VERDICT_KEEP
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ._accuracy_gate import (
@@ -3262,16 +3263,25 @@ class IntegratePatchExecutor:
         # resolver. On the output axis the drift-resolved ``base_tput`` is the
         # reference, which is what resolve_anchor_with_drift exists for.
         new_tput = bench_result.get("output_throughput")
-        graded = resolve_graded_comparison(shared_state, bench_result)
+        graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
         if graded.degrade_reason:
             log.info("integrate_patch: grading on output throughput (%s)", graded.degrade_reason)
-        if not graded.graded_on_total:
+        if not graded.graded_on_intvty:
             delta_pct = gain_pct(new_tput, base_tput)
-        elif graded.vetoed:
-            log.info("integrate_patch: candidate failed the interactivity constraint")
-            delta_pct = None
-        else:
+        elif graded.verdict == VERDICT_KEEP:
             delta_pct = gain_pct(graded.candidate, graded.reference)
+        else:
+            # A REVERT or RECORDED verdict has no promotable delta; the reason
+            # travels to the ledger so the agent can tell it from a failed run.
+            log.info(
+                "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
+                graded.verdict,
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
+            delta_pct = None
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))

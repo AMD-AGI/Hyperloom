@@ -2217,16 +2217,16 @@ class WritebackCollaborator:
                 "reason": f"configuration:{type(exc).__name__}",
                 "backend": "unknown",
             }
-        # Every Recipe sink funnels through agentx_kb_write_blocked; see it for
+        # Every Recipe sink funnels through agentx_kb_blocked; see it for
         # why an agentic measurement must not enter a cross-session store. Placed
         # ahead of the mode branch because in REMOTE mode _kb_amend_recipe returns
         # early, which made the write below the only Recipe writer and the one
         # door that gate could not see.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_write_blocked,
+            agentx_kb_blocked,
         )
 
-        if agentx_kb_write_blocked(self.shared_state):
+        if agentx_kb_blocked(self.shared_state):
             log.info(
                 "Recipe KB finalize skipped (AgentX): the recipe identity has no mode "
                 "or workload dimension, so an agentic-replay result would overwrite a "
@@ -2775,18 +2775,26 @@ class WritebackCollaborator:
             ``True`` when the winner was lifted, ``False`` when it was refused
             for not beating the current anchor.
         """
-        from hyperloom.common.perf_metric import graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
 
         cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
         graded = resolve_graded_comparison(self.shared_state, cand_source)
         if graded.degrade_reason:
             log.info(
-                "lift: total-throughput grading unavailable (%s); grading %s winner on output throughput",
+                "lift: grading unavailable (%s); grading %s winner on output throughput",
                 graded.degrade_reason,
                 task_kind,
             )
-        if graded.vetoed:
-            log.info("current_best held: %s winner failed the interactivity constraint", task_kind)
+        if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+            log.info(
+                "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",
+                task_kind,
+                graded.verdict,
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
             return False
         if graded.reference > 0 and graded.candidate <= graded.reference:
             log.info(
@@ -3336,7 +3344,7 @@ class WritebackCollaborator:
                 "input_throughput": result.get("input_throughput"),
                 "total_throughput": result.get("total_token_throughput"),
                 "tpot_p90_ms": result.get("tpot_p90_ms"),
-                "intvty_p90": result.get("intvty_p90"),
+                "e2e_norm_intvty_p90": result.get("e2e_norm_intvty_p90"),
                 "workspace": result.get("workspace"),
             }
             from hyperloom.common.perf_metric import perf_snapshot_from_mapping
@@ -3345,10 +3353,17 @@ class WritebackCollaborator:
             if snap:
                 self.shared_state.baseline_perf = dict(snap)
                 current_best["total_throughput"] = snap["total_throughput"]
-                current_best["intvty_p90"] = snap["intvty_p90"]
+                current_best["e2e_norm_intvty_p90"] = snap["e2e_norm_intvty_p90"]
                 for _axis in ("input_throughput", "tpot_p90_ms"):
                     if snap.get(_axis) is not None:
                         current_best[_axis] = snap[_axis]
+            # The measured corpus shape replaces the canonical seed. Only an
+            # aiperf result carries the distributions, so their presence is
+            # what marks the measurement as AgentX-produced.
+            if result.get("isl_distribution"):
+                from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+                self.shared_state.agentx_corpus_shape = map_corpus_shape(result)
             self.shared_state.current_best = current_best
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
@@ -3380,8 +3395,12 @@ class WritebackCollaborator:
         if self.shared_state.baseline_tput > 0:
             await self._drain_queued_baselines(reason="baseline_established")
         # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
-        # snapshot ceiling in case the later roofline step fails.
-        if isinstance(tput, (int, float)) and tput > 0:
+        # snapshot ceiling in case the later roofline step fails. Abstains under
+        # AgentX, where the ceiling is derived from the inert ISL/OSL and the
+        # conc-sweep chart already refuses to draw it for the same reason.
+        from hyperloom.orchestrator.actions.executors._workload_envs import agentx_active
+
+        if isinstance(tput, (int, float)) and tput > 0 and not agentx_active(self.shared_state):
             try:
                 self.shared_state.record_baseline_roofline_ceiling()
             except Exception as exc:  # noqa: BLE001 — best-effort backup

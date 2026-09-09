@@ -311,6 +311,8 @@ def _build_orchestration_prompt(
     phase: str = "",
     transport: str = TRANSPORT_TOOLS,
     action_registry: Mapping[str, ActionMetadata] | None = None,
+    benchmark_mode: str = "",
+    agentx_corpus_shape: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -329,6 +331,8 @@ def _build_orchestration_prompt(
         cycle_directive=cycle_directive,
         phase=phase,
         transport=transport,
+        benchmark_mode=benchmark_mode,
+        agentx_corpus_shape=agentx_corpus_shape,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -1925,12 +1929,29 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 _fw_version_for_env = _detected
         if _fw_version_for_env:
             os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
-        print(
-            f"Workload        : ISL={args.isl} OSL={args.osl} "
-            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
-            f"PRECISION={args.precision} "
-            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
-        )
+        if _agentx_enabled():
+            from hyperloom.inference_optimizer.agentx.mapping import (
+                CANONICAL_ISL,
+                CANONICAL_OSL,
+                CANONICAL_PREFIX_CACHE_HIT,
+            )
+
+            print(
+                f"Workload        : AgentX corpus replay "
+                f"(ISL avg={CANONICAL_ISL['avg']} p50={CANONICAL_ISL['p50']} p90={CANONICAL_ISL['p90']}, "
+                f"OSL avg={CANONICAL_OSL['avg']} p50={CANONICAL_OSL['p50']}, "
+                f"prefix_cache~{CANONICAL_PREFIX_CACHE_HIT:.0%}) "
+                f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+                f"PRECISION={args.precision} "
+                f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
+            )
+        else:
+            print(
+                f"Workload        : ISL={args.isl} OSL={args.osl} "
+                f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+                f"PRECISION={args.precision} "
+                f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
+            )
 
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         session_dir = make_session_dir(model_name=resolve_model_display_name(args))
@@ -2194,6 +2215,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             cycle_directive=_initial_directive,
             phase=_initial_phase,
             transport=_orch_transport,
+            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2211,6 +2234,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         objective=objective,
         max_minutes=max_minutes_for_prompt,
         transport=_orch_transport,
+        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
