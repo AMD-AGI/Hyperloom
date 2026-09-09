@@ -5,8 +5,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [v1.1.0] - 2026-09-07
-
 ### Changed
 
 - **AgentX installs its own benchmark client instead of letting an agent guess
@@ -1339,8 +1337,7 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.1.0...HEAD
-[v1.1.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.0.0...HEAD
 [v1.0.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0
 [v1.0.0b2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2
 [v1.0.0b1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1
