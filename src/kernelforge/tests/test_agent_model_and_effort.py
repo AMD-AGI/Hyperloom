@@ -174,3 +174,39 @@ def test_the_width_repair_is_the_only_capped_call_site() -> None:
                     if keyword.arg == "max_reasoning_effort":
                         offenders.append(str(path.relative_to(_SRC)))
     assert offenders == ["orchestrator/plan_critic.py"], offenders
+
+
+def test_every_runtime_names_a_model_it_resolved_for_that_provider() -> None:
+    """A runtime is built with a model read for the provider being built.
+
+    Two ways to get this wrong, and the tree had one of each: pass no ``model``
+    at all and the registry default silently wins over ``CODEX_MODEL``; pass
+    the already-resolved ``config.agent_model`` across a provider switch and a
+    Claude id reaches the OpenAI-protocol gateway. Both are invisible to the
+    closed-set test above, which only says *where* runtimes are built.
+    """
+    offenders: list[str] = []
+    for path in _python_sources():
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                continue
+            if node.func.id != "resolve_agent_runtime":
+                continue
+            model = next((kw.value for kw in node.keywords if kw.arg == "model"), None)
+            where = f"{path.relative_to(_SRC)}:{node.lineno}"
+            if model is None:
+                offenders.append(f"{where} (no model=)")
+                continue
+            text = ast.get_source_segment(source, model) or ""
+            # ``config.agent_model`` was resolved for whichever provider the
+            # config settled on, which is not the one being built here.
+            if "config.agent_model" in text:
+                offenders.append(f"{where} (carries {text} across a provider switch)")
+            elif "resolve_agent_model" not in text and "resolve_agent_model" not in source:
+                offenders.append(f"{where} ({text} is not read per-provider)")
+    # ``config.py`` holds the resolved value on the dataclass and reads the pair
+    # itself once the provider is settled, so it is the one legitimate hand-off.
+    offenders = [entry for entry in offenders if not entry.startswith("config.py:")]
+    assert not offenders, "runtimes built without a model resolved for their provider: " + ", ".join(offenders)

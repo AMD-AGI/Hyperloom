@@ -20,7 +20,7 @@ from kernelforge.agent_backends import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -115,7 +115,10 @@ def make_agent_fn(
     if agent_backend and agent_backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             agent_backend,
-            model=config.agent_model,
+            # ``config.agent_model`` belongs to the provider that was resolved,
+            # not to the one being switched to; carrying it across the switch
+            # is how a Claude model id reaches the OpenAI-protocol gateway.
+            model=resolve_agent_model(agent_backend),
             executable=config.agent_cli,
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,

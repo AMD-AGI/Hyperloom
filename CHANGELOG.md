@@ -295,7 +295,16 @@ for the user-facing summary.
   took the provider default model and the default effort. Both now read the
   same pair and the same effort ladder as `forge-loop`, and a new test asserts
   the set of modules that build a runtime is closed -- a fresh bypass fails the
-  suite rather than going unnoticed, which is how these two did.
+  suite rather than going unnoticed, which is how these two did.<br/>
+  The two provider-*switch* branches had the same defect on their far side.
+  `make_supervisor_fn` rebuilds the runtime when `--supervisor-backend` names a
+  provider other than the implementer's -- which is the ordinary case, since
+  that option defaults to `codex` on `forge-rewrite` -- and passed no model at
+  all, so the supervisor ran the registry default however `CODEX_MODEL` was
+  set. `make_agent_fn` did the opposite, carrying the already-resolved
+  `config.agent_model` into the new provider, which is the Claude-id-to-Codex
+  defect again one level up. Both now read the pair for the provider they are
+  about to build, and a second test asserts every construction site does.
 
 - **An agent session's reasoning effort is now the operator's decision, not the
   call site's.** `AgentRunSpec.resolved()` used to let a spec's own

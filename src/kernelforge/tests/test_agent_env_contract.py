@@ -164,3 +164,22 @@ def test_auto_never_hands_a_claude_model_id_to_codex(clean_env) -> None:
     config = Config.from_env(agent_backend="auto", workspace="/tmp")
     assert config.agent_model == ""
     assert resolve_agent_model("codex") == "gpt-5.6-sol"
+
+
+def test_a_backend_switch_reads_the_new_provider_s_model(clean_env, monkeypatch) -> None:
+    """Switching provider re-reads the pair; it never carries the old id over.
+
+    ``make_supervisor_fn`` and ``make_agent_fn`` rebuild the runtime when the
+    caller names a backend other than the resolved one -- the supervisor's
+    ``--supervisor-backend`` defaults to ``codex`` on ``forge-rewrite``, so a
+    Claude implementer takes this branch on an ordinary run. The model variable
+    is per-provider, so the switch has to read it again: passing nothing ran
+    the new provider on the registry default, and passing the old provider's id
+    sent a Claude model to the OpenAI-protocol gateway.
+    """
+    from kernelforge.agent_backends.registry import resolve_agent_runtime
+
+    clean_env.setenv("CLAUDE_MODEL", "claude-opus-5")
+    clean_env.setenv("CODEX_MODEL", "gpt-5.5")
+    assert resolve_agent_runtime("codex", model=resolve_agent_model("codex")).model == "gpt-5.5"
+    assert resolve_agent_runtime("claude", model=resolve_agent_model("claude")).model == "claude-opus-5"
