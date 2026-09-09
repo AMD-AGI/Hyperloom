@@ -170,6 +170,56 @@ async def test_sweep_via_geak_prefers_executable_final_launch_script(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requirement", ["live_tree_files", "cache_invalidation"])
+@pytest.mark.parametrize("launcher_state", ["absent", "missing", "not_executable"])
+async def test_tuning_cannot_fall_back_without_its_deployment(
+    tmp_path: Path, requirement: str, launcher_state: str
+) -> None:
+    marker = tmp_path / "bench_started"
+    bench = tmp_path / "bench.sh"
+    bench.write_text("#!/bin/bash\ntouch " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
+    final = tmp_path / "final.sh"
+    if launcher_state == "not_executable":
+        final.write_text("#!/bin/bash\n", encoding="utf-8")
+        final.chmod(0o644)
+    result = await sweep_via_geak(
+        result={
+            "bench_script": str(bench),
+            "final_launch_script": "" if launcher_state == "absent" else str(final),
+            "accepted_config": {"flags": "--tp 1"},
+            "tuning_skillset": {"gate": "accepted", requirement: ["required-data"]},
+        },
+        conc_values=[1],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=10,
+    )
+    assert result["status"] == "failed"
+    assert result["error_class"] == "missing_deployment_launcher"
+    assert not result.get("promotion_measurement")
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_flags_only_can_still_replay_without_a_final_launcher(tmp_path: Path) -> None:
+    marker = tmp_path / "bench_started"
+    bench = tmp_path / "bench.sh"
+    bench.write_text("#!/bin/bash\ntouch " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
+    result = await sweep_via_geak(
+        result={"bench_script": str(bench), "final_launch_script": str(tmp_path / "missing.sh")},
+        conc_values=[1],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=10,
+        repeats=1,
+    )
+    assert marker.is_file()
+    assert result["replay_mode"] == "bench_e2e_fallback"
+    assert result["status"] == "failed"
+    assert not result.get("promotion_measurement")
+
+
+@pytest.mark.asyncio
 async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

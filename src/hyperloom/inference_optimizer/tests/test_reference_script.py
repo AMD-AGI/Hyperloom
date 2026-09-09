@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 
 import pytest
 from pathlib import Path
@@ -297,6 +299,46 @@ def test_render_quotes_env_values():
         gpu_type="mi300x",
     )
     assert "export HL_OPTS='a b; rm -rf /'" in text
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/runs/a table 'quoted' $literal/candidate.csv",
+        '{"path":"$literal", "name":"a b"}',
+        "line one\nline two",
+        "",
+        "$(printf unexpected) `printf unexpected`",
+    ],
+)
+def test_literal_environment_survives_export_child_and_reference_import(tmp_path, value):
+    name = "AITER_CONFIG_GEMM_BF16"
+    text = render_reference_script(framework="sglang", server_args="", envs={name: value})
+    recipe = _write(tmp_path, text)
+    assert parse_reference_script(recipe, framework="sglang").envs[name] == value
+    observer = tmp_path / "observe.py"
+    observer.write_text("import json,os; print(json.dumps(os.environ['AITER_CONFIG_GEMM_BF16']))")
+    wrapper = tmp_path / "run.sh"
+    import shlex
+
+    wrapper.write_text("python3() { " + shlex.join([sys.executable, "-S", str(observer)]) + "; }\n" + text)
+    child = subprocess.run(["bash", str(wrapper)], text=True, capture_output=True, check=True)
+    assert json.loads(child.stdout) == value
+
+
+def test_reference_import_keeps_literal_dollars_and_skips_dynamic_commands(tmp_path):
+    recipe = _write(
+        tmp_path,
+        """export AITER_CONFIG_GEMM_BF16='/tables/$literal file.csv'
+export DYNAMIC=$HOME
+export COMMAND=`printf surprise`
+export DEFAULT=${DEFAULT:-`printf surprise`}
+export CHAIN=value;true
+""",
+    )
+    assert parse_reference_script(recipe, framework="sglang").envs == {
+        "AITER_CONFIG_GEMM_BF16": "/tables/$literal file.csv",
+    }
 
 
 def test_render_redacts_secret_shaped_envs():

@@ -142,8 +142,9 @@ def _extract_envs(text: str) -> dict[str, str]:
     """Pull literal exports the denylist allows, resolving self-referential defaults."""
     envs: dict[str, str] = {}
     dropped: list[str] = []
-    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
-    for line in text.splitlines():
+    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+    lines = iter(text.splitlines(keepends=True))
+    for line in lines:
         m = pat.match(line)
         if not m:
             continue
@@ -151,19 +152,51 @@ def _extract_envs(text: str) -> dict[str, str]:
         if not is_allowed_external_env_key(key):
             dropped.append(key)
             continue
-        # strip surrounding quotes if present
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-            val = val[1:-1]
-        if _has_var(val):
-            resolved = _resolve_self_default(key, val)
+        while True:
+            try:
+                tokens = shlex.split(val)
+                break
+            except ValueError:
+                continuation = next(lines, None)
+                if continuation is None:
+                    tokens = []
+                    break
+                val += continuation
+        if len(tokens) != 1 and val.strip():
+            dropped.append(key)
+            continue
+        literal = tokens[0] if tokens else ""
+        if _has_shell_expansion(val):
+            resolved = _resolve_self_default(key, literal)
             if resolved is None:
                 dropped.append(key)
                 continue
-            val = resolved
-        envs[key] = val
+            literal = resolved
+        envs[key] = literal
     if dropped:
         log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(sorted(set(dropped))))
     return envs
+
+
+def _has_shell_expansion(value: str) -> bool:
+    """Recognize dynamic shell syntax while preserving quoted literal values."""
+    quote = ""
+    escaped = False
+    for char in value.strip():
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            if char == "'":
+                quote = ""
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            quote = ""
+        elif not quote and char in ("'", '"'):
+            quote = char
+        elif char in ("$", "`") or (not quote and char in ";&|<>()"):
+            return True
+    return False
 
 
 # ``${FOO:-1}`` / ``${FOO-1}``, capturing the name and the default.
@@ -176,7 +209,7 @@ def _resolve_self_default(key: str, val: str) -> str | None:
     if not m or m.group(1) != key:
         return None
     default = m.group(2)
-    return None if _has_var(default) else default
+    return None if _has_shell_expansion(default) else default
 
 
 def _extract_server_args(
@@ -351,7 +384,7 @@ def render_reference_script(
     if framework_root:
         lines.append(f"export FRAMEWORK_ROOT={shlex.quote(str(framework_root))}")
     for k, v in (envs or {}).items():
-        if not str(k).strip() or _has_var(str(v)):
+        if not str(k).strip():
             continue
         # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
         if is_secret_shaped_env_name(k):

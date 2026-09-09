@@ -160,6 +160,18 @@ async def sweep_via_geak(
     final_launch_script = str(result.get("final_launch_script") or "").strip()
     final_launch_path = Path(final_launch_script) if final_launch_script else None
     use_final_launch = bool(final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK))
+    tuning = result.get("tuning_skillset")
+    requires_deployment = (
+        isinstance(tuning, dict)
+        and tuning.get("gate") == "accepted"
+        and bool(tuning.get("live_tree_files") or tuning.get("cache_invalidation"))
+    )
+    if requires_deployment and not use_final_launch:
+        return {
+            "status": "failed",
+            "error_class": "missing_deployment_launcher",
+            "error": "GEAK accepted tuning requires file deployment, but its final launch script is unavailable.",
+        }
     replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
     overlay = result.get("final_overlay") or ""
     flags, accepted_env = _accepted_config_as_variant(result.get("accepted_config"))
@@ -168,8 +180,6 @@ async def sweep_via_geak(
     if not replay_script.is_file():
         return {
             "status": "failed",
-            # Keep the established error contract: a final launch script is optional, and unavailable final scripts
-            # fall back to bench_e2e.
             "error_class": "missing_bench_script",
             "error": (
                 f"GEAK final launch script is not executable ({final_launch_script}); "
