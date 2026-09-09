@@ -38,13 +38,8 @@ _DENIED_FLAG_SUFFIXES: tuple[str, ...] = (
     "-path",
 )
 
-# Legitimate optimization knobs that happen to end with a denied suffix.
-# These are exempt from the suffix heuristic but stay subject to the explicit
-# deny list above, so a hard-blocked flag can never be re-enabled here. The
-# suffix rule is a broad guard against filesystem/model injection; flags listed
-# here are known tuning parameters (e.g. the speculative-decoding draft model)
-# that the optimizer must be allowed to sweep. The exemption covers the flag
-# name only -- values stay constrained by _unsafe_path_value_reason below.
+# Legitimate tuning flags ending in a denied suffix. Explicit denies still win, and only the name is exempt: values
+# remain subject to _unsafe_path_value_reason so this cannot reopen filesystem or model injection.
 _SUFFIX_EXEMPT_CLI_FLAGS: frozenset[str] = frozenset(
     {
         "--speculative-draft-model-path",
@@ -53,15 +48,7 @@ _SUFFIX_EXEMPT_CLI_FLAGS: frozenset[str] = frozenset(
 
 
 def is_denied_server_flag(flag: str) -> bool:
-    """Return whether a single CLI flag token is denied at the fan-out boundary.
-
-    Args:
-        flag: A ``--flag`` token (``flag=value`` callers must split first).
-
-    Returns:
-        bool: True when the flag is an explicit deny or matches a denied suffix
-        without being an allowlisted exemption.
-    """
+    """Return whether a single CLI flag token is denied at the fan-out boundary."""
     name = (flag or "").strip()
     if not name.startswith("--"):
         return False
@@ -75,25 +62,13 @@ def is_denied_server_flag(flag: str) -> bool:
 
 
 def _unsafe_path_value_reason(value: str | None) -> str:
-    """Return why an exempt flag's path value is unsafe ("" when acceptable).
-
-    Every exempt flag ends in a denied suffix by construction, so its value is a
-    filesystem path. Exempting the name alone would re-open the vector the suffix
-    guard closes, hence these shape rules.
-
-    Args:
-        value: Token following the flag, or None when the flag carried none.
-
-    Returns:
-        str: Human-readable reason, or "" when the value passes every rule.
-    """
+    """Return why an exempt flag's path value is unsafe (\"\" when acceptable)."""
     val = (value or "").strip()
     if not val:
         return "missing value"
     if not val.startswith("/"):
-        # Subsumes remote URIs (``http://``, ``s3://``, ``hf://``) and bare HF
-        # repo ids, either of which would make every pod run its own
-        # uncontrolled download instead of reading the shared filesystem.
+        # Subsumes remote URIs (``http://``, ``s3://``, ``hf://``) and bare HF repo ids, either of which would make
+        # every pod run its own uncontrolled download instead of reading the shared filesystem.
         return "must be an absolute path, not a repo id or URI"
     if ".." in PurePosixPath(val).parts:
         return "must not traverse with '..'"
@@ -101,16 +76,7 @@ def _unsafe_path_value_reason(value: str | None) -> str:
 
 
 def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
-    """Return ``(flag, value)`` pairs for both ``--flag=value`` and ``--flag value``.
-
-    Args:
-        tokens: Shell-split server-arg tokens.
-
-    Returns:
-        list[tuple[str, str | None]]: Flag names with their values. A value is
-        None when the flag ends the token list or is followed by another ``--``
-        flag, so a dangling path flag can never swallow the next flag as a value.
-    """
+    """Return ``(flag, value)`` pairs for both ``--flag=value`` and ``--flag value``."""
     pairs: list[tuple[str, str | None]] = []
     for idx, tok in enumerate(tokens):
         if not tok.startswith("--"):
@@ -125,18 +91,7 @@ def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
 
 
 def find_unsafe_flag_values(raw: str) -> list[str]:
-    """Return ``"flag: reason"`` entries for exempt flags carrying unsafe values.
-
-    The name-level exemption only decides that a flag may appear; this decides
-    what it is allowed to point at.
-
-    Args:
-        raw: Whitespace-separated server CLI flags.
-
-    Returns:
-        list[str]: Violations found; empty when clean, blank, or unparseable
-        (an unparseable string is already reported by :func:`find_denied_flags`).
-    """
+    """Return ``\"flag: reason\"`` entries for exempt flags carrying unsafe values."""
     text = (raw or "").strip()
     if not text:
         return []
@@ -160,14 +115,7 @@ class ServerArgsRejected(ValueError):
 
 
 def find_denied_flags(raw: str) -> list[str]:
-    """Return denied flag tokens present in a shell-style server-args string.
-
-    Args:
-        raw: Whitespace-separated server CLI flags.
-
-    Returns:
-        list[str]: Denied flag names found (empty when clean or blank).
-    """
+    """Return denied flag tokens present in a shell-style server-args string."""
     text = (raw or "").strip()
     if not text:
         return []
@@ -184,16 +132,7 @@ def find_denied_flags(raw: str) -> list[str]:
 
 
 def validate_server_args(raw: str, *, context: str = "") -> None:
-    """Raise :class:`ServerArgsRejected` on denied flags or unsafe flag values.
-
-    Args:
-        raw: Whitespace-separated server CLI flags.
-        context: Optional label for error messages.
-
-    Raises:
-        ServerArgsRejected: When a denied flag is present, or when a suffix-exempt
-            flag points at a value outside the allowed path shape.
-    """
+    """Raise :class:`ServerArgsRejected` on denied flags or unsafe flag values."""
     where = f" ({context})" if context else ""
     denied = find_denied_flags(raw)
     if denied:
@@ -204,44 +143,13 @@ def validate_server_args(raw: str, *, context: str = "") -> None:
 
 
 def prepare_shell_safe_extra_args(raw: str, *, context: str = "") -> str:
-    """Validate ``raw`` and return a shell-safe extra-args string for fan-out.
-
-    Args:
-        raw: Whitespace-separated server CLI flags (may be empty).
-        context: Optional label for error messages.
-
-    Returns:
-        str: The re-quoted, shell-safe token string (empty when ``raw`` blank).
-
-    Raises:
-        ServerArgsRejected: When ``raw`` is denied or not shell-tokenizable.
-    """
+    """Validate ``raw`` and return a shell-safe extra-args string for fan-out."""
     validate_server_args(raw, context=context)
     return shell_safe_extra_args(raw, context=context)
 
 
 def shell_safe_extra_args(raw: str, *, context: str = "") -> str:
-    """Return ``raw`` re-quoted per shell token so it can be spliced after ``--``.
-
-    ``extra_args`` is forwarded verbatim after a ``--`` separator into a Ray
-    Dashboard shell entrypoint and word-split by the pod launcher into argv. A
-    raw splice lets a value like ``--foo 1; touch x`` inject a second shell
-    command. This tokenises with shlex (the same word-splitting the pod applies)
-    and re-quotes each token, so multi-token flag/value semantics are preserved
-    while any shell metacharacter (``;`` ``|`` ``$()`` …) stays inside a single
-    quoted argv token and can no longer act as shell control syntax.
-
-    Args:
-        raw: Whitespace-separated server CLI flags (may be empty).
-        context: Optional label for error messages.
-
-    Returns:
-        str: The re-quoted, shell-safe token string (empty when ``raw`` blank).
-
-    Raises:
-        ServerArgsRejected: When ``raw`` is not shell-tokenizable (e.g. an
-            unbalanced quote), which a raw splice would carry through unchecked.
-    """
+    """Return ``raw`` re-quoted per shell token so it can be spliced after ``--``."""
     text = (raw or "").strip()
     if not text:
         return ""

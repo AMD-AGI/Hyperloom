@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -30,22 +24,7 @@ def _shape_ledger(
     *,
     top_n: int = 20,
 ) -> dict[str, Any]:
-    """Normalize a search ledger (params / backends / explore) for the report.
-
-    Shapes the ``accepted`` / ``rejected`` / ``tested`` entries to a stable
-    field set and derives a ``top_by_gain`` ranking from the tested entries.
-
-    Args:
-        ledger (dict[str, Any] | None): A raw search ledger from state, or
-            ``None``.
-        top_n (int): Maximum number of entries in ``top_by_gain``. Defaults to
-            20.
-
-    Returns:
-        dict[str, Any]: ``{"schema_version", "tested_count", "accepted",
-        "rejected", "top_by_gain"}``. An empty shell is returned when
-        ``ledger`` is not a dict.
-    """
+    """Normalize a search ledger (params / backends / explore) for the report."""
     if not isinstance(ledger, dict):
         return {
             "schema_version": 0,
@@ -56,15 +35,7 @@ def _shape_ledger(
         }
 
     def _shape_entry(e: Any) -> dict[str, Any]:
-        """Coerce one ledger entry to the stable field set.
-
-        Args:
-            e (Any): A raw ledger entry.
-
-        Returns:
-            dict[str, Any]: The shaped entry, or ``{}`` when ``e`` is not a
-            dict.
-        """
+        """Coerce one ledger entry to the stable field set."""
         if not isinstance(e, dict):
             return {}
         args = str(e.get("extra_server_args") or "")
@@ -114,20 +85,7 @@ def _shape_ledger(
 def _shape_winners_history(
     explore_search: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Persist ``explore_search.winners_history`` rows with their join key + source.
-
-    Re-emits the fingerprint→provenance map (dropped by ``_shape_ledger``) so
-    downstream can reconstruct ``phase_breakdown.explore.by_domain`` offline.
-
-    Args:
-        explore_search (dict[str, Any] | None): The ``explore_search`` ledger
-            from state, or ``None``.
-
-    Returns:
-        list[dict[str, Any]]: The shaped ``winners_history`` rows (round id,
-        variant, fingerprint, provenance, scope, gain, args/envs, ts). Empty
-        when no history is present.
-    """
+    """Persist ``explore_search.winners_history`` rows with their join key + source."""
     if not isinstance(explore_search, dict):
         return []
     rows = explore_search.get("winners_history")
@@ -157,17 +115,8 @@ def collect_explore_search(
     state: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Collect the explore-phase search summary for the breakdown.
-
-    Args:
-        state: Session state mapping.
-        warnings: Mutable list that collected warnings are appended to.
-
-    Returns:
-        A dict summarizing the explore-phase search activity and outcomes.
-    """
-    # Emit all three ledgers (unified explore + legacy params/backends);
-    # unused ones shape to empty shells.
+    """Collect the explore-phase search summary for the breakdown."""
+    # Emit all three ledgers (unified explore + legacy params/backends); unused ones shape to empty shells.
     explore_ledger = _shape_ledger(state.get("explore_search"))
     # Persist provenance+fingerprint winners_history for offline recompute.
     explore_ledger["winners_history"] = _shape_winners_history(state.get("explore_search"))

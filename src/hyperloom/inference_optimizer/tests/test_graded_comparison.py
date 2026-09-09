@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The grading chokepoint reads candidate and reference off ONE axis.
-
-Under AgentX the primary axis is E2E normalised interactivity P90 (slow tail),
-with per-chip throughput as a secondary guard.  The two axes cannot be confused
-because the AgentX corpus has a ~140x input-to-output ratio.
-"""
+"""The grading chokepoint reads candidate and reference off ONE axis, interactivity under AgentX."""
 
 from __future__ import annotations
 
@@ -269,6 +264,7 @@ def test_cumulative_gain_falls_back_to_baseline_tput_together(monkeypatch):
 
 @pytest.mark.parametrize("agentx", [True, False])
 def test_the_anchor_chokepoint_is_the_output_axis_on_every_session(monkeypatch, agentx):
+    """It seeds ``base_tput``, backs the drift check, and answers the two objective resolvers, whose targets are operator-supplied output figures."""
     _agentx(monkeypatch) if agentx else _synthetic(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
 
@@ -286,11 +282,8 @@ def test_the_anchor_falls_back_to_the_baseline_before_any_layer_lands(monkeypatc
 
 
 def test_graded_axes_survive_a_winner_record(monkeypatch):
-    """The defect this guards: AgentX grading dies after the first KEEP.
-
-    ``current_best`` is the next round's anchor. A winner record that carries
-    no graded axes writes an anchor with none, `resolve_grading_anchor_perf`
-    then answers ``current_best_axes_missing`` for the rest of the session.
+    """The defect this guards: AgentX grading dies after the first KEEP, because ``current_best`` is the next
+    round's anchor and a winner record carrying no graded axes writes an anchor with none.
     """
     _agentx(monkeypatch)
     measurement = _full_measurement(total=26500.0, output=190.0, intvty=24.0)
@@ -311,12 +304,7 @@ def test_graded_axes_of_omits_what_was_not_measured():
 
 
 def test_a_round_without_the_env_var_still_grades_on_intvty(monkeypatch):
-    """A re-baseline or integrate round can be driven from a shell that never saw it.
-
-    ``benchmark_mode`` is stamped at seed for exactly this reason. Without it
-    the chokepoint would silently grade an agentic measurement on the synthetic
-    axis.
-    """
+    """A re-baseline or integrate round can be driven from a shell that never saw it; the seeded mode covers it."""
     _synthetic(monkeypatch)
     state = _State(current_best=dict(_ANCHOR), benchmark_mode="agentx")
     graded = resolve_graded_comparison(

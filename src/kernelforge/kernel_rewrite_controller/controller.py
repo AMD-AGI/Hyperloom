@@ -79,10 +79,8 @@ class ControllerRunState:
     #: A task naming a repository already pinned to a different commit is skipped,
     #: so this records what the campaign actually built against.
     repository_pins: dict[str, str] = field(default_factory=dict)
-    #: Validated forge-loop best results that could not be turned into a patch.
-    #: Durable on purpose: Hyperloom discards this process's stdout and stderr
-    #: when it hard-kills the controller on timeout, so a reason that lives only
-    #: in the log is a reason nobody can read afterwards.
+    #: Validated results that could not be published. Persist the reason because
+    #: controller logs may be lost when Hyperloom kills it on timeout.
     recovery_failures: tuple[dict[str, str], ...] = ()
     #: What each operator's forge-loop spent on the model, one row per run that
     #: counted a call. The controller is the only place that sees both the spend
@@ -96,12 +94,7 @@ class ControllerRunState:
 
 
 def _recovery_failures(results: Iterable[RecoveryResult]) -> tuple[dict[str, str], ...]:
-    """Keep the recoveries that found a validated best result and could not ship it.
-
-    A task that produced nothing, and one whose patch was already published, are
-    both ordinary outcomes. What deserves a record is a trusted best commit that
-    never became a patch, because the export or the publication raised.
-    """
+    """Keep the recoveries that found a validated best result and could not ship it."""
     return tuple(
         {
             "operator_id": result.operator_id,
@@ -114,13 +107,7 @@ def _recovery_failures(results: Iterable[RecoveryResult]) -> tuple[dict[str, str
 
 
 def _forge_llm_usage(results: Iterable[SingleTaskResult]) -> tuple[dict[str, Any], ...]:
-    """Collect each forge-loop's token accounting, one row per operator.
-
-    A campaign spends nearly all of its budget inside these subprocesses, so
-    without this the per-attempt cost of a rewrite is invisible. A run that
-    counted no call is dropped rather than reported as zero spend, which is the
-    distinction ``UsageTotals.totals`` draws with its ``calls`` field.
-    """
+    """Collect each forge-loop's token accounting, one row per operator."""
     rows: list[dict[str, Any]] = []
     for result in results:
         outcome = result.forge_outcome
@@ -246,13 +233,7 @@ def run_controller(
     budget_minutes: float,
     output_dir: str | Path,
 ) -> ControllerRunState:
-    """Run one macro cycle's rewrite campaign against a fresh output directory.
-
-    Reads the handoff, runs opportunity analysis, dispatches every task it
-    published, reclaims validated forge-loop results into patches, and records a
-    terminal status. An already-initialized output directory is refused rather
-    than resumed, so each macro cycle brings its own.
-    """
+    """Run one macro cycle's rewrite campaign against a fresh output directory."""
     budget = _validate_budget(budget_minutes)
     handoff_path = Path(handoff_dir).expanduser().resolve()
     layout = ControllerLayout(Path(output_dir))
@@ -274,15 +255,7 @@ def run_controller(
     progress: dict[str, Any] = {}
 
     def _publish_running(**updates: Any) -> None:
-        """Persist what the campaign has accounted for so far, still as running.
-
-        These fields used to land only in the terminal write, which is the one
-        write a Hyperloom hard kill never reaches: it raises ``TimeoutExpired``
-        without this process's streams, so anything recorded only at the end is
-        unreadable afterwards -- and a timeout is the ordinary end of a long
-        campaign, not an edge case. Publishing per milestone is what makes the
-        spend, the pinned baselines and the skip reasons survive it.
-        """
+        """Persist what the campaign has accounted for so far, still as running."""
         progress.update(updates)
         snapshot = ControllerRunState(**{**running.to_dict(), **progress})
         _write_state(layout, snapshot)
@@ -299,9 +272,8 @@ def run_controller(
         )
 
     try:
-        # No recovery pass before analysis: the layout was just created, and an
-        # already-initialized output directory is refused rather than resumed, so
-        # there is never a prior task workspace here to reclaim.
+        # No recovery pass before analysis: the layout was just created, and an already-initialized output directory
+        # is refused rather than resumed, so there is never a prior task workspace here to reclaim.
         analysis = run_opportunity_analysis(
             handoff=handoff,
             layout=layout,

@@ -27,8 +27,7 @@ def test_resolve_framework_from_kernel_path_when_candidate_silent():
 
 
 def test_resolve_framework_owning_package_not_deep_subdir():
-    # Kernel lives directly in vllm; the owning package (shallowest) wins, not a
-    # deep dir. Mirrors the arena side for the same operator.
+    # Kernel lives directly in vllm; the owning package (shallowest) wins, not a deep dir.
     fw = forge_submit._resolve_framework({}, "/ws/worktree/vllm/v1/attention/ops/paged.py")
     assert fw == "vllm"
 
@@ -57,16 +56,7 @@ def test_logical_operator_priority_and_namespace_normalization():
 
 
 def test_logical_operator_is_stable_across_launch_attribution():
-    """Both shapes of a trace name reduce to one identity.
-
-    A candidate is named after the two rows it occupies, so the same kernel
-    reads ``hipModuleLaunchKernel->_gqa_sparse_fwd_kernel`` in an analysis whose
-    trace paired the launch call with the device row and ``_gqa_sparse_fwd_kernel``
-    in one whose trace did not. One session here produced both, from two profiles
-    of the same configuration. Forge keys its experience store on this name, so
-    letting the launch call through writes two identities for one kernel and the
-    warm-start read of either finds no prior record.
-    """
+    """Both shapes of a trace name reduce to one identity."""
     composite = {"name": "hipModuleLaunchKernel->_gqa_sparse_fwd_kernel"}
     bare = {"name": "_gqa_sparse_fwd_kernel"}
     assert forge_submit._logical_operator(composite) == forge_submit._logical_operator(bare) == "_gqa_sparse_fwd_kernel"
@@ -83,9 +73,8 @@ def test_logical_operator_is_stable_across_launch_attribution():
 
 
 def test_resolve_framework_follows_kernel_sources_across_packages():
-    # Cross-package indirection: the traced entry/anchor is a vLLM dispatch, but
-    # the real kernel is defined in aiter (kernel_sources). Must resolve 'aiter'
-    # to match the arena producer, not 'vllm' (the caller).
+    # Cross-package indirection: the traced entry/anchor is a vLLM dispatch, but the real kernel is defined in aiter
+    # (kernel_sources).
     candidate = {
         "kernel_sources": ["/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/unified.py"],
     }
@@ -95,7 +84,6 @@ def test_resolve_framework_follows_kernel_sources_across_packages():
 
 def test_resolve_framework_returns_empty_when_unknown():
     # Unresolvable -> "" so the caller OMITS --framework and forge-loop infers.
-    # Fault tolerance: never raises, never guesses a wrong framework.
     assert forge_submit._resolve_framework({}, "/tmp/scratch/kernel.py") == ""
     assert forge_submit._resolve_framework(None, "") == ""
     assert forge_submit._resolve_framework({"framework": None, "backend": None}) == ""

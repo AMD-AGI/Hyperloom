@@ -274,11 +274,7 @@ def _summary_without_platform(**extra) -> dict:
 
 
 def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
-    """A summary with no platform key still gets a line.
-
-    This is the case with no ``reason`` to print, and it is the one worth
-    stating: silence reads as a host that was checked and found unremarkable.
-    """
+    """A summary with no platform key still gets a line."""
     md = rp._format_md(_summary_without_platform())
     assert "- platform       : not recorded" in md
 

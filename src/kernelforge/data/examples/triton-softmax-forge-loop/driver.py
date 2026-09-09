@@ -1,24 +1,4 @@
-"""Measurement driver for the forge-loop softmax example.
-
-forge-loop treats the driver as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout. This driver implements the three
-modes of that contract:
-
-  * Correctness  ``python driver.py`` -> runs the complete suite and prints
-    ``SNR: <db> dB`` (and ``allclose: True/False``).
-    forge invokes this once as the driver-owned complete correctness suite.
-
-  * Benchmark    ``python driver.py --warmup <n> --iters <n>
-    --bench-mode`` -> prints ``wall_ms`` samples plus one ``case_ms`` aggregate.
-    forge takes the median of those samples as the kernel's wall time.
-
-  * Profiling    ``python driver.py --profile-run`` -> the driver selects the
-    profile case, runs only the target kernel, and exits without reference/timing.
-
-The driver is the correctness ORACLE and the perf MEASURER; forge never edits it
-(it is a protected measurement file). It imports the kernel under optimization by
-its stable public name ``softmax`` from ``softmax_kernel.py``.
-"""
+"""Measurement driver for the forge-loop softmax example."""
 
 from __future__ import annotations
 
@@ -52,8 +32,7 @@ def _make_input(rows: int, cols: int, mode: str, device: str) -> torch.Tensor:
     torch.manual_seed(_SEED)
     x = torch.randn(rows, cols, device=device, dtype=torch.float16)
     if mode == "stability":
-        # Large magnitudes stress the max-subtraction; a kernel that skips it
-        # overflows exp() and fails here.
+        # Large magnitudes stress the max-subtraction; a kernel that skips it overflows exp() and fails here.
         x = x * 50.0
     return x
 
@@ -100,18 +79,12 @@ def _run_correctness_suite(device: str) -> int:
 
 
 def _run_bench(rows: int, cols: int, warmup: int, iters: int, device: str) -> int:
-    # Static input allocated once; the graph harness replays the op on the same
-    # memory so it times GPU execution, not host launch overhead.
+    # Static input allocated once; the graph harness replays the op on the same memory so it times GPU execution, not
+    # host launch overhead.
     x = _make_input(rows, cols, "full", device)
     ref = torch.softmax(x, dim=-1)
 
-    # softmax(x) allocates and returns its own output, so there is no external
-    # buffer to hand the harness. Capture the returned tensor instead: under graph
-    # capture it is a fixed graph-pool buffer that every replay recomputes into, so
-    # zeroing it (dirty) and checking it (verify) proves the graph actually did the
-    # work — rejecting a silently empty / uncaptured graph rather than reporting a
-    # fake speedup. Storing into the dict is a trivial host op, so timing is still
-    # just the softmax (no extra copy).
+    # softmax(x) allocates and returns its own output, so there is no external buffer to hand the harness.
     captured: dict = {}
 
     def step() -> None:

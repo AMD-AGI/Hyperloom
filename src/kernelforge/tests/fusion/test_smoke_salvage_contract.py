@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a killed or env-blocked serving smoke owes the caller.
-
-Two promises the gate makes, both of which need the SMOKE to say what happened
-rather than the gate guessing from a message:
-
-* A micro KEEP survives a smoke that never judged the kernel, and it survives it
-  WITH an applicable patch -- including on a plain pip install, where ``git diff``
-  yields nothing and only a pristine-snapshot diff can produce one.
-* Only a GPU fault discards a KEEP. A boot-time HIP OOM and an HTTP probe error
-  are the environment failing, and clearing the patch for them throws away a
-  kernel that parity and the microbench both passed.
-"""
+"""What a killed or env-blocked serving smoke owes the caller."""
 
 from __future__ import annotations
 
@@ -106,12 +95,7 @@ def _run_gate(monkeypatch, tmp_path, verdict, *, repo_root="", pristine_dir="", 
 
 
 def test_a_non_git_install_hands_over_a_patch_when_the_smoke_is_killed(monkeypatch, tmp_path):
-    """The salvage target: a pip framework must still produce fusion.patch.
-
-    ``export_artifacts`` has no git to diff here, so without the pristine
-    snapshot it returns empty and a process killed during the smoke leaves a
-    checkpoint pointing at nothing.
-    """
+    """The salvage target: a pip framework must still produce fusion.patch."""
     repo, source = _pip_install(tmp_path)
     out = tmp_path / "out"
     out.mkdir()

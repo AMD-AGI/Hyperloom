@@ -83,11 +83,7 @@ def split_launch_flags(argv_tail: str) -> str:
 
 
 def launch_argv_from_log(path: str, framework: str) -> str:
-    """Extract and normalize the engine launch argv from one benchmark log.
-
-    Returns ``""`` when ``framework`` has no registered argv marker, so callers
-    can stay unaware of the per-backend marker table.
-    """
+    """Extract and normalize the engine launch argv from one benchmark log."""
     marker = _LAUNCH_ARGV_MARKERS.get(str(framework or "").strip().lower())
     if not marker:
         return ""

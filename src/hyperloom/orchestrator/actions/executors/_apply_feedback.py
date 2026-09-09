@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Structured apply-failure feedback for patch reauthoring.
-
-Public surface:
-
-* :class:`ApplyFeedback`            — structured patch-apply failure record.
-* :func:`read_patch_source_context` — parse a unified diff and extract a line
-  window near the first failing hunk; used by the patch-apply path.
-* :func:`source_context_for_file`   — shared file-resolve + window primitive;
-  used by the enablement source-context path.
-* :func:`build_apply_feedback`      — convenience factory from raw error info.
-"""
+"""Structured apply-failure feedback for patch reauthoring."""
 
 from __future__ import annotations
 
@@ -25,21 +15,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ApplyFeedback:
-    """Structured feedback from a failed patch apply attempt.
-
-    Attached to every ``apply_failed`` executor result under the key
-    ``"retry_feedback"`` (a list of :class:`ApplyFeedback`, one per patch).
-
-    Attributes:
-        patch: Absolute path string of the patch file that failed.
-        channel: ``"git"`` or ``"nogit"`` — which apply channel was used.
-        tried_levels: The ``-p`` strip levels that were tried (e.g. ``[0, 1, 2]``).
-        stderr: Combined stderr from all tried apply attempts (newline-separated).
-        rejected_hunks: Text of ``.rej`` reject files produced during apply
-            (empty string when none were collected).
-        source_context: A formatted source-code snippet from the target file
-            near the first failing hunk (empty string when unavailable).
-    """
+    """Structured feedback from a failed patch apply attempt."""
 
     patch: str
     channel: str
@@ -92,25 +68,7 @@ def read_patch_source_context(
     *,
     radius: int = 25,
 ) -> str:
-    """Extract a source-code window near the first failing hunk in a patch.
-
-    Parses the first ``---`` target file and first ``@@`` hunk line from
-    ``patch_text``, resolves the file against ``framework_root`` (trying the
-    raw path as-is first, then stripping one leading path component as ``-p1``
-    does), and returns ``radius`` lines centred on the hunk start line.
-
-    Fully exception-guarded: any failure returns ``""`` so callers degrade
-    gracefully when source context is unavailable.
-
-    Args:
-        patch_text: The unified-diff text to parse.
-        framework_root: The source-tree root to resolve target files against.
-        radius: Total number of lines to include in the snippet window.
-
-    Returns:
-        A formatted ``# file (lines N-M)`` header + line-numbered snippet,
-        or ``""`` when unavailable.
-    """
+    """Extract a source-code window near the first failing hunk in a patch."""
     try:
         return _read_source_context_impl(patch_text, framework_root, radius=radius)
     except Exception:  # noqa: BLE001 — best-effort
@@ -174,19 +132,7 @@ def _read_source_context_impl(
 
 
 def _resolve_patch_target(target_raw: str, framework_root: Path) -> Path | None:
-    """Resolve a raw patch header path to an existing file.
-
-    Tries the path directly (possibly absolute), then strips one leading
-    component (mimicking ``-p1``), then two (``-p2``), falling back to
-    ``framework_root``-relative.
-
-    Args:
-        target_raw: The raw path from the ``+++`` or ``---`` header.
-        framework_root: Root to resolve relative paths against.
-
-    Returns:
-        An existing :class:`~pathlib.Path`, or ``None`` when unresolvable.
-    """
+    """Resolve a raw patch header path to an existing file."""
     candidates: list[Path] = []
     raw = Path(target_raw)
 
@@ -212,24 +158,7 @@ def source_context_for_file(
     window: int = 12,
     search_roots: "list[Path] | None" = None,
 ) -> str:
-    """Extract a source window centred on the first occurrence of *symbol*.
-
-    This is the shared "file resolve + window" primitive underlying both
-    :func:`read_patch_source_context` and
-    :meth:`~enablement.params.EnablementParams._read_enablement_source_context`.
-
-    Args:
-        filepath: Absolute or relative path to the target file.
-        symbol: Optional string to search for within the file; when found the
-            window is centred on the first matching line.
-        window: Total number of lines to include in the snippet.
-        search_roots: Additional directories to search when *filepath* is
-            relative (tried in order after ``filepath`` itself).
-
-    Returns:
-        A formatted ``# file (lines N-M)`` header + line-numbered snippet,
-        or ``""`` when unavailable.
-    """
+    """Extract a source window centred on the first occurrence of *symbol*."""
     try:
         return _source_context_for_file_impl(filepath, symbol=symbol, window=window, search_roots=search_roots)
     except Exception:  # noqa: BLE001 — grounding is best-effort
@@ -291,22 +220,7 @@ def build_apply_feedback(
     rejected_hunks: str = "",
     framework_root: "Path | None" = None,
 ) -> ApplyFeedback:
-    """Build an :class:`ApplyFeedback` record with optional source context.
-
-    When *framework_root* is provided the patch text is parsed and a source
-    context snippet is extracted automatically.
-
-    Args:
-        patch_path: Path to the patch file that failed.
-        channel: ``"git"`` or ``"nogit"``.
-        tried_levels: Strip levels that were attempted.
-        stderr: Combined stderr from all apply attempts.
-        rejected_hunks: Content of collected ``.rej`` files.
-        framework_root: Source-tree root for resolving target files.
-
-    Returns:
-        A populated :class:`ApplyFeedback` instance.
-    """
+    """Build an :class:`ApplyFeedback` record with optional source context."""
     patch_str = str(patch_path)
     source_ctx = ""
     if framework_root is not None:

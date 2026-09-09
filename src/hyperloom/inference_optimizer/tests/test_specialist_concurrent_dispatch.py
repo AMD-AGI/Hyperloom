@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,17 +67,32 @@ async def _build_coord_with_capacity(
 class _ConcurrencyProbe:
     """Captures per-task entry/exit times to detect actual parallelism."""
 
-    def __init__(self, sleep_seconds: float = 0.2):
+    def __init__(
+        self, sleep_seconds: float = 0.2, *, expected_concurrency: int | None = None, wait_timeout: float = 10.0
+    ):
         self.sleep_seconds = sleep_seconds
+        self.expected_concurrency = expected_concurrency
+        self.wait_timeout = wait_timeout
         self.entries: list[tuple[str, float]] = []
         self.exits: list[tuple[str, float]] = []
         self.gpu_ids_by_task: dict[str, list[int]] = {}
         self._lock = asyncio.Lock()
+        self._wave_ready = asyncio.Event()
+        self._wave_entries = 0
 
     async def __call__(self, ctx) -> dict:
         async with self._lock:
             self.entries.append((ctx.task.task_id, time.monotonic()))
             self.gpu_ids_by_task[ctx.task.task_id] = list((ctx.extra or {}).get("gpu_ids") or [])
+            wave_ready = self._wave_ready
+            if self.expected_concurrency is not None:
+                self._wave_entries += 1
+                if self._wave_entries == self.expected_concurrency:
+                    wave_ready.set()
+                    self._wave_ready = asyncio.Event()
+                    self._wave_entries = 0
+        if self.expected_concurrency is not None:
+            await asyncio.wait_for(wave_ready.wait(), timeout=self.wait_timeout)
         await asyncio.sleep(self.sleep_seconds)
         async with self._lock:
             self.exits.append((ctx.task.task_id, time.monotonic()))
@@ -122,11 +138,64 @@ def _max_concurrent(entries: list[tuple[str, float]], exits: list[tuple[str, flo
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
+@pytest.mark.parametrize("participants, capacity", [(3, 3), (4, 1)], ids=["missing-participant", "serial"])
+async def test_concurrency_probe_rejects_insufficient_concurrency(participants: int, capacity: int):
+    probe = _ConcurrencyProbe(sleep_seconds=0, expected_concurrency=4, wait_timeout=0.05)
+    slots = asyncio.Semaphore(capacity)
+
+    async def _run(index):
+        async with slots:
+            ctx = SimpleNamespace(task=SimpleNamespace(task_id=str(index), params={}), extra={})
+            return await probe(ctx)
+
+    tasks = [asyncio.create_task(_run(i)) for i in range(participants)]
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10)
+        assert sum(isinstance(result, asyncio.TimeoutError) for result in results) == 3
+        assert len(probe.entries) == participants
+        assert len(probe.exits) == participants - 3
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrency_probe_requires_a_fresh_second_wave():
+    probe = _ConcurrencyProbe(sleep_seconds=0.01, expected_concurrency=2)
+    contexts = [SimpleNamespace(task=SimpleNamespace(task_id=str(i), params={}), extra={}) for i in range(4)]
+    tasks = [asyncio.create_task(probe(ctx)) for ctx in contexts[:2]]
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        tasks.append(asyncio.create_task(probe(contexts[2])))
+        await asyncio.sleep(0.4)
+        assert len(probe.exits) == 2
+        tasks.append(asyncio.create_task(probe(contexts[3])))
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        assert len(probe.entries) == len(probe.exits) == 4
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_entry_delay", [0.0, 0.4], ids=["default", "staggered"])
+async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path, late_entry_delay: float):
     """capacity=4 with 4 queued specialists runs all 4 in one pump (peak concurrency 4)."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=4)
-    probe = _ConcurrencyProbe(sleep_seconds=0.3)
-    coord.sub.register_executor("specialist", probe)
+    probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=4)
+    first_entry = asyncio.Event()
+
+    async def _staggered_probe(ctx):
+        if ctx.task.params["gap_canonical_id"] == "gap.test.3":
+            await first_entry.wait()
+            await asyncio.sleep(late_entry_delay)
+        else:
+            first_entry.set()
+        return await probe(ctx)
+
+    coord.sub.register_executor("specialist", _staggered_probe)
 
     for i in range(4):
         await coord.tasks.create_or_return_existing(
@@ -145,11 +214,8 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
     assert len(probe.entries) == 4
     assert len(probe.exits) == 4
 
-    # Peak concurrency (from overlapping entry/exit intervals) is the
-    # authoritative, deterministic proof of parallel dispatch: if the 4 tasks
-    # serialised, peak would be 1. A wall-clock elapsed budget is intentionally
-    # NOT asserted here — it is redundant with this check and flaky under CI
-    # load (matches the peak-only assertions in the sibling tests below).
+    # Peak concurrency (from overlapping entry/exit intervals) is the authoritative, deterministic proof of parallel
+    # dispatch: if the 4 tasks serialised, peak would be 1.
     peak = _max_concurrent(probe.entries, probe.exits)
     assert peak == 4, f"expected peak concurrency 4 (capacity=4 with 4 queued), got {peak}"
 
@@ -158,11 +224,9 @@ async def test_dispatcher_runs_four_specialists_concurrently(tmp_path: Path):
 async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
     tmp_path: Path,
 ):
-    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak
-    concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees.
-    """
+    """capacity=2 with 4 queued: the pump drains all 4 but never exceeds peak concurrency 2 (the lane-capacity invariant), re-dispatching as a slot frees."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=2)
-    probe = _ConcurrencyProbe(sleep_seconds=0.3)
+    probe = _ConcurrencyProbe(sleep_seconds=0.3, expected_concurrency=2)
     coord.sub.register_executor("specialist", probe)
 
     for i in range(4):
@@ -190,9 +254,7 @@ async def test_dispatcher_caps_concurrency_at_capacity_when_more_queued(
 
 @pytest.mark.asyncio
 async def test_dispatcher_capacity_one_serialises(tmp_path: Path):
-    """capacity=1 serialises execution (peak concurrency 1) while still draining
-    the whole queue across re-scans within a single pump.
-    """
+    """capacity=1 serialises execution (peak concurrency 1) while still draining the whole queue across re-scans within a single pump."""
     coord = await _build_coord_with_capacity(tmp_path, capacity=1)
     probe = _ConcurrencyProbe(sleep_seconds=0.1)
     coord.sub.register_executor("specialist", probe)
@@ -221,9 +283,7 @@ async def test_gpu_specialist_pool_limits_concurrency_even_when_research_lane_fr
     tmp_path: Path,
     monkeypatch,
 ):
-    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the
-    research_lane has headroom; both tasks drain serially, reusing GPU id 0.
-    """
+    """GPU-specialist pool capacity 1 caps GPU concurrency at 1 even when the research_lane has headroom; both tasks drain serially, reusing GPU id 0."""
     coord = await _build_coord_with_capacity(
         tmp_path,
         capacity=2,

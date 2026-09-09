@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Guards for ensure_scriptable_quality_deps()'s torch-clobber protection.
-
-The bug: ensure_scriptable_quality_deps() ran a bare `pip install scikit-image lpips`.
-lpips declares `torch>=0.4.0`, so pip's resolver pulled a PyPI (CUDA) torch and
-REPLACED the vendor ROCm torch (and triton) already installed in the shared
-venv. The command exited 0; the only signal was a cosmetic "not importable"
-warn. Every framework co-tenant in that venv (atom/vllm/sglang) then failed at
-`torch.cuda.is_available()` with "Found no NVIDIA driver".
-
-The fix makes the optional install structurally unable to move the load-bearing
-core:
-  1. pin torch/torchvision/triton to their installed versions via `pip -c`;
-  2. a post-install tripwire that aborts HARD (not a silent warn) if torch's
-     ROCm build vanished anyway.
-
-These tests extract the real shell functions from install.sh and run them with a
-fake `$PYTHON` whose fake `pip` models the resolver: an UNCONSTRAINED install
-swaps the ROCm torch for a CUDA build, a properly constrained one does not.
-"""
+"""Guards for ensure_scriptable_quality_deps()'s torch-clobber protection."""
 
 from __future__ import annotations
 
@@ -176,8 +158,8 @@ def test_constraints_prevent_torch_clobber(tmp_path: Path) -> None:
 
 
 def test_tripwire_aborts_when_torch_clobbered(tmp_path: Path) -> None:
-    # If a clobber slips through anyway ("always"), the guard must abort HARD
-    # (not silently warn) and attempt a rollback.
+    # If a clobber slips through anyway ("always"), the guard must abort HARD (not silently warn) and attempt a
+    # rollback.
     proc, hip_after, piplog = _run(tmp_path, mode="always")
     assert proc.returncode != 0, f"expected hard abort, got rc=0:\n{proc.stdout}"
     assert "clobbered the load-bearing ROCm torch" in proc.stdout, proc.stdout

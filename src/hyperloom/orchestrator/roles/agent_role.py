@@ -1,34 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Agent role definitions
-
-Each :class:`AgentRole` binds:
-
-    * a backend type (Claude tool-using vs. Codex no-tools)
-    * a model slug + the env var holding the API key
-    * the system prompt loaded from ``orchestrator/prompts/<name>.md``
-    * which intent types the role is allowed to emit
-    * permission flags consumed by :class:`PolicyGate`
-
-Three persistent LLM agent roles and their permitted intents::
-
-    ┌──────────────┬──────────┬─────────────────────────────────────────┐
-    │ name         │ backend  │ allowed intents (high level)            │
-    ├──────────────┼──────────┼─────────────────────────────────────────┤
-    │ orchestration│ Claude   │ propose_action / delegate / request /   │
-    │              │          │ update_state / extend_lease / ...       │
-    │ critic       │ Codex    │ review_verdict (only) / send_message /  │
-    │              │ no-tools │ alert                                   │
-    │ robustness   │ Claude   │ alert / prune_branch /                  │
-    │              │          │ escalate_strategy_change                │
-    │              │          │ + always-on tick                        │
-    └──────────────┴──────────┴─────────────────────────────────────────┘
-
-Kernel work is handled by programmatic Python handlers, not an LLM role.
-Framework-agent work runs as the Coordinator-owned FRAMEWORK_AGENT phase, not
-an agent role.
-"""
+"""Agent role definitions."""
 
 from __future__ import annotations
 
@@ -96,8 +69,6 @@ _ROBUSTNESS_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 
 
 # Specialist — single exit signal, optional heartbeats and alerts only.
-# Exact mirror of runner.py's accept-set (specialist_done | send_message | alert).
-# Public because the specialist has no AgentRole record to reach it through.
 SPECIALIST_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
     {
         IntentType.SPECIALIST_DONE,
@@ -107,11 +78,7 @@ SPECIALIST_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 
 @dataclass(frozen=True)
 class AgentRole:
-    """Static role record. Backend instances are created elsewhere.
-
-    Multiple roles can share the same backend instance in dry-runs.
-    PolicyGate consumes the permission flags below.
-    """
+    """Static role record. Backend instances are created elsewhere."""
 
     name: str
     backend_type: BackendType
@@ -126,34 +93,16 @@ class AgentRole:
 
     @property
     def system_prompt_path(self) -> Path:
-        """Path to this role's system prompt markdown file.
-
-        Uses ``system_prompt_filename`` when set, else ``<name>.md`` under
-        the shared system-prompts asset directory.
-
-        Returns:
-            Path: Absolute path to the role's system prompt file.
-        """
+        """Path to this role's system prompt markdown file."""
         return asset_system_prompts_dir() / (self.system_prompt_filename or f"{self.name}.md")
 
     def load_system_prompt(self) -> str:
-        """Read and return this role's system prompt text.
-
-        Returns:
-            str: The UTF-8 decoded contents of :attr:`system_prompt_path`.
-        """
+        """Read and return this role's system prompt text."""
         return self.system_prompt_path.read_text(encoding="utf-8")
 
 
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return the canonical 3-agent role registry.
-
-    Builds fresh :class:`AgentRole` records for orchestration, critic, and
-    robustness with their default backends, models, and permission flags.
-
-    Returns:
-        dict[str, AgentRole]: Mapping of role name to its static record.
-    """
+    """Return the canonical 3-agent role registry."""
     return {
         "orchestration": AgentRole(
             name="orchestration",

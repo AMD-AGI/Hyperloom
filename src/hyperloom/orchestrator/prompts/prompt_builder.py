@@ -121,6 +121,7 @@ def _section_session_context(
     framework_source_roots: tuple[str, ...] | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
+    session_framework_tree: str = "",
 ) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
@@ -134,8 +135,10 @@ def _section_session_context(
         objective_value (float | str | None): Optional objective target value
             rendered alongside the kind.
         max_minutes (int): Wall-clock budget for the run, in minutes.
-        framework_source_roots (tuple[str, ...] | None): Optional framework
-            source roots; a PolicyGate-default note is shown when empty.
+        framework_source_roots (tuple[str, ...] | None): Optional source roots
+            to search; a "none discovered" note is shown when empty.
+        session_framework_tree (str): The tree this session optimises; omitted
+            from the rendering when empty.
         benchmark_mode (str): ``"agentx"`` or ``""``/``"synthetic"``; injects
             the AgentX workload and grading blocks when it names AgentX.
         agentx_corpus_shape (Mapping[str, Any] | None): The session's
@@ -149,7 +152,9 @@ def _section_session_context(
     if objective_value not in (None, ""):
         obj = f"{objective_kind}={objective_value}"
     roots = framework_source_roots or ()
-    roots_line = ", ".join(roots) if roots else "(defaults from PolicyGate)"
+    roots_line = ", ".join(roots) if roots else "none discovered on this host"
+    tree = str(session_framework_tree or "").strip()
+    tree_lines = [f"- session_framework_tree: {tree}  (the tree under optimisation)"] if tree else []
     lines = [
         "## 2. SESSION CONTEXT",
         "",
@@ -159,7 +164,8 @@ def _section_session_context(
         f"- objective        : {obj}",
         f"- graded_axis      : {graded_metric_key(benchmark_mode=benchmark_mode)}",
         f"- max_minutes      : {max_minutes}",
-        f"- framework_source_roots: {roots_line}",
+        *tree_lines,
+        f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(benchmark_mode):
         lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines()]
@@ -975,6 +981,7 @@ def build_orchestration_prompt(
     transport: str = TRANSPORT_TOOLS,
     rules_fragment_path: Path | None = None,
     framework_source_roots: tuple[str, ...] | None = None,
+    session_framework_tree: str = "",
     references_dir: Path | None = None,
     benchmark_mode: str = "",
     agentx_corpus_shape: Mapping[str, Any] | None = None,
@@ -1008,7 +1015,9 @@ def build_orchestration_prompt(
             that transport does not mount.
         rules_fragment_path: path to ``orchestration.md``; placeholder if
             unreadable.
-        framework_source_roots: optional framework source roots passed through
+        framework_source_roots: optional source roots to search, passed through
+            to the session-context section.
+        session_framework_tree: the tree this session optimises, passed through
             to the session-context section.
         references_dir: directory of on-demand reference documents; defaults
             to ``asset_prompt_references_dir()`` when ``None``.
@@ -1055,6 +1064,7 @@ def build_orchestration_prompt(
             framework_source_roots=framework_source_roots,
             benchmark_mode=benchmark_mode,
             agentx_corpus_shape=agentx_corpus_shape,
+            session_framework_tree=session_framework_tree,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(

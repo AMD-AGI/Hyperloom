@@ -75,8 +75,7 @@ def test_export_and_restore_cover_sibling_file():
         # base_commit must have absorbed the pre-existing dirty file.
         assert base_commit, "base_commit must be set"
 
-        # Winning edit lands in the SIBLING config file.
-        # iter1 (kept): config 64 -> 128, kernel untouched.
+        # Winning edit lands in the SIBLING config file. iter1 (kept): config 64 -> 128, kernel untouched.
         config.write_text("BLOCK_SIZE = 128\n")
         _commit_all(repo, "iter1: tune config")
         # iter2 (reverted): config 128 -> 256, then revert.
@@ -341,17 +340,13 @@ def test_validated_checkpoint_requires_commit_metrics_and_coverage(tmp_path, cap
             )
             is None
         )
-    # Discarding a KEEP the producer already published is the expensive outcome
-    # here, so it may not be inferred from a return value alone.
+    # Discarding a KEEP the producer already published is the expensive outcome here, so it may not be inferred from a
+    # return value alone.
     assert "case coverage mismatch" in caplog.text
 
 
 def test_a_checkpoint_that_reports_no_coverage_is_still_recoverable(tmp_path):
-    """forge-loop stopped reporting case coverage when drivers took over the suite.
-
-    Vetoing on the field's absence throws away every salvageable best from a
-    timed-out campaign, silently: the run just looks like it recovered nothing.
-    """
+    """forge-loop stopped reporting case coverage when drivers took over the suite."""
     env = _make_repo(tmp_path)
     repo = env["repo"]
     kernel = env["kernel_agent"]
@@ -494,9 +489,9 @@ def test_default_branch_resolves_main():
 
 
 def test_prepare_inplace_autorecovers_from_stale_forge_branch():
-    """After a crash leaves the repo stranded on a stale forge temp branch,
-    _prepare_inplace must auto-recover (force-checkout the default branch, drop
-    the stale branch, snapshot a pristine baseline) instead of refusing."""
+    """After a crash leaves the repo stranded on a stale forge temp branch, _prepare_inplace must auto-recover
+    (force-checkout the default branch, drop the stale branch, snapshot a pristine baseline) instead of refusing.
+    """
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         env = _make_repo(tmp)
@@ -514,8 +509,7 @@ def test_prepare_inplace_autorecovers_from_stale_forge_branch():
         assert prep is not None, "auto-recover must yield a usable prep, not None"
         _, _, restore = prep
 
-        # Recovery force-checked-out main, so the leftover optimization is gone
-        # and the baseline snapshot is pristine.
+        # Recovery force-checked-out main, so the leftover optimization is gone and the baseline snapshot is pristine.
         assert kernel.read_text() == "KERNEL_ORIGINAL\n", "must recover to pristine kernel"
         # Stale forge branch deleted; restore targets the recovered default branch.
         assert _git(repo, "branch", "--list", stale).strip() == "", "stale forge branch must be deleted"

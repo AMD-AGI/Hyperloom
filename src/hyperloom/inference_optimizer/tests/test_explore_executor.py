@@ -523,10 +523,7 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 @pytest.mark.asyncio
 async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner, tmp_path):
-    """A high-risk serving variant that clears throughput but yields no accuracy
-    verdict used to skip the gate (throughput-only fallback). That fallback is
-    removed: the variant REVERTs (the change likely broke the eval path), but
-    the run does NOT stop -- only a broken baseline halts the run."""
+    """A high-risk serving variant that clears throughput but yields no accuracy verdict used to skip the gate (throughput-only fallback)."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -584,14 +581,7 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
 
 @pytest.mark.asyncio
 async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_agent_runner, tmp_path):
-    """The gate no longer asks which knobs look risky.
-
-    ``--online_quant_config`` changes numeric precision directly, and no entry of
-    the deleted high-risk catalogue matched it, so a variant carrying it cleared
-    on throughput alone with its measured accuracy discarded. With a baseline on
-    the state it is now gated like any other variant, and no eval verdict is a
-    REVERT rather than a KEEP.
-    """
+    """The gate no longer asks which knobs look risky."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -1147,9 +1137,7 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
     tmp_path,
     monkeypatch,
 ):
-    """The overtime deadline is anchored on a throughput-only baseline, so the
-    rounds it gates must measure throughput only. The warmup round is ungated and
-    remains the accuracy source."""
+    """The overtime deadline is anchored on a throughput-only baseline, so the rounds it gates must measure throughput only."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
@@ -1199,13 +1187,69 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
 
 
 @pytest.mark.asyncio
+async def test_explore_no_eval_disables_magpie_warmup_and_decision(
+    sub_agent_runner,
+    tmp_path,
+):
+    """Session ``--no-eval`` turns Magpie RUN_EVAL off for every explore round."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.eval_disabled = True
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-session-noeval"
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        seen.append((str(slot), _run_eval_of(cmd)))
+        _fake_workspace(slot, tput=920.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "session_noeval",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+        },
+        idempotency_key="ex-session-noeval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        await sub.run_task(task)
+
+    assert seen
+    assert all(ev in _RUN_EVAL_FALSE for _slot, ev in seen)
+    base_yaml = yaml.safe_load((output_dir / "explore_base.with_envs.yaml").read_text())
+    assert str(base_yaml["benchmark"]["envs"].get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE
+
+
+@pytest.mark.asyncio
 async def test_explore_cold_decision_keeps_eval(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
 ):
-    """Without server_lifecycle reuse there is no warmup round whose eval the
-    decision round could fall back on, so it must run its own accuracy gate."""
+    """Without server_lifecycle reuse there is no warmup round whose eval the decision round could fall back on, so it must run its own accuracy gate."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -1258,12 +1302,7 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
     sub_agent_runner,
     tmp_path,
 ):
-    """A cold ``baseline_tput`` must be graded cold even when lifecycle reuse is available.
-
-    The baseline gates its cold+hot double run on ``baseline_double_run`` as well
-    as lifecycle eligibility, so warm-decision has to honour both or a hot
-    candidate is scored against a cold anchor.
-    """
+    """A cold ``baseline_tput`` must be graded cold even when lifecycle reuse is available."""
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
@@ -1518,20 +1557,15 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     tmp_path,
     monkeypatch,
 ):
-    """A granted cap never exceeds what is left of the session.
-
-    explore derives the cap from the measured baseline (up to 4h) and never
-    consulted the budget, so a 3h session could hand a single variant more time
-    than the whole run was given.
-    """
+    """A granted cap never exceeds what is left of the session."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     state = SharedState()
     state.baseline_tput = 800.0
     state.max_minutes = 3.0
     sub.shared_state = state
-    # Read before the run: the budget only shrinks from here, so a cap granted
-    # later can only be smaller than what this allows.
+    # Read before the run: the budget only shrinks from here, so a cap granted later can only be smaller than what
+    # this allows.
     usable_sec = state.session_budget_usable_sec()
 
     base = tmp_path / "base.yaml"
@@ -1539,8 +1573,8 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
     granted: list[int] = []
 
     def _fake_run(cmd, *args, **kwargs):
-        # Only benchmark rounds carry --output-dir; the interpreter probe does not,
-        # and it is module-memoized, so counting it would make this order-dependent.
+        # Only benchmark rounds carry --output-dir; the interpreter probe does not, and it is module-memoized, so
+        # counting it would make this order-dependent.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
         granted.append(int(kwargs["timeout"]))
@@ -1576,9 +1610,8 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
 
     assert res.result["status"] == "succeeded"
     assert granted, f"the variant should have been admitted (20s expected, ~{usable_sec:.0f}s left)"
-    # The hard cap is allowed to sit a grace window past the deadline so the
-    # in-process session watchdog reaps the tree first and the kill is attributed
-    # to the budget rather than to a slow variant.
+    # The hard cap is allowed to sit a grace window past the deadline so the in-process session watchdog reaps the
+    # tree first and the kill is attributed to the budget rather than to a slow variant.
     assert all(t <= usable_sec + _SESSION_KILL_GRACE_SEC for t in granted), (
         f"caps must be clamped to the ~{usable_sec:.0f}s budget, got {granted}"
     )
@@ -1638,8 +1671,8 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
         res = await sub.run_task(task)
 
     assert granted == [], "a variant needing 600s must not start with ~60s left"
-    # Measuring nothing because the budget ran out is not the same as variants
-    # failing, and it must not be reported as a bare, unattributed failure.
+    # Measuring nothing because the budget ran out is not the same as variants failing, and it must not be reported as
+    # a bare, unattributed failure.
     assert res.result["error_class"] == "session_time_exhausted"
     assert res.result["session_budget_untested"] == 1
     # Untested variants stay out of the ledger so a resume can retry them.
@@ -1653,13 +1686,7 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     tmp_path,
     monkeypatch,
 ):
-    """The common case: the budget expires while a variant is running, not before it.
-
-    ``run_grid`` records such a variant as ``skipped`` because nothing was
-    measured. Explore has to consume that distinction: a variant written into
-    the KB-facing ``tested`` ledger as ``FAILED`` is one a resume will skip
-    forever, and one the KB learns is a bad idea, on the evidence of a clock.
-    """
+    """The common case: the budget expires while a variant is running, not before it."""
     _force_cold_decision(monkeypatch)
     sub, tr, _ = sub_agent_runner
     state = SharedState()
@@ -1680,8 +1707,8 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
         if "v_reaped" not in str(slot):
             _fake_workspace(slot, tput=840.0)
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        # The session deadline elapsed while this round was running, so the
-        # reaper tore the tree down and named the cause.
+        # The session deadline elapsed while this round was running, so the reaper tore the tree down and named the
+        # cause.
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -1722,8 +1749,8 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
         res = await sub.run_task(task)
 
     tested = res.result["explore_search_update"]["tested"]
-    # A variant the run reaped was never measured; recording it keeps a resume
-    # from ever retrying it, and teaches the KB a clock's verdict.
+    # A variant the run reaped was never measured; recording it keeps a resume from ever retrying it, and teaches the
+    # KB a clock's verdict.
     assert [t["name"] for t in tested.values()] == ["v_measured"]
     assert [lr["name"] for lr in res.result["losers"]] == []
     assert res.result["session_budget_untested"] == 1
@@ -1735,14 +1762,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     tmp_path,
     monkeypatch,
 ):
-    """The stop has to survive ``run_grid``'s own discarded warmup round.
-
-    With server-lifecycle reuse ineligible, explore's decision round is a plain
-    ``run_grid`` call, and ``run_grid`` runs its own warmup pass before it (on by
-    default outside pytest). Explore reads the stop off the result's
-    ``error_class``, so a warmup reap graded as ``warmup_round_failed`` reaches
-    this ledger as a measured verdict about the variant.
-    """
+    """The stop has to survive ``run_grid``'s own discarded warmup round."""
     _force_cold_decision(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
     monkeypatch.setattr(
@@ -2105,8 +2125,8 @@ def test_atom_default_grid_survives_compatibility_filter_without_help_probe(
     monkeypatch,
 ):
     """When the atom help-text probe is unavailable, ``apply_compatibility_filter`` drops no seed variant."""
-    # The filter resolves this name in its own module, so patching the
-    # re-export on _grid_runner would leave the real ten-second probe running.
+    # The filter resolves this name in its own module, so patching the re-export on _grid_runner would leave the real
+    # ten-second probe running.
     from hyperloom.orchestrator.actions.executors import _grid_variant_filter
 
     monkeypatch.setattr(_grid_variant_filter, "_probe_server_help_text", lambda fw: "")
@@ -2249,14 +2269,14 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
+# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
-    """A ctx that makes __call__ take its earliest ``return`` (missing_config),
-    exercising the wrapper without needing to drive a full benchmark round."""
+    """A ctx that makes __call__ take its earliest ``return`` (missing_config), exercising the wrapper without needing
+    to drive a full benchmark round.
+    """
     return SimpleNamespace(
         task=SimpleNamespace(
             task_id="t-explore-reap",
@@ -2268,12 +2288,9 @@ def _missing_config_ctx(tmp_path: Path) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, monkeypatch):
-    """__call__ must reap any lingering server after _run_explore returns,
-    even on its earliest failure path (missing_config) -- not just after a
-    full benchmark round. A magpie_timeout that fires before a
-    server_lifecycle variant's pidfile is ever written leaves nothing for
-    that pidfile-based teardown to find, orphaning its server
-    (AMD-AGI/Hyperloom#1354)."""
+    """__call__ must reap any lingering server after _run_explore returns, even on its earliest failure path
+    (missing_config) -- not just after a full benchmark round.
+    """
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     executor = ExploreExecutor(session_dir=tmp_path)
     ctx = _missing_config_ctx(tmp_path)
@@ -2296,9 +2313,7 @@ async def test_explore_call_reaps_stale_servers_even_on_early_return(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_explore_call_skips_reap_under_pytest(tmp_path):
-    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
-    set (pytest always sets it for a running test), mirroring the guard on
-    the per-launch preclean in ``_grid_runner.py``."""
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running test), mirroring the guard on the per-launch preclean in ``_grid_runner.py``."""
     executor = ExploreExecutor(session_dir=tmp_path)
     ctx = _missing_config_ctx(tmp_path)
 

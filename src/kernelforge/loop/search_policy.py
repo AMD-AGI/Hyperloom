@@ -14,37 +14,19 @@ OBJECTIVE_IMMEDIATE_CANONICAL_GAIN = "IMMEDIATE_CANONICAL_GAIN"
 OBJECTIVE_DISCOVER_NEW_MECHANISM = "DISCOVER_NEW_MECHANISM"
 
 # One empty diff can be a session that honestly found nothing worth changing.
-# Two in a row mean the Implementer cannot express the current direction as an
-# edit at all, which is a different fact from the no-improvement streak: nothing
-# was measured, so no amount of further exploitation can resolve it.
 NO_CHANGES_ESCALATION_THRESHOLD = 2
 
-# How many recent iteration outcomes are scanned for that streak. Counted in
-# outcomes rather than in raw log events: an iteration writes several events, so
-# an event-counted window is spent by a handful of interleaved infrastructure
-# failures and hides the streak it exists to find.
+# How many recent iteration outcomes are scanned for that streak.
 NO_CHANGES_STREAK_WINDOW = 16
 
-# The smallest total gain a run of exploit iterations can produce and still be
-# worth another one. Stated over the window below rather than per iteration,
-# because one small step is ordinary and only a run of them is a trend: a
-# campaign whose whole recent ladder moved the incumbent by less than this is
-# refining a direction whose remaining steps are too small to reach what a
-# different mechanism might, and zero returns are not the only reason to look
-# elsewhere.
+# The smallest total gain a run of exploit iterations can produce and still be worth another one.
 MARGINAL_GAIN_FLOOR = 0.05
 
-# How many measured steps that window spans, counted in outcomes rather than
-# iterations so the ones that measured nothing do not shorten it. Six steps need
-# seven outcomes: the oldest is the anchor the gain is measured against, not a
-# step of its own. Six is wide enough that a campaign still climbing at better
-# than roughly one percent an iteration keeps its ladder, and long enough that
-# filling the window is itself the cost ceiling on the trigger.
+# How many measured steps that window spans, counted in outcomes rather than iterations so the ones that measured
+# nothing do not shorten it.
 MARGINAL_GAIN_WINDOW = 6
 
-# How many recent outcomes are scanned to fill that window. Longer than the
-# window itself because outcomes that concluded nothing are transparent to it,
-# for the same reason as the empty-diff scan above.
+# How many recent outcomes are scanned to fill that window.
 MARGINAL_GAIN_SCAN_WINDOW = 16
 
 
@@ -79,15 +61,7 @@ class SearchPolicyEngine:
         consecutive_no_changes: int = 0,
         window_gain_ratio: float | None = None,
     ) -> SearchPolicyDecision:
-        """Return a deterministic mode with stable reason codes.
-
-        ``window_gain_ratio`` is the relative gain the incumbent made across the
-        last full window of exploit outcomes, or ``None`` when the campaign has
-        not produced a full window yet. ``None`` is not a gain of zero: a
-        campaign that has not been measured enough times to have a trend is not
-        a campaign whose ladder has flattened, and only the second of those is a
-        reason to look for another mechanism.
-        """
+        """Return a deterministic mode with stable reason codes."""
         threshold = max(1, int(stall_threshold))
         residence = max(0, int(residence_iterations_remaining))
         empty_diffs = max(0, int(consecutive_no_changes))
@@ -95,10 +69,9 @@ class SearchPolicyEngine:
         if window_gain is not None and not math.isfinite(window_gain):
             raise ValueError(f"window_gain_ratio must be finite: {window_gain_ratio!r}")
 
-        # Outranks every other signal, mode residence included: those weigh how
-        # promising the current direction is, while repeated empty diffs are
-        # evidence it cannot be turned into a candidate at all, so staying in
-        # EXPLOIT spends another session on a direction that produces no edit.
+        # Outranks every other signal, mode residence included: those weigh how promising the current direction is,
+        # while repeated empty diffs are evidence it cannot be turned into a candidate at all, so staying in EXPLOIT
+        # spends another session on a direction that produces no edit.
         if empty_diffs >= NO_CHANGES_ESCALATION_THRESHOLD:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "REPEATED_NO_CHANGES"

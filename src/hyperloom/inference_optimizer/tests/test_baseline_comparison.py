@@ -30,8 +30,7 @@ def test_name_mapping_case_insensitive():
 
 
 def test_name_mapping_canonical_names_starting_with_vendor_token():
-    """Canonical names beginning with a vendor-like token must not be mangled
-    by the prefix strip (regression: DeepSeek / Qwen mapped to None)."""
+    """Canonical names beginning with a vendor-like token must not be mangled by the prefix strip (regression: DeepSeek / Qwen mapped to None)."""
     from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
 
     assert to_inferencex_name("DeepSeek-R1-0528") == "DeepSeek-R1-0528"
@@ -165,8 +164,7 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
 
 
 def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeypatch):
-    """A disaggregated / multinode row with inflated per-GPU throughput must not
-    be promoted to ``best`` — only single-node aggregated rows are comparable."""
+    """A disaggregated / multinode row with inflated per-GPU throughput must not be promoted to ``best`` — only single-node aggregated rows are comparable."""
     rows = _make_rows()
     disagg = json.loads(json.dumps(_SAMPLE_ROW))
     disagg["disagg"] = True
@@ -192,8 +190,7 @@ def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeyp
 
 
 def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
-    """On success, a measured ``competitor_target.json`` (source = API URL) is
-    written so the EXPLORE advisory gap is driven by real InferenceX data."""
+    """On success, a measured ``competitor_target.json`` (source = API URL) is written so the EXPLORE advisory gap is driven by real InferenceX data."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
@@ -269,8 +266,7 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
 
 
 def test_analyze_unsupported_target_gpu(tmp_path, monkeypatch):
-    """A GPU InferenceX has no data for → ``no_match`` / ``unsupported_target_gpu``.
-    Crucially, unknown GPUs are NOT back-filled by any LLM estimate."""
+    """A GPU InferenceX has no data for → ``no_match`` / ``unsupported_target_gpu``."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
@@ -310,10 +306,9 @@ def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
 
 
 def test_analyze_precision_mismatch(tmp_path, monkeypatch):
-    """GPU + shape exist but only at a different precision → ``precision_mismatch``.
-    An fp4 run must never be compared against fp8 reference numbers."""
-    # _make_rows() has b300/1024/1024 rows at fp8 (and one fp4 row); ask for a
-    # precision InferenceX does not carry for this shape.
+    """GPU + shape exist but only at a different precision → ``precision_mismatch``."""
+    # _make_rows() has b300/1024/1024 rows at fp8 (and one fp4 row); ask for a precision InferenceX does not carry for
+    # this shape.
     _patch_fetch_rows(monkeypatch, _make_rows())
 
     from hyperloom.inference_optimizer.baseline_comparison import analyze
@@ -353,9 +348,7 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
 
 
 def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
-    """A pre-existing (e.g. scout-authored) competitor_target.json must be
-    dropped when analyze() ends in no_match, so the advisory feed never reads a
-    non-API source. Guards the 'API-measured only' invariant."""
+    """A pre-existing (e.g. scout-authored) competitor_target.json must be dropped when analyze() ends in no_match, so the advisory feed never reads a non-API source."""
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 
@@ -388,8 +381,7 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
 
 
 def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monkeypatch):
-    """When measured advisory write fails, any pre-existing competitor_target.json
-    must be removed so the EXPLORE gap block never reads a non-API source."""
+    """When measured advisory write fails, any pre-existing competitor_target.json must be removed so the EXPLORE gap block never reads a non-API source."""
     from hyperloom.inference_optimizer.session import session_paths
     from hyperloom.orchestrator.knowledge import research_hints
 

@@ -41,9 +41,7 @@ _REQUEST_HIGH_SEVERITY = {
 }
 
 
-# ---------------------------------------------------------------------------
 # In-process: _run_tick + _coerce_request
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -155,9 +153,7 @@ def test_coerce_request_rejects_empty_raw_prompt():
         _coerce_request({**_REQUEST_HEARTBEAT, "raw_prompt": "   "})
 
 
-# ---------------------------------------------------------------------------
 # Subprocess: python -m hyperloom.agents.robustness.runtime.cli tick
-# ---------------------------------------------------------------------------
 
 
 def _agent_root() -> Path:
@@ -247,9 +243,7 @@ def test_subprocess_tick_help_smoke():
     assert "tick" in proc.stdout
 
 
-# ---------------------------------------------------------------------------
 # Multi-node options plumbing
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

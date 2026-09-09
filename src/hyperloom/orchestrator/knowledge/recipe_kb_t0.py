@@ -32,16 +32,11 @@ log = logging.getLogger(__name__)
 
 
 def _default_status_emitter(line: str) -> None:
-    """Default ``on_status`` callback — log the banner line at INFO.
-
-    Args:
-        line (str): The status banner line to emit.
-    """
+    """Default ``on_status`` callback — log the banner line at INFO."""
     log.info("%s", line)
 
 
-# Numeric workload knobs threaded into the KB ``prefer`` block so a
-# closer-workload recipe is reranked first.
+# Numeric workload knobs threaded into the KB ``prefer`` block so a closer-workload recipe is reranked first.
 _PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
     "tp",
     "ep",
@@ -53,19 +48,7 @@ _PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
 
 
 def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, Any]:
-    """Assemble the ``prefer`` similarity hints from SharedState.
-
-    Only non-empty values are included; the dispatcher skips absent
-    fields. ``quant_scheme`` / ``workload_mode`` ride on the per-baseline
-    ``baseline_workload_extra`` map when present.
-
-    Args:
-        shared_state: The live SharedState carrying workload knobs.
-        framework_version: The resolved framework version, included when set.
-
-    Returns:
-        The ``prefer`` similarity-hint dict (non-empty fields only).
-    """
+    """Assemble the ``prefer`` similarity hints from SharedState."""
     prefer: dict[str, Any] = {}
     for attr in _PREFER_NUMERIC_ATTRS:
         val = getattr(shared_state, attr, None)
@@ -84,34 +67,13 @@ def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, A
 
 
 def _warm_recipe_source(row: Mapping[str, Any] | None, kb: Any) -> str:
-    """Return the source tag for a Recipe warm-start row.
-
-    Args:
-        row: Unused; retained for call-site compatibility.
-        kb: Recipe backend or read-only compatibility adapter.
-
-    Returns:
-        A stable backend source tag.
-    """
+    """Return the source tag for a Recipe warm-start row."""
     del row
     return str(getattr(kb, "backend_name", "") or "recipe-kb")
 
 
 def _recipe_is_actionable(row: Mapping[str, Any]) -> bool:
-    """True when a warm recipe carries something worth replaying or priors.
-
-    A View that reports ``replayable`` / ``replay_material_available`` is
-    trusted verbatim. Otherwise a bare draft anchor (identity + tracing tags
-    but no champion / experiential lists) is NOT actionable, so warm-replay
-    never applies an empty config or starves the specialist prompt.
-
-    Args:
-        row: A warm recipe row to inspect.
-
-    Returns:
-        ``True`` when the row is replayable, or carries a usable config,
-        positive throughput, or any experiential list worth replaying.
-    """
+    """True when a warm recipe carries something worth replaying or priors."""
     if not isinstance(row, Mapping):
         return False
     if isinstance(row.get("replay_material_available"), bool):
@@ -165,12 +127,7 @@ def _with_exact_history(
 
 
 def _config_replay_args_envs(row: Mapping[str, Any]) -> tuple[str, dict[str, str]]:
-    """Extract a replayable ``(args, envs)`` pair from a row's best_config.
-
-    Reads the canonical ``extra_server_args`` field and the nested env map
-    under ``extra_envs`` / ``envs``. Returns empty values when nothing
-    replayable is present.
-    """
+    """Extract a replayable ``(args, envs)`` pair from a row's best_config."""
     best_config = row.get("best_config") if isinstance(row.get("best_config"), Mapping) else {}
     args = str(best_config.get("extra_server_args") or "").strip()
     envs = best_config.get("extra_envs") or {}
@@ -184,8 +141,8 @@ def _has_replayable_config(row: Mapping[str, Any]) -> bool:
     if not isinstance(row, Mapping):
         return False
     if isinstance(row.get("replay_material_available"), bool):
-        # Remote candidate material is inspected by its owning AgentKB SDKs
-        # while isolated; T0 receives only this capability bit.
+        # Remote candidate material is inspected by its owning AgentKB SDKs while isolated; T0 receives only this
+        # capability bit.
         return bool(row.get("replay_material_available"))
     if isinstance(row.get("replay_config_available"), bool):
         return bool(row.get("replay_config_available"))
@@ -223,32 +180,7 @@ def _donor_is_trustworthy(
     target_isl: Any = None,
     target_osl: Any = None,
 ) -> bool:
-    """Gate a BORROWED (cross-model) warm-replay config donor.
-
-    Borrowing a champion config on a loose same-arch match empirically produced
-    near-zero or negative replay gains: cross-architecture configs, donors whose
-    architecture is ``unknown``, and donors whose own validated gain was zero
-    ("reproduce baseline" no-ops). A borrowed donor must therefore satisfy ALL:
-
-    * a replayable champion config (args or envs);
-    * a positive validated/session gain (rejects zero-gain donors);
-    * a concrete architecture (not ``unknown``) equal to the target's;
-    * complete, matching workload-shape fields when the target declares them.
-
-    This is only applied to BORROWED donors — a true-self (identity ``exact``)
-    replay is never gated, preserving the "reproduce my own champion" contract.
-
-    Args:
-        donor: Candidate donor recipe row.
-        target_arch_slug: Architectures slug of the workload being optimized.
-        target_model_type: Model type of the workload being optimized.
-        target_conc: Target concurrency (optional shape hint).
-        target_isl: Target input sequence length (optional shape hint).
-        target_osl: Target output sequence length (optional shape hint).
-
-    Returns:
-        ``True`` when the donor is safe to borrow for warm-replay.
-    """
+    """Gate a BORROWED (cross-model) warm-replay config donor."""
     if not isinstance(donor, Mapping):
         return False
     if isinstance(donor.get("replayable"), bool) and not donor.get("replayable"):
@@ -329,20 +261,7 @@ def _find_config_donor(
     target_isl: Any = None,
     target_osl: Any = None,
 ) -> tuple[Mapping[str, Any] | None, str, float]:
-    """Borrow a replayable config through the standard degradation tiers.
-
-    Used when no donor config has been established yet — the identity match
-    may have no replayable best_config, or it may have one at a non-exact
-    tier that failed :func:`_donor_is_trustworthy`. The identity row still
-    supplies priors, but the active warm-replay needs a champion config to
-    apply. Search and compatibility checks match the main T0 cascade:
-    same-architecture class, same GPU ISA, then nearest non-newer framework
-    version at the target precision. Each candidate must additionally clear
-    :func:`_donor_is_trustworthy` (positive validated gain, concrete matching
-    architecture, matching workload shape) so a borrowed config is both
-    stack-compatible and evidence-backed. Returns
-    ``(donor_row, donor_tier, donor_confidence)`` or ``(None, "", 0.0)``.
-    """
+    """Borrow a replayable config through the standard degradation tiers."""
     if not (model_type or arch_slug):
         return None, "", 0.0
     common = {
@@ -427,19 +346,7 @@ def _build_warm_start_context(
     config_donor_tier: str = "",
     config_donor_confidence: float | None = None,
 ) -> dict[str, Any]:
-    """Build the model-facing WarmStartContext from a KB recipe row.
-
-    ``status`` is one of ``hit`` / ``seed_only`` / ``miss`` / ``error``.
-    Current remote records expose only match/history/advisory metadata here;
-    PRELUDE reads replay data through the section SDKs. Local legacy records
-    retain their ready-to-replay projection.
-
-    Config-donor decoupling: the experiential lists (priors) always come from the
-    identity match ``recipe``, while ``recommended_replay`` is sourced from
-    ``config_donor`` (the identity row itself when ``config_tier="self"``, or a
-    borrowed same-architecture sibling). The donor's transfer confidence governs
-    the downstream replay gate, not the identity-match confidence.
-    """
+    """Build the model-facing WarmStartContext from a KB recipe row."""
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
     current_remote = bool(isinstance(recipe, Mapping) and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE)
@@ -945,31 +852,7 @@ def run_t0_anchor(
     session_dir: Path | None = None,
     save_state: bool = True,
 ) -> None:
-    """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search.
-
-    Anchors identity, then cascades exact/model/hardware/framework tiers; in
-    remote mode a selected donor is materialized via ``select_candidate``.
-    Mutates ``shared_state`` in place (warm_start_* fields) and persists when
-    ``save_state=True``. ``session_dir`` is required.
-
-    Args:
-        kb: The recipe-KB dispatcher used for the read-modify-write anchor.
-        shared_state: The live SharedState, mutated in place with warm-start
-            results.
-        workload: The model/workload identifier.
-        hw: The hardware/GPU identifier.
-        image_digest: Optional container image digest stamped as a trace tag.
-        stack_fingerprint: Optional stack-version fingerprint mapping.
-        extra_attrs: Optional extra identity/trace attributes (model_class,
-            framework, session ids).
-        resume: When ``True``, re-anchor even if already anchored.
-        on_status: Optional status-line callback; defaults to INFO logging.
-        session_dir: The session directory (required).
-        save_state: When ``True``, persist the mutated SharedState.
-
-    Raises:
-        ValueError: If ``session_dir`` is ``None``.
-    """
+    """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
     emit = on_status or _default_status_emitter
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
@@ -989,9 +872,8 @@ def run_t0_anchor(
 
     workload = (workload or "").strip() or "unknown_model"
     hw = (hw or "").strip() or "unknown_gpu"
-    # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``),
-    # resolved once so the cid, the stored ``hardware`` field, and every
-    # warm-start tier below share an identical, isolated key.
+    # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``), resolved once so the cid, the stored
+    # ``hardware`` field, and every warm-start tier below share an identical, isolated key.
     from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
 
     hw = kb_hardware_slug(hw, **resolve_kb_topology())
@@ -1012,8 +894,7 @@ def run_t0_anchor(
             timespec="seconds",
         )
 
-    # Backfill operator-tracing metadata; T0 only stamps metadata (best_config
-    # preserved, rewritten at CLOSE).
+    # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
     _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
     _model_class = str(_extra.get("model_class") or "").strip()
     _framework = str(
@@ -1062,8 +943,8 @@ def run_t0_anchor(
         shared_state.framework_version = _fw_version
 
     if getattr(kb, "mode", "") != "remote":
-        # Read-modify-write the selected store's exact authority row so the stamp
-        # does not clobber fields or trigger a broad remote warm-start scan.
+        # Read-modify-write the selected store's exact authority row so the stamp does not clobber fields or trigger a
+        # broad remote warm-start scan.
         try:
             live = kb.get_authoritative_recipe(canonical_id=cid) or {}
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -1115,10 +996,9 @@ def run_t0_anchor(
                 if new and new != "unknown":
                     sfp_payload[fp_key] = new
 
-        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras
-        # copies SharedState.isl/osl into the row, which under AgentX are the
-        # inert 1024/1024 placeholders -- so anchoring here mis-tags the
-        # cross-session row exactly as the CLOSE-time write would.
+        # Third Recipe sink; see agentx_kb_blocked. _build_t0_trace_extras copies SharedState.isl/osl into the
+        # row, which under AgentX are the inert 1024/1024 placeholders -- so anchoring here mis-tags the cross-session
+        # row exactly as the CLOSE-time write would.
         from hyperloom.orchestrator.actions.executors._workload_envs import (
             agentx_kb_blocked,
         )
@@ -1193,8 +1073,8 @@ def run_t0_anchor(
         warm_tier = "seed_only"
         warm_conf = 0.0
 
-    # Config-donor decoupling: the identity match supplies priors; borrow a
-    # champion config from the nearest same-arch sibling when it has none.
+    # Config-donor decoupling: the identity match supplies priors; borrow a champion config from the nearest same-arch
+    # sibling when it has none.
     config_donor: Mapping[str, Any] | None = None
     config_donor_tier = ""
     config_donor_conf = 0.0
@@ -1206,8 +1086,8 @@ def run_t0_anchor(
     _tgt_conc = getattr(shared_state, "conc", None)
     _tgt_isl = getattr(shared_state, "isl", None)
     _tgt_osl = getattr(shared_state, "osl", None)
-    # A true-self (identity ``exact``) champion always replays; a cross-model
-    # borrow must clear the trustworthiness gate before it becomes the donor.
+    # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
+    # gate before it becomes the donor.
     if (
         not current_remote_point
         and warm_point
@@ -1246,8 +1126,7 @@ def run_t0_anchor(
             config_donor_tier = dtier
             config_donor_conf = dconf
 
-    # Keep warm.json envelope shape stable; new readers prefer
-    # shared_state.warm_start_recipe.
+    # Keep warm.json envelope shape stable; new readers prefer shared_state.warm_start_recipe.
     warm_text = json.dumps(
         {"points": [warm_point] if warm_point else []},
         sort_keys=True,
@@ -1279,8 +1158,7 @@ def run_t0_anchor(
     except OSError as exc:
         log.warning("warm_start snapshot write failed: %s", exc)
 
-    # WarmStartContext: model-facing projection of the KB result, with an
-    # explicit hit/seed_only/miss status.
+    # WarmStartContext: model-facing projection of the KB result, with an explicit hit/seed_only/miss status.
     if not warm_point:
         wsc_status = "miss"
     elif warm_tier == "seed_only":

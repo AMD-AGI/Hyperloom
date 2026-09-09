@@ -8,8 +8,7 @@ from __future__ import annotations
 import json
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.specialists.profile                                            #
+# --------------------------------------------------------------------------- # orchestrator.specialists.profile #
 # --------------------------------------------------------------------------- #
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
@@ -40,7 +39,7 @@ def test_uses_whole_machine_gpu_lane() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.actions.executors._accuracy_gate.parse_quality_gate            #
+# orchestrator.actions.executors._accuracy_gate.parse_quality_gate #
 # --------------------------------------------------------------------------- #
 def test_parse_quality_gate_paths(tmp_path) -> None:
     from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
@@ -65,9 +64,8 @@ def test_parse_quality_gate_paths(tmp_path) -> None:
     assert res3["quality_gate"] == {"passed": True}
 
 
-# --------------------------------------------------------------------------- #
-# orchestrator.trace.trace_env.env_flag                                        #
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # orchestrator.trace.trace_env.env_flag
+# # --------------------------------------------------------------------------- #
 def test_env_flag_tokens(monkeypatch) -> None:
     from hyperloom.orchestrator.trace import trace_env
 
@@ -82,7 +80,7 @@ def test_env_flag_tokens(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# orchestrator.bus.gpu_pool._parse_gpu_list                                   #
+# orchestrator.bus.gpu_pool._parse_gpu_list #
 # --------------------------------------------------------------------------- #
 def test_parse_gpu_list() -> None:
     from hyperloom.orchestrator.bus.gpu_pool import _parse_gpu_list

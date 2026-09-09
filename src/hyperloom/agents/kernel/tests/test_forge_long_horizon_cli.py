@@ -1,23 +1,4 @@
-"""Regression tests for the long-horizon KernelForge CLI integration.
-
-The forge-loop runs in a hard-killable subprocess, so a long-horizon campaign is
-routinely terminated mid-iteration. Everything here pins the contract that makes
-such a run salvageable rather than wasted:
-
-  * the CLI invocation + isolated process group that the kill relies on,
-  * the two recovery channels submit trusts, in order --
-    ``<workspace>/forge_experiments/best_result.json`` (the published manifest)
-    first, then ``<experiments_dir>/hyperloom.json`` (the caller-owned
-    checkpoint) -- and what happens when they disagree,
-  * the rule that a timed-out run with NO validated recovery discards its
-    measurements and fails, while one WITH a validated recovery returns a
-    salvaged, exportable best commit,
-  * the precondition that makes any of that trustworthy -- a campaign starts
-    fresh or not at all -- and the workspace hygiene around it: a stale campaign
-    worktree is replaced rather than reused, and an in-place campaign (which
-    runs *in* the developer's checkout) keeps every campaign-owned path under
-    the output dir and hands the checkout back as it found it.
-"""
+"""Regression tests for the long-horizon KernelForge CLI integration."""
 
 from __future__ import annotations
 
@@ -175,13 +156,7 @@ def test_all_kernel_sources_are_remapped_into_prepared_worktree(tmp_path):
 
 
 def test_untracked_kernel_inside_a_git_repo_is_not_worktree_prepared(tmp_path):
-    """A repo that indexes only part of its tree must not swallow the kernel.
-
-    A scratch git repo created over a framework install can track only one
-    subtree (``vllm/`` and nothing else). ``git worktree add`` still succeeds
-    there, but the checkout has no copy of an untracked kernel, so preparation
-    has to decline and let the caller fall back to the no-git scratch path.
-    """
+    """A repo that indexes only part of its tree must not swallow the kernel."""
     repo, _kernel = _make_repo(tmp_path)
     untracked = repo / "aiter" / "ops" / "gemm.py"
     untracked.parent.mkdir(parents=True)
@@ -411,13 +386,7 @@ def test_nonzero_exit_with_sidecar_timings_never_exports_dirty_worktree(
 
 
 def test_placeholder_driver_stages_in_workspace_without_clobbering(tmp_path):
-    """The delegated driver is staged as a hidden unique file in the workspace.
-
-    ``campaign_config._relative_file`` rejects a ``--driver`` outside
-    ``--workspace``, so every staged driver must live inside it. The
-    ``.forge_driver_`` prefix keeps it out of the keep/revert patch, and
-    ``_finalize_forge_workspace`` cleans it up by prefix after the run.
-    """
+    """The delegated driver is staged as a hidden unique file in the workspace."""
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     tracked_driver = workspace / "forge_driver.py"
@@ -459,12 +428,7 @@ def test_finalize_removes_staged_drivers_from_the_live_repo(tmp_path):
 
 
 def test_finalize_leaves_the_live_repo_exclude_file_as_it_found_it(tmp_path):
-    """Staging a driver edits the caller's repository, so cleanup undoes it.
-
-    ``--git-common-dir`` resolves to the live repository even from a worktree, so
-    the entry outlived the run and reached sessions that never enabled this
-    route. Pre-existing content has to survive the removal untouched.
-    """
+    """Staging a driver edits the caller's repository, so cleanup undoes it."""
     workspace = tmp_path / "repo"
     workspace.mkdir()
     _git(workspace, "init", "-q")
@@ -491,12 +455,7 @@ def test_finalize_leaves_the_live_repo_exclude_file_as_it_found_it(tmp_path):
 
 
 def test_finalize_repoints_artifact_paths_at_the_relocated_campaign(tmp_path):
-    """Relocating the campaign moves the producer's bundle with it.
-
-    The producer publishes inside ``<workspace>/forge_experiments``, so the paths
-    a caller receives named a directory this cleanup had just emptied -- and the
-    consumer that builds the deploy snapshot afterwards silently found nothing.
-    """
+    """Relocating the campaign moves the producer's bundle with it."""
     workspace = tmp_path / "repo"
     published = workspace / "forge_experiments" / "rewrite_applyback" / "best"
     published.mkdir(parents=True)
@@ -536,11 +495,7 @@ def test_finalize_repoints_artifact_paths_at_the_relocated_campaign(tmp_path):
 
 
 def test_finalize_keeps_both_campaigns_when_the_destination_is_populated(tmp_path):
-    """A populated ``forge_experiments`` no longer aborts in-place cleanup.
-
-    ``--experiments-dir`` points at ``output_dir/forge_experiments`` and mkdir's
-    it, so the destination always exists; only real artifacts force a rename.
-    """
+    """A populated ``forge_experiments`` no longer aborts in-place cleanup."""
     workspace = tmp_path / "repo"
     (workspace / "forge_experiments").mkdir(parents=True)
     (workspace / "forge_experiments" / "best_result.json").write_text("{}\n")
@@ -586,14 +541,7 @@ def test_finalize_reuses_an_empty_destination_for_the_campaign(tmp_path):
 
 
 def test_inplace_restore_returns_the_original_working_tree_bytes(tmp_path):
-    """In-place mode edits the live repo, so restore must be byte-exact.
-
-    ``_prepare_inplace`` snapshots pre-existing dirty content into a baseline
-    commit, so the index/working-tree split is folded into "unstaged" -- what is
-    guaranteed is that the *content* on disk is identical afterwards, the files
-    are still dirty, and the repo is back on its original branch with no forge
-    temp branch left behind.
-    """
+    """In-place mode edits the live repo, so restore must be byte-exact."""
     repo, source = _make_repo(tmp_path)
     binary = repo / "payload.bin"
     binary.write_bytes(b"\x00BASELINE\xff")
@@ -626,9 +574,8 @@ def test_inplace_restore_returns_the_original_working_tree_bytes(tmp_path):
     status = _git(repo, "status", "--short")
     assert "kernel.py" in status
     assert "payload.bin" in status
-    # ... and the index is back at the original HEAD (the pre-forge staged /
-    # unstaged split is deliberately collapsed into unstaged by the baseline
-    # snapshot, so nothing is silently left staged).
+    # ... and the index is back at the original HEAD (the pre-forge staged / unstaged split is deliberately collapsed
+    # into unstaged by the baseline snapshot, so nothing is silently left staged).
     assert _git(repo, "diff", "--cached") == ""
 
 
@@ -693,8 +640,8 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         target_functions=["kernel_impl", "device_kernel"],
     )
 
-    # The loop result is a named outcome; unpacking it as a bare tuple is what
-    # silently broke the recovery channels before.
+    # The loop result is a named outcome; unpacking it as a bare tuple is what silently broke the recovery channels
+    # before.
     assert forge_submit.ForgeLoopOutcome._fields == (
         "baseline_ms",
         "best_ms",
@@ -750,40 +697,29 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     for flag, value in expected_flags.items():
         assert flag in command, flag
         assert command[command.index(flag) + 1] == value, flag
-    # An option forge-loop does not declare is never worth sending: a producer
-    # that tolerates it drops it silently, and one that does not aborts the child
-    # before the campaign starts. Either way the value never reaches the loop, so
-    # the argv must not imply otherwise. Shapes travel in the invocation spec.
+    # An option forge-loop does not declare is never worth sending: a producer that tolerates it drops it silently,
+    # and one that does not aborts the child before the campaign starts.
     for unsupported in ("--kernel-kind", "--shapes-json", "--e2e-pct", "--max-iters"):
         assert unsupported not in command, unsupported
 
     assert captured["env"]["GPU_TARGET"] == "gfx950"
-    # The card, alongside the target it builds for: KernelForge addresses a
-    # kernel's experience by the former, and declines to read or write without
-    # it, so a run that carried only the target would accumulate nothing.
+    # The card, alongside the target it builds for: KernelForge addresses a kernel's experience by the former, and
+    # declines to read or write without it, so a run that carried only the target would accumulate nothing.
     assert captured["env"]["GPU_TYPE"] == "mi355x"
-    # KernelForge ships in this distribution now, so the child imports it from
-    # the same install as the parent and no checkout root is grafted onto
-    # PYTHONPATH. Asserting the graft is *gone* -- rather than that some value
-    # is present -- is what keeps a resurrected override from silently
-    # shadowing the packaged copy.
+    # KernelForge ships in this distribution now, so the child imports it from the same install as the parent and no
+    # checkout root is grafted onto PYTHONPATH.
     assert captured["env"].get("PYTHONPATH") == os.environ.get("PYTHONPATH")
     # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
     assert captured["popen_kwargs"]["stdout"] is subprocess.PIPE
     assert captured["popen_kwargs"]["stderr"] is subprocess.PIPE
     assert captured["popen_kwargs"]["cwd"] == str(workspace)
-    # The subprocess wait is bounded by the absolute deadline, not by wall time
-    # already spent before the loop started.
+    # The subprocess wait is bounded by the absolute deadline, not by wall time already spent before the loop started.
     assert 100.0 < captured["communicate_timeout"] <= 120.0
 
 
 def test_failure_tail_prefers_the_usage_error_over_the_transcript():
-    """A producer that rejected its own argv must say so in the raised error.
-
-    A usage error is the shape cross-repo option drift takes, and the CLI prints
-    it instead of the progress output a plain tail would capture.
-    """
+    """A producer that rejected its own argv must say so in the raised error."""
     tail = forge_submit._forge_failure_tail(
         "  [prepare] task already conforms\nUsage: main forge-loop [OPTIONS]\nError: No such option '--shapes-json'.\n"
     )
@@ -807,12 +743,7 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
     tmp_path,
     monkeypatch,
 ):
-    """The orchestrator sees the raised error, never the forge log.
-
-    Reporting only ``rc=2`` made a producer that refused its own argv look
-    identical to one that crashed while measuring, which is how a cross-repo
-    option removal stayed invisible.
-    """
+    """The orchestrator sees the raised error, never the forge log."""
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     (workspace / "kernel.py").write_text("pass\n")
@@ -1013,12 +944,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
 
 
 def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
-    """A hard kill must yield THIS run's checkpoint, never a stale one.
-
-    ``_run_loop_via_cli`` clears both recovery artifacts before launching, so a
-    checkpoint returned after a kill can only have been written by the run that
-    was killed.
-    """
+    """A hard kill must yield THIS run's checkpoint, never a stale one."""
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -1129,29 +1055,20 @@ def test_forced_termination_escalates_to_sigkill_and_keeps_partial_output(monkey
 
     assert stdout == "partial stdout\nfinal stdout"
     assert stderr == "partial stderr\nfinal stderr"
-    # SIGTERM, SIGKILL once the grace period expires, then a final sweep of the
-    # group after the parent is reaped (a re-parented kernel backend child would
-    # otherwise survive its parent).
+    # SIGTERM, SIGKILL once the grace period expires, then a final sweep of the group after the parent is reaped (a
+    # re-parented kernel backend child would otherwise survive its parent).
     assert signals == [
         (process.pid, signal.SIGTERM),
         (process.pid, signal.SIGKILL),
         (process.pid, signal.SIGKILL),
     ]
-    # The escalation also sweeps captured descendants, so a kernel backend's own
-    # grandchildren cannot outlive the group.
+    # The escalation also sweeps captured descendants, so a kernel backend's own grandchildren cannot outlive the
+    # group.
     assert killed == [(descendants, signal.SIGKILL)]
 
 
 def _grandchild_running(pid: int) -> bool:
-    """True only while ``pid`` exists and is not a reaped zombie.
-
-    Reads ``/proc/<pid>/stat`` defensively: the file can vanish between an
-    existence check and the read once the kernel reaps the process, so a
-    missing file (FileNotFoundError / ProcessLookupError) means "not running"
-    -- the success condition here -- rather than a test error. Guarding the
-    read this way removes a TOCTOU race that made the assertion flaky under
-    load (it surfaced as ``FileNotFoundError: /proc/<pid>/stat`` on CI).
-    """
+    """True only while ``pid`` exists and is not a reaped zombie."""
     try:
         state = Path(f"/proc/{pid}/stat").read_text().split()[2]
     except (FileNotFoundError, ProcessLookupError, IndexError):
@@ -1194,9 +1111,7 @@ def test_forced_termination_leaves_no_running_grandchild(tmp_path):
         stdout, _stderr = forge_submit._terminate_forge_process(proc, grace_sec=2)
 
         assert "child-started" in stdout
-        # Generous: a loaded CI runner can take seconds to reap the group after
-        # SIGKILL. The assertion is still "the grandchild must die" -- only the
-        # patience is relaxed, so a real leak still fails here.
+        # Generous: a loaded CI runner can take seconds to reap the group after SIGKILL.
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if not _grandchild_running(child_pid):
@@ -1219,11 +1134,7 @@ def test_disagreeing_recovery_channels_keep_the_published_manifest(
     monkeypatch,
     caplog,
 ):
-    """Both channels validated but naming different commits is a forge bug.
-
-    The published manifest is rewritten on every KEEP, the checkpoint only on
-    the last KEEP callback, so the manifest wins -- loudly, never silently.
-    """
+    """Both channels validated but naming different commits is a forge bug."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "attempt-disagree"
     prompt = tmp_path / "prompt.md"
@@ -1279,18 +1190,14 @@ def test_disagreeing_recovery_channels_keep_the_published_manifest(
     assert result["best_commit"] != captured["checkpointed_commit"]
     optimized = output_dir / "optimized_versions" / "v1_forge.py"
     assert optimized.read_text() == "PUBLISHED_BEST\n"
-    # The warning only fires when BOTH channels validated, which is what makes
-    # this a precedence assertion rather than a "checkpoint was ignored" one.
+    # The warning only fires when BOTH channels validated, which is what makes this a precedence assertion rather than
+    # a "checkpoint was ignored" one.
     assert "disagree" in caplog.text
     assert "keeping the published manifest" in caplog.text
 
 
 def test_checkpoint_naming_an_unavailable_commit_is_rejected(tmp_path):
-    """A checkpoint pointing at a commit that is not in the workspace is junk.
-
-    Trusting it would export the current (unvalidated) worktree under a commit
-    that never existed. Rejection must also leave the workspace untouched.
-    """
+    """A checkpoint pointing at a commit that is not in the workspace is junk."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "output"
     output_dir.mkdir()
@@ -1347,8 +1254,8 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
         experiments = workspace / "forge_experiments"
         experiments.mkdir(parents=True, exist_ok=True)
         (experiments / "best_result.json").write_text(json.dumps(_published_manifest(best_commit)))
-        # The kill lands mid-iteration, so the working tree holds an unvalidated
-        # candidate that must never reach the exported artifacts.
+        # The kill lands mid-iteration, so the working tree holds an unvalidated candidate that must never reach the
+        # exported artifacts.
         kernel.write_text("UNVERIFIED_MID_ITERATION\n")
         _git(workspace, "add", "-u")
         captured.update(
@@ -1399,8 +1306,8 @@ def test_submit_timeout_salvages_only_the_validated_best_commit(
     assert "[micro_speedup] 1.5000x" in report
     assert "[correctness] pass" in report
 
-    # Campaign state lives under the output dir, never inside the live repo, and
-    # the isolated worktree + temp branch are retained afterwards for inspection.
+    # Campaign state lives under the output dir, never inside the live repo, and the isolated worktree + temp branch
+    # are retained afterwards for inspection.
     assert (output_dir / "forge_experiments").is_dir()
     assert not (repo / "forge_experiments").exists()
     assert captured["workspace"].exists()
@@ -1478,12 +1385,7 @@ def test_submit_timeout_without_validated_recovery_discards_measurements(
     tmp_path,
     monkeypatch,
 ):
-    """No validated commit -> the sidecar's numbers are not evidence.
-
-    After a forced termination only a validated commit may produce a passing
-    report; the loop's self-reported baseline/best are dropped so nothing
-    downstream can promote an unverified kernel.
-    """
+    """No validated commit -> the sidecar's numbers are not evidence."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "attempt-unrecoverable"
     prompt = tmp_path / "prompt.md"
@@ -1524,8 +1426,8 @@ def test_submit_timeout_without_validated_recovery_discards_measurements(
     assert not (output_dir / "optimized_versions").exists()
     assert not (output_dir / "optimization_report.md").exists()
 
-    # forge-loop rejects a soft budget below its own one-hour minimum, so submit
-    # floors --max-hours there while still hard-killing at timeout_s.
+    # forge-loop rejects a soft budget below its own one-hour minimum, so submit floors --max-hours there while still
+    # hard-killing at timeout_s.
     assert captured["max_hours"] >= forge_submit._FORGE_MIN_BUDGET_SEC / 3600.0
     assert captured["timeout_s"] == 10
 
@@ -1570,9 +1472,8 @@ def test_submit_non_timeout_error_fails_and_uses_unique_retained_branch(
     branches = [_git(workspace, "branch", "--show-current") for workspace in workspaces]
     assert [result["returncode"] for result in results] == [1, 1]
     assert all("forge cli loop failed" in result["stderr_tail"] for result in results)
-    # Each attempt retains its isolated worktree for inspection under its own
-    # output dir, on a unique Forge branch, so a repeat run on the same repo is
-    # never blocked by (or reuses) a prior attempt.
+    # Each attempt retains its isolated worktree for inspection under its own output dir, on a unique Forge branch, so
+    # a repeat run on the same repo is never blocked by (or reuses) a prior attempt.
     assert len(workspaces) == 2
     assert all(workspace.is_dir() for workspace in workspaces)
     assert len(set(branches)) == 2
@@ -1678,13 +1579,7 @@ def test_nogit_scratch_bootstraps_a_committable_scratch_repo(tmp_path):
 
 
 def test_nogit_scratch_keeps_regenerated_bytecode_out_of_the_patch(tmp_path):
-    """Caches written while the loop runs must not reach the published diff.
-
-    The scratch copy skips pre-existing caches, but the loop imports what it
-    edits and writes new ones. Committed, they reach the patch as binary hunks
-    with no full index line, which ``git apply`` refuses — so a solution
-    published to the KB could not be replayed.
-    """
+    """Caches written while the loop runs must not reach the published diff."""
     source_root = tmp_path / "source"
     source_root.mkdir()
     source = source_root / "kernel.py"
@@ -1702,8 +1597,8 @@ def test_nogit_scratch_keeps_regenerated_bytecode_out_of_the_patch(tmp_path):
     assert prepared is not None
     workspace, kernel, base_commit = prepared
 
-    # Stands in for the import that happens the moment the loop benchmarks its
-    # edit, which is what actually produced the unappliable patch.
+    # Stands in for the import that happens the moment the loop benchmarks its edit, which is what actually produced
+    # the unappliable patch.
     cache = Path(workspace) / "__pycache__"
     cache.mkdir()
     (cache / "kernel.cpython-312.pyc").write_bytes(b"\xcb\x0d\x0d\x0a\x00binary")
@@ -1720,18 +1615,7 @@ def test_nogit_scratch_keeps_regenerated_bytecode_out_of_the_patch(tmp_path):
 
 
 def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypatch):
-    """An in-place campaign must leave the developer's checkout as it found it.
-
-    In-place mode hands forge the *live* repo as its workspace, so every
-    campaign-owned path that can live outside it -- ``--experiments-dir``, the
-    CLI sidecar -- is addressed at the output dir up front. The generated
-    driver is the one exception: the long-horizon CLI resolves ``--driver``
-    relative to ``--workspace`` and rejects anything outside it, so it is
-    staged in the checkout under a hidden ``.forge_driver_`` name and removed
-    during finalization. Pin both halves: what the loop is handed points at the
-    output dir (driver aside), and after the run the repo's tracked state,
-    branch and temp-branch set are exactly what they were before forge started.
-    """
+    """An in-place campaign must leave the developer's checkout as it found it."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "attempt-inplace"
     prompt = tmp_path / "prompt.md"
@@ -1798,8 +1682,8 @@ def test_inplace_campaign_state_never_lands_in_the_live_repo(tmp_path, monkeypat
     assert (output_dir / "forge_experiments").is_dir()
     assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == "VERIFIED_BEST\n"
 
-    # ... and the live checkout is handed back untouched: original branch, no
-    # forge temp branch, pre-forge bytes, nothing tracked left dirty.
+    # ... and the live checkout is handed back untouched: original branch, no forge temp branch, pre-forge bytes,
+    # nothing tracked left dirty.
     assert _git(repo, "branch", "--show-current") == "main"
     assert _git(repo, "branch", "--list", captured["branch"]) == ""
     assert source.read_text() == "BASELINE\n"
@@ -1818,11 +1702,7 @@ def test_inplace_restore_failure_is_surfaced_without_losing_the_result(
     monkeypatch,
     caplog,
 ):
-    """In-place cleanup touches the live repo, so its failure must be loud.
-
-    Restore is still attempted, the failure is reported rather than swallowed,
-    and the salvaged forge result survives it.
-    """
+    """In-place cleanup touches the live repo, so its failure must be loud."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "attempt-inplace-cleanup-failure"
     prompt = tmp_path / "prompt.md"
@@ -1888,13 +1768,7 @@ def test_retained_worktree_collision_skips_without_delete_or_nogit_fallback(
     tmp_path,
     monkeypatch,
 ):
-    """A retained worktree at the campaign path skips cleanly, never clobbering it.
-
-    ``output_dir/worktree`` is the fixed campaign workspace path and prior
-    attempts are retained for inspection. A collision must skip safely (rc 2)
-    without deleting the retained attempt and without reinterpreting the path as
-    a no-git scratch workspace.
-    """
+    """A retained worktree at the campaign path skips cleanly, never clobbering it."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "collision"
     retained = output_dir / "worktree"
@@ -1928,13 +1802,7 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
     tmp_path,
     monkeypatch,
 ):
-    """Every campaign starts fresh, or it does not start at all.
-
-    ``_run_loop_via_cli`` clears the two recovery artifacts up front so anything
-    found afterwards provably belongs to this run. If one cannot be cleared the
-    launch is refused -- silently proceeding would let a previous campaign's
-    checkpoint be salvaged as if this run had produced it.
-    """
+    """Every campaign starts fresh, or it does not start at all."""
     workspace = tmp_path / "worktree"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -1986,13 +1854,7 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
     monkeypatch,
     caplog,
 ):
-    """Two validated bests claiming the same iteration must not be blended.
-
-    Both channels can name a best for iteration N; when they name different
-    commits one of them is stale. The published manifest wins *entirely* --
-    commit AND measurements -- so the exported artifacts, the reported speedup
-    and the returned commit all describe one coherent result rather than a mix.
-    """
+    """Two validated bests claiming the same iteration must not be blended."""
     repo, source = _make_repo(tmp_path)
     output_dir = tmp_path / "results" / "attempt-same-iteration"
     prompt = tmp_path / "prompt.md"
@@ -2059,8 +1921,8 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
             kernel_repo=str(repo),
         )
 
-    # The warning only fires when BOTH channels validated, so reaching it proves
-    # the conflict was real and not a one-sided rejection.
+    # The warning only fires when BOTH channels validated, so reaching it proves the conflict was real and not a
+    # one-sided rejection.
     assert "disagree" in caplog.text
     assert captured["published_commit"][:12] in caplog.text
     assert captured["checkpointed_commit"][:12] in caplog.text
@@ -2070,8 +1932,8 @@ def test_same_iteration_recovery_conflict_resolves_wholly_to_the_manifest(
     assert result["best_commit"] != captured["checkpointed_commit"]
     assert (output_dir / "optimized_versions" / "v1_forge.py").read_text() == "PUBLISHED_BEST\n"
 
-    # The manifest's own numbers are reported -- the checkpoint's faster
-    # best_ms=1.5 (a 2.0x claim) is not merged in behind the manifest's commit.
+    # The manifest's own numbers are reported -- the checkpoint's faster best_ms=1.5 (a 2.0x claim) is not merged in
+    # behind the manifest's commit.
     report = (output_dir / "optimization_report.md").read_text()
     assert "[micro_speedup] 1.5000x" in report
     assert "baseline_ms=3.0000 selected_ms=2.0000" in report
@@ -2217,13 +2079,7 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
 
 
 def _capabilities_payload(**overrides) -> dict:
-    """One capability payload, spelled exactly as the producer emits it.
-
-    Copied from ``kernelforge.rewrite_by_flydsl.protocol.capabilities()``.
-    ``test_capability_payload_matches_the_installed_producer`` re-derives it from
-    a real producer when one is on disk, so a rename on either side cannot leave
-    these tests passing against a payload nobody emits.
-    """
+    """One capability payload, spelled exactly as the producer emits it."""
     payload = {
         "rewrite_protocol_version": 2,
         "artifact_schema_versions": [2],
@@ -2273,8 +2129,8 @@ _SUPPORTED_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     driver_preparation=True,
 )
 
-# A producer predating driver preparation: it cannot author the measurement
-# driver, which is the one thing this route cannot supply itself.
+# A producer predating driver preparation: it cannot author the measurement driver, which is the one thing this route
+# cannot supply itself.
 _NO_PREPARATION_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     True,
     "capability_ok",
@@ -2284,8 +2140,7 @@ _NO_PREPARATION_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     source_kinds=("triton", "hip_cpp"),
 )
 
-# A producer that ports Triton only, as the route assumed before the source
-# language became part of the handshake.
+# A producer that ports Triton only, as the route assumed before the source language became part of the handshake.
 _TRITON_ONLY_CAPABILITIES = _flydsl_rewrite.RewriteCapabilities(
     True,
     "capability_ok",
@@ -2351,9 +2206,8 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
         "forge-rewrite-by-flydsl",
         "--capabilities-json",
     ]
-    # The child inherits this process's environment untouched: the producer is
-    # the installed kernelforge, so there is no root left to graft onto
-    # PYTHONPATH.
+    # The child inherits this process's environment untouched: the producer is the installed kernelforge, so there is
+    # no root left to graft onto PYTHONPATH.
     assert captured["env"] == os.environ
 
 
@@ -2377,11 +2231,7 @@ def test_capability_probe_rejects_an_incompatible_producer(monkeypatch, override
 
 
 def test_capability_probe_rejects_a_renamed_protocol_field(monkeypatch):
-    """A producer that spells the version under any other key is unreadable.
-
-    The consumer once read a ``protocol_versions`` list no producer has ever
-    emitted, which made every real handshake decline the route silently.
-    """
+    """A producer that spells the version under any other key is unreadable."""
     payload = _capabilities_payload()
     del payload["rewrite_protocol_version"]
     payload["protocol_versions"] = [2]
@@ -2416,31 +2266,20 @@ def test_capability_probe_reports_a_producer_that_rejects_the_flag(monkeypatch):
 
 
 def test_capability_payload_matches_the_installed_producer():
-    """The real producer must satisfy this consumer, unstubbed.
-
-    Every other capability test builds the payload itself, so both halves of
-    this contract can drift into agreeing only with their own fixtures. This
-    runs the installed producer and pins its payload against the fixture, which
-    is the one check that catches a rename on either side.
-
-    It used to resolve the producer from ``$FORGE_PATH`` and skip when that
-    named no checkout carrying the rewrite command -- so in practice it never
-    ran. The producer is part of this distribution now, and a missing rewrite
-    command is a real failure rather than a reason to skip.
-    """
+    """The real producer must satisfy this consumer, unstubbed."""
     capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert capabilities.reason == "capability_ok"
     assert set(capabilities.frameworks) >= {"aiter", "sglang", "vllm"}
-    # The route now asks the producer which sources it can port, so a producer
-    # that stopped naming them would silently decline every candidate.
+    # The route now asks the producer which sources it can port, so a producer that stopped naming them would silently
+    # decline every candidate.
     assert "triton" in capabilities.accepted_sources()
     # And a source-less kind must not appear on either advertised list.
     assert not capabilities.accepted_sources() & {"aiter_asm", "prebuilt", "asm"}
 
-    # Ordering is not contractual, but the key set and value shapes are: a
-    # fixture that no longer mirrors them stops protecting the other tests.
+    # Ordering is not contractual, but the key set and value shapes are: a fixture that no longer mirrors them stops
+    # protecting the other tests.
     proc = subprocess.run(
         [
             sys.executable,
@@ -2489,12 +2328,7 @@ def test_rewrite_route_needs_the_explicit_switch(tmp_path, monkeypatch):
 
 
 def test_a_traced_triton_kernel_is_rewritable_despite_its_python_language(tmp_path, monkeypatch):
-    """The curated kind decides, not the file's language.
-
-    The tracer reports a Triton kernel's ``source_type`` as ``python`` and
-    records that it is Triton in ``kernel_kind``. Reading the language alone
-    declined every Triton kernel the tracer resolved, which is all of them.
-    """
+    """The curated kind decides, not the file's language."""
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
     probe = _RecordingProbe(_SUPPORTED_CAPABILITIES)
 
@@ -2522,12 +2356,7 @@ def test_a_flydsl_kernel_is_declined_whatever_its_language_says(tmp_path, monkey
 
 
 def test_the_route_requires_a_producer_that_authors_the_driver(tmp_path, monkeypatch):
-    """An operator's real invocation is not rebuildable from traced shapes.
-
-    Quantized and routed operands carry scale and index meanings the trace does
-    not describe, so the producer writes the driver from the invocation spec. A
-    producer that cannot do that leaves this route with nothing to measure.
-    """
+    """An operator's real invocation is not rebuildable from traced shapes."""
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
 
     granted = _flydsl_rewrite.evaluate_rewrite_route(
@@ -2551,13 +2380,7 @@ def test_the_route_declines_without_the_invocation_evidence(
     monkeypatch,
     spec_file,
 ):
-    """The same requirement as driver preparation, seen from the other side.
-
-    Preparation is only possible against a real invocation spec. Admitting the
-    route without one hands the producer nothing to author from and leaves it the
-    placeholder driver, which exits 1 -- so the whole budget would be spent
-    reaching a failure that is knowable at admission.
-    """
+    """The same requirement as driver preparation, seen from the other side."""
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
 
     decision = _flydsl_rewrite.evaluate_rewrite_route(
@@ -2605,12 +2428,7 @@ def test_a_source_without_readable_code_is_refused_whatever_the_producer_adverti
     tmp_path,
     monkeypatch,
 ):
-    """A prebuilt binary or hand-written ASM has nothing to port.
-
-    Negotiation decides which *languages* are portable, and widening that list
-    must not reach a candidate that ships no source at all -- so this refusal
-    stays local and ahead of the handshake.
-    """
+    """A prebuilt binary or hand-written ASM has nothing to port."""
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
     generous = _flydsl_rewrite.RewriteCapabilities(
         True,
@@ -2636,8 +2454,8 @@ def test_a_source_without_readable_code_is_refused_whatever_the_producer_adverti
 @pytest.mark.parametrize(
     ("overrides", "capabilities", "expected"),
     [
-        # A HIP/C++ candidate is portable once the producer says it can read it,
-        # and refused by the same producer that only ever handled Triton.
+        # A HIP/C++ candidate is portable once the producer says it can read it, and refused by the same producer that
+        # only ever handled Triton.
         ({"source_type": "hip_cpp", "kernel_kind": "hip_cpp"}, _SUPPORTED_CAPABILITIES, True),
         ({"source_type": "hip_cpp", "kernel_kind": "hip_cpp"}, _TRITON_ONLY_CAPABILITIES, False),
         ({"source_type": "hip", "kernel_kind": ""}, _SUPPORTED_CAPABILITIES, True),
@@ -2664,8 +2482,8 @@ def test_the_producer_decides_which_source_languages_are_portable(
     assert decision.eligible is expected, decision.detail
     if not expected:
         assert decision.reason == "source_type_unsupported"
-        # The reason names both advertised lists, so an operator can tell a
-        # producer limit from a candidate this consumer refused on its own.
+        # The reason names both advertised lists, so an operator can tell a producer limit from a candidate this
+        # consumer refused on its own.
         assert str(list(capabilities.source_languages)) in decision.detail
 
 
@@ -2761,8 +2579,8 @@ def test_eligible_rewrite_route_carries_the_producer_candidate_fields(tmp_path, 
         "shape_cases": [{"M": 8, "N": 16}],
         "framework": "vllm",
         "gpu_target": "gfx942",
-        # The producer needs this stated: the candidate's file is a .py that
-        # names no language, and only the trace knew it was Triton.
+        # The producer needs this stated: the candidate's file is a .py that names no language, and only the trace
+        # knew it was Triton.
         "source_language": "triton",
         # The driver is generated only after the route is granted.
         "driver": "",
@@ -2835,8 +2653,8 @@ def _submit_with_rewrite_route(tmp_path, monkeypatch, captured=None, **submit_ov
         },
         "timeout_s": 7200,
         "kernel_repo": str(repo),
-        # The rewrite route declines without it: the producer's driver-preparation
-        # stage has nothing to author a measurement driver from.
+        # The rewrite route declines without it: the producer's driver-preparation stage has nothing to author a
+        # measurement driver from.
         "invocation_spec_file": str(_written_invocation_spec(tmp_path)),
     }
     submit_kwargs.update(submit_overrides)
@@ -2963,12 +2781,7 @@ def test_submit_declines_a_valid_applyback_that_is_not_faster(
     best_wall_ms,
     case_id,
 ):
-    """The decline must name the policy, not impugn the producer's artifact.
-
-    A contract-valid apply-back that is not faster is something the producer is
-    allowed to publish. Reporting it as "no validated apply-back patch" sends
-    whoever reads the log hunting a producer bug that does not exist.
-    """
+    """The decline must name the policy, not impugn the producer's artifact."""
     monkeypatch.setenv(_flydsl_rewrite.REWRITE_ENV, "1")
     monkeypatch.setattr(
         _flydsl_rewrite,
@@ -3027,8 +2840,8 @@ def test_submit_consumes_a_canonical_applyback_instead_of_the_forge_loop(
         "flydsl_kernel.py",
         "kernel.py",
     ]
-    # The micro gate stays readable by the only report scanner in the repo,
-    # while the integration verdict is stated separately.
+    # The micro gate stays readable by the only report scanner in the repo, while the integration verdict is stated
+    # separately.
     report = (output_dir / "optimization_report.md").read_text()
     assert "[correctness] pass" in report
     assert "[integration_validation] pending" in report
@@ -3205,8 +3018,8 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         "--workspace": str(workspace),
         "--experiments-dir": str(experiments),
         "--target-functions": "matmul,matmul_kernel",
-        # A list of per-case dimension dicts: the producer coerces this with
-        # ``list()``, so a mapping would arrive as a list of its keys.
+        # A list of per-case dimension dicts: the producer coerces this with ``list()``, so a mapping would arrive as
+        # a list of its keys.
         "--shapes-json": json.dumps([{"M": 8, "N": 16, "dtype": "fp16"}]),
         "--invocation-spec-file": str(invocation_spec),
         "--snr-threshold": "30.0",
@@ -3221,14 +3034,14 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         assert command[command.index(flag) + 1] == value, flag
     # A boolean switch carries no value, so it is checked apart from the pairs.
     assert "--prepare-driver" in command
-    # The campaign is time-driven; forge-rewrite-by-flydsl no longer declares an
-    # iteration cap and would only report ours as an ignored option.
+    # The campaign is time-driven; forge-rewrite-by-flydsl no longer declares an iteration cap and would only report
+    # ours as an ignored option.
     assert "--max-iters" not in command
-    # The rewrite producer files its port under the same identity scheme, so it
-    # needs the card as much as the loop does.
+    # The rewrite producer files its port under the same identity scheme, so it needs the card as much as the loop
+    # does.
     assert captured["popen_kwargs"]["env"]["GPU_TYPE"] == "mi355x"
-    # The producer is aimed one reserve short of this process's hard kill, so it
-    # publishes the apply-back inside its own budget instead of racing the kill.
+    # The producer is aimed one reserve short of this process's hard kill, so it publishes the apply-back inside its
+    # own budget instead of racing the kill.
     producer_deadline = float(command[command.index("--deadline-unix") + 1])
     assert producer_deadline == pytest.approx(deadline - _flydsl_rewrite.APPLYBACK_RESERVE_SEC)
     producer_hours = float(command[command.index("--max-hours") + 1])
@@ -3307,8 +3120,8 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         deadline_unix=time.time() + 1.0,
     )
 
-    # The whole process group is torn down, and a run that published nothing
-    # yields no result for the validator to consider.
+    # The whole process group is torn down, and a run that published nothing yields no result for the validator to
+    # consider.
     assert terminated["pid"] == 4321
     assert outcome.timed_out is True
     assert outcome.result is None

@@ -1,12 +1,4 @@
-"""An attempt that leaves the driver untouched must be reported as such.
-
-Observed in a real forge run: both prep attempts hit the agent timeout with the
-driver byte-identical (same sha256 in ``driver_before.py`` /
-``driver_at_timeout.py`` across both attempts). The retry prompt still said
-"your previous attempt still did NOT pass the deterministic check", and the
-operator-facing failure quoted preflight reasons — making a driver nobody had
-touched look like a botched repair. These tests pin the distinction.
-"""
+"""An attempt that leaves the driver untouched must be reported as such."""
 
 from __future__ import annotations
 
@@ -134,14 +126,7 @@ def test_audit_records_whether_the_driver_was_edited(tmp_path, monkeypatch):
 
 
 def test_system_prompt_orders_writing_before_further_reading():
-    """48% of observed attempts burned their whole budget without writing.
-
-    Every attempt that completed had edited the driver, and one that timed out
-    *after* editing was still salvaged into a success by the post-timeout
-    preflight — so "get a draft on disk" is the difference between a salvageable
-    attempt and a total loss. The ordering has to be in the system prompt, which
-    applies to every attempt, not just the retries.
-    """
+    """48% of observed attempts burned their whole budget without writing."""
     prompt = task_preparer._SYSTEM_PROMPT
 
     assert "Working order" in prompt
@@ -153,11 +138,7 @@ def test_system_prompt_orders_writing_before_further_reading():
 
 
 def test_reference_template_covers_the_full_contract():
-    """The template the agent reads must demonstrate the COMPLETE contract.
-
-    The template must expose per-case benchmark data while leaving profile-case
-    selection inside the driver.
-    """
+    """The template the agent reads must demonstrate the COMPLETE contract."""
     tmpl = task_preparer.REFERENCE_DRIVER_TEMPLATE
 
     assert "case_ms:" in tmpl
@@ -168,13 +149,7 @@ def test_reference_template_covers_the_full_contract():
 
 
 def test_template_verify_uses_snr_not_allclose():
-    """The verify callback must use SNR, not allclose.
-
-    Observed: FP8 bpreshuffle GEMM at M=12288 produces SNR=44.9dB (correct)
-    but allclose=False.  A verify callback using allclose caused graph capture
-    to "fail" and fall back to eager timing, even though the kernel captured
-    and replayed correctly.
-    """
+    """The verify callback must use SNR, not allclose."""
     tmpl = task_preparer.REFERENCE_DRIVER_TEMPLATE
     assert "_snr_db" in tmpl
     assert "allclose" not in tmpl.split("_run_bench")[1].split("def ")[0]
@@ -200,13 +175,7 @@ def test_user_prompt_does_not_tell_the_agent_to_read_everything_first():
 
 
 def test_compile_only_driver_is_detected_and_flagged_in_evidence(tmp_path):
-    """A compile-only autogen driver needs a REWRITE, not a repair.
-
-    Observed: the agent saw a 4KB compile-only driver and spent 900s reading
-    without writing, because the prompt said "Current (non-conforming) driver"
-    — implying it just needs a fix. When the driver prints `compile_only: True`
-    the evidence must say "rewrite it completely", not "repair".
-    """
+    """A compile-only autogen driver needs a REWRITE, not a repair."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kernel = workspace / "kernel.cu"
@@ -359,13 +328,7 @@ def test_all_failures_are_timeouts_property():
 
 
 def test_exception_path_tracks_driver_edits(tmp_path, monkeypatch):
-    """An agent error after a partial driver edit must still track the edit.
-
-    If the agent writes a partial driver and then the API call fails, the
-    exception handler must record driver_edited=True so the final failure
-    message says "could not produce a conforming driver" rather than the
-    misleading "prep agent never edited the driver".
-    """
+    """An agent error after a partial driver edit must still track the edit."""
     workspace, driver = _workspace(tmp_path)
     _patch_git(monkeypatch)
 
@@ -393,12 +356,7 @@ def test_exception_path_tracks_driver_edits(tmp_path, monkeypatch):
 
 
 def test_jit_timeout_retry_tells_agent_not_to_rewrite(tmp_path, monkeypatch):
-    """When all preflight failures are timeouts, the retry must discourage rewriting.
-
-    Observed: agent writes a correct 10KB driver, but preflight times out due to
-    JIT compilation. On retry, the agent rewrites the driver differently — wasting
-    the attempt. The hint should say "do NOT rewrite from scratch".
-    """
+    """When all preflight failures are timeouts, the retry must discourage rewriting."""
     workspace, driver = _workspace(tmp_path)
     _patch_git(monkeypatch)
     prompts: list[str] = []
@@ -432,10 +390,7 @@ def test_jit_timeout_retry_tells_agent_not_to_rewrite(tmp_path, monkeypatch):
 
 
 def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
-    """When the driver lives OUTSIDE the workspace, prepare_task must stage it
-    via ExternalArtifactTransaction, let the agent edit the staged copy, and
-    publish the result back on success.
-    """
+    """When the driver lives OUTSIDE the workspace, prepare_task must stage it via ExternalArtifactTransaction, let the agent edit the staged copy, and publish the result back on success."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "kernel.py").write_text("def kernel(x):\n    return x\n", encoding="utf-8")

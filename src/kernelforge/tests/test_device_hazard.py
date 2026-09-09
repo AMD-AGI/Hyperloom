@@ -16,12 +16,7 @@ from kernelforge.loop.device_hazard import (
 
 
 class _FakeDevice:
-    """The device state the re-check reads, without a real process on it.
-
-    Holds pid -> start time for the processes that currently have a device node
-    open. Nothing here is a process: the reaper's two readers are replaced, so a
-    test decides what ``/proc`` would have said.
-    """
+    """The device state the re-check reads, without a real process on it."""
 
     def __init__(self, monkeypatch, holders: dict[int, int]) -> None:
         self.holders = dict(holders)
@@ -47,12 +42,7 @@ class _FakeDevice:
 
 
 def test_a_hazard_blocks_until_the_device_is_free(tmp_path, monkeypatch):
-    """Both directions, and neither of them is the clock.
-
-    The hazard keeps refusing while the process it recorded still has the
-    device, and stops the moment it does not -- not after a fixed number of
-    iterations, and not because an iteration ended.
-    """
+    """Both directions, and neither of them is the clock."""
     device = _FakeDevice(monkeypatch, {4321: 99})
     log = DeviceHazardLog(tmp_path)
 
@@ -68,12 +58,7 @@ def test_a_hazard_blocks_until_the_device_is_free(tmp_path, monkeypatch):
 
 
 def test_a_recycled_pid_does_not_keep_a_hazard_alive(tmp_path, monkeypatch):
-    """The holder is an identity, not a number.
-
-    Pid ranges wrap in under an hour on a busy host. A hazard that re-checked on
-    the bare pid would go on refusing measurements because something unrelated
-    landed on the same number and happens to touch the GPU.
-    """
+    """The holder is an identity, not a number."""
     device = _FakeDevice(monkeypatch, {4321: 99})
     log = DeviceHazardLog(tmp_path)
 
@@ -84,14 +69,7 @@ def test_a_recycled_pid_does_not_keep_a_hazard_alive(tmp_path, monkeypatch):
 
 
 def test_a_hazard_with_nothing_on_the_device_clears_at_the_next_check(tmp_path, monkeypatch):
-    """The reaper's "could not clear" and "is on the device" are not the same.
-
-    A directory the reaper could not empty is reason enough for the iteration
-    that found it to refuse. It is not reason for the next one to refuse, unless
-    something it named is actually holding the device -- otherwise there is
-    nothing for the re-check to wait on and the campaign would stall on a
-    process that demonstrably is not in the way.
-    """
+    """The reaper's \"could not clear\" and \"is on the device\" are not the same."""
     _FakeDevice(monkeypatch, {})
     log = DeviceHazardLog(tmp_path)
 
@@ -102,12 +80,7 @@ def test_a_hazard_with_nothing_on_the_device_clears_at_the_next_check(tmp_path, 
 
 
 def test_re_checking_twice_in_one_iteration_counts_as_one_refusal(tmp_path, monkeypatch):
-    """The loop consults the hazard before and after its fan-out round.
-
-    Counting the second look as a second refusal would end the campaign in half
-    the iterations the cap names, which is the difference between "waited as
-    long as we said" and "gave up early".
-    """
+    """The loop consults the hazard before and after its fan-out round."""
     _FakeDevice(monkeypatch, {4321: 99})
     log = DeviceHazardLog(tmp_path)
 
@@ -120,11 +93,7 @@ def test_re_checking_twice_in_one_iteration_counts_as_one_refusal(tmp_path, monk
 
 
 def test_a_hazard_that_never_clears_reaches_the_cap(tmp_path, monkeypatch):
-    """A hazard nothing can clear must end somewhere, not spin.
-
-    Nothing about a foreign process guarantees it ever exits, so the count is
-    what makes the refusal terminal rather than permanent.
-    """
+    """A hazard nothing can clear must end somewhere, not spin."""
     _FakeDevice(monkeypatch, {4321: 99})
     log = DeviceHazardLog(tmp_path)
 
@@ -138,12 +107,7 @@ def test_a_hazard_that_never_clears_reaches_the_cap(tmp_path, monkeypatch):
 
 
 def test_a_hazard_survives_the_process_that_recorded_it(tmp_path, monkeypatch):
-    """A campaign ending between iterations is the ordinary case.
-
-    The reaper's finding was in memory and the resumed process would measure on
-    the held device knowing nothing, which is exactly the number the refusal
-    exists to prevent.
-    """
+    """A campaign ending between iterations is the ordinary case."""
     _FakeDevice(monkeypatch, {4321: 99})
     DeviceHazardLog(tmp_path).record(iteration=7, detail="pid(s) [4321] hold a device node", pids=[4321])
 
@@ -156,11 +120,7 @@ def test_a_hazard_survives_the_process_that_recorded_it(tmp_path, monkeypatch):
 
 
 def test_an_unreadable_record_is_not_a_hazard(tmp_path):
-    """A corrupt file must not refuse every measurement for the rest of the run.
-
-    There is nothing to wait on in it -- no pid, no identity -- so it can only
-    block forever. Measuring is the recoverable mistake here.
-    """
+    """A corrupt file must not refuse every measurement for the rest of the run."""
     path = tmp_path / "forge_experiments" / "device_hazard.json"
     path.parent.mkdir(parents=True)
     path.write_text("{ truncated", encoding="utf-8")

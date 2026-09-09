@@ -22,10 +22,8 @@ from hyperloom.common.perf_metric import (
 
 _KEEP_THRESHOLD_PCT = 1.0
 
-# Shaped like a measured AgentX round: prefill dominates the token budget
-# (input ~114k prompt / ~806 output tokens), total >> output-only.
-# e2e_norm_intvty_p90 is the slow-tail E2E normalised interactivity (tok/s/user),
-# computed as P10 of per-request OSL/E2EL_s.
+# Shaped like a measured AgentX round: prefill dominates the token budget (~114k prompt / ~806 output tokens), so
+# total is essentially input. e2e_norm_intvty_p90 is the slow tail, P10 of per-request OSL/E2EL_s.
 _BASELINE = {
     "input_throughput": 25801.36,
     "output_throughput": 183.44,

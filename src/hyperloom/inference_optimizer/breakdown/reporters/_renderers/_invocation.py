@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared invocation-block renderer for baseline / final sections.
-
-Centralised so both renderers emit an identical block. The ``_`` prefix
-marks it as a helper: it registers no renderer and is not listed in
-``compose.py``'s renderer imports.
-"""
+"""Shared invocation-block renderer for baseline / final sections."""
 
 from __future__ import annotations
 
@@ -21,31 +16,14 @@ _ENVS_MAX_DISPLAY = 12
 
 
 def _truncate(text: str, limit: int) -> str:
-    """Truncate ``text`` to ``limit`` characters with an ellipsis.
-
-    Args:
-        text (str): The text to truncate.
-        limit (int): The maximum length of the returned string.
-
-    Returns:
-        str: ``text`` unchanged when within ``limit``, otherwise a prefix
-            ending in ``...``.
-    """
+    """Truncate ``text`` to ``limit`` characters with an ellipsis."""
     if len(text) <= limit:
         return text
     return text[: max(limit - 3, 0)] + "..."
 
 
 def _format_envs(envs: dict[str, Any] | None) -> str:
-    """Format environment variables as a compact, capped string.
-
-    Args:
-        envs (dict[str, Any] | None): Environment variable name/value pairs.
-
-    Returns:
-        str: A comma-joined ``k=v`` listing (capped at ``_ENVS_MAX_DISPLAY``
-            entries with a ``+N more`` suffix), or an empty string when empty.
-    """
+    """Format environment variables as a compact, capped string."""
     if not isinstance(envs, dict) or not envs:
         return ""
     items = sorted(envs.items())
@@ -60,17 +38,7 @@ def render_invocation_block(
     invocation: Any,
     session_image: Any,
 ) -> str:
-    """Render an ``### Invocation`` markdown block, or "" when absent/empty.
-
-    Args:
-        invocation: Invocation record (dict) describing framework args,
-            environment overrides and config/log paths.
-        session_image: Container image associated with the session, if any.
-
-    Returns:
-        The rendered markdown block, or an empty string when the invocation
-        is missing or has nothing to show.
-    """
+    """Render an ``### Invocation`` markdown block, or \"\" when absent/empty."""
     if not isinstance(invocation, dict):
         return ""
     framework_args = str(invocation.get("framework_args") or "").strip()

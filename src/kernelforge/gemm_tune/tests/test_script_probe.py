@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the --help capability probe.
-
-The probe exists because aiter moved a tuner script and changed its argparse
-surface, and forge kept sending a flag the old path never accepted (14 runs,
-0 output). The tests below pin the three behaviours that make the probe an
-improvement rather than a new failure mode:
-
-1. a rejected *required* flag fails the run instead of silently degrading it,
-2. a probe that cannot run vetoes nothing,
-3. probing is cached, because each one costs ~6-7s of ``import aiter``.
-"""
+"""Tests for the --help capability probe."""
 
 from __future__ import annotations
 
@@ -23,12 +13,7 @@ from kernelforge.gemm_tune import script_probe as sp
 
 
 class TestNegativeNumbersAreValuesNotFlags:
-    """``-1.0`` is an argument, not an option.
-
-    Testing ``isdigit()`` alone called every non-integer negative a flag, which
-    splits an option from its own value: the number then reads as an unsupported
-    flag and the option reads as having been passed nothing.
-    """
+    """``-1.0`` is an argument, not an option."""
 
     def test_numeric_forms(self):
         for tok in ("-1", "-1.0", "-1e-3", "-1.5E+2", "+2", "-.5", "0", "3.25"):
@@ -52,8 +37,8 @@ class TestNegativeNumbersAreValuesNotFlags:
 
 
 def test_corrupt_probe_cache_costs_a_reprobe_not_a_crash(tmp_path, monkeypatch):
-    # A truncated or hand-edited cache can decode to a list or a string just as
-    # validly as to a dict, and .get on those raises rather than missing.
+    # A truncated or hand-edited cache can decode to a list or a string just as validly as to a dict, and .get on
+    # those raises rather than missing.
     monkeypatch.setenv("FORGE_SCRIPT_PROBE_CACHE", str(tmp_path))
     for payload in ("[1, 2, 3]", '"nope"', "null", "17"):
         (tmp_path / "deadbeef.json").write_text(payload, encoding="utf-8")
@@ -120,8 +105,8 @@ class TestProbeScript:
         assert not surface.supports("--mxfp4-flydsl")
 
     def test_nonzero_rc_still_usable_when_flags_parsed(self, tmp_path, monkeypatch):
-        # aiter's import side effects can make --help exit non-zero; the same
-        # lesson as the tuner's own exit code -- judge by output, not by rc.
+        # aiter's import side effects can make --help exit non-zero; the same lesson as the tuner's own exit code --
+        # judge by output, not by rc.
         monkeypatch.setattr(sp.subprocess, "run", _fake_run(stderr=_HELP, rc=1))
         assert sp.probe_script(_script(tmp_path)).probed is True
 
@@ -198,9 +183,8 @@ class TestFilterArgs:
         assert "20" not in out.args, "dropped flag left its value behind"
 
     def test_unknown_unsupported_flag_is_kept_on_purpose(self):
-        # Keeping it makes the script emit "unrecognized arguments: --wat",
-        # which the call-time guard turns into a precise failure. Guessing here
-        # would only hide which flag was wrong.
+        # Keeping it makes the script emit "unrecognized arguments: --wat", which the call-time guard turns into a
+        # precise failure.
         out = sp.filter_args(["--wat", "1", "-i", "in.csv"], _surface("-i"))
         assert out.ok and out.dropped == []
         assert out.args == ["--wat", "1", "-i", "in.csv"]

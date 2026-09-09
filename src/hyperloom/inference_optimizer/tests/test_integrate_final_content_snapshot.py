@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Integrate must apply from FINAL patch bytes, not the fusion pristine snapshot.
-
-``snapshot_dir`` names two different things on the two sides of the nomination
-wire: the fusion exporter records the pre-authoring *pristine* tree it diffed
-against, while ``apply_kernel_patch`` reads the field as the *post-patch final*
-contents it copies from. Handing the former to the latter loses a real KEEP --
-the pristine tree is missing every module the fusion authored, so the apply
-pre-flight refuses the whole patch.
-"""
+"""Integrate must apply from FINAL patch bytes, not the fusion pristine snapshot."""
 
 from __future__ import annotations
 
@@ -24,8 +16,7 @@ MODELS = "python/sglang/srt/models"
 PRISTINE_SRC = "def forward(x):\n    return x\n"
 FUSED_MODULE = f"{MODELS}/qwen3_fused_llm_ar_residual_rmsnorm_fp8quant_wiring.py"
 
-# The shape forge-fusion emits for one sibling: the wiring edit plus the module
-# that sibling authored.
+# The shape forge-fusion emits for one sibling: the wiring edit plus the module that sibling authored.
 PATCH = f"""\
 diff --git a/{MODELS}/qwen3.py b/{MODELS}/qwen3.py
 --- a/{MODELS}/qwen3.py
@@ -68,11 +59,7 @@ def patch_file(tmp_path):
 
 @pytest.fixture
 def pristine(tmp_path):
-    """What the fusion exporter records: the tree BEFORE authoring.
-
-    Two entries, exactly as the failing e2e produced -- the un-edited source and
-    the fused-sibling inventory. The authored module is absent by construction.
-    """
+    """What the fusion exporter records: the tree BEFORE authoring."""
     root = tmp_path / ".pristine_llm_ar_residual_rmsnorm_fp8quant_wiring"
     (root / MODELS).mkdir(parents=True)
     (root / MODELS / "qwen3.py").write_text(PRISTINE_SRC, encoding="utf-8")
@@ -91,8 +78,8 @@ def _writes(snapshot: str) -> dict[str, str]:
 
 def test_pristine_snapshot_is_replaced_with_materialized_final_content(repo, patch_file, pristine):
     """Regression: the fusion sibling's pristine dir must not be used as final content."""
-    # Precondition: this is what the pending record carries, and it cannot serve
-    # the apply -- the authored module simply is not in it.
+    # Precondition: this is what the pending record carries, and it cannot serve the apply -- the authored module
+    # simply is not in it.
     assert not (pristine / FUSED_MODULE).exists()
 
     resolved = _final_content_snapshot(
@@ -120,11 +107,7 @@ def test_missing_snapshot_is_materialized(repo, patch_file):
 
 
 def test_a_complete_snapshot_is_left_alone(repo, patch_file, tmp_path):
-    """A dir that already holds final bytes for every write is used as-is.
-
-    Re-materializing would be wasted work, and would discard a snapshot a
-    producer built deliberately.
-    """
+    """A dir that already holds final bytes for every write is used as-is."""
     good = tmp_path / "already_final"
     (good / MODELS).mkdir(parents=True)
     (good / MODELS / "qwen3.py").write_text("FUSED = 1\n" + PRISTINE_SRC, encoding="utf-8")
@@ -145,11 +128,7 @@ def test_non_patch_artifact_is_untouched(repo, tmp_path):
 
 
 def test_unmaterializable_patch_falls_back_to_the_original(repo, tmp_path, pristine):
-    """A patch that will not apply keeps the caller's value.
-
-    Swallowing the error here would replace apply's precise complaint with a
-    vaguer one from this helper.
-    """
+    """A patch that will not apply keeps the caller's value."""
     bad = tmp_path / "conflict.patch"
     bad.write_text(
         f"diff --git a/{MODELS}/qwen3.py b/{MODELS}/qwen3.py\n"
@@ -169,14 +148,7 @@ def test_unmaterializable_patch_falls_back_to_the_original(repo, tmp_path, prist
 
 
 def test_materializes_when_the_snapshot_dir_is_inside_a_git_checkout(repo, patch_file, tmp_path):
-    """Regression: a session dir living INSIDE a repo must still materialize.
-
-    ``git apply`` resolves paths against the enclosing repository, so with the
-    snapshot dir under a checkout every hunk is "Skipped patch ..." while git
-    still exits 0 -- the snapshot comes back empty and the real complaint
-    ("snapshot missing final content") points nowhere useful. Observed for real:
-    the PR #1366 session dir sits under the Hyperloom checkout itself.
-    """
+    """Regression: a session dir living INSIDE a repo must still materialize."""
     enclosing = tmp_path / "hyperloom_checkout"
     enclosing.mkdir()
     subprocess.run(["git", "-C", str(enclosing), "init", "-q"], check=True, capture_output=True)

@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Lifecycle events are actually emitted at the phase/step boundaries.
-
-Covers the emit points:
-
-* ``_lifecycle_paths`` extracts only present, non-empty path-like fields.
-* ``Coordinator._emit_lifecycle`` records AND persists to state.json.
-* ``Coordinator._handle_request`` brackets a programmatic kernel step with
-  START + END events carrying the input/output artifact paths + duration,
-  and emits a lone END (no START) for the cache-hit / rejected-patch
-  short-circuits.
-* ``Coordinator._advance_phase_if_needed`` emits an ENTER phase-boundary
-  marker (not a paired START).
-* ``Coordinator._on_enter_close`` emits the final report END event.
-* ``RooflineExecutor`` emits a TraceLens END event for the auto-roofline
-  path (which never passes through ``_handle_request``).
-"""
+"""Lifecycle events are actually emitted at the phase/step boundaries."""
 
 from __future__ import annotations
 
@@ -78,8 +63,7 @@ def test_lifecycle_paths_extracts_present_path_keys():
 
 
 def test_lifecycle_paths_surfaces_tracelens_report_keys():
-    # The lifecycle allowlist must surface trace_analyze report outputs so
-    # operators reach analysis.md + sidecars.
+    # The lifecycle allowlist must surface trace_analyze report outputs so operators reach analysis.md + sidecars.
     payload = {
         "trace_report_path": "/tmp/run/analysis.md",
         "analysis_report_path": "/tmp/run/analysis.md",
@@ -125,8 +109,8 @@ async def test_emit_lifecycle_records_and_persists(session_dir):
 async def test_emit_lifecycle_debounces_nonterminal_but_flushes_terminal(
     session_dir,
 ):
-    # Bursty START markers within the debounce window coalesce to a single
-    # state.json write; the next terminal END flushes the whole tail.
+    # Bursty START markers within the debounce window coalesce to a single state.json write; the next terminal END
+    # flushes the whole tail.
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from unittest.mock import patch as _patch
@@ -217,8 +201,8 @@ async def test_handle_request_end_surfaces_tracelens_report_paths(
     monkeypatch,
     tmp_path,
 ):
-    # The lifecycle END for a trace_analyze step must carry every TraceLens
-    # report path the handler returns, not just candidates_path.
+    # The lifecycle END for a trace_analyze step must carry every TraceLens report path the handler returns, not just
+    # candidates_path.
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
@@ -379,8 +363,8 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
 ):
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
-        # Bypass the execution-order gate that would deny an integrate request
-        # in the initial phase before reaching the emit.
+        # Bypass the execution-order gate that would deny an integrate request in the initial phase before reaching
+        # the emit.
         monkeypatch.setattr(
             c.dispatcher,
             "_sequence_denial_for_request",

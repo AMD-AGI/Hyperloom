@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests.
-
-Locks the reader → prompt-render path for ``kind=lesson`` KB writes: the
-warmer populates the task param, ``build_specialist_prompts`` renders the
-section with metadata, and empty/malformed rows fall back gracefully.
-"""
+"""``RELATED LESSONS`` specialist prompt section + ``warm_start_lessons`` plumbing tests."""
 
 from __future__ import annotations
 

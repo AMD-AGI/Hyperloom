@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.0.0"
+version = "1.1.0"
 description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -140,11 +140,8 @@ fa = "hyperloom.agents.framework.runtime.cli:main"
 robustness-agent = "hyperloom.agents.robustness.main:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
-# ``python -m kernelforge.cli`` directly; these are for interactive use.
+# ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
-# Deprecated alias kept for one release: the standalone ``kernel-agents``
-# distribution is gone, and operator scripts still reference this name.
-kernel-agents = "kernelforge.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes

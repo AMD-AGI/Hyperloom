@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the long-horizon run state, event log, and prompt view.
-
-These cover the file-backed state substrate that lets a long forge-loop run be
-driven from files instead of an ever-growing prompt: atomic state save/load,
-append-only event replay, the iteration reducer, and the bounded prompt-view
-header (overview + retrieval pointers, detail left on disk).
-"""
+"""Unit tests for the long-horizon run state, event log, and prompt view."""
 
 from __future__ import annotations
 
@@ -53,8 +47,8 @@ from kernelforge.loop.runner import (
     _long_horizon_header,
 )
 
-# The header's own rendering budgets, read from the definition that owns them so
-# the expectations below cannot drift from the defaults the loop relies on.
+# The header's own rendering budgets, read from the definition that owns them so the expectations below cannot drift
+# from the defaults the loop relies on.
 _HEADER_PARAMS = inspect.signature(render_long_horizon_header).parameters
 _HEADER_MAX_RECENT = _HEADER_PARAMS["max_recent"].default
 _HEADER_MAX_CHARS = _HEADER_PARAMS["max_chars"].default
@@ -160,11 +154,7 @@ def test_load_v13_migrates_with_empty_analysis_anchor(tmp_path):
 
 
 def test_load_v14_migrates_with_no_critic_ruling(tmp_path):
-    """What such a campaign knows is that it never recorded a verdict.
-
-    An empty ruling divides the next round as an ordinary one, which is what a
-    checkpoint written before the ruling existed can honestly support.
-    """
+    """What such a campaign knows is that it never recorded a verdict."""
     store = LoopStateStore(str(tmp_path))
     payload = RunState().to_dict()
     payload["schema_version"] = 14
@@ -182,15 +172,7 @@ def test_load_v14_migrates_with_no_critic_ruling(tmp_path):
 def test_load_v17_migrates_with_a_campaign_clock_that_covers_its_planning(
     tmp_path,
 ):
-    """A v17 checkpoint banked planning with no span to divide it by.
-
-    That is why a resumed session published a planning share above 100: the
-    cumulative numerator was divided by the current process's wall-clock. The
-    migration has to supply a denominator such a checkpoint can actually
-    support, and the rounds' own recorded wall-clock is it -- a lower bound on
-    how long the campaign ran, and one that already covers the planning inside
-    it, since no round's total is smaller than its own planning.
-    """
+    """A v17 checkpoint banked planning with no span to divide it by."""
     store = LoopStateStore(str(tmp_path))
     payload = RunState().to_dict()
     payload["schema_version"] = 17
@@ -211,12 +193,7 @@ def test_load_v17_migrates_with_a_campaign_clock_that_covers_its_planning(
 
 
 def test_load_v17_without_round_wall_clock_still_covers_its_planning(tmp_path):
-    """The degenerate v17 shape: planning recorded, round totals missing.
-
-    Falling back to the round wall-clock alone would hand back a span shorter
-    than the planning charged to it -- the same broken division in durable
-    form -- so the migration takes the larger of the two.
-    """
+    """The degenerate v17 shape: planning recorded, round totals missing."""
     store = LoopStateStore(str(tmp_path))
     payload = RunState().to_dict()
     payload["schema_version"] = 17
@@ -235,13 +212,7 @@ def test_load_v17_without_round_wall_clock_still_covers_its_planning(tmp_path):
 
 
 def test_load_v18_seeds_the_stall_counter_from_the_shared_streak(tmp_path):
-    """A v18 checkpoint held one counter for two questions.
-
-    Its no-improvement streak was reset by every past supervisor intervention,
-    so it understates how long the search has really been stuck. Seeding from
-    it is the fail-safe direction: a resumed campaign can be a few iterations
-    late to DIVERSIFY, but it can never claim a stall it did not measure.
-    """
+    """A v18 checkpoint held one counter for two questions."""
     store = LoopStateStore(str(tmp_path))
     payload = RunState().to_dict()
     payload["schema_version"] = 18
@@ -259,11 +230,7 @@ def test_load_v18_seeds_the_stall_counter_from_the_shared_streak(tmp_path):
 
 
 def test_a_keep_clears_both_stall_counters():
-    """One measured improvement ends the stall episode outright.
-
-    The split counter must not latch: it is "iterations since the last real
-    KEEP", so a KEEP zeroes it exactly as it zeroes the supervisor cooldown.
-    """
+    """One measured improvement ends the stall episode outright."""
     state = RunState()
     apply_iteration(
         state,
@@ -560,13 +527,7 @@ def test_apply_iteration_non_keep_increments_stall_then_stalled_phase():
 
 
 def test_an_api_error_is_counted_apart_from_a_revert_and_leaves_the_stall_alone():
-    """A gateway outage measured nothing, so it is not an optimization outcome.
-
-    Counting it as ``reverted`` understated the optimizer on a bad-gateway day, and
-    extending the stall streak pulled in the supervisor to redirect an agent that
-    never ran -- three consecutive outages read as "the optimizer stopped
-    improving".
-    """
+    """A gateway outage measured nothing, so it is not an optimization outcome."""
     state = RunState()
     apply_iteration(
         state,
@@ -867,12 +828,7 @@ def _rendered_attempt_iterations(header: str) -> list[int]:
 
 
 def _store_with_live_iteration_events(tmp_path, iterations: range) -> LoopStateStore:
-    """A store fed the events a live iteration writes, for each iteration.
-
-    Every iteration logs its search-policy decision, its analysis result and an
-    iteration_started marker before the outcome, so a tail counted in raw events
-    reaches roughly a quarter of the outcomes its length suggests.
-    """
+    """A store fed the events a live iteration writes, for each iteration."""
     store = LoopStateStore(str(tmp_path))
     for iteration in iterations:
         store.append_event(make_event("search_policy_decision", iteration, mode="EXPLOIT"))
@@ -891,12 +847,7 @@ def _store_with_live_iteration_events(tmp_path, iterations: range) -> LoopStateS
 
 
 def _state_with_best_pin_held_against_near_misses() -> RunState:
-    """A state whose pin list holds the best lineage ahead of later pins.
-
-    ``pin_iteration`` keeps the iteration behind the current best when the list
-    overflows, so after enough later near-misses the best lineage sits at the
-    front of a list longer than the header renders.
-    """
+    """A state whose pin list holds the best lineage ahead of later pins."""
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
@@ -918,11 +869,7 @@ def _state_with_best_pin_held_against_near_misses() -> RunState:
 
 
 def test_header_pin_hint_keeps_the_held_best_lineage_pin():
-    """The map names the pin ``pin_iteration`` held against the near-misses.
-
-    The pin list is capped at eight with the best lineage held at the front, so
-    rendering only its tail drops exactly the pin the map exists to point at.
-    """
+    """The map names the pin ``pin_iteration`` held against the near-misses."""
     state = _state_with_best_pin_held_against_near_misses()
 
     header = render_long_horizon_header(state, [])
@@ -931,12 +878,7 @@ def test_header_pin_hint_keeps_the_held_best_lineage_pin():
 
 
 def test_header_pin_hint_marks_the_best_and_carries_measured_speedups():
-    """Each pin says what it is, so a bare number is never all the agent gets.
-
-    ``pinned_iterations`` holds iteration numbers alone, so the measured mean
-    case speedups come from the best record and the supplied outcome events; a
-    pin older than that window renders as its iteration number only.
-    """
+    """Each pin says what it is, so a bare number is never all the agent gets."""
     state = _state_with_best_pin_held_against_near_misses()
     events = [
         make_event(
@@ -960,21 +902,14 @@ def test_header_pin_hint_marks_the_best_and_carries_measured_speedups():
     assert "3 best 1.200000x" in hint
     assert "9 1.003100x" in hint
     assert "11 1.012500x" in hint
-    # Iterations 7, 8 and 10 are pinned but outside the supplied event window,
-    # so they carry no score rather than a guessed one.
+    # Iterations 7, 8 and 10 are pinned but outside the supplied event window, so they carry no score rather than a
+    # guessed one.
     assert re.search(r"\b7, 8\b", hint)
     assert re.search(r"\b10, 11\b", hint)
 
 
 def test_loop_header_scores_every_pin_and_fills_the_recent_budget(tmp_path):
-    """The loop hands the header a window counted in outcomes, so both fit in it.
-
-    An iteration writes four events before its outcome, so the eight raw events
-    this header used to be handed reached two outcomes: the recent list rendered
-    a third of the budget it is allowed, and every pin older than those two
-    outcomes rendered as a bare number, which reads as an attempt that measured
-    nothing.
-    """
+    """The loop hands the header a window counted in outcomes, so both fit in it."""
     state = _state_with_best_pin_held_against_near_misses()
     store = _store_with_live_iteration_events(tmp_path, range(1, 12))
 
@@ -991,12 +926,12 @@ def test_loop_header_scores_every_pin_and_fills_the_recent_budget(tmp_path):
         "10 1.010000x",
         "11 1.011000x",
     ]
-    # A wider window feeds more outcomes but renders no more of them: what the
-    # header shows is still bounded by its own budgets.
+    # A wider window feeds more outcomes but renders no more of them: what the header shows is still bounded by its
+    # own budgets.
     assert len(header) <= _HEADER_MAX_CHARS
 
-    # The window this replaces, from the same log: eight raw events reached two
-    # outcomes, so three of the six pins carried no measured speedup at all.
+    # The window this replaces, from the same log: eight raw events reached two outcomes, so three of the six pins
+    # carried no measured speedup at all.
     stale = render_long_horizon_header(state, store.recent_events(8))
     assert _rendered_attempt_iterations(stale) == [10, 11]
     assert _pin_entries(stale) == [
@@ -1010,12 +945,7 @@ def test_loop_header_scores_every_pin_and_fills_the_recent_budget(tmp_path):
 
 
 def test_loop_header_window_covers_the_pin_cap_and_is_served_from_the_cache(tmp_path):
-    """The window must span every pin the state can hold and be answerable.
-
-    ``recent_results`` refuses a request wider than its cache rather than
-    answering short, and the loop renders this header best-effort, so a window
-    beyond the cache would cost every session its header instead.
-    """
+    """The window must span every pin the state can hold and be answerable."""
     state = RunState()
     for iteration in range(1, 3 * LONG_HORIZON_OUTCOME_WINDOW):
         pin_iteration(state, iteration)
@@ -1067,12 +997,7 @@ def test_should_resume_only_when_commit_is_head():
 
 
 def test_supervisor_intervention_resets_the_cooldown_but_not_the_stall():
-    """Advice is not a result, so only the cooldown window restarts.
-
-    A run that has gone five iterations without a KEEP is exactly as stuck the
-    moment after the supervisor answers as it was the moment before, and the
-    phase label and the search-mode switch both read that fact.
-    """
+    """Advice is not a result, so only the cooldown window restarts."""
     from kernelforge.loop import run_state as run_state_module
 
     state = RunState()
@@ -1096,11 +1021,7 @@ def test_supervisor_intervention_resets_the_cooldown_but_not_the_stall():
 
 # ── schema guards ───────────────────────────────────────────────────────────────
 def test_from_dict_rejects_payloads_that_are_not_the_current_shape():
-    """A checkpoint is control state: a partial one must not load as defaults.
-
-    Silently filling a missing field would resume with a fabricated anchor (a
-    zeroed stall streak, an empty best) rather than the campaign's own.
-    """
+    """A checkpoint is control state: a partial one must not load as defaults."""
     valid = RunState().to_dict()
 
     with pytest.raises(ValueError, match="must be a JSON object"):
@@ -1150,8 +1071,8 @@ def test_from_dict_rejects_control_values_outside_their_domains():
     with pytest.raises(ValueError, match="unsupported orchestration circuit state"):
         RunState.from_dict(dict(valid, orchestration_circuit_state="tripped"))
 
-    # next_iteration is the cursor apply_iteration refuses to go behind; a zero
-    # would let iteration 0 be replayed as fresh work.
+    # next_iteration is the cursor apply_iteration refuses to go behind; a zero would let iteration 0 be replayed as
+    # fresh work.
     with pytest.raises(ValueError, match="next_iteration must be positive"):
         RunState.from_dict(dict(valid, next_iteration=0))
 
@@ -1191,12 +1112,7 @@ def test_finish_session_requires_a_running_session_and_a_terminal_status():
 
 
 def test_orchestration_probe_transitions_are_guarded_in_both_directions():
-    """A probe is a single deliberate step out of an open circuit.
-
-    Closing straight from open would clear the streak without a call ever
-    succeeding, and probing a circuit that is not open would report a recovery
-    that never happened.
-    """
+    """A probe is a single deliberate step out of an open circuit."""
     closed = RunState()
     with pytest.raises(ValueError, match="only an open orchestration circuit"):
         begin_orchestration_probe(closed)
@@ -1213,11 +1129,7 @@ def test_orchestration_probe_transitions_are_guarded_in_both_directions():
 
 
 def test_pin_iteration_dedupes_without_refreshing_recency():
-    """Re-pinning an iteration is a no-op, not a bump to the head of the list.
-
-    Eviction is by age, so treating a repeat pin as new would let one iteration
-    that keeps coming up push the rest of the lineage out of the map.
-    """
+    """Re-pinning an iteration is a no-op, not a bump to the head of the list."""
     state = RunState()
     for iteration in (3, 4, 5):
         pin_iteration(state, iteration)
@@ -1229,12 +1141,7 @@ def test_pin_iteration_dedupes_without_refreshing_recency():
 
 # ── store degradation ───────────────────────────────────────────────────────────
 def test_workspace_lock_reacquire_and_release_are_idempotent(tmp_path):
-    """The loop takes the lock once per session but may unwind it more than once.
-
-    A second acquire must hand back the same held lock rather than block on the
-    handle this process already owns, and a second release must not touch a lock
-    the next session may already hold.
-    """
+    """The loop takes the lock once per session but may unwind it more than once."""
     store = LoopStateStore(str(tmp_path))
     lock = store.workspace_lock()
 
@@ -1272,12 +1179,7 @@ def test_store_construction_degrades_instead_of_raising(tmp_path, monkeypatch):
 
 
 def test_write_failures_degrade_the_store_but_still_feed_the_prompt_view(tmp_path):
-    """Every write is best-effort, and the in-memory tails are updated first.
-
-    An iteration whose disk append failed is still an iteration the next prompt
-    must describe, so the cached view carries it even though events.jsonl never
-    took it.
-    """
+    """Every write is best-effort, and the in-memory tails are updated first."""
     store = LoopStateStore(str(tmp_path))
     # Rename/open onto a directory fails, without depending on file modes.
     store.state_path.mkdir()

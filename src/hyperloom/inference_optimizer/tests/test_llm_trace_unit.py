@@ -167,12 +167,7 @@ def test_append_llm_call_rejects_unknown_status(tmp_path: Path):
 
 
 def test_llm_call_failed_is_a_backend_error(tmp_path: Path):
-    """The marker must stay catchable as ``BackendError``.
-
-    Retry and error-streak accounting are written against ``BackendError``; if
-    the marker were a sibling type instead of a subclass, marking a call site
-    would silently change failure handling as well as tracing.
-    """
+    """The marker must stay catchable as ``BackendError``."""
     from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed
 
     assert issubclass(LLMCallFailed, BackendError)

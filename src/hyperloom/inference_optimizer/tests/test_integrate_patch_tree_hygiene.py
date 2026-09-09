@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A reverted candidate leaves the framework tree exactly at HEAD.
-
-Every KEEP is committed, so HEAD *is* the accepted stack by construction and
-"restore the working tree to HEAD" reverts a candidate exactly: kept work is in
-commits and survives, candidate work is uncommitted and goes.
-
-Reverse-applying each diff instead is textual, and it can report success while
-leaving the tree a few lines away from HEAD -- the forward apply may have used
-fuzz or a guessed -p level. That residue is what starts the failure:
-
-  residue survives the revert
-    -> the next candidate's auto-stash banks it as "user changes"
-    -> a KEEP lands in between, touching the same functions
-    -> git stash pop conflicts, leaving the tree in UU with markers in source
-
-from where two different runs died. One benchmarked a tree whose source no
-longer parsed; the other could not stash at all (git refuses while a conflict is
-unresolved), so five consecutive candidates aborted with apply_failed and the
-phase plateaued out of a 24h budget.
-"""
+"""A reverted candidate leaves the framework tree exactly at HEAD."""
 
 from __future__ import annotations
 
@@ -86,12 +67,7 @@ def test_stash_recovers_a_tree_left_conflicted_by_an_earlier_cycle(tmp_path: Pat
 
 
 def test_clearing_an_unresolved_merge_banks_it_rather_than_deleting_it(tmp_path: Path):
-    """Nothing here can prove whose merge it is, so it must stay recoverable.
-
-    The tree Hyperloom is handed may be an operator's own repository, and this
-    code cannot tell a previous cycle's wreckage from a merge someone started by
-    hand. Clearing it is required to make progress; destroying it is not.
-    """
+    """Nothing here can prove whose merge it is, so it must stay recoverable."""
     repo = _repo(tmp_path)
     _wedge_with_a_stash_conflict(repo)
     assert _is_conflicted(repo), "fixture did not reproduce the wedge"
@@ -109,11 +85,7 @@ def test_clearing_an_unresolved_merge_banks_it_rather_than_deleting_it(tmp_path:
 
 
 def _wedge_with_an_operator_merge(repo: Path) -> None:
-    """A conflict the operator started by hand, not one Hyperloom created.
-
-    Unlike a failed stash pop this leaves ``MERGE_HEAD`` standing, which is what
-    makes the next commit a merge commit.
-    """
+    """A conflict the operator started by hand, not one Hyperloom created."""
     _git(repo, "checkout", "-q", "-b", "operator-branch")
     (repo / "src.py").write_text("def f():\n    return 111\n", encoding="utf-8")
     git_commit_all(repo, "operator work")
@@ -124,13 +96,7 @@ def _wedge_with_an_operator_merge(repo: Path) -> None:
 
 
 def test_a_kept_candidate_after_a_quarantine_is_not_a_merge_commit(tmp_path: Path):
-    """Clearing the index is not the same as ending the merge.
-
-    ``MERGE_HEAD`` outlives the staging and the stash, and while it stands the
-    next commit takes a second parent. A KEEP would then claim the whole of the
-    operator's branch as accepted work, and "HEAD is the accepted stack" would
-    no longer be true of the stack it reports.
-    """
+    """Clearing the index is not the same as ending the merge."""
     repo = _repo(tmp_path)
     _wedge_with_an_operator_merge(repo)
     assert _is_conflicted(repo), "fixture did not reproduce an operator merge"

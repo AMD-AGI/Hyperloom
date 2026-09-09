@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic collectors for ``session_breakdown.json``.
-
-Each ``collect_<section>`` is a pure function over ``session_dir`` /
-``state`` / ``manifest`` returning its schema section (see :mod:`.schema`).
-Collectors never mutate state, fabricate values, or raise — failures are
-recorded in ``warnings`` and the section returns a best-effort partial.
-"""
+"""Deterministic collectors for ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -42,33 +36,14 @@ _AUDIT_ACTIONS = (
 
 
 class TimelineDedup:
-    """Decide which timeline rows describe an event already seen.
-
-    Rows collide on ``(action, ts-to-second, change)``. Rows that also carry
-    distinct task ids are distinct events and are all kept -- but only while
-    every row seen for that triple was itself task-tagged. An untagged row is
-    the same event observed from another source (journal vs audit list vs
-    recorder fragment), so it keeps the legacy fold rather than duplicating.
-
-    The collector and the exporter merge different mixes of those sources.
-    Sharing this decision is what stops them disagreeing about what one event
-    is: an exporter with a weaker identity silently drops rows the collector
-    would have kept, and nothing downstream can tell that happened.
-    """
+    """Decide which timeline rows describe an event already seen."""
 
     def __init__(self) -> None:
         """Start with no events seen."""
         self._seen: dict[tuple[str, str, str], set[str]] = {}
 
     def is_new(self, ev: dict[str, Any]) -> bool:
-        """Record ``ev`` and report whether it is an event not seen before.
-
-        Args:
-            ev (dict[str, Any]): One timeline event row.
-
-        Returns:
-            bool: ``True`` when the row should be kept.
-        """
+        """Record ``ev`` and report whether it is an event not seen before."""
         base = (
             str(ev.get("action") or ""),
             iso_z(ev.get("ts"))[:19],
@@ -86,15 +61,7 @@ class TimelineDedup:
 
 
 def _journal_entry_to_event(e: dict[str, Any]) -> dict[str, Any]:
-    """Map one optimization_journal entry to a phase_timeline event.
-
-    Args:
-        e (dict[str, Any]): One ``optimization_journal.json`` entry.
-
-    Returns:
-        dict[str, Any]: The event row with normalized timestamp, resolved
-        action, metric / decision fields, and a threaded ``extras`` map.
-    """
+    """Map one optimization_journal entry to a phase_timeline event."""
     metric = e.get("throughput_after")
     metric_kind = "output_throughput" if metric is not None else None
     if metric is None and e.get("gain_pct") is not None:
@@ -145,30 +112,7 @@ def collect_phase_timeline(
     state: dict[str, Any],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Flat, chronological action timeline.
-
-    Merges two complementary sources so no action family is dropped:
-
-    * ``reports/optimization_journal.json`` — the canonical decision log.
-      Carries ``phase`` for exact segment attribution.
-    * the per-action ``*_attempts`` audit lists + ``kernel_opt`` /
-      ``kernel_integrate`` histories — add per-attempt rows (incl.
-      failures) and the kernel lanes.
-
-    Events are de-duplicated by ``(action, ts-to-second, change)`` with
-    the journal copy winning, then sorted by ``ts``. Passing
-    ``session_dir=None`` degrades gracefully to the audit-list scrape.
-
-    Args:
-        session_dir (Path | None): Absolute session root, or ``None`` to skip
-            the on-disk journal source.
-        state (dict[str, Any]): Parsed ``state.json``.
-        warnings (list[str]): Shared warnings list (mutated in place).
-
-    Returns:
-        list[dict[str, Any]]: The merged, de-duplicated, ts-sorted action
-        events.
-    """
+    """Flat, chronological action timeline."""
     events: list[dict[str, Any]] = []
 
     # Source 1: canonical journal (carries phase).
@@ -275,22 +219,7 @@ def _capability_for_action(
     state: dict[str, Any],
     action: str,
 ) -> dict[str, Any]:
-    """Per-action capability tally from the real ``<action>_attempts`` ledger.
-
-    Status is derived strictly from recorded attempt evidence (written forward
-    by ``SharedState.record_action_attempt``). We deliberately do NOT reverse-
-    infer ``kept`` from ``optimization_stack``: the stack is the final adopted
-    state and can carry seeded / warm-replayed / cross-harness entries that were
-    never a real this-session attempt, so counting them would fabricate KEEPs
-    and attempts. No attempt record => ``not_attempted``.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        action (str): The action label whose attempts / keeps are tallied.
-
-    Returns:
-        dict[str, Any]: ``{"status", "attempts", "keeps"}`` for the action.
-    """
+    """Per-action capability tally from the real ``<action>_attempts`` ledger."""
     attempts_list = state.get(f"{action}_attempts") or []
     n_attempts = len(attempts_list) if isinstance(attempts_list, list) else 0
     n_keeps = (
@@ -308,18 +237,7 @@ def _capability_for_action(
 
 
 def _fold_search_ledger_keeps(row: dict[str, Any], search: dict[str, Any]) -> None:
-    """Promote a capability row to ``kept`` from its real ``*_search`` ledger.
-
-    ``<phase>_search.accepted`` is the forward-recorded ledger of variants this
-    session actually accepted (KEPT). Unlike ``optimization_stack`` (which can
-    carry seeded / warm-replayed entries that were never a real this-session
-    KEEP), the search ledger is genuine evidence, so it may set the status to
-    ``kept``. No accepted entries => the row's attempt-derived status stands.
-
-    Args:
-        row (dict[str, Any]): The capability row to update in place.
-        search (dict[str, Any]): The ``<phase>_search`` ledger from state.
-    """
+    """Promote a capability row to ``kept`` from its real ``*_search`` ledger."""
     accepted = [v for v in (search.get("accepted") or []) if isinstance(v, dict)]
     if not accepted:
         return
@@ -330,47 +248,19 @@ def _fold_search_ledger_keeps(row: dict[str, Any], search: dict[str, Any]) -> No
     row["status"] = "kept"
 
 
-# How decided a verdict is. One kernel can carry several integrate rows (the
-# ledger is keyed ``<kernel_id>|<patch_path>|<extra_args>``), and folding them
-# by kernel must not hand the outcome to whichever row is iterated last: an
-# adopted patch is not undone by a reverted sibling. Anything unlisted --
-# ``NEEDS_REVIEW``, or no decision recorded yet -- ranks lowest, because it is
-# the absence of a verdict rather than a verdict.
+# How decided a verdict is.
 _VERDICT_RANK = {"KEEP": 3, "REVERT": 2, "REJECT": 2}
 
 
 def _stronger_verdict(current: str, candidate: str) -> str:
-    """Return whichever of two integrate verdicts is more decided.
-
-    Args:
-        current (str): The verdict folded so far.
-        candidate (str): The verdict being folded in.
-
-    Returns:
-        str: The verdict that should represent the kernel.
-    """
+    """Return whichever of two integrate verdicts is more decided."""
     if _VERDICT_RANK.get(candidate, 1) > _VERDICT_RANK.get(current, 1):
         return candidate
     return current
 
 
 def geak_route_evidence(state: dict[str, Any] | None, geak: dict[str, Any] | None) -> tuple[bool, bool]:
-    """Answer whether GEAK's route ran, and whether it was promoted.
-
-    One definition with two readers: the capability-summary fallback below and
-    the exporter's consistency warnings. They are only meaningful while they
-    agree, so they must not each carry their own copy of the predicate.
-
-    Args:
-        state: Session state mapping, read for ``optimization_stack``.
-        geak: Normalized GEAK section.
-
-    Returns:
-        tuple[bool, bool]: ``(promoted, has_route_evidence)`` -- whether a
-        ``geak_e2e`` entry reached the optimization stack, and whether the route
-        ran at all. ``engaged`` alone can mean only that GEAK was configured, so
-        ``status=missing`` (no result, no disk recovery) is not evidence.
-    """
+    """Answer whether GEAK's route ran, and whether it was promoted."""
     state = state if isinstance(state, dict) else {}
     geak = geak if isinstance(geak, dict) else {}
     promoted = any(
@@ -391,19 +281,7 @@ def collect_capability_summary(
     forge_invocations: list[dict[str, Any]] | None = None,
     geak: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Summarize kernel-optimization capability outcomes for the breakdown.
-
-    Args:
-        state: Session state mapping.
-        geak_invocations: GEAK backend invocation records.
-        warnings: Mutable list that collected warnings are appended to.
-        forge_invocations: Forge backend invocation records (own lane).
-        geak: Normalized GEAK section. Used as a route-level fallback when
-            GEAK ran outside the native kernel-agent run directory layout.
-
-    Returns:
-        A capability-summary dict (per-kernel status, attempt and keep counts).
-    """
+    """Summarize kernel-optimization capability outcomes for the breakdown."""
     forge_invocations = forge_invocations or []
     # Integrate (e2e) outcome per kernel: a KEEP reverted at integrate is not a real adoption.
     integ = state.get("kernel_integrate_attempts") or {}
@@ -421,27 +299,16 @@ def collect_capability_summary(
             if prior is None:
                 integ_by_kid[kid] = {"decision": decision, "e2e_gain_pct": gain}
                 continue
-            # Fold, never overwrite: several patches for one kernel each get
-            # their own row here.
+            # Fold, never overwrite: several patches for one kernel each get their own row here.
             prior["decision"] = _stronger_verdict(prior["decision"], decision)
             if gain is not None and (prior["e2e_gain_pct"] is None or gain > prior["e2e_gain_pct"]):
                 prior["e2e_gain_pct"] = gain
 
     # Kernel backends from on-disk invocations, reconciled against the integrate verdict.
     def _from_invocations(invs: list[dict[str, Any]]) -> dict[str, Any]:
-        """Reduce one lane's invocations to a capability row.
-
-        Args:
-            invs (list[dict[str, Any]]): A lane's invocation records.
-
-        Returns:
-            dict[str, Any]: ``{"status", "attempts", "keeps"}`` where ``keeps``
-            counts distinct kernels an integrate verdict adopted, plus optional
-            ``reverts`` / ``micro_only_keeps`` / ``e2e_gain_pct``.
-        """
+        """Reduce one lane's invocations to a capability row."""
         attempts = len(invs)
-        # Tally distinct kernels, not invocation rows: one kernel re-tried
-        # across runs is still one kernel.
+        # Tally distinct kernels, not invocation rows: one kernel re-tried across runs is still one kernel.
         adopted_kids: set[str] = set()
         reverted_kids: set[str] = set()
         pending_kids: set[str] = set()
@@ -455,26 +322,21 @@ def collect_capability_summary(
             ident = kid or f"__row_{i}"
             outcome = integ_by_kid.get(kid) if kid else None
             if outcome is None:
-                # A KEEP that never reached integrate cleared the micro
-                # benchmark only. It is not an adoption (see CapabilityEntry:
-                # ``keeps`` is "kernels adopted at integrate").
+                # A KEEP that never reached integrate cleared the micro benchmark only.
                 micro_only_kids.add(ident)
                 continue
             decision = outcome["decision"]
             if decision == "KEEP":
                 adopted_kids.add(ident)
-                # Only an adoption contributes to "best gain": a reverted
-                # patch's number describes a regression, and an undecided
-                # one describes a measurement nobody has ruled on.
+                # Only an adoption contributes to "best gain": a reverted patch's number describes a regression, and
+                # an undecided one describes a measurement nobody has ruled on.
                 g = outcome["e2e_gain_pct"]
                 if g is not None and (best_e2e is None or g > best_e2e):
                     best_e2e = g
             elif decision in ("REVERT", "REJECT"):
                 reverted_kids.add(ident)
             else:
-                # NEEDS_REVIEW, or no decision recorded. The verdict is not in,
-                # and a gain <= 0 NEEDS_REVIEW never gets retried, so calling
-                # this an adoption misreports it for the rest of the session.
+                # NEEDS_REVIEW, or no decision recorded.
                 pending_kids.add(ident)
         # A decided outcome outranks an undecided one for the same kernel.
         reverted_kids -= adopted_kids
@@ -505,11 +367,8 @@ def collect_capability_summary(
     geak_cap = _from_invocations(geak_invocations)
     forge_cap = _from_invocations(forge_invocations)
 
-    # GEAK e2e owns its own working-tree layout, so a real run does not
-    # necessarily create ``kernel-agent/runs/*/optimization_attempts.jsonl``.
-    # Treat the normalized GEAK result as engagement evidence instead of
-    # reporting ``not_attempted``. A promoted ``geak_e2e`` stack entry is the
-    # route-level KEEP; accepted-kernel count is used when available.
+    # GEAK e2e owns its own working-tree layout, so a real run does not necessarily create
+    # ``kernel-agent/runs/*/optimization_attempts.jsonl``.
     geak = geak if isinstance(geak, dict) else {}
     promoted, has_route_evidence = geak_route_evidence(state, geak)
     if has_route_evidence:
@@ -526,15 +385,10 @@ def collect_capability_summary(
             accepted_head_count,
             1,
         )
-        # A revert is decided evidence from the native invocation rows; this
-        # fallback exists for the case where those rows are MISSING, so it must
-        # not overwrite a verdict they did record — and that means the keep
-        # COUNT too. Bumping ``keeps`` while leaving ``status="reverted"``
-        # emits a row that says the win was both kept and rolled back.
+        # A revert is decided evidence from the native invocation rows; this fallback exists for the case where those
+        # rows are MISSING, so it must not overwrite a verdict they did record — and that means the keep COUNT too.
         if promoted and str(geak_cap.get("status") or "") != "reverted":
-            # ONE promotion is ONE keep, whatever it carried. Counting a keep
-            # per accepted kernel would contradict the canonical ledger, which
-            # books exactly one adoption for the route-level win.
+            # ONE promotion is ONE keep, whatever it carried.
             geak_cap["keeps"] = max(int(geak_cap.get("keeps") or 0), 1)
             geak_cap["status"] = "kept"
         elif geak_cap.get("status") == "not_attempted":
@@ -553,8 +407,8 @@ def collect_capability_summary(
                 default=None,
             )
         _fold_search_ledger_keeps(explore, explore_search)
-        # Only a session recorded before the confirmation round was removed
-        # carries these rows; the reader stays so its report still renders.
+        # Only a session recorded before the confirmation round was removed carries these rows; the reader stays so
+        # its report still renders.
         keep_unstable_count = sum(
             1
             for entry in (explore_search.get("rejected") or [])
@@ -575,18 +429,7 @@ def collect_capability_summary(
 
 
 def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
-    """Derive ``capability_summary.specialist`` from ``specialist_rounds``.
-
-    Headline counts aggregate all domains; ``by_specialist`` breaks them
-    out per SpecialistDomain.key.
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-
-    Returns:
-        dict[str, Any]: The specialist capability row (aggregate status /
-        attempts / keeps / tested plus a ``by_specialist`` per-domain map).
-    """
+    """Derive ``capability_summary.specialist`` from ``specialist_rounds``."""
     rounds = state.get("specialist_rounds") or []
     if not isinstance(rounds, list) or not rounds:
         return {
@@ -612,8 +455,8 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
         proposals_total += int(r.get("proposals_total") or 0)
         proposals_kept += int(r.get("proposals_kept") or 0)
 
-        # Per-domain tallies: trust ``domain_breakdown`` when present, else
-        # split the round totals evenly across ``domains[]``.
+        # Per-domain tallies: trust ``domain_breakdown`` when present, else split the round totals evenly across
+        # ``domains[]``.
         round_breakdown = r.get("domain_breakdown")
         if isinstance(round_breakdown, dict) and round_breakdown:
             for dom, payload in round_breakdown.items():
@@ -688,12 +531,7 @@ def _specialist_capability_row(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
-    """Seed every catalogue domain with a not_attempted CapabilityEntry.
-
-    Returns:
-        dict[str, dict[str, Any]]: One zeroed, ``not_attempted`` capability
-        entry per catalogue specialist-domain key.
-    """
+    """Seed every catalogue domain with a not_attempted CapabilityEntry."""
     return {d: {"status": "not_attempted", "attempts": 0, "keeps": 0, "tested": 0} for d in _SPECIALIST_DOMAIN_KEYS}
 
 
@@ -706,28 +544,7 @@ def collect_phase_segments(
     phase_timeline: list[dict[str, Any]],
     warnings: list[str],
 ) -> list[dict[str, Any]]:
-    """Group action events into phase segments using ``phase_history`` boundaries.
-
-    Only rows with a real phase change (``to_phase != from_phase``) are
-    transitions (segment boundaries); marker rows and legacy rows without
-    ``to_phase`` are folded in as sub-events. Each segment's
-    exit comes from the next transition. Actions are attributed by their
-    own ``phase`` when present, else by the ``[entered_ts, exit_ts)``
-    window. Empty when ``phase_history`` is missing (readers fall back to
-    the flat ``phase_timeline``).
-
-    Args:
-        state (dict[str, Any]): Parsed ``state.json``.
-        phase_timeline (list[dict[str, Any]]): The flat action timeline whose
-            events are attributed into segments.
-        warnings (list[str]): Shared warnings list (mutated in place when a
-            legacy plateau proxy fired).
-
-    Returns:
-        list[dict[str, Any]]: One segment per phase transition (with folded
-        sub-events and attributed actions). Empty when ``phase_history`` is
-        missing.
-    """
+    """Group action events into phase segments using ``phase_history`` boundaries."""
     history = state.get("phase_history") or []
     if not isinstance(history, list) or not history:
         return []
@@ -737,15 +554,7 @@ def collect_phase_segments(
     sub_events = [r for r in rows if not _is_phase_transition_row(r)]
 
     def _unix(row: dict[str, Any]) -> float | None:
-        """Return a row's timestamp as a Unix epoch float.
-
-        Args:
-            row: Event row carrying ``ts_unix`` and/or ``ts``.
-
-        Returns:
-            The ``ts_unix`` value when numeric, else the parsed ISO ``ts``,
-            else ``None``.
-        """
+        """Return a row's timestamp as a Unix epoch float."""
         u = row.get("ts_unix")
         if isinstance(u, (int, float)):
             return float(u)
@@ -785,16 +594,7 @@ def collect_phase_segments(
         )
 
     def _owner_by_window(ts: str) -> dict[str, Any] | None:
-        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts``.
-
-        Args:
-            ts (str): An ISO-8601 timestamp.
-
-        Returns:
-            dict[str, Any] | None: The owning segment, the last segment when
-            ``ts`` is empty / past the end, or ``None`` when there are no
-            segments.
-        """
+        """Return the segment whose ``[entered_ts, exit_ts)`` ISO window holds ``ts``."""
         if not ts:
             return segments[-1] if segments else None
         for s in segments:

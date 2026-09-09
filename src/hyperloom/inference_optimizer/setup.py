@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Backend for the Hyperloom setup skill.
-
-The skill writes ``.env`` in the user's target directory, then invokes this
-module with ``PYTHONPATH=<target> python3 -m ...``. This backend locates the
-packaged installers and runs the bare-metal setup flow with the target
-directory as the runtime/config root.
-
-Kept directly under the lightweight ``hyperloom.inference_optimizer`` package
-(not under ``cli/``) so ``python -m hyperloom.inference_optimizer.setup`` starts
-with zero third-party imports; runtime deps are installed later by install.sh.
-"""
+"""Backend for the Hyperloom setup skill."""
 
 from __future__ import annotations
 
@@ -25,8 +15,8 @@ _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _INSTALL_BAREMETAL_SH = _ASSETS_DIR / "install_baremetal.sh"
 _PACKAGE_SKILL = Path(__file__).resolve().parent / "SKILL.md"
 
-# ``DEEPSEEK_`` is retired as a provider but still scrubbed so an ambient legacy
-# export cannot override the .env the operator just confirmed.
+# ``DEEPSEEK_`` is retired as a provider but still scrubbed so an ambient legacy export cannot override the .env the
+# operator just confirmed.
 _AMBIENT_LLM_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "DEEPSEEK_")
 _AMBIENT_LLM_ENV_KEYS = {
     "LLM_GATEWAY_KEY",
@@ -80,15 +70,7 @@ def _setup_dotenv_is_authoritative(env_file: Path) -> bool:
 
 
 def _scrub_ambient_setup_env(env: dict[str, str], env_file: Path) -> None:
-    """Keep the setup skill's freshly-written .env authoritative.
-
-    Ambient shell variables left behind by local Claude / LiteLLM setup must not
-    override the setup-written .env and get persisted back into it by
-    install_baremetal.sh. Runtime path variables from an earlier Hyperloom
-    workspace must not make a new ``pip --target .`` workspace write artifacts
-    into the old session root. Only scrub when the .env already exists so
-    standalone non-interactive installer use can still rely on process env.
-    """
+    """Keep the setup skill's freshly-written .env authoritative."""
     if not _setup_dotenv_is_authoritative(env_file):
         return
     for key in list(env):

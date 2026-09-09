@@ -1,9 +1,4 @@
-"""Tests for the unsupported-model preflight gate (whitelist approach).
-
-Only text-generation (causal LM) models pass; others are rejected before the
-baseline boot. A missing/invalid ``config.json`` does NOT hard-block — only a
-positively-identified non-text-generation model is rejected.
-"""
+"""Tests for the unsupported-model preflight gate (whitelist approach)."""
 
 from __future__ import annotations
 
@@ -41,8 +36,7 @@ def _seed_state(session_dir: Path, monkeypatch) -> None:
 
 
 def test_detect_rwkv6qwen2_hybrid_rejected(tmp_path):
-    """RWKV6Qwen2ForCausalLM (RWKV/Qwen2 hybrid) is not in sglang's supported
-    arch list and fails ModelConfig validation; reject before boot."""
+    """RWKV6Qwen2ForCausalLM (RWKV/Qwen2 hybrid) is not in sglang's supported arch list and fails ModelConfig validation; reject before boot."""
     m = tmp_path / "rwkv6qwen2"
     _write_config(
         m,
@@ -230,8 +224,9 @@ def test_detect_known_text_model_type_with_nonstandard_arch_allowed(tmp_path):
 
 
 def test_detect_causal_lm_with_vision_config_is_text_coercible(tmp_path):
-    """A generic ForCausalLM arch carrying vision_config is text-coercible:
-    a text decoder exists, so we degrade to the text path (not fail-fast)."""
+    """A generic ForCausalLM arch carrying vision_config is text-coercible: a text decoder exists, so we degrade to the
+    text path (not fail-fast).
+    """
     m = tmp_path / "visioncausal"
     _write_config(
         m,
@@ -248,8 +243,7 @@ def test_detect_causal_lm_with_vision_config_is_text_coercible(tmp_path):
 
 
 def test_detect_kimi_k25_text_coercible(tmp_path):
-    """Kimi-K2.6 carries vision_config but its text MoE path benchmarks fine
-    -> text_coercible (degrade with warning), not fail-fast."""
+    """Kimi-K2.6 carries vision_config but its text MoE path benchmarks fine -> text_coercible (degrade with warning), not fail-fast."""
     m = tmp_path / "kimi_k25"
     _write_config(
         m,
@@ -265,8 +259,7 @@ def test_detect_kimi_k25_text_coercible(tmp_path):
 
 
 def test_detect_qwen35_moe_text_coercible(tmp_path):
-    """Qwen3.6 MoE carries vision_config but benchmarks as text-only
-    -> text_coercible."""
+    """Qwen3.6 MoE carries vision_config but benchmarks as text-only -> text_coercible."""
     m = tmp_path / "qwen3_5_moe"
     _write_config(
         m,
@@ -282,12 +275,7 @@ def test_detect_qwen35_moe_text_coercible(tmp_path):
 
 
 def test_detect_gemma4_wrapper_text_coercible(tmp_path):
-    """Gemma4 multimodal wrappers route to the text-coercible degraded path.
-
-    A Gemma4 wrapper carries ``vision_config`` but exposes a text decoder
-    (``text_config``), so the multimodal gate classifies it as text_coercible
-    (text-only degraded mode) rather than fail-fasting.
-    """
+    """Gemma4 multimodal wrappers route to the text-coercible degraded path."""
     m = tmp_path / "gemma4"
     _write_config(
         m,
@@ -332,10 +320,7 @@ def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
 
 
 def test_detect_mislabeled_vlm_with_vision_config_is_vision_only(tmp_path):
-    """A multimodal config whose model_type is merely in the text allowlist
-    (e.g. a real VLM mislabeled model_type='qwen2') but with NO confirmed
-    text-generation architecture must fail-fast (vision_only), not degrade.
-    Guards against _SUPPORTED_MODEL_TYPES widening text_coercible routing."""
+    """A multimodal config whose model_type is merely in the text allowlist (e.g. a real VLM mislabeled model_type='qwen2') but with NO confirmed text-generation architecture must fail-fast (vision_only), not degrade."""
     m = tmp_path / "mislabeled"
     _write_config(
         m,
@@ -465,8 +450,7 @@ def _coercible_model(tmp_path: Path) -> Path:
 
 
 def test_preflight_text_coercible_fallback_on_proceeds(tmp_path, monkeypatch):
-    """Default --allow-mm-text-fallback: a text-coercible model proceeds (no
-    fail-fast), records degraded_mode + a model warning, writes no final.json."""
+    """Default --allow-mm-text-fallback: a text-coercible model proceeds (no fail-fast), records degraded_mode + a model warning, writes no final.json."""
     model = _coercible_model(tmp_path)
     sd = tmp_path / "session_coerce_on"
     _seed_state(sd, monkeypatch)
@@ -490,8 +474,7 @@ def test_preflight_text_coercible_fallback_on_proceeds(tmp_path, monkeypatch):
 
 
 def test_preflight_text_coercible_fallback_off_fails_fast(tmp_path, monkeypatch):
-    """--no-allow-mm-text-fallback turns a text-coercible model back into a
-    fail-fast (stop_reason=unsupported_model_arch)."""
+    """--no-allow-mm-text-fallback turns a text-coercible model back into a fail-fast (stop_reason=unsupported_model_arch)."""
     model = _coercible_model(tmp_path)
     sd = tmp_path / "session_coerce_off"
     _seed_state(sd, monkeypatch)
@@ -539,9 +522,7 @@ def _xdit_args(model: str) -> argparse.Namespace:
 
 
 def test_preflight_scriptable_xdit_skips_gate(tmp_path, monkeypatch):
-    """A scriptable (xDiT) session must bypass the causal-LM gate even when its
-    root config.json looks nothing like a text-generation model — diffusion
-    checkpoints legitimately lack architectures/model_type at the root."""
+    """A scriptable (xDiT) session must bypass the causal-LM gate even when its root config.json looks nothing like a text-generation model — diffusion checkpoints legitimately lack architectures/model_type at the root."""
     model = tmp_path / "hunyuan_image"
     _write_config(model, {"_class_name": "HunyuanDiTPipeline"})
     sd = tmp_path / "session_xdit"
@@ -556,8 +537,7 @@ def test_preflight_scriptable_xdit_skips_gate(tmp_path, monkeypatch):
 
 
 def test_preflight_scriptable_xdit_skips_even_vlm_config(tmp_path, monkeypatch):
-    """The scriptable skip is framework-driven, so it fires before detection —
-    even a config that would otherwise read as vision_only must not block xDiT."""
+    """The scriptable skip is framework-driven, so it fires before detection — even a config that would otherwise read as vision_only must not block xDiT."""
     model = tmp_path / "diffusion_vlm_like"
     _write_config(
         model,
@@ -574,8 +554,7 @@ def test_preflight_scriptable_xdit_skips_even_vlm_config(tmp_path, monkeypatch):
 
 
 def test_preflight_serving_framework_still_blocks_vlm(tmp_path, monkeypatch):
-    """Regression guard: an explicit serving framework (sglang) must still run
-    the gate and block a true VLM — the skip is scoped to scriptable only."""
+    """Regression guard: an explicit serving framework (sglang) must still run the gate and block a true VLM — the skip is scoped to scriptable only."""
     model = tmp_path / "llava_sglang"
     _write_config(
         model,

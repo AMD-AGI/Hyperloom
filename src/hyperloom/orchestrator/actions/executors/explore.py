@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ExploreExecutor.
-
-The unified ``explore`` action (one yaml meta, one
-``SharedState.explore_search`` ledger, one executor).
-
-Per-variant flow:
-
-1. canonical_fingerprint dedup within the submitted grid only; historical
-   ``explore_search`` results are evidence, never an eligibility gate.
-2. Render the variant's Magpie YAML, run E2E bench.
-3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
-   threshold + accuracy gate on every variant that has a reference).
-
-Follows the "one change at a time" rule (single-tenant serving GPU).
-``provenance`` passes through to the ledger unchanged so the specialist
-path can fill ``'specialist:<domain>'``.
-
-The result payload is consumed by writeback's ``explore`` promote branch; see
-the ``return`` at the end of ``__call__`` for the authoritative field set.
-"""
+"""ExploreExecutor."""
 
 from __future__ import annotations
 
@@ -35,6 +16,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -116,12 +98,7 @@ _now_iso = functools.partial(now_iso, "auto")
 
 
 def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger.
-
-    Returns:
-        dict[str, Any]: A fresh explore-search ledger with all sections
-        initialized to their empty defaults.
-    """
+    """Empty :attr:`SharedState.explore_search` ledger."""
     return {
         "schema_version": 1,
         "tested": {},
@@ -137,8 +114,7 @@ def _initial_explore_search_state() -> dict[str, Any]:
     }
 
 
-# Audit/provenance metadata stashed on a GridVariant that must survive being
-# rebuilt into a derived variant.
+# Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
     "scope",
@@ -150,16 +126,19 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
 )
 
 
-def _carry_variant_metadata(src: Any, dst: Any) -> Any:
-    """Copy the carried audit metadata from ``src`` onto ``dst``.
+def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
+    """Whether Magpie lm_eval is opted out for this explore run.
 
-    Args:
-        src: The variant to read metadata from.
-        dst: The derived variant to stamp.
-
-    Returns:
-        ``dst``, for chaining.
+    ``--no-eval`` persists on ``SharedState.eval_disabled``. Task param
+    ``disable_run_eval`` is the same opt-out for internally queued explores.
     """
+    if is_truthy(params.get("disable_run_eval")):
+        return True
+    return bool(getattr(shared_state, "eval_disabled", False))
+
+
+def _carry_variant_metadata(src: Any, dst: Any) -> Any:
+    """Copy the carried audit metadata from ``src`` onto ``dst``."""
     for attr in _CARRIED_VARIANT_ATTRS:
         if hasattr(src, attr):
             setattr(dst, attr, getattr(src, attr))
@@ -182,34 +161,7 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
 
 
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
-    """Convert the LLM/specialist grid payload into GridVariant objects.
-
-    Variant dict shape:
-
-        {
-          "name": str (required, unique-in-round),
-          "extra_args" | "extra_server_args": str,
-          "extra_envs": dict[str,str],
-          "remove_args": list[str],      # inherited/base flags to remove
-          "unset_envs": list[str],       # inherited env keys to remove
-          "args_mode": "append"|"replace",
-          "note": str,
-          "provenance": str,            # llm_direct / default_grid / specialist:<tag>
-          "scope": str,                 # specialist dial: domain / domains / freeform (advisory)
-          "kb_evidence": list,          # passthrough
-          "pr_evidence": list,          # passthrough
-          "source_evidence": list,      # passthrough
-        }
-
-    Unknown keys ignored; unstamped ``provenance`` defaults to
-    ``'default_grid'`` (keeps seed grids distinct from ``'llm_direct'``).
-
-    Args:
-        payload: List of variant dicts from the LLM/specialist grid.
-
-    Returns:
-        The parsed ``GridVariant`` objects (entries without a name skipped).
-    """
+    """Convert the LLM/specialist grid payload into GridVariant objects."""
     out: list[GridVariant] = []
     for raw in payload or []:
         if not isinstance(raw, dict) or not raw.get("name"):
@@ -224,25 +176,19 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
-        # Stash extra metadata on the GridVariant so the ledger writer can
-        # pull provenance/evidence.
+        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
-        # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag
-        # variants. Consumed by _grid_runner._build_variant_yaml.
+        # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag variants.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
-        # Authored kernels this variant's overlay installs. Carried so the
-        # decision row names the kernel instead of inheriting the flag string as
-        # its whole identity; empty for every flag/env-only variant.
+        # Authored kernels this variant's overlay installs.
         gv.accepted_kernels = [  # type: ignore[attr-defined]
             str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
         ]
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
-        # Framework-rewrite lever this variant attributes to, and how. Carried so
-        # the round can report each rewrite's own contribution instead of only
-        # whether the variant won.
+        # Framework-rewrite lever this variant attributes to, and how.
         gv.framework_lever = str(raw.get("framework_lever") or "")  # type: ignore[attr-defined]
         gv.framework_lever_source = str(raw.get("framework_lever_source") or "")  # type: ignore[attr-defined]
         out.append(gv)
@@ -250,32 +196,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
 
 def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
-    """Build explore variants that attribute each registered rewrite lever.
-
-    Registered levers are the switches behind framework-level source rewrites
-    that were accepted by ``integrate_patch``. They arrive in one of two states,
-    and each needs the opposite experiment:
-
-    * **dormant** (the authored bundle passed correctness but not the throughput
-      threshold, so the code is applied with every switch off) — switch one lever
-      plus its dependency closure ON and see what it adds;
-    * **on** (the bundle cleared the gate and its switches are part of the running
-      configuration) — switch one lever plus everything that depends on it OFF and
-      see what the stack loses.
-
-    The closure is what makes either experiment meaningful. An enabler measured
-    alone shows nothing, and a dependent measured without its enabler shows the
-    cost of a broken configuration rather than the lever's contribution.
-
-    Levers that already carry an attribution are skipped, so a later round spends
-    its legs on something new.
-
-    Args:
-        shared_state: The live SharedState (duck-typed; ``None`` yields ``[]``).
-
-    Returns:
-        Variant payload dicts ready for :func:`_grid_variants_from_payload`.
-    """
+    """Build explore variants that attribute each registered rewrite lever."""
     if shared_state is None:
         return []
     rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
@@ -300,28 +221,7 @@ def _framework_lever_attributions(
     per_variant_outcomes: list[dict[str, Any]],
     lever_payload: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Derive each rewrite lever's own contribution from this round's outcomes.
-
-    The sign convention differs by experiment, and getting it wrong would invert
-    every verdict:
-
-    * an **additive** variant switched the lever on, so the measured gain *is* its
-      contribution;
-    * a **leave-one-out** variant switched it off, so its contribution is the
-      negation of the measured gain — a stack that drops 8% without a lever means
-      that lever was worth about 8%.
-
-    Only variants naming a single primary lever are attributed. A whole-stack
-    combination variant carries no primary lever and is a combination test, not an
-    attribution of any one rewrite.
-
-    Args:
-        per_variant_outcomes: This round's per-variant outcome rows.
-        lever_payload: The lever variants seeded into this round.
-
-    Returns:
-        ``{switch, gain_pct, source, variant_name, outcome}`` rows.
-    """
+    """Derive each rewrite lever's own contribution from this round's outcomes."""
     if not lever_payload:
         return []
     by_name = {
@@ -354,7 +254,6 @@ def _framework_lever_attributions(
 
 
 # Curated MTP-capable model class set (needs multi-token-prediction heads).
-# Cross-reference atom's ``atom/model_engine/`` before adding entries.
 _ATOM_MTP_CAPABLE_MODEL_CLASSES: frozenset[str] = frozenset(
     {
         "moe_mla",
@@ -370,23 +269,7 @@ def _atom_default_grid(
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
-    """Atom default explore grid, seeded from atom's known perf knobs.
-
-    Covers the atom CLI surface (compile/cudagraph bracket, prefix cache,
-    KV fp8, MoE EP, MLA DP-attention, MTP), each gated on model_class.
-    ``apply_compatibility_filter`` drops any that the installed ``atom`` does
-    not list in its ``--help``. Variant names are ``atom_``-prefixed for
-    cross-session disambiguation.
-
-    Args:
-        model_class: Model-class label that gates which variants are emitted.
-        conc: Live concurrency used to bracket cudagraph capture sizes.
-        isl: Input sequence length (reserved for future gating).
-        osl: Output sequence length (reserved for future gating).
-
-    Returns:
-        The curated list of atom ``GridVariant`` seeds.
-    """
+    """Atom default explore grid, seeded from atom's known perf knobs."""
     mc_l = (model_class or "").strip().lower()
     is_moe = "moe" in mc_l
     is_mla = "mla" in mc_l
@@ -396,15 +279,7 @@ def _atom_default_grid(
     variants: list[GridVariant] = []
 
     def _add(name: str, args: str) -> None:
-        """Append a ``default_grid``-provenance variant to the grid.
-
-        Args:
-            name (str): Unique variant name (``atom_`` prefixed).
-            args (str): The extra server args for the variant.
-
-        Returns:
-            None: Appends to the enclosing ``variants`` list.
-        """
+        """Append a ``default_grid``-provenance variant to the grid."""
         gv = GridVariant(
             name=name,
             extra_server_args=args,
@@ -414,8 +289,7 @@ def _atom_default_grid(
         gv.provenance = "default_grid"  # type: ignore[attr-defined]
         variants.append(gv)
 
-    # ``atom_level_3`` is atom's default, so use ``atom_level_2`` as the
-    # off-default contrast.
+    # ``atom_level_3`` is atom's default, so use ``atom_level_2`` as the off-default contrast.
     _add("atom_level_2", "--level 2")
     _add("atom_prefix_cache", "--enable_prefix_caching")
 
@@ -439,8 +313,8 @@ def _atom_default_grid(
         )
 
     if conc and conc > 0:
-        # Bracket the live concurrency so cudagraph captures the actual
-        # decode batch sizes the workload spends most of its time at.
+        # Bracket the live concurrency so cudagraph captures the actual decode batch sizes the workload spends most of
+        # its time at.
         cg_sizes = sorted({1, 2, 4, 8, 16, int(conc)})
         cg_str = "[" + ",".join(str(s) for s in cg_sizes) + "]"
         _add(
@@ -458,34 +332,11 @@ def _xdit_default_grid(
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
-    """xDiT (diffusion) default explore grid, seeded from the empirical KB.
-
-    Only BF16-safe knobs are emitted (precision is locked). Known-regression /
-    crash knobs are omitted here, and ``xdit_blacklist_reason`` drops them from
-    a proposal that reintroduces one. Variant names are ``xdit_``-prefixed for
-    cross-session disambiguation.
-
-    Args:
-        model_class: Model-class label (reserved for future DiT gating).
-        conc: Live concurrency (unused for diffusion; kept for signature parity).
-        isl: Input sequence length (unused; signature parity).
-        osl: Output sequence length (unused; signature parity).
-
-    Returns:
-        The curated list of xDiT ``GridVariant`` seeds.
-    """
+    """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
     variants: list[GridVariant] = []
 
     def _add(name: str, *, envs: dict[str, str]) -> None:
-        """Append a ``default_grid``-provenance env-only variant.
-
-        Args:
-            name (str): Unique variant name (``xdit_`` prefixed).
-            envs (dict[str, str]): The per-variant env overrides.
-
-        Returns:
-            None: Appends to the enclosing ``variants`` list.
-        """
+        """Append a ``default_grid``-provenance env-only variant."""
         gv = GridVariant(
             name=name,
             extra_server_args="",
@@ -509,12 +360,7 @@ _CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
 
 
 def _is_config_replay_variant(variant: Any) -> bool:
-    """Whether a variant replays an already-validated config verbatim.
-
-    Such a variant carries the workload spec (resolution / frames / steps) as
-    part of the config being reproduced, so the off-spec filter — which reads
-    those keys as an attempt to move the spec — must not judge it.
-    """
+    """Whether a variant replays an already-validated config verbatim."""
     return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
@@ -522,29 +368,7 @@ def filter_operator_pinned_envs(
     grid: list[GridVariant],
     baseline_envs: dict[str, Any] | None,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that overwrite an env the operator pinned in the baseline.
-
-    A pinned env is part of what the headline number means. Overwriting one does
-    not produce a faster configuration of the same workload, it produces a
-    different measurement wearing the baseline's name — and the quality gate
-    cannot catch it, because changing a repeat count or a warmup depth leaves
-    the output identical. Adding a key the baseline never set is exactly what
-    exploration is for, so only overwrites are refused.
-
-    This is for ``custom`` alone. A shipped framework's pinned value does not
-    mean "locked" — several pin a knob at its off value precisely so explore can
-    flip it — and those frameworks declare what is genuinely immutable in their
-    own blacklist. An operator has no blacklist to write in, so their pins carry
-    the stricter reading; it is the one place they can say "this must not move".
-
-    Args:
-        grid: Candidate variants for this round.
-        baseline_envs: ``benchmark.envs`` from the materialized baseline config.
-
-    Returns:
-        A ``(kept, dropped)`` tuple, where ``dropped`` holds
-        ``(variant_name, reason)`` pairs for logging.
-    """
+    """Drop variants that overwrite an env the operator pinned in the baseline."""
     pinned = {str(k).strip().upper() for k in (baseline_envs or {}) if str(k).strip()}
     if not pinned:
         return list(grid), []
@@ -555,8 +379,8 @@ def filter_operator_pinned_envs(
         clash = sorted(
             key for key in (str(k).strip().upper() for k in (getattr(gv, "extra_envs", None) or {})) if key in pinned
         )
-        # A replay reproduces a config another component already measured, so it
-        # carries the pinned values verbatim by construction.
+        # A replay reproduces a config another component already measured, so it carries the pinned values verbatim by
+        # construction.
         if clash and not _is_config_replay_variant(gv):
             dropped.append(
                 (
@@ -578,22 +402,7 @@ def _default_grid_for_framework(
     isl: int = 0,
     osl: int = 0,
 ) -> list[GridVariant]:
-    """Framework-keyed default grid dispatch.
-
-    Atom and xDiT return curated seed grids; sglang / vllm / unknown
-    return ``[]`` ("no programmatic seed") and rely on LLM-emitted
-    ``default_grid`` variants.
-
-    Args:
-        framework: Inference framework name to dispatch on.
-        model_class: Model-class label forwarded to the seed grid builder.
-        conc: Live concurrency forwarded to the seed grid builder.
-        isl: Input sequence length forwarded to the seed grid builder.
-        osl: Output sequence length forwarded to the seed grid builder.
-
-    Returns:
-        The framework's default ``GridVariant`` seeds, or ``[]`` when none.
-    """
+    """Framework-keyed default grid dispatch."""
     fw = (framework or "").strip().lower()
     if fw == "atom":
         return _atom_default_grid(
@@ -612,17 +421,12 @@ def _default_grid_for_framework(
     return []
 
 
-# Auto-derived per-variant hard timeout: derive the cap from the
-# Coordinator-injected measured baseline runtime plus a safety margin above the
-# soft-kill ratio (preserves soft-kill → hard-cap layering). Override per-task
-# via ``params['variant_timeout_sec']``; floor/ceiling guard pathological inputs.
+# Auto-derived per-variant hard timeout: derive the cap from the Coordinator-injected measured baseline runtime plus a
+# safety margin above the soft-kill ratio (preserves soft-kill → hard-cap layering).
 DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min
 DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — roofline composite budget
 DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5  # hard cap ≥ baseline × (kill_ratio + 0.5)
-# AgentX ceiling. A measured round (35B / conc 64 / 3600s window) is ~111 min,
-# so the stock 4h ceiling would clamp the hard cap under the soft kill and
-# invert the layering. 8h keeps the ordering intact for baselines up to ~2.3h at
-# the default kill ratio, which covers the models this mode targets.
+# AgentX ceiling.
 AGENTX_EXPLORE_TIMEOUT_CEILING_SEC = 28800  # 8 h
 
 
@@ -634,23 +438,7 @@ def _compute_explore_variant_timeout(
     ceiling_sec: int = DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
     safety_margin: float = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN,
 ) -> int:
-    """Derive the per-variant hard timeout from the measured baseline.
-
-    Returns ``floor_sec`` when ``baseline_runtime_sec`` is non-positive;
-    otherwise scales with the workload runtime. The hard cap stays **above**
-    the soft kill ratio (the catastrophic backstop sits above the designed
-    "slower than baseline" bound); inverting them defeats the layering.
-
-    Args:
-        baseline_runtime_sec: Measured baseline wall-clock (Coordinator-
-            injected). Non-positive forces the ``floor_sec`` fallback.
-        kill_ratio: ``--explore-overtime-kill-ratio``; clamped to ≥1.0 so the
-            derived timeout never underflows the soft kill.
-        floor_sec: Lower bound (default 40 min smoke-workload behaviour).
-        ceiling_sec: Upper bound (default 4 h, roofline composite timeout).
-        safety_margin: Additive margin on ``kill_ratio`` keeping the hard cap
-            above the soft kill (~50% headroom for one-off variant cold starts).
-    """
+    """Derive the per-variant hard timeout from the measured baseline."""
     if baseline_runtime_sec <= 0:
         return int(floor_sec)
     effective_kill_ratio = max(1.0, float(kill_ratio))
@@ -659,10 +447,7 @@ def _compute_explore_variant_timeout(
 
 
 class ExploreExecutor:
-    """ActionRunner for the merged ``explore`` action.
-
-    Per-variant KEEP/REVERT gating over a running optimization stack.
-    """
+    """ActionRunner for the merged ``explore`` action."""
 
     def __init__(
         self,
@@ -672,45 +457,14 @@ class ExploreExecutor:
         variant_timeout_sec: int = 2400,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
     ):
-        """Initialize the explore executor and its gating thresholds.
-
-        Args:
-            default_config_path (Path | str | None): Fallback benchmark
-                config path; resolved from defaults when ``None``.
-            session_dir (Path | str | None): Session output directory;
-                auto-resolved when ``None``.
-            variant_timeout_sec (int): Legacy per-variant hard timeout
-                floor. Defaults to ``2400``.
-            keep_threshold_pct (float): Minimum gain to KEEP a variant.
-                Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
-        """
+        """Initialize the explore executor and its gating thresholds."""
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
 
     async def __call__(self, ctx) -> dict[str, Any]:
-        """Run the merged ``explore`` action for one task.
-
-        Thin wrapper around :meth:`_run_explore` that guarantees a
-        post-round GPU sweep regardless of how the task ends (success,
-        failure, or an early ``return``): every variant this task started is
-        expected to be torn down by its own per-variant finally by the time
-        this returns, but a magpie_timeout that fires before a
-        server_lifecycle variant's pidfile is ever written leaves nothing
-        for that pidfile-based teardown to find, orphaning its server
-        (AMD-AGI/Hyperloom#1354). Skipped under pytest (unsafe there),
-        matching the guard on the per-launch preclean in ``_grid_runner.py``.
-        Best-effort; never raises.
-
-        Args:
-            ctx: The action runner context carrying the task and params.
-
-        Returns:
-            dict[str, Any]: The explore result payload (status plus the
-            accepted/rejected variants and ledger updates), or a failure
-            dict on error.
-        """
+        """Run the merged ``explore`` action for one task."""
         try:
             return await self._run_explore(ctx)
         finally:
@@ -736,6 +490,7 @@ class ExploreExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
+        eval_disabled = _explore_eval_disabled(shared_state, params)
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
@@ -743,9 +498,8 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
 
-        # ----- Workload-contract materialization ---------------------------
-        # Re-materialize so variant YAMLs honour the operator's actual
-        # workload (CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION).
+        # ----- Workload-contract materialization --------------------------- Re-materialize so variant YAMLs honour
+        # the operator's actual workload (CONC / ISL / OSL / TP / MAX_MODEL_LEN / PRECISION).
         resolved_model = resolve_session_model_path(
             params=params,
             state_model_path=str(getattr(shared_state, "model_path", "") or "") if shared_state else "",
@@ -770,6 +524,7 @@ class ExploreExecutor:
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
+                extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
             )
         except FrameworkScriptMismatchError as exc:
@@ -779,10 +534,9 @@ class ExploreExecutor:
                 "error": str(exc),
             }
 
-        # ----- Inputs ------------------------------------------------------
-        # Params snapshot the anchor and the stack it was measured on together;
-        # a KEEP landing while this task queued invalidates both, so refresh them
-        # as a pair. Revalidation reproduces the saved stack, so it never re-reads.
+        # ----- Inputs ------------------------------------------------------ Params snapshot the anchor and the stack
+        # it was measured on together; a KEEP landing while this task queued invalidates both, so refresh them as a
+        # pair.
         ss = extra.get("shared_state") or extra.get("state")
         snapshot_tput = float(params.get("base_tput") or 0.0)
         # Revalidation reproduces the saved stack, so it never re-anchors.
@@ -796,8 +550,8 @@ class ExploreExecutor:
                 log.warning("explore: anchor drift %.1f -> %.1f; re-reading base args", snapshot_tput, anchor)
             params["base_tput"] = anchor
             cb = getattr(ss, "current_best", None)
-            # Only current_best carries args; a baseline_tput anchor leaves the
-            # params stack (seeded from the baseline record) authoritative.
+            # Only current_best carries args; a baseline_tput anchor leaves the params stack (seeded from the baseline
+            # record) authoritative.
             if first_positive_tput(cb) > 0:
                 params.update(stack_base_params(cb))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
@@ -806,13 +560,7 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # The measured baseline outranks a proposed one. ``accuracy_baseline`` is
-        # offered to the LLM in the action schema while every in-tree writer only
-        # copies ``SharedState.baseline_accuracy``, so a proposed figure that
-        # disagrees is a hallucination -- and now that every variant carrying a
-        # reference is gated, one bad number fails a whole grid where it used to
-        # reach only the few variants a flag catalogue called risky. params stay
-        # as the fallback for an external invocation that has no state.
+        # The measured baseline outranks a proposed one.
         baseline_accuracy = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0) if ss is not None else 0.0
         if baseline_accuracy <= 0:
             baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
@@ -826,9 +574,6 @@ class ExploreExecutor:
         )
 
         # per-variant overtime kill — anchored on baseline wall-clock.
-        # Coordinator injects ``baseline_runtime_sec`` +
-        # ``explore_overtime_kill_ratio``; if either is missing the deadline
-        # stays None and only the ``variant_timeout_sec`` hard cap gates.
         baseline_runtime_sec_raw = params.get("baseline_runtime_sec")
         try:
             baseline_runtime_sec = float(baseline_runtime_sec_raw) if baseline_runtime_sec_raw is not None else 0.0
@@ -839,8 +584,7 @@ class ExploreExecutor:
             overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
         except (TypeError, ValueError):
             overtime_kill_ratio = 0.0
-        # WARM measure-round anchor (client-only). When warm-decision is active
-        # the overtime kill anchors on this; falls back to the cold baseline.
+        # WARM measure-round anchor (client-only).
         baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
         try:
             baseline_warm_runtime_sec = (
@@ -848,10 +592,9 @@ class ExploreExecutor:
             )
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
-        # Per-variant hard cap precedence: explicit
-        # ``params['variant_timeout_sec']`` → auto-derive from baseline
-        # runtime + kill ratio (see ``_compute_explore_variant_timeout``) →
-        # ``self.variant_timeout_sec`` floor (no baseline yet).
+        # Per-variant hard cap precedence: explicit ``params['variant_timeout_sec']`` → auto-derive from baseline
+        # runtime + kill ratio (see ``_compute_explore_variant_timeout``) → ``self.variant_timeout_sec`` floor (no
+        # baseline yet).
         explicit_timeout = params.get("variant_timeout_sec")
         if explicit_timeout is not None:
             timeout_sec = int(explicit_timeout)
@@ -866,15 +609,7 @@ class ExploreExecutor:
                 )
             except (TypeError, ValueError):
                 safety_margin = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
-            # The stock 4h ceiling assumes a synthetic round measured in
-            # minutes. An AgentX round is a fixed measurement window plus corpus
-            # load, per-lane warmup and drain -- measured at ~111 min for a 35B
-            # model at conc 64 -- so the ceiling clamps the hard cap BELOW the
-            # soft kill and inverts the layering this function documents: the
-            # generic timeout fires first and the round is recorded as a plain
-            # timeout instead of KILLED_OVERTIME with its diagnostic ratio.
-            # Raise the ceiling (not the kill ratio) so the ordering holds for
-            # the long baselines AgentX produces.
+            # The stock 4h ceiling assumes a synthetic round measured in minutes.
             _ceiling = AGENTX_EXPLORE_TIMEOUT_CEILING_SEC if agentx_enabled() else DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
             timeout_sec = _compute_explore_variant_timeout(
                 baseline_runtime_sec=baseline_runtime_sec,
@@ -884,8 +619,7 @@ class ExploreExecutor:
                 safety_margin=safety_margin,
             )
 
-        # Resolve framework from materialized YAML (for the ledger + the
-        # atom seed-grid fallback below).
+        # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
@@ -904,11 +638,7 @@ class ExploreExecutor:
         grid_payload = params.get("grid") or []
         if not isinstance(grid_payload, list):
             grid_payload = []
-        # Framework-rewrite levers first. Each one is a measured, already-applied
-        # source rewrite awaiting its individual number, so it is both cheaper to
-        # judge and better evidenced than a proposed config knob. Prepending also
-        # means an LLM-supplied grid does not crowd the attribution out of the
-        # round's budget.
+        # Framework-rewrite levers first.
         lever_payload = framework_lever_grid(extra.get("shared_state") or extra.get("state"))
         if lever_payload:
             existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
@@ -920,8 +650,7 @@ class ExploreExecutor:
                 )
                 grid_payload = fresh + list(grid_payload)
         if not grid_payload:
-            # No LLM variants: fall through to the framework's programmatic
-            # seed grid instead of failing the task.
+            # No LLM variants: fall through to the framework's programmatic seed grid instead of failing the task.
             seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
             seed_conc = 0
             try:
@@ -1010,8 +739,7 @@ class ExploreExecutor:
         tested_dict = search.get("tested") or {}
         inherited_name_index: dict[str, Any] = dict(search.get("name_index") or {})
 
-        # Attach the per-variant fingerprint as an attribute so the result
-        # loop needn't recompute.
+        # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
         unique_in_round: dict[str, GridVariant] = {}
@@ -1046,19 +774,13 @@ class ExploreExecutor:
             len(skipped_dup),
         )
 
-        # Multi-node grid shaping. Both helpers short-circuit in single-node
-        # mode, leaving ``runnable`` bit-for-bit identical. In multi-node mode:
-        # drop known-regression variants (cuda-graph-max-bs < CONC), then
-        # surface likely-winners first so a max-hours cut still benches the
-        # strong candidates.
+        # Multi-node grid shaping.
         if runnable:
             runnable, _mn_dropped = apply_multi_node_invalid_variants(runnable)
-            # Honour an operator-pinned SGLANG_USE_AITER=0: drop variants that
-            # would re-enable the (hang-prone) aiter MoE runner. No-op unless
-            # the pin is set. Self-gates, so safe to run in any mode.
+            # Honour an operator-pinned SGLANG_USE_AITER=0: drop variants that would re-enable the (hang-prone) aiter
+            # MoE runner.
             runnable, _aiter_dropped = apply_aiter_moe_pin_filter(runnable)
-            # xDiT do-not-set list, plus flags the model class or the installed
-            # server does not support. Proposals reach here unfiltered.
+            # xDiT do-not-set list, plus flags the model class or the installed server does not support.
             runnable, _compat_dropped = apply_compatibility_filter(
                 runnable,
                 framework=framework,
@@ -1088,17 +810,15 @@ class ExploreExecutor:
         # ----- Per-variant serial run loop ---------------------------------
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
-        # This round's own ledger writes, kept apart from the ledger it inherited
-        # and merged over it once the loop is done. A fingerprint may be re-run
-        # across rounds, so writing straight into the merged dict would lose the
-        # earlier round's measured row under this round's write.
+        # This round's own ledger writes, kept apart from the ledger it inherited and merged over it once the loop is
+        # done.
         round_tested: dict[str, dict[str, Any]] = {}
         round_name_index: dict[str, Any] = {}
         rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
         winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
 
-        # ``stack_extra_args`` / ``stack_extra_envs`` carry the running
-        # accumulation; after a KEEP they extend with the KEEP'd variant.
+        # ``stack_extra_args`` / ``stack_extra_envs`` carry the running accumulation; after a KEEP they extend with
+        # the KEEP'd variant.
         stack_extra_args = base_extra_args
         stack_extra_envs = dict(base_extra_envs)
         stack_remove_args = list(dict.fromkeys(base_remove_args))
@@ -1117,93 +837,45 @@ class ExploreExecutor:
             log.info("explore: grading this round on output throughput (%s)", _anchor_reason)
             running_base_perf = ANCHOR_DEGRADED
 
-        # Single-node server_lifecycle eligibility (multi-node / non-builtin
-        # script / profiler-on falls back to a cold decision round instead of
-        # one that re-attaches to the warmup's server).
+        # Single-node server_lifecycle eligibility (multi-node / non-builtin script / profiler-on falls back to a cold
+        # decision round instead of one that re-attaches to the warmup's server).
         lifecycle = resolve_lifecycle_params(config_path)
         lifecycle_eligible = bool(lifecycle.get("eligible"))
         lifecycle_framework = str(lifecycle.get("framework") or "")
         lifecycle_port = int(lifecycle.get("port") or 0)
 
-        # Warm-decision mode. Run a discarded cold warmup round first so the
-        # decision round reuses the hot server (client-only) and is measured
-        # warm — apples-to-apples with ``baseline_tput``. Mirrors both conjuncts
-        # the baseline gates its cold+hot double-run on, so the two sides measure
-        # hot together or cold together: a session that opted out of the double
-        # run has a COLD ``baseline_tput`` and must be graded cold.
+        # Warm-decision mode.
         use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
-        # Decision-round overtime anchor: the WARM measure time when warm-decision
-        # is active and available, else the cold baseline wall-clock (legacy).
+        # Decision-round overtime anchor: the WARM measure time when warm-decision is active and available, else the
+        # cold baseline wall-clock (legacy).
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
         )
-        # The soft deadline is anchored on the warm client-only measure time and
-        # enforced from the server-ready marker, so both the measured runtime and
-        # this anchor exclude cold boot / warmup.
+        # The soft deadline is anchored on the warm client-only measure time and enforced from the server-ready
+        # marker, so both the measured runtime and this anchor exclude cold boot / warmup.
         if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
             decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
         else:
             decision_deadline_sec = None
 
-        # One Ray serving lease (actor) spans the WHOLE round; every variant
-        # reuses it. The per-variant server is still (re)booted via run_grid and
-        # reaped by teardown_lifecycle_server (a driver-side pgid kill, which is
-        # raylet-free) between variants, so switching server args never churns a
-        # Ray worker — only the actor's child server restarts inside the same
-        # long-lived worker. The lease/actor is closed exactly once at round end
-        # (the ``finally`` after the loop) instead of per variant: the old
-        # per-variant ``ray.kill`` made raylet reap a heavyweight GPU worker on
-        # every variant, which destabilised the single-node raylet and took the
-        # whole session down with it.
+        # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
-        # Stop testing further variants once the session wall-clock budget runs
-        # out; untested variants stay out of the ledger so a resume can retry them.
-        #
-        # What a normally-behaving round needs, as opposed to ``timeout_sec``,
-        # which is the catastrophic backstop (``baseline x (kill_ratio + margin)``
-        # ~= baseline x 2). Gating on the backstop abandons the tail of the budget
-        # to variants that would have finished comfortably: with a 20-min baseline
-        # it refuses to start with 30 min left, for a round that needs ~20. The
-        # params values win over the session's because an operator may override
-        # them per task; ``None`` when neither is known, which leaves the stricter
-        # backstop check in place rather than guessing.
-        #
-        # The two rounds are estimated separately because they cost different
-        # amounts: the warmup pass pays a cold server boot and is discarded, while
-        # the decision round is client-only against the hot server -- which is
-        # exactly the split ``decision_anchor_sec`` already draws for the overtime
-        # kill.
+        # Stop testing further variants once the session wall-clock budget runs out; untested variants stay out of the
+        # ledger so a resume can retry them.
         session_deadline_sec, session_expected_sec = session_grid_bounds(
             extra.get("shared_state") or extra.get("state")
         )
         warmup_expected_sec = (baseline_runtime_sec if baseline_runtime_sec > 0 else None) or session_expected_sec
         decision_expected_sec = (decision_anchor_sec if decision_anchor_sec > 0 else None) or session_expected_sec
-        # Set when the loop stops because the run stopped it -- the budget ran
-        # out, or the orchestrator cancelled the action -- so the round can say
-        # so instead of reporting a bare, unattributed failure: a variant that
-        # never ran is not a variant that failed. ``run_stop_detail`` is the
-        # lead clause, which differs by whether a round was already under way.
+        # Set when the loop stops because the run stopped it -- the budget ran out, or the orchestrator cancelled the
+        # action -- so the round can say so instead of reporting a bare, unattributed failure: a variant that never
+        # ran is not a variant that failed.
         run_stop: StoppedByTheRun | None = None
         run_stop_detail = ""
         session_budget_untested = 0
 
         def _stopped_by_the_run(result: Any, *, variant: GridVariant, idx: int, round_label: str) -> bool:
-            """Whether the run stopped this round, and record it if it did.
-
-            A reaped round measured nothing, so the variant is left out of every
-            ledger exactly as an unadmitted one is: writing it as ``FAILED``
-            would make a resume skip a variant nothing ever measured, and would
-            teach the KB that these knobs are bad because a clock ran out.
-
-            Args:
-                result: The round's :class:`VariantResult`, or ``None``.
-                variant: The variant the round was measuring, for the log line.
-                idx: Its index in ``runnable``, for the untested count.
-                round_label: Which round was stopped, for the log line.
-
-            Returns:
-                bool: ``True`` when the caller must stop testing variants.
-            """
+            """Whether the run stopped this round, and record it if it did."""
             nonlocal run_stop, run_stop_detail, session_budget_untested
             stopped = stopped_by_the_run_class(getattr(result, "error_class", "") if result is not None else "")
             if stopped is None:
@@ -1223,9 +895,8 @@ class ExploreExecutor:
 
         try:
             for idx, gv in enumerate(runnable):
-                # A warm-decision variant pays for both rounds, so admitting it on
-                # the decision round alone would let it in and then strand it
-                # mid-variant with a discarded warmup and no measurement.
+                # A warm-decision variant pays for both rounds, so admitting it on the decision round alone would let
+                # it in and then strand it mid-variant with a discarded warmup and no measurement.
                 if decision_expected_sec is not None:
                     fit_required_sec = float(decision_expected_sec) + (
                         float(warmup_expected_sec or 0.0) if use_warm_decision else 0.0
@@ -1257,6 +928,8 @@ class ExploreExecutor:
                 run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
                 run_extra_envs = dict(stack_extra_envs)
                 run_extra_envs.update(gv.extra_envs)
+                if eval_disabled:
+                    run_extra_envs["RUN_EVAL"] = "false"
                 run_gv = GridVariant(
                     name=gv.name,
                     extra_server_args=gv.extra_server_args,
@@ -1267,11 +940,8 @@ class ExploreExecutor:
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
                 _carry_variant_metadata(gv, run_gv)
-                # The decision round is timed against a throughput-only anchor, so
-                # it measures throughput only: the warmup round already evaluated
-                # accuracy and ``parse_eval_results`` falls back to that score.
-                # Without a warmup there is nothing to fall back to, so the
-                # decision round keeps its own eval.
+                # The decision round is timed against a throughput-only anchor, so it measures throughput only: the
+                # warmup round already evaluated accuracy and ``parse_eval_results`` falls back to that score.
                 decision_gv = run_gv
                 if use_warm_decision:
                     decision_envs = dict(run_extra_envs)
@@ -1290,26 +960,16 @@ class ExploreExecutor:
                     )
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
-                # The warmup and decision rounds share this slot as the
-                # lifecycle pid_dir so the decision round re-attaches to the
-                # server the warmup left hot.
+                # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
+                # re-attaches to the server the warmup left hot.
                 variant_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
-                # Ray-managed GPU execution (§12 T1): reuse the round-level Ray
-                # lease (actor) for this variant's warmup and decision
-                # rounds; they reuse one persistent server, so no GPU
-                # process outlives the lease. ``None`` on the local path keeps the
-                # legacy behaviour. The actor is NOT closed per variant — only its
-                # child server is reaped in the ``finally`` below (raylet-free);
-                # the lease/actor is released once at round end.
+                # Ray-managed GPU execution (§12 T1): reuse the round-level Ray lease (actor) for this variant's
+                # warmup and decision rounds; they reuse one persistent server, so no GPU process outlives the lease.
                 variant_lease = round_serving_lease
                 try:
-                    # Warm-decision warmup round. Boot the variant's server once
-                    # and DISCARD the cold measurement so the decision round runs
-                    # warm / client-only. cleanup=false keeps the server hot; no
-                    # soft_deadline (only the hard variant_timeout cap gates the
-                    # warmup, so a one-time cold boot doesn't trip the kill).
+                    # Warm-decision warmup round.
                     if use_warm_decision:
                         warmup_slot = slot / "warmup_round"
                         warmup_slot.mkdir(parents=True, exist_ok=True)
@@ -1403,10 +1063,8 @@ class ExploreExecutor:
                                 }
                             )
                             continue
-                    # Decision round: warm (re-attaches to the warmup's hot
-                    # server, client-only) when ``use_warm_decision``, otherwise a
-                    # fresh cold boot. It is the round the variant is graded on.
-                    # ``soft_deadline_sec`` is the overtime kill.
+                    # Decision round: warm (re-attaches to the warmup's hot server, client-only) when
+                    # ``use_warm_decision``, otherwise a fresh cold boot.
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
@@ -1437,17 +1095,14 @@ class ExploreExecutor:
                     if _stopped_by_the_run(r, variant=gv, idx=idx, round_label="decision"):
                         break
 
-                    # Overtime gate fired: record a ``KILLED_OVERTIME`` row (no
-                    # faked tput/gain), skip downstream gates, leave the stack
-                    # unadvanced.
+                    # Overtime gate fired: record a ``KILLED_OVERTIME`` row (no faked tput/gain), skip downstream
+                    # gates, leave the stack unadvanced.
                     if getattr(r, "killed_overtime", False):
                         variant_runtime = float(r.runtime_sec or 0.0)
                         wall_clock_ratio = (
                             round(variant_runtime / decision_anchor_sec, 3) if decision_anchor_sec > 0 else None
                         )
                         # Rough output tok/s salvaged from partial server.log.
-                        # Informational only: ``tput`` stays None so this never
-                        # enters winner selection or gain math.
                         est_tput = getattr(r, "estimated_output_throughput", None)
                         round_tested[fp] = {
                             "fingerprint": fp,
@@ -1539,9 +1194,8 @@ class ExploreExecutor:
                         )
                         continue
 
-                    # A variant KEEPs when it clears the graded verdict and the
-                    # accuracy gate. The axes and the threshold floor belong to
-                    # resolve_graded_comparison, which every lane shares.
+                    # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the
+                    # threshold floor belong to resolve_graded_comparison, which every lane shares.
                     variant_meas = {
                         GRADED_OUTPUT: r.output_throughput,
                         "input_throughput": r.input_throughput,
@@ -1587,22 +1241,14 @@ class ExploreExecutor:
                     else:
                         gain = gain_pct(graded.candidate, graded.reference)
                     if outcome == "FAILED" and not reason:
-                        # Accuracy gate. Every variant is gated: the round already
-                        # ran the eval, so the score is on disk and the flag
-                        # catalogue that used to decide whether to read it only
-                        # discarded numbers already paid for -- and missed atom's
-                        # precision knobs entirely. A session that opted out of
-                        # eval has no baseline accuracy, which is what leaves
-                        # serving ungated below. For scriptable frameworks the
-                        # image-quality gate is the sole correctness signal, so a
-                        # missing gate fails closed.
+                        # Accuracy gate.
                         from hyperloom.inference_optimizer import framework_registry
 
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
                         accuracy_value: float | None = None
-                        # Serving still needs a measured baseline to compare
-                        # against; scriptable compares against a fixed 1.0.
+                        # Serving still needs a measured baseline to compare against; scriptable compares against a
+                        # fixed 1.0.
                         if scriptable or baseline_accuracy > 0:
                             eval_out = parse_eval_results(
                                 slot,
@@ -1611,23 +1257,15 @@ class ExploreExecutor:
                             )
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
-                                # Scriptable maps gate pass→1.0 / fail→0.0, so
-                                # compare against a perfect reference (1.0);
-                                # serving compares vs the measured baseline.
+                                # Scriptable maps gate pass→1.0 / fail→0.0, so compare against a perfect reference
+                                # (1.0); serving compares vs the measured baseline.
                                 reference = 1.0 if scriptable else baseline_accuracy
                                 accuracy_ok = accuracy_passed(
                                     reference,
                                     float(accuracy_value),
                                 )
                             else:
-                                # No eval result. Both scriptable and serving
-                                # fail closed: a gated variant (scriptable, or a
-                                # serving variant with a baseline) that yields no
-                                # accuracy verdict likely broke the eval
-                                # path, so the change is reverted. The former
-                                # serving throughput-only skip is removed. Baseline
-                                # is where a missing accuracy result halts the run;
-                                # post-baseline it is a per-variant REVERT.
+                                # No eval result.
                                 accuracy_ok = False
                         if not accuracy_ok:
                             outcome = "REVERT"
@@ -1672,10 +1310,7 @@ class ExploreExecutor:
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack. For
-                        # removal variants, next_args/next_envs are the
-                        # effective launch config that must persist if the KEEP
-                        # survives; gv.extra_* remain only the candidate delta.
+                        # Layer onto the running stack.
                         next_effective_args = compose_server_args(
                             inherited_args=_effective_inherited_args,
                             base_extra_args=stack_extra_args,
@@ -1724,24 +1359,17 @@ class ExploreExecutor:
                             **effective_control_fields,
                             "note": gv.note,
                             "provenance": provenance,
-                            # Names of the authored kernels this config carried,
-                            # when an overlay was loaded. Empty for a flags-only
-                            # variant, so a downstream reader can tell a config
-                            # gain from a gain that also had a kernel running.
+                            # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
                             "graded_objective": GRADED_INTVTY if _graded_on_intvty else GRADED_OUTPUT,
-                            # The verdict this KEEP rests on. ``None`` means the
-                            # variant was not gated (not high-risk, or no
-                            # baseline to compare against) rather than that it
-                            # scored nothing — without it the ledger cannot say
-                            # afterwards whether a kept config was ever checked.
+                            # The verdict this KEEP rests on. ``None`` means the variant was not gated (not
+                            # high-risk, or no baseline) rather than that it scored nothing.
                             "accuracy": accuracy_value,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
-                            # The axes this KEEP was graded on travel with it:
-                            # current_best becomes the next round's anchor, and
-                            # an anchor without them degrades the session.
+                            # The axes this KEEP was graded on travel with it: current_best becomes the next round's
+                            # anchor, and an anchor without them degrades the session.
                             "input_throughput": r.input_throughput,
                             "total_throughput": r.total_token_throughput,
                             "e2e_norm_intvty_p90": r.intvty_p90,
@@ -1753,9 +1381,7 @@ class ExploreExecutor:
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
                         }
-                        # The variant KEEPs on the round that graded it. Folding
-                        # it onto the stack advances the anchor the next in-batch
-                        # variant is graded against.
+                        # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                         stack_extra_envs = next_envs
                         stack_remove_args = list(run_remove_args)
@@ -1829,12 +1455,8 @@ class ExploreExecutor:
                         }
                     )
                 finally:
-                    # Reap THIS variant's persistent server on every exit path
-                    # (idempotent + no-op when reuse was ineligible). This is a
-                    # driver-side pgid kill (raylet-free), so the next variant
-                    # boots a fresh server inside the SAME long-lived actor. The
-                    # Ray lease/actor itself is released once at round end (§4.2:
-                    # the server is always reaped before the lease is dropped).
+                    # Reap THIS variant's persistent server on every exit path (idempotent + no-op when reuse was
+                    # ineligible).
                     if lifecycle_eligible:
                         teardown_lifecycle_server(
                             pid_dir=slot,
@@ -1842,15 +1464,13 @@ class ExploreExecutor:
                             port=lifecycle_port,
                         )
         finally:
-            # Release the round's Ray serving lease/actor exactly once (this was
-            # a per-variant ``ray.kill`` before — the raylet worker churn that
-            # destabilised the single-node cluster).
+            # Release the round's Ray serving lease/actor exactly once (this was a per-variant ``ray.kill`` before —
+            # the raylet worker churn that destabilised the single-node cluster).
             if round_serving_lease is not None:
                 round_serving_lease.close()
 
-        # ----- Ledger compaction (per-fingerprint last-wins) ----------------
-        # This round's writes over the ledger it inherited: a re-run fingerprint
-        # replaces its earlier row, which is what a fresh measurement means, and a
+        # ----- Ledger compaction (per-fingerprint last-wins) ---------------- This round's writes over the ledger it
+        # inherited: a re-run fingerprint replaces its earlier row, which is what a fresh measurement means, and a
         # variant this round rolled back leaves the earlier row standing.
         tested_update: dict[str, dict[str, Any]] = {**tested_dict, **round_tested}
         name_index: dict[str, Any] = {**inherited_name_index, **round_name_index}
@@ -1861,8 +1481,7 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # Flat per-variant outcomes for the Coordinator's per-variant
-        # fact-write hook (this round's outcomes).
+        # Flat per-variant outcomes for the Coordinator's per-variant fact-write hook (this round's outcomes).
         reasons_by_fp: dict[str, str] = {
             str(r.get("fingerprint") or ""): str(r.get("reason") or "")
             for r in rejected_update
@@ -1885,14 +1504,13 @@ class ExploreExecutor:
                 metrics["tput"] = te.get("tput")
             if te.get("gain_pct") is not None:
                 metrics["gain_pct"] = te.get("gain_pct")
-            # Rough decode tput salvaged from a killed-overtime variant's
-            # partial server.log. Informational only (no ``tput``/gain).
+            # Rough decode tput salvaged from a killed-overtime variant's partial server.log.
             if te.get("estimated_output_throughput") is not None:
                 metrics["estimated_output_throughput"] = te.get(
                     "estimated_output_throughput",
                 )
-            # Surface wall-clock + kill ratio so the LLM/KB sees "ran too slow
-            # → early kill" instead of an opaque FAILED row.
+            # Surface wall-clock + kill ratio so the LLM/KB sees "ran too slow → early kill" instead of an opaque
+            # FAILED row.
             if te.get("runtime_sec") is not None:
                 metrics["runtime_sec"] = te.get("runtime_sec")
             if te.get("wall_clock_ratio_vs_baseline") is not None:
@@ -1919,8 +1537,7 @@ class ExploreExecutor:
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
                     "raw_result_path": te.get("raw_result_path"),
-                    # Carry the variant knobs so the journal's
-                    # ``classify_change_kind`` can classify the change kind.
+                    # Carry the variant knobs so the journal's ``classify_change_kind`` can classify the change kind.
                     "variant": {
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),
@@ -1993,8 +1610,8 @@ class ExploreExecutor:
         # Each KEEP advances ``running_base_tput``, so this is the final stack.
         output_throughput = float(running_base_tput) if winners else None
 
-        # Successful = at least one bench produced a measurement or was reaped
-        # by the overtime gate (KILLED_OVERTIME is a real signal).
+        # Successful = at least one bench produced a measurement or was reaped by the overtime gate (KILLED_OVERTIME
+        # is a real signal).
         produced_measurement = any(
             t.get("outcome")
             in (
@@ -2006,10 +1623,9 @@ class ExploreExecutor:
             if t.get("round_id") == round_id
         )
         status = "succeeded" if produced_measurement or winners else "failed"
-        # A round that measured nothing because the run stopped it is not the
-        # same as one whose variants failed, and it used to be reported as a bare
-        # ``failed`` with no error_class at all -- nothing downstream could tell
-        # the two apart, so the KB could learn that these variants are bad.
+        # A round that measured nothing because the run stopped it is not the same as one whose variants failed, and
+        # it used to be reported as a bare ``failed`` with no error_class at all -- nothing downstream could tell the
+        # two apart, so the KB could learn that these variants are bad.
         budget_error: dict[str, Any] = {}
         if status == "failed" and run_stop is not None:
             budget_error = {
@@ -2047,15 +1663,7 @@ class ExploreExecutor:
 
 
 def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names.
-
-    Args:
-        name (str): The raw variant name.
-
-    Returns:
-        str: A slug with non-alphanumeric characters replaced by ``_``,
-        truncated to 60 characters.
-    """
+    """Filesystem-safe slug for variant directory names."""
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 

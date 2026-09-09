@@ -57,8 +57,7 @@ def test_finds_named_benchmark_and_demotes_multigpu(tmp_path):
 
 
 def test_content_match_finds_test_when_name_lacks_op(tmp_path):
-    # silu_and_mul's benchmark is test_activation.py (name has no 'silu');
-    # content grep must still find it.
+    # silu_and_mul's benchmark is test_activation.py (name has no 'silu'); content grep must still find it.
     repo = _fake_repo(tmp_path)
     src = str(repo / "csrc" / "kernels" / "act.cu")
     files = find_benchmark_files("sgl_kernel::silu_and_mul", src)

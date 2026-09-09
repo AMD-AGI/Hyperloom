@@ -2,12 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI wrapper: aiperf ``profile_export_aiperf.json`` -> ``inferencex_result.json``.
-
-Thin shim over ``hyperloom.inference_optimizer.agentx.mapping.map_aiperf`` (runs
-in the same venv as Hyperloom). Falls back to a vendored copy of the mapping if
-the package is not importable, so the deployed script is self-sufficient.
-"""
+"""CLI wrapper: aiperf ``profile_export_aiperf.json`` -> ``inferencex_result.json``."""
 
 import json
 import os
@@ -15,12 +10,7 @@ import sys
 
 
 def _noncanonical_reasons():
-    """Workload deviations the client detected; see aiperf_client.sh.
-
-    aiperf cannot judge these -- it has no concept of corpus size, and it only
-    stamps a False verdict when --unsafe-override actually suppressed a
-    violation -- so the client passes them here and the verdict is forced.
-    """
+    """Workload deviations the client detected; see aiperf_client.sh."""
     raw = (os.environ.get("AGENTX_NONCANONICAL_REASONS") or "").strip()
     return [p.strip() for p in raw.split(",") if p.strip()] if raw else []
 
@@ -43,8 +33,7 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         return default
 
     def _submission_outcome(export):
-        # Tri-state: True / False / None(absent). Absent is NOT valid -- it means
-        # no --scenario was requested or the aiperf build predates the field.
+        # Tri-state: True / False / None(absent).
         md = export.get("metadata")
         if not isinstance(md, dict) or "submission_valid" not in md:
             return None, []
@@ -77,9 +66,8 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
         rc = int(_stat(m, "request_count") or 0)
         isl = _stat(m, "input_sequence_length")
-        # E2E Normalized Interactivity slow tail.  P10 of the per-request rate
-        # OSL/E2EL_s equals 1/P90 of the per-request ratio E2EL/OSL -- the
-        # slow-tail definition upstream uses (MODELS.md:78).
+        # E2E normalised interactivity slow tail: P10 of the per-request rate OSL/E2EL_s equals 1/P90 of the
+        # E2EL/OSL ratio, which is the definition upstream uses (MODELS.md:78).
         intvty_p90 = _pct(m, "e2e_output_token_throughput", "p10")
         return {
             "request_throughput": _stat(m, "request_throughput"),

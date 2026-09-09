@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The tool-side git callers must survive a foreign-owned checkout.
-
-The kernel agent's Forge backend, the framework explorer's isolation helpers and
-the pod-side TraceLens patcher all build their own argv instead of going through
-``executors/_git.py``, and the trees they drive are the ones the documented
-container recipe bind-mounts. Git refuses every call on them, and the refusals
-read as facts about the repository: "no default branch", "HEAD is unresolvable",
-"the best commit does not contain the source it was validated on".
-
-``GIT_TEST_ASSUME_DIFFERENT_OWNER`` is git's own hook for this path, so the
-tests need no root and no foreign-owned directory. The repo is built first and
-only then declared foreign, otherwise the fixture could not commit.
-"""
+"""The tool-side git callers must survive a foreign-owned checkout."""
 
 from __future__ import annotations
 
@@ -62,15 +50,9 @@ def _multinode_patcher():
     return module
 
 
-# ---------------------------------------------------------------------------
 # forge_submit: the kernel agent's main path
-# ---------------------------------------------------------------------------
 def test_the_default_branch_is_not_reported_as_missing(foreign_repo):
-    """A refusal here reads as "this repo has no default branch".
-
-    ``_prepare_inplace`` uses the answer to recover from a leftover forge
-    branch, and an empty one makes it skip the run instead.
-    """
+    """A refusal here reads as \"this repo has no default branch\"."""
     assert forge_submit._default_branch(str(foreign_repo)) == "main"
 
 
@@ -94,11 +76,7 @@ def test_a_worktree_is_prepared_on_a_foreign_owned_repo(foreign_repo, tmp_path):
 
 
 def test_the_validated_best_commit_is_exported_from_a_foreign_owned_repo(foreign_repo, tmp_path):
-    """The export reads blobs with a bare ``subprocess.run``, not ``_run``.
-
-    Refused, it reports a validated commit as not containing the source it was
-    validated on, which aborts a run that had already produced its result.
-    """
+    """The export reads blobs with a bare ``subprocess.run``, not ``_run``."""
     guard = ["-c", f"safe.directory={foreign_repo}"]
     base_commit = subprocess.run(
         ["git", *guard, "-C", str(foreign_repo), "rev-parse", "HEAD"],
@@ -136,21 +114,13 @@ def test_the_validated_best_commit_is_exported_from_a_foreign_owned_repo(foreign
     assert (output_dir / "optimized_versions" / "forge.patch").read_text(encoding="utf-8").strip()
 
 
-# ---------------------------------------------------------------------------
 # isolation: its own _run_git, located by cwd rather than -C
-# ---------------------------------------------------------------------------
 def test_isolation_run_git_locates_the_repo_from_cwd(foreign_repo):
-    """``_run_git`` raises on a non-zero exit, so a refusal aborts provisioning.
-
-    It passes ``cwd=`` and never ``-C``, so the executors/_git.py fix could not
-    reach it and the helper has to resolve the repo from the working directory.
-    """
+    """``_run_git`` raises on a non-zero exit, so a refusal aborts provisioning."""
     isolation._run_git(["git", "status", "--porcelain"], cwd=foreign_repo, timeout_sec=60)
 
 
-# ---------------------------------------------------------------------------
 # Static guards: forge_submit builds ~40 argv across 30 call sites
-# ---------------------------------------------------------------------------
 def _forge_submit_ast() -> tuple[ast.Module, dict[int, str]]:
     tree = ast.parse(Path(forge_submit.__file__).read_text(encoding="utf-8"))
     owners: dict[int, str] = {}
@@ -179,11 +149,7 @@ def test_forge_submit_builds_every_git_argv_through_the_guard():
 
 
 def test_forge_submit_stays_import_light():
-    """``tools/`` scripts run standalone on remote nodes, without ``hyperloom``.
-
-    A module-level import breaks that silently, so the git guard is imported
-    inside the helper and falls back to the plain argv when it is unavailable.
-    """
+    """``tools/`` scripts run standalone on remote nodes, without ``hyperloom``."""
     tree, owners = _forge_submit_ast()
 
     module_level: list[str] = []

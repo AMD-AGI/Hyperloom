@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers
-it shares with the native concurrency sweep.
-
-These cover the ``_geak_sweep.sweep_via_geak`` branches not exercised by
-``test_geak_breakdown_unit`` -- the ``validated_regimes`` protocol fallback (used
-when ``result`` carries no explicit ``bench_protocol``), the ``pin_num_prompts``
-single-point replay, and the per-variant subprocess-error path -- plus the pure
-row/flatten helpers the GEAK sweep result feeds into downstream.
-"""
+"""Unit tests for the GEAK post-optimization sweep and the sweep/kernel helpers it shares with the native concurrency sweep."""
 
 from __future__ import annotations
 
@@ -65,8 +57,9 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry;
-    ``pin_num_prompts`` forwards that regime's NUM_PROMPTS onto the point."""
+    """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry; ``pin_num_prompts`` forwards that
+    regime's NUM_PROMPTS onto the point.
+    """
     bench = _bench_script(tmp_path)
     monkeypatch.setenv("MODEL_PATH", "/models/x")
     monkeypatch.setenv("FRAMEWORK", "sglang")
@@ -271,18 +264,16 @@ def test_backend_results_dir_keyed_and_single_subdir(tmp_path: Path) -> None:
 
 
 def test_coerce_extra_envs_skips_malformed_tokens() -> None:
-    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the
-    shell-string and token-list shapes rather than emitting junk keys."""
+    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the shell-string and token-list shapes rather than emitting junk keys."""
     # Shell-string shape: leading separator -> empty token; ``=v`` -> empty key.
     assert coerce_extra_envs("; =v FOO=1") == {"FOO": "1"}
-    # Token-list shape: dict item with a None key, a token without ``=``, a
-    # non-string item, and an empty-key ``=v`` are all skipped.
+    # Token-list shape: dict item with a None key, a token without ``=``, a non-string item, and an empty-key ``=v``
+    # are all skipped.
     assert coerce_extra_envs([{None: "x", "A": "1"}, "noeq", 123, "=v", "B=2"]) == {"A": "1", "B": "2"}
 
 
 def test_parse_server_arg_value_falls_back_on_unbalanced_quotes() -> None:
-    """The GEAK handoff recovers a flag value even when the server-args string is
-    not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
+    """The GEAK handoff recovers a flag value even when the server-args string is not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
     got = _parse_server_arg_value('--max-model-len 4096 "unbalanced', "--max-model-len")
     assert got == "4096"
     # ``--flag=value`` form is also handled.

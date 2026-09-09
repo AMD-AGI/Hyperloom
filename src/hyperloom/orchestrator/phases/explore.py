@@ -929,11 +929,14 @@ class ExplorePhase(CoordinatorCollaborator):
         # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
-                from ..framework.paths import resolve_source_file_allowlist
+                from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
 
-                roots = resolve_source_file_allowlist()
+                roots = resolve_kernel_search_roots()
                 if roots:
                     params["framework_source_roots"] = list(roots)
+                tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
+                if tree:
+                    params["session_framework_tree"] = tree
             except Exception as exc:  # noqa: BLE001
                 log.debug(
                     "specialist warmup: framework_source_roots lookup failed: %r",
@@ -972,28 +975,22 @@ class ExplorePhase(CoordinatorCollaborator):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        # Static-recon specialist extras: structured model_info + checklist-derived
-        # source-hint directories for the recon focus block.
-        if domain == "static_recon_specialist":
-            if "model_info" not in params:
-                _minfo = getattr(state, "model_info", None)
-                if isinstance(_minfo, dict) and _minfo:
-                    params["model_info"] = dict(_minfo)
-            if "source_hint_directories" not in params:
-                try:
-                    from ..knowledge import static_recon_checklist as _src_recon
+        if domain == "static_recon_specialist" and "model_info" not in params:
+            _minfo = getattr(state, "model_info", None)
+            if isinstance(_minfo, dict) and _minfo:
+                params["model_info"] = dict(_minfo)
 
-                    _dirs = _src_recon.source_hint_directories_for(
-                        model_class=str(getattr(state, "model_class", "") or ""),
-                        gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                        precision=str(getattr(state, "precision", "") or ""),
-                    )
-                    if _dirs:
-                        params["source_hint_directories"] = list(_dirs)
-                except Exception:  # noqa: BLE001 — advisory; never block dispatch
-                    log.exception(
-                        "static-recon: source_hint_directories lookup failed",
-                    )
+        # Checklist-derived focus directories; a caller that named its own keeps it.
+        if "source_hint_directories" not in params:
+            from ..knowledge import static_recon_checklist as _src_recon
+
+            _dirs = _src_recon.source_hint_directories_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=_src_recon.workload_precision(state),
+            )
+            if _dirs:
+                params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
             try:

@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Intent routing collaborator for :class:`Coordinator`.
-
-:meth:`IntentRouter.handle_intent` validates an emitted intent through
-``PolicyGate`` and dispatches it to the matching ``_handle_*`` method.
-
-``IntentRouter`` holds a back-reference to its owning ``Coordinator`` and
-delegates every attribute it does not define itself to that coordinator via
-``__getattr__``, so handler bodies keep using ``self.shared_state`` /
-``self.bus`` etc. ``Coordinator`` keeps thin forwarding shims that delegate
-to the router.
-"""
+"""Intent routing collaborator for :class:`Coordinator`."""
 
 from __future__ import annotations
 
@@ -53,16 +43,13 @@ from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
 from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 
-# ``Coordinator`` is intentionally NOT imported (avoids a module-level import
-# cycle with coordinator.py); it is held as a back-reference and the annotation
-# below is a deferred string.
+# ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
+# as a back-reference and the annotation below is a deferred string.
 
 log = __import__("logging").getLogger(__name__)
 
 
-# IntentType -> the ``Coordinator`` handler method it dispatches to. Replaces the
-# former 12-branch if/elif in :meth:`IntentRouter._handle_intent`; an unknown
-# type falls through to the observation fallback (see the ``else`` branch there).
+# IntentType -> the ``Coordinator`` handler method it dispatches to.
 _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.PROPOSE_ACTION: "_handle_propose_action",
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
@@ -79,18 +66,7 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 
 
 def _is_upstream_pr_candidate(pending: Any) -> bool:
-    """True for an ``integrate_patch`` proposal that pre-screens a PR candidate.
-
-    The candidate pre-screen and an authored patch are the same action now;
-    a top-level ``framework_agent_candidate_id`` is what distinguishes the
-    pre-screen, whose approval means "spend a bench on this candidate".
-
-    Args:
-        pending: The pending proposal.
-
-    Returns:
-        True when this proposal is a candidate pre-screen.
-    """
+    """True for an ``integrate_patch`` proposal that pre-screens a PR candidate."""
     if getattr(pending, "action_name", "") != "integrate_patch":
         return False
     return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
@@ -107,13 +83,7 @@ class IntentRouter:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
-        """Freeze patch ownership when a specialist task is created.
-
-        Stamps the phase that owns the work, and the lever only where the
-        mandate already names one. A mandate that names neither a PR nor an
-        enablement flag does not know which lever its specialist will move, and
-        a guess written here would outrank the delivery that settles it.
-        """
+        """Freeze patch ownership when a specialist task is created."""
         lever = patch_lever_kind(params)
         if lever:
             params["lever_kind"] = lever
@@ -121,14 +91,8 @@ class IntentRouter:
         if not owner:
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
-            # Layer first, phase last: both lanes share one phase, so the live
-            # phase no longer says which lever a specialist moves. The phase
-            # stays as the fallback when the mandate named neither.
-            #
-            # ``EXPLORE`` below is an owner namespace, not a phase this build
-            # can enter: it is the published KB section name for the
-            # configuration lever, and renaming it would orphan the overlays
-            # every record already stores under that prefix.
+            # Layer first, phase last: both lanes share one phase, so the live phase no longer says which lever a
+            # specialist moves.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
@@ -167,8 +131,8 @@ class IntentRouter:
             "gap_layer",
             "framework_agent_authoring",
             "framework_agent_candidate_id",
-            # The lever the specialist was dispatched against; the patch that
-            # lands is the same lever, so it is copied rather than re-derived.
+            # The lever the specialist was dispatched against; the patch that lands is the same lever, so it is copied
+            # rather than re-derived.
             "lever_kind",
         ):
             value = specialist_params.get(key)
@@ -178,16 +142,7 @@ class IntentRouter:
         return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
-        """Validate an emitted intent through PolicyGate, then route it.
-
-        Runs the intent through :meth:`PolicyGate.validate_intent`; a
-        :class:`PolicyDenied` is recorded and the intent dropped. Valid intents
-        are dispatched to the matching ``_handle_*`` method by type.
-
-        Args:
-            source (str): The agent that emitted the intent.
-            intent (Intent): The parsed intent to validate and route.
-        """
+        """Validate an emitted intent through PolicyGate, then route it."""
         try:
             self.policy.validate_intent(source, intent)
         except PolicyDenied as denied:
@@ -231,18 +186,7 @@ class IntentRouter:
             return
 
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
-        """Gate a proposed action and enqueue it for Critic Review.
-
-        Records an advisory observation for pruned families (the proposal still
-        queues), applies the execution-order denial, then publishes a
-        ``proposal`` message and registers a :class:`PendingProposal` so the
-        Critic gate can later return a verdict.
-
-        Args:
-            source (str): The agent proposing the action.
-            intent (Intent): The PROPOSE_ACTION intent; ``payload`` carries
-                ``action_name`` and optional ``params`` / ``predicted_gain_pct``.
-        """
+        """Gate a proposed action and enqueue it for Critic Review."""
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self.shared_state.is_pruned(action_name):
@@ -302,18 +246,7 @@ class IntentRouter:
         self.state.pending_proposals[msg.msg_id] = pending
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal.
-
-        A ``verdict_map`` is held per entry, then collapsed on the proceedable
-        subset (``approve`` / ``advise``) so a genuine reject cannot discard
-        siblings that may still run. Those names are passed through as the
-        materialize filter.
-
-        Args:
-            source: The agent (Critic) emitting the verdict.
-            intent: The REVIEW_VERDICT intent; payload carries
-                ``target_proposal_msg_id`` and ``verdict``/``verdict_map``.
-        """
+        """Apply a Critic ``review_verdict`` to its target proposal."""
         target = intent.payload["target_proposal_msg_id"]
         pending = self.state.pending_proposals.get(target)
         verdict_map = intent.payload.get("verdict_map")
@@ -366,17 +299,7 @@ class IntentRouter:
         action_name: str,
         payload: dict[str, Any],
     ) -> dict[str, str]:
-        """Hold each ``verdict_map`` entry to its cited rule.
-
-        Args:
-            verdict_map: Per-variant verdict entries from the Critic payload.
-            target: The target proposal msg_id, for the audit record.
-            action_name: The proposal's action, forwarded to the hold.
-            payload: The full verdict payload; batch-level findings live here.
-
-        Returns:
-            ``{variant_name: held_verdict}`` after any advisory-only downgrade.
-        """
+        """Hold each ``verdict_map`` entry to its cited rule."""
         held_by_name: dict[str, str] = {}
         for name, entry in verdict_map.items():
             held_by_name[str(name)] = await self._record_verdict_hold(
@@ -392,13 +315,7 @@ class IntentRouter:
         verdict: str,
         held_by_name: dict[str, str],
     ) -> None:
-        """Log when a mixed map still proceeds, for traceability.
-
-        Args:
-            target: The target proposal msg_id.
-            verdict: The collapsed summary after the proceedable-subset rule.
-            held_by_name: Per-variant held verdicts.
-        """
+        """Log when a mixed map still proceeds, for traceability."""
         try:
             sub_verdicts = list(held_by_name.values())
             if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
@@ -418,25 +335,7 @@ class IntentRouter:
         target: str,
         variant: str = "",
     ) -> str:
-        """Return the verdict to act on, recording any hold to a cited rule.
-
-        A rule that declares ``advise`` does so because rejecting on it discards
-        the whole proposal set over a format or strategy hint. Enforcing the
-        declaration means the Critic cannot spend a round's proposals on a rule
-        that never asked for a rejection; the downgrade is recorded so the drift
-        is visible rather than silently corrected.
-
-        Args:
-            held: The ``(verdict, reason_code)`` pair
-                :func:`verdict_held_to_its_rule` returned for a single verdict,
-                or :func:`verdict_map_entry_held_to_its_rule` for one variant's.
-            target: The target proposal msg_id, for the audit record.
-            variant: The ``verdict_map`` key when the verdict is one variant's;
-                empty for a single verdict.
-
-        Returns:
-            The verdict to act on.
-        """
+        """Return the verdict to act on, recording any hold to a cited rule."""
         verdict, downgraded_from_code = held
         if not downgraded_from_code:
             return verdict
@@ -472,25 +371,7 @@ class IntentRouter:
         advisory: dict[str, Any] | None = None,
         approved_variant_names: set[str] | None = None,
     ) -> None:
-        """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
-
-        Args:
-            source: The agent emitting the verdict.
-            pending: The pending proposal the verdict targets.
-            verdict: The collapsed verdict (approve / advise / reject / needs_review).
-            reasoning: Free-text reasoning recorded with the verdict.
-            authored_verdict: The verdict the Critic itself wrote, before any
-                hold to a cited rule. Mirrored onto ``specialist_patch_verdicts``
-                in place of ``verdict``; defaults to ``verdict``.
-            advisory: Pre-serialised advisory fields (``required_evidence`` /
-                ``risks`` / ``advice_text`` / ``alternative_action`` /
-                ``notes`` / ``kb_evidence`` / ``packet_evidence``) to carry on
-                the rebroadcast payload so the full Critic context reaches the
-                orchestration inbox and downstream consumers.
-            approved_variant_names: When a ``verdict_map`` named proceedable
-                variants, restrict an explore grid to those names; ``None``
-                keeps the full proposal.
-        """
+        """Apply one collapsed verdict: approve/advise materialise, reject may rearm."""
         pending.decided = True
         pending.verdict = verdict
         if _is_upstream_pr_candidate(pending):
@@ -521,14 +402,8 @@ class IntentRouter:
                 in_reply_to=pending.proposal_msg_id,
             )
         )
-        # Mirror specialist / integrate_patch verdicts onto SharedState so
-        # PolicyGate's integrate_patch gate can consult them on the next tick.
-        # What gets mirrored is what the Critic wrote, never what the hold made
-        # of it: ``advise`` is a landing permit there, and holding a reject to a
-        # formatting rule is meant to save the round's ideas from being thrown
-        # away, not to land a patch the Critic refused. A held proposal that
-        # still deserves to land gets there through a fresh Critic verdict,
-        # which overwrites this one.
+        # Mirror specialist / integrate_patch verdicts onto SharedState so PolicyGate's integrate_patch gate can
+        # consult them on the next tick.
         patch_verdict = str(authored_verdict or verdict).strip()
         try:
             pa_params = pending.payload.get("params") or {}
@@ -553,8 +428,7 @@ class IntentRouter:
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
                 )
-        # Both `approve` and `advise` mean "dispatch may proceed"; treat them
-        # identically for materialization.
+        # Both `approve` and `advise` mean "dispatch may proceed"; treat them identically for materialization.
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(
                 pending,
@@ -567,10 +441,8 @@ class IntentRouter:
                 reasoning,
             )
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            # A Critic-rejected ENABLEMENT integrate_patch never reaches the
-            # executor, so the normal integrate-result rearm never fires. Without
-            # this, the stall streak would never advance toward enablement_stalled.
-            # Treat the rejection as a no-progress round.
+            # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
+            # rearm never fires.
             try:
                 self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
@@ -587,19 +459,7 @@ class IntentRouter:
             )
 
     async def _handle_delegate(self, source: str, intent: Intent) -> None:
-        """Validate and enqueue a delegated action as a TaskRegistry task.
-
-        Records an advisory observation for pruned families (the delegate still
-        proceeds), denies execution-order violations, and materialises the
-        delegated action — including ``explore``, which runs its variants
-        directly with no Critic pre-review — into a task with the appropriate
-        lanes, TTL and warmed params.
-
-        Args:
-            source (str): The agent issuing the delegation.
-            intent (Intent): The DELEGATE intent; ``payload`` carries
-                ``action_name`` and optional ``params``.
-        """
+        """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self.shared_state.is_pruned(action_name):
             await self._record_observation(
@@ -643,9 +503,7 @@ class IntentRouter:
                 )
                 return
         if action_name == "specialist":
-            # Capture proposal ownership at dispatch. Specialist work can finish
-            # after the state machine advances, so completion-time phase is not
-            # a reliable source for a later integrate_patch KEEP.
+            # Capture proposal ownership at dispatch.
             self._stamp_specialist_owner(params)
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
@@ -653,14 +511,12 @@ class IntentRouter:
         if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
         # Delegates skip _materialize_approved_proposal, so seed the same params here.
-        # Both grid actions launch on top of current_best per their action contract.
         if action_name in ("sweep", "explore"):
             inject_stack_base_params(params, self.shared_state, anchor=True)
         if action_name == "explore":
             self._inject_explore_runtime_params(params)
-        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out
-        # into N standard freeform specialist tasks, each dispatched through the
-        # normal SpecialistRunner + TaskRegistry + lease + reap path.
+        # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
+        # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (
             action_name == "specialist"
             and isinstance(
@@ -693,17 +549,14 @@ class IntentRouter:
         for attempt in range(6):
             idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
             lanes, ttl = self._registry_lanes_ttl(action_name)
-            # Bench-enabled specialists serialize against the other GPU
-            # benchmark/profile/server work via benchmark_lane (research_lane
-            # alone conflicts with nothing).
+            # Bench-enabled specialists serialize against the other GPU benchmark/profile/server work via
+            # benchmark_lane (research_lane alone conflicts with nothing).
             if action_name == "specialist":
                 from ..specialists.profile import resolve_specialist_profile
 
                 if resolve_specialist_profile(params).reserves_benchmark_lane:
                     lanes = tuple(dict.fromkeys((*lanes, "benchmark_lane")))
-                # Any GPU-holding specialist serializes against serving via
-                # gpu_research_lane. Its lane lease TTL comes from the agent wall
-                # budget (iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL).
+                # Any GPU-holding specialist serializes against serving via gpu_research_lane.
                 needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
                 if needs_gpu:
                     lanes = tuple(dict.fromkeys((*lanes, "gpu_research_lane")))
@@ -771,19 +624,10 @@ class IntentRouter:
 
     @asynccontextmanager
     async def _kernel_step_heartbeat(self, kind: str, started: float):
-        """Keep orchestration's bus timestamp moving through an inline step.
+        """Keep orchestration's bus timestamp moving through an inline step."""
 
-        The task-progress heartbeat cannot cover these: it reads the ``tasks``
-        table, and an inline kernel request never becomes a row.
-
-        Args:
-            kind (str): Request kind, echoed so an operator can tell what the
-                loop is blocked on.
-            started (float): ``time.monotonic()`` at the step's start.
-        """
-
-        # Re-stamped per beat rather than once at the start, so a stamp that
-        # outlives its process expires instead of muting the KERNEL idle guard.
+        # Re-stamped per beat rather than once at the start, so a stamp that outlives its process expires instead of
+        # muting the KERNEL idle guard.
         def _mark_running() -> None:
             self.shared_state.kernel_inline_step_seen_unix = time.time()
 
@@ -815,29 +659,12 @@ class IntentRouter:
             self.shared_state.kernel_inline_step_seen_unix = 0.0
 
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
-        """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.
-
-        Args:
-            kind: The request kind, recorded as the failing action.
-            request_msg_id: The request message id, standing in for a task id.
-            result: The failure envelope carrying ``error_class`` and ``error``.
-        """
+        """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads."""
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
-        """Route a REQUEST intent to its programmatic handler.
-
-        Applies the execution-order gate, records the request on the bus, and
-        dispatches to the registered handler or auto-rejects with a RESPONSE so
-        the requester never hangs. Every failure is also appended to
-        ``last_action_failures``.
-
-        Args:
-            source (str): The agent issuing the request.
-            intent (Intent): The REQUEST intent; ``payload`` carries
-                ``target_agent`` and ``kind``.
-        """
+        """Route a REQUEST intent to its programmatic handler."""
         from .coordinator import _lifecycle_paths
 
         target_agent = intent.payload["target_agent"]
@@ -915,8 +742,8 @@ class IntentRouter:
             if cached_result is not None:
                 result = cached_result
                 cache_hit_source = "shared_state_cache"
-                # A cache hit never runs the handler; emit a single END
-                # (detail=cache_hit) so the lifecycle log records the step.
+                # A cache hit never runs the handler; emit a single END (detail=cache_hit) so the lifecycle log
+                # records the step.
                 self._emit_lifecycle(
                     step=kind,
                     status="END",
@@ -940,8 +767,7 @@ class IntentRouter:
                         "reason": rejected.get("reason"),
                     }
                     cache_hit_source = "shared_state_kernel_rejection"
-                    # A short-circuited integrate never runs the handler;
-                    # emit a lone END recording the rejection.
+                    # A short-circuited integrate never runs the handler; emit a lone END recording the rejection.
                     self._emit_lifecycle(
                         step=kind,
                         status="END",
@@ -958,9 +784,7 @@ class IntentRouter:
                     handler_kwargs: dict[str, Any] = {
                         "session_dir": self.session_dir,
                     }
-                    # Bracket the programmatic kernel step with START / END
-                    # lifecycle events. ``kind`` is the machine step name;
-                    # the human label is resolved from LIFECYCLE_STEP_LABELS.
+                    # Bracket the programmatic kernel step with START / END lifecycle events.
                     _lc_t0 = time.monotonic()
                     self._emit_lifecycle(
                         step=kind,
@@ -984,10 +808,8 @@ class IntentRouter:
                             "error_class": "handler_exception",
                             "error": repr(exc),
                         }
-                    # A block-FP8 GEMM run may have executed an inline
-                    # Roofline whose refreshed profile fields only live in
-                    # state.json. Merge them before the terminal lifecycle
-                    # event persists the live state over them.
+                    # A block-FP8 GEMM run may have executed an inline Roofline whose refreshed profile fields only
+                    # live in state.json.
                     if kind == "run_gemm_tuning":
                         self._sync_profile_state_after_gemm_roofline(result)
                     _lc_status = "ERROR" if str(result.get("status", "")).lower() in ("failed", "error") else "END"
@@ -1067,16 +889,7 @@ class IntentRouter:
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
 
     async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Route a RESPONSE intent back to the original requester.
-
-        Looks up the request message referenced by ``in_reply_to`` to address
-        the response, then publishes it on the bus.
-
-        Args:
-            source (str): The agent emitting the response.
-            intent (Intent): The RESPONSE intent; ``payload`` carries
-                ``in_reply_to``.
-        """
+        """Route a RESPONSE intent back to the original requester."""
         in_reply_to = intent.payload["in_reply_to"]
         # Locate the original requester so we can address the response.
         original = await self.bus.lookup_by_id(in_reply_to)
@@ -1093,22 +906,7 @@ class IntentRouter:
         )
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
-        """Grant a running task more lease time.
-
-        Refreshes the task's ``lease_ttl_sec``, its lane rows, its GPU rows and
-        the live subprocess wall-clock deadline together, preserving
-        ``kill <= gpu_lease TTL <= gpu_research_lane TTL``.
-
-        ``lease_ttl_sec`` is a *cumulative* budget measured from ``updated_at``
-        (when the task entered ``running``), but lane / GPU rows expire at
-        ``now + ttl``. Feeding the cumulative TTL straight into them would hand
-        back the already-elapsed time, so the refresh uses the remaining budget.
-
-        Args:
-            source (str): The agent requesting the extension.
-            intent (Intent): The EXTEND_LEASE intent; ``payload`` carries
-                ``task_id``, ``extra_sec`` and an optional ``reason``.
-        """
+        """Grant a running task more lease time."""
         task_id = str(intent.payload.get("task_id") or "").strip()
         extra_sec = int(intent.payload.get("extra_sec") or 0)
         try:
@@ -1134,9 +932,7 @@ class IntentRouter:
                 running_sec = max(0.0, time.time() - started)
         except Exception:  # noqa: BLE001 — fall back to the full TTL
             log.exception("extend_lease: could not read running age for task=%s", task_id)
-        # A late extension can arrive after the cumulative task TTL expired but
-        # before the worker/reaper acted on it. It must still buy the full newly
-        # granted increment rather than refreshing leases for only one second.
+        # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
         gpu_error = ""
@@ -1146,8 +942,8 @@ class IntentRouter:
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
             gpu_error = repr(exc)[:200]
-        # Push the live subprocess's hard wall-clock kill deadline out too, so
-        # the extension actually buys the specialist more time to run.
+        # Push the live subprocess's hard wall-clock kill deadline out too, so the extension actually buys the
+        # specialist more time to run.
         wall_budget_error = ""
         try:
             from ..specialists.subprocess_ import grant_wall_budget_extension
@@ -1156,9 +952,8 @@ class IntentRouter:
         except Exception as exc:  # noqa: BLE001 — lease rows already moved
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
-        # A swallowed GPU or wall-budget failure would leave the lane extended
-        # while the GPU reaper or subprocess wall-clock cap can still interrupt
-        # the work — report the partial extension as degraded.
+        # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
+        # wall-clock cap can still interrupt the work — report the partial extension as degraded.
         await self._record_observation(
             "coordinator",
             "observation",
@@ -1178,18 +973,7 @@ class IntentRouter:
         )
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
-        """Prune an action family and cancel its in-flight tasks.
-
-        ``scope="family"`` (the default) adds the family to the persistent
-        pruned set so it stays retired. ``scope="queued"`` only drains the
-        backlog, leaving the family available — the move for an action whose
-        queue outlived its usefulness rather than one that has to stop.
-
-        Args:
-            source (str): The agent issuing the prune.
-            intent (Intent): The PRUNE_BRANCH intent; ``payload`` carries
-                ``family``, optional ``reason`` and optional ``scope``.
-        """
+        """Prune an action family and cancel its in-flight tasks."""
         family = intent.payload["family"]
         reason = str(intent.payload.get("reason") or "prune_branch")
         scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
@@ -1200,8 +984,8 @@ class IntentRouter:
             cancelled = await self._drain_queued_baselines(reason=reason)
         else:
             cancelled = await self.tasks.cancel_family([family], reason=reason)
-        # A pruned explore family can take the GEAK 2b rebench with it; settle the
-        # slot so KERNEL is not held open waiting on a task that will never run.
+        # A pruned explore family can take the GEAK 2b rebench with it; settle the slot so KERNEL is not held open
+        # waiting on a task that will never run.
         if cancelled:
             from ..phases.geak_rebench import settle_dangling_geak_pending
 
@@ -1230,13 +1014,7 @@ class IntentRouter:
         )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints.
-
-        Args:
-            source: The agent issuing the escalation.
-            intent: The ESCALATE_STRATEGY_CHANGE intent; ``payload`` may carry a
-                closed-vocab ``next_action_hint``.
-        """
+        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints."""
         payload = dict(intent.payload or {})
         # Always emit the broadcast first.
         await self.bus.append_and_seq(
@@ -1261,8 +1039,8 @@ class IntentRouter:
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
             return
-        # Pre-enablement close guard: drop a premature ``skip_to_close`` while
-        # the model is not yet runnable and let the enablement loop continue.
+        # Pre-enablement close guard: drop a premature ``skip_to_close`` while the model is not yet runnable and let
+        # the enablement loop continue.
         if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
             log.info(
                 "escalate_strategy_change: dropping premature skip_to_close from %s "
@@ -1307,17 +1085,7 @@ class IntentRouter:
         self.shared_state.save(self.session_dir)
 
     async def _handle_send_message(self, source: str, intent: Intent) -> None:
-        """Publish a free-form message onto the bus.
-
-        Soft-degrades an unknown topic to ``observation`` and routes to the
-        requested recipient (defaulting to broadcast). A ``specialist:<id>``
-        recipient additionally gets the message in its workspace inbox.
-
-        Args:
-            source (str): The sending agent.
-            intent (Intent): The SEND_MESSAGE intent; ``payload`` may carry
-                ``topic`` / ``to`` plus arbitrary message fields.
-        """
+        """Publish a free-form message onto the bus."""
         topic = intent.payload.get("topic", "observation")
         if (
             topic
@@ -1338,16 +1106,7 @@ class IntentRouter:
             self._deliver_specialist_inbox(source, str(to_agent), intent.payload)
 
     def _deliver_specialist_inbox(self, source: str, to_agent: str, payload: dict[str, Any]) -> None:
-        """Append a message to a running specialist's workspace inbox.
-
-        A specialist reads ``inbox.json`` between turns; the reaper ignores the
-        file, so this steers a live run without ending it.
-
-        Args:
-            source (str): The sending agent.
-            to_agent (str): Recipient of the form ``specialist:<task_id>``.
-            payload (dict[str, Any]): The send_message payload.
-        """
+        """Append a message to a running specialist's workspace inbox."""
         task_id = to_agent[len(SPECIALIST_FROM_AGENT_PREFIX) :].strip()
         if not task_id:
             return
@@ -1377,16 +1136,7 @@ class IntentRouter:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
-        """Broadcast an alert message, prioritized by severity.
-
-        High-severity alerts are published at priority 0; everything else at
-        priority 1.
-
-        Args:
-            source (str): The alerting agent.
-            intent (Intent): The ALERT intent; ``payload`` may carry
-                ``severity`` plus alert detail.
-        """
+        """Broadcast an alert message, prioritized by severity."""
         prio = 0 if intent.payload.get("severity") == "high" else 1
         await self.bus.append_and_seq(
             Message.new(
@@ -1399,17 +1149,7 @@ class IntentRouter:
         )
 
     async def _handle_update_state(self, source: str, intent: Intent) -> None:
-        """Apply agent-requested SharedState changes and report the result.
-
-        Applies the requested changes (core fields disallowed), persists when
-        anything changed, and broadcasts an observation listing the applied vs
-        rejected keys.
-
-        Args:
-            source (str): The agent requesting the state update.
-            intent (Intent): The UPDATE_STATE intent; ``payload`` carries a
-                ``changes`` dict.
-        """
+        """Apply agent-requested SharedState changes and report the result."""
         # Apply to persistent SharedState (PolicyGate enforces core-field writes).
         applied = self.shared_state.apply_changes(
             intent.payload["changes"],

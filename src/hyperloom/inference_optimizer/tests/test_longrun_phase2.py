@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Long-run exploration-depth bottleneck re-direction acceptance tests.
-
-Covers that a cyclic EXPLORE plateau is actionable, that ``compute_next_phase``
-routes a plateaued EXPLORE → KERNEL_AGENT, that the Coordinator stamps the
-bottleneck-switch handoff and renders the redirect advisory, and that
-rejected/tested fingerprints are bucketed per macro-cycle. All deterministic +
-offline.
-"""
+"""Long-run exploration-depth bottleneck re-direction acceptance tests."""
 
 from __future__ import annotations
 
@@ -27,12 +20,7 @@ def _plateaued_explore_state(
     started_hours_ago: float = 0.5,
     top_bottleneck: str = "MoE_fused",
 ) -> SharedState:
-    """Optimisation-phase state with both arms dry and budget remaining.
-
-    Config arm: no winners and enough trailing empty specialist rounds.
-    Source arm: ``framework_agent_phase_done``. The merged phase leaves only
-    when both report dry, so a config-only plateau would keep it open.
-    """
+    """Optimisation-phase state with both arms dry and budget remaining."""
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
@@ -254,8 +242,7 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     assert st.explore_search["tested"]["fp_a"]["cycle"] == 0
     assert st.explore_search["rejected"][0]["cycle"] == 0
 
-    # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps
-    # its cycle-0 attribution.
+    # Next cycle: a new rejection is bucketed under cycle 1; the old one keeps its cycle-0 attribution.
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {

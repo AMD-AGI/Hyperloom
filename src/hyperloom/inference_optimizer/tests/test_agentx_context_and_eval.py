@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX context-window and eval-opt-out wiring.
-
-Three invariants, each guarding a defect that produced a *plausible* number
-rather than an error:
-
-- ``MAX_MODEL_LEN`` under AgentX must come from the model's own context window,
-  not from ``ISL+OSL+headroom``. The synthetic derivation yields 6144 at the
-  1024/1024 defaults, which caps a corpus whose traces reach ~1M tokens.
-- sglang's ``--context-length`` must skip the same ISL/OSL ceiling; it is a
-  second, independent path to the same truncation.
-- AgentX must be a *deliberate* eval opt-out, so the baseline's
-  missing-accuracy guard does not stamp a good AgentX baseline as a failure.
-
-The synthetic (non-AgentX) path must be byte-for-byte unaffected by all three.
-"""
+"""AgentX context-window and eval-opt-out wiring."""
 
 from __future__ import annotations
 
@@ -61,13 +47,7 @@ def test_max_model_len_synthetic_path_unchanged(tmp_path, monkeypatch):
 
 
 def test_short_context_model_warns_before_the_round_starts(tmp_path, monkeypatch, capsys):
-    """A model too small for the corpus must say so up front.
-
-    The run still proceeds -- it is the honest one to make, and a model that
-    cannot hold the corpus cannot hold a leaderboard row either. But left
-    unannounced the failure surfaces roughly an hour in as a
-    ``--failed-request-threshold`` abort, with nothing pointing at the cause.
-    """
+    """A model too small for the corpus must say so up front."""
     from hyperloom.inference_optimizer.cli import AGENTX_CAPPED_CORPUS_PEAK_TOKENS
 
     _clear(monkeypatch)
@@ -81,11 +61,7 @@ def test_short_context_model_warns_before_the_round_starts(tmp_path, monkeypatch
 
 
 def test_explicit_flag_below_the_corpus_peak_still_warns(tmp_path, monkeypatch, capsys):
-    """``--max-model-len 8192`` is the likeliest way to get this wrong.
-
-    The warning used to live inside the auto-resolve branch, so it stayed silent
-    for exactly the two configurations that override the native context by hand.
-    """
+    """``--max-model-len 8192`` is the likeliest way to get this wrong."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     args = _args(_model_dir(tmp_path))
@@ -138,13 +114,7 @@ def test_max_model_len_operator_override_still_wins(tmp_path, monkeypatch):
 
 
 def test_max_model_len_agentx_falls_back_when_config_unreadable(tmp_path, monkeypatch, capsys):
-    """An uncached model must not hard-fail -- but nothing re-resolves it later.
-
-    The client deliberately emits no context cap and the server phase is a bare
-    delegation, so this fallback really is the width the server gets. It is a
-    synthetic-shape derivation that does not describe the agentic workload, so
-    the corpus-fit warning has to fire on it too.
-    """
+    """An uncached model must not hard-fail -- but nothing re-resolves it later."""
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=None)))
@@ -191,13 +161,7 @@ def test_sglang_context_non_sglang_untouched(tmp_path, monkeypatch):
 
 
 def test_agentx_runs_its_own_eval_not_lmeval(monkeypatch):
-    """AgentX eval is a post-hoc error-rate gate, not an lm-eval opt-out.
-
-    The eval gate is in ``_accuracy_gate.parse_eval_results``:
-    under AgentX it reads ``request_error_rate`` from the aiperf export and
-    maps pass (<= 0.10) -> 1.0 / fail -> 0.0 against a fixed 1.0 reference.
-    This replaces the old ``eval_disabled=... or _agentx_enabled()`` opt-out.
-    """
+    """AgentX eval is a post-hoc error-rate gate, not an lm-eval opt-out, so ``eval_disabled`` tracks --no-eval."""
     from hyperloom.inference_optimizer.cli import bootstrap
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)

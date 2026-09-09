@@ -12,19 +12,7 @@ from ..base import RenderedSection, md_kv_list, register_renderer
 
 @register_renderer("workload")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the workload section: model / framework name / GPU / shape / objective.
-
-    Surfaces the model and framework name, GPU type, request shape
-    (tp / conc / isl / osl / max_model_len / precision) and objective,
-    warning when the GPU type is missing. Skipped when neither model nor
-    framework name is present.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        RenderedSection: The rendered workload section.
-    """
+    """Render the workload section: model / framework name / GPU / shape / objective."""
     w = breakdown.get("workload") or {}
     facts: list[str] = []
     warnings: list[str] = []

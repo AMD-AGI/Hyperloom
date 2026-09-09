@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Every optimizer flag a shipped launcher builds must still be accepted by the CLI.
-
-The launchers assemble the command as shell text, so a flag removed from argparse
-stays invisible until a real run reaches it.
-
-Accepting the *name* is not the whole contract: a flag the launcher gives a value
-to must be one argparse consumes a value for, or the value is left behind as a
-stray positional and the run still exits 2 before it starts.
-"""
+"""Every optimizer flag a shipped launcher builds must still be accepted by the CLI."""
 
 from __future__ import annotations
 
@@ -25,17 +17,15 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 REPO_ROOT = Path(__file__).resolve().parents[4]
 PACKAGE_ROOT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer"
 
-# (asset, invocations carrying flags); the count stops a scanner that matches
-# nothing from passing the flag check vacuously.
+# (asset, invocations carrying flags); the count stops a scanner that matches nothing from passing the flag check
+# vacuously.
 LAUNCHERS = (
     (PACKAGE_ROOT / "assets" / "slurm" / "_incontainer.sh.in", 2),
     (PACKAGE_ROOT / "assets" / "slurm" / "run_hyperloom.sbatch", 0),
     (PACKAGE_ROOT / "tools" / "robustness_monitor.sh.example", 2),
 )
 
-# Retired with the kernel LLM role. The parser keeps them as hidden no-ops for
-# out-of-tree callers, so they are "known" flags and the acceptance check below
-# can no longer notice a launcher reintroducing one.
+# Retired with the kernel LLM role.
 RETIRED = ("--kernel-codex", "--kernel-claude", "--kernel-prompt", "HL_KERNEL_BACKEND")
 
 _CLI_MODULE = "hyperloom.inference_optimizer.cli"
@@ -99,11 +89,7 @@ def test_launcher_optimizer_flags_are_accepted_by_the_cli(launcher: Path, expect
 
 @pytest.mark.parametrize(("launcher", "expected"), LAUNCHERS, ids=lambda v: getattr(v, "name", v))
 def test_launcher_flag_values_match_the_cli_arity(launcher: Path, expected: int) -> None:
-    """A launcher that writes ``--flag value`` needs a flag argparse takes a value for.
-
-    The name check above passes either way, so an arity drift exits 2 at every
-    launch with the value reported as an unrecognized argument.
-    """
+    """A launcher that writes ``--flag value`` needs a flag argparse takes a value for."""
     actions = _optimize_actions()
     non_values = _non_value_tokens()
     invocations = _optimizer_invocations(launcher.read_text(encoding="utf-8"))
@@ -132,12 +118,7 @@ def test_retired_kernel_backend_flags_are_gone_from_every_launcher() -> None:
 
 
 def test_retired_kernel_flags_parse_as_no_ops() -> None:
-    """The shims exist so an out-of-tree caller does not exit 2.
-
-    ``--kernel-prompt`` took a path, so accepting the flag while rejecting its
-    value would not be acceptance — argparse reports the path as an
-    unrecognized argument and the container dies at startup.
-    """
+    """The shims exist so an out-of-tree caller does not exit 2."""
     args = _build_parser().parse_args(
         [
             "optimize",

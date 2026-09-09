@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""forge is an independent kernel backend lane.
-
-These tests pin the contract that forge gets its own ``forge_invocations`` section, its own capability-summary row, its
-own attribution bucket, and its own ``adopted_by`` value — everywhere the
-breakdown splits invocations by lane.
-"""
+"""forge is an independent kernel backend lane."""
 
 from __future__ import annotations
 
@@ -23,8 +18,8 @@ def test_invocation_section_forge_is_own_lane() -> None:
 
 def test_capability_summary_has_distinct_forge_row() -> None:
     forge_invs = [{"kernel_id": "k1", "decision": "KEEP", "micro_speedup": 1.4}]
-    # The integrate verdict is what promotes a micro KEEP into a reported
-    # adoption; see test_breakdown_report_integrity for the micro-only lane.
+    # The integrate verdict is what promotes a micro KEEP into a reported adoption; see
+    # test_breakdown_report_integrity for the micro-only lane.
     state = {
         "kernel_integrate_attempts": {"attempt-1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 2.0}}
     }
@@ -80,9 +75,8 @@ def test_attribution_backward_compatible_without_forge() -> None:
 
 
 def test_capability_not_reverse_inferred_from_optimization_stack() -> None:
-    # A session whose optimization_stack lists an "explore" entry but has NO
-    # explore_attempts record must report explore as not_attempted (the stack
-    # entry may be seeded / warm-replayed), never fabricated as kept.
+    # A session whose optimization_stack lists an "explore" entry but has NO explore_attempts record must report
+    # explore as not_attempted (the stack entry may be seeded / warm-replayed), never fabricated as kept.
     state = {
         "optimization_stack": [{"action": "explore", "variant_name": "v1", "source": "seeded_from_current_best"}],
         # no explore_attempts key => no real attempt evidence
@@ -94,8 +88,7 @@ def test_capability_not_reverse_inferred_from_optimization_stack() -> None:
 
 
 def test_kernel_gain_without_forge_keep_is_unattributed_not_credited_to_forge() -> None:
-    # Kernel-lane gain exists but there is NO Forge KEEP evidence. The gain must
-    # stay unattributed rather than being reverse-inferred onto Forge.
+    # Kernel-lane gain exists but there is NO Forge KEEP evidence.
     state = {"gain_per_stack_entry": [{"action": "kernel_opt", "delta_pct": 12.0}]}
     out = collectors.collect_attribution(
         state,

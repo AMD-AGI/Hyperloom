@@ -281,8 +281,8 @@ async def test_gpu_memory_leaked_silent_when_live_owner_present(tmp_path):
 async def test_repeated_failure_emits_prune_branch_passing_gate(tmp_path):
     from hyperloom.agents.robustness.config import Config
 
-    # Inject a fake coordinator.db with enough same-family failures to cross
-    # the prune threshold (repeated_failure escalates to HIGH -> prune_branch).
+    # Inject a fake coordinator.db with enough same-family failures to cross the prune threshold (repeated_failure
+    # escalates to HIGH -> prune_branch).
     import json
     import sqlite3
 

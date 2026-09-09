@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""On-disk audit view of hot-kernel source resolution.
-
-Source resolution used to exist only as a scatter of fields mutated onto
-candidate rows by a dozen functions, with no single place to read "which file
-did we decide this kernel lives in, and how sure are we". This module defines a
-standalone, versioned artifact for exactly that question.
-
-**Scope: this is an audit view, not the stage contract.** The contract between
-analysis and optimization remains ``kernel_candidates.json`` -- it alone carries
-what dispatch needs (shapes, ``reusable_native_kernel``, ``skip_reason``,
-``source_type``, recommended backends, task groups, dispatchability). This
-artifact answers one narrow question and is deliberately not sufficient to
-decide what to optimize.
-
-The review tier revises entries here, but a revision only reaches the pipeline
-because ``apply_resolution_entries_to_candidates()`` folds it back onto the
-candidates and re-runs classification. Editing this file after the fact changes
-nothing downstream.
-"""
+"""On-disk audit view of hot-kernel source resolution."""
 
 from __future__ import annotations
 
@@ -140,21 +122,7 @@ REQUIRED_ENTRY_KEYS = (
 
 
 def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = "") -> str:
-    """Reduce a candidate's routing verdict to one judgeable class.
-
-    Reads only the two fields the gate itself produces, so this stays a pure
-    function of the verdict rather than a second opinion on it.
-
-    Args:
-        reusable: The gate's ``reusable_native_kernel`` verdict.
-        skip_reason: The gate's prose explanation, empty when reusable.
-        source_file: Resolved path. A kernel can be reusable in principle yet
-            have no resolved source, so this gates ``resolved``: reusable alone is
-            not dispatch-ready.
-
-    Returns:
-        One of :data:`KNOWN_REASON_CLASSES`.
-    """
+    """Reduce a candidate's routing verdict to one judgeable class."""
     if reusable is True and str(source_file or "").strip():
         return CLASS_RESOLVED
     text = str(skip_reason or "").strip().lower()
@@ -164,8 +132,8 @@ def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = 
     for marker, reason_class in _REASON_CLASS_MARKERS:
         if marker in text:
             return reason_class
-    # The active finder's own verdict is prefixed by the gate and carries an
-    # arbitrary tail, so it is matched last and by prefix.
+    # The active finder's own verdict is prefixed by the gate and carries an arbitrary tail, so it is matched last and
+    # by prefix.
     if text.startswith("source:"):
         return CLASS_NOT_REWRITABLE_VERDICT
     return CLASS_UNKNOWN
@@ -190,26 +158,7 @@ def make_entry(
     previous_method: str = "",
     reason_class: str = "",
 ) -> dict[str, Any]:
-    """Build one resolution entry with every required key present.
-
-    Args:
-        kernel_id: Stable-within-run candidate id (``k001``).
-        name: Kernel symbol as the profiler reported it.
-        gpu_pct: Share of GPU time, used to rank what is worth resolving.
-        source_file: Resolved path, or ``""`` when unresolved.
-        source_line: 1-based line when the tier produced one.
-        source_function: Enclosing function when the tier produced one.
-        method: One of :data:`KNOWN_METHODS`.
-        confidence: 0..1 when the tier reports one; ``None`` for deterministic
-            tiers, which are either right or silent.
-        reason: Human-readable note -- why this path, or why none.
-        rejected_value: Placeholder that was zeroed, kept for audit.
-        previous_source_file: Location replaced by a model review.
-        previous_method: Resolution tier replaced by a model review.
-
-    Returns:
-        The entry dict.
-    """
+    """Build one resolution entry with every required key present."""
     if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
         safe_gpu_pct = 0.0
     else:
@@ -225,8 +174,8 @@ def make_entry(
         "confidence": confidence,
         "reason": str(reason or ""),
         "rejected_value": str(rejected_value or ""),
-        # Derived from the caller's verdict when not supplied, so an entry is
-        # never written without a class a consumer can act on.
+        # Derived from the caller's verdict when not supplied, so an entry is never written without a class a consumer
+        # can act on.
         "reason_class": str(reason_class or "")
         or classify_skip_reason(
             reusable=bool(source_file),
@@ -241,20 +190,7 @@ def make_entry(
 
 
 def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Count located kernels and group the rest by why they are undispatchable.
-
-    A bare located/total count cannot say whether the unlocated kernels were
-    worth chasing, so this also reports the GPU share behind them and splits it
-    into what a search could still rescue and what nothing can.
-
-    Args:
-        entries: Source-resolution entries, as written to the artifact.
-
-    Returns:
-        ``total`` / ``located`` counts, per-class counts, the GPU share behind
-        undispatchable kernels, and its ``recoverable`` / ``unsalvageable``
-        split.
-    """
+    """Count located kernels and group the rest by why they are undispatchable."""
     by_class: dict[str, int] = {}
     located = 0
     undispatchable_gpu_pct = 0.0
@@ -302,11 +238,7 @@ def make_document(
 
 
 def validate_document(doc: Any) -> list[str]:
-    """Return a list of contract violations; empty means the document is valid.
-
-    Reports every problem rather than raising on the first, so a producer test
-    failure names all of them at once.
-    """
+    """Return a list of contract violations; empty means the document is valid."""
     problems: list[str] = []
     if not isinstance(doc, dict):
         return [f"document is {type(doc).__name__}, expected dict"]
@@ -388,30 +320,12 @@ def split_line_suffix(path: str) -> tuple[str, int | None, str]:
 
 
 def strip_line_suffix(path: str) -> str:
-    """Return the bare file path from a possibly line-annotated one.
-
-    ``/repo/moe.py(247): _grouped_gemm`` -> ``/repo/moe.py``. Measured on a real
-    session, 29 of 36 resolved entries carried this suffix, so an existence
-    check that skips this step rejects paths that are perfectly real.
-    """
+    """Return the bare file path from a possibly line-annotated one."""
     return split_line_suffix(path)[0]
 
 
 def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
-    """Return the validated canonical target for ``path``, or ``""``.
-
-    The file must exist on this host **and** sit under a known framework root.
-
-    Requiring existence is the point. "Under a root" alone is trivially
-    satisfiable by a plausible-looking invention -- a model can emit
-    ``<root>/python/sglang/srt/layers/attention/does_not_exist.py`` and pass a
-    root-prefix check, which would hand the backend a fabricated file and
-    reintroduce exactly the wrong-source failure this pipeline exists to
-    prevent. A deterministic tier may legitimately resolve to a path that is
-    absent here (the analysis host often lacks the serving container's
-    filesystem), and such a path is kept with a ``source_file_missing_on_disk``
-    breadcrumb -- but that latitude is not extended to a generated rewrite.
-    """
+    """Return the validated canonical target for ``path``, or ``\"\"``."""
     text = strip_line_suffix(path)
     if not text or not os.path.isfile(text):
         return ""

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for aiperf export -> InferenceX-schema mapping.
-
-The mapping must emit exactly the keys Magpie's
-``ResultParser.parse_inferencex_result`` reads, from the aiperf
-``profile_export_aiperf.json`` metric shape (each metric is a dict with at
-least ``avg``; latency metrics also carry ``p50``/``p99``/``std``).
-"""
+"""Tests for aiperf export -> InferenceX-schema mapping."""
 
 from __future__ import annotations
 
@@ -35,11 +29,9 @@ def _sample():
         "benchmark_duration": {"unit": "s", "avg": 14.0},
         "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
         "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
-        # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster).
-        # The slow-tail interactivity is P10 of this metric (slowest-decile users).
+        # e2e_output_token_throughput is OSL/E2EL_s per request (larger = faster); the slow tail is its P10.
         "e2e_output_token_throughput": _metric(209.9, p10=22.6, p50=55.0, p90=447.2, p99=2028.5),
-        # 1/ITL, deliberately far from the e2e figure so reading the wrong axis
-        # cannot pass.
+        # 1/ITL, deliberately far from the e2e figure so reading the wrong axis cannot pass.
         "output_token_throughput_per_user": _metric(686.1, p50=84.1, p90=1092.6),
         "request_latency": _metric(900.0, p50=850.0, p99=1500.0, std=120.0),
         "theoretical_prefix_cache_hit": {"unit": "%", "avg": 0.73},
@@ -103,21 +95,14 @@ def test_map_total_tput_fallback_from_in_plus_out():
 
 
 def test_e2e_norm_intvty_p90_reads_p10_slow_tail():
-    """e2e_norm_intvty_p90 must read P10 (slow tail), not P90 (fast tail).
-
-    P10 of per-request OSL/E2EL_s = 1/P90(E2EL/OSL) — the slow-tail definition
-    used by InferenceX (MODELS.md:78).  P90 of the per-request rate is the fastest
-    decile; using it would optimise the wrong end of the distribution.
-    """
-    import pytest
-
+    """Must read P10 (slow tail) not P90: P10 of OSL/E2EL_s is 1/P90(E2EL/OSL), upstream's definition."""
     s = _sample()
     r = map_aiperf(s)
     assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)  # p10, not p90=447.2
 
 
 def test_e2e_norm_intvty_p90_is_zero_when_export_has_no_p10():
-    """An export where e2e_output_token_throughput carries no p10 must emit 0.0."""
+    """An export where e2e_output_token_throughput carries no p10 must emit 0.0, not the mean."""
     s = _sample()
     s["e2e_output_token_throughput"] = {"unit": "tok/s", "avg": 209.9}
     r = map_aiperf(s)
@@ -137,13 +122,7 @@ def test_map_missing_metric_defaults_zero():
 
 
 def test_noncanonical_reasons_force_the_verdict_false():
-    """The client sees deviations the scenario cannot.
-
-    aiperf has no concept of corpus size, and it stamps a False verdict only
-    when ``--unsafe-override`` actually suppressed a violation -- so a shrunken
-    corpus, or the override forced at the canonical duration, would come back
-    ``submission_valid=True`` on a workload nothing on the leaderboard ran.
-    """
+    """The client sees deviations the scenario cannot."""
     export = {"output_token_throughput": {"avg": 10.0}, "metadata": {"submission_valid": True}}
     r = map_aiperf(export, noncanonical_reasons=["entries=50(canonical 393)"])
     assert r["submission_valid"] is False
@@ -170,8 +149,7 @@ def test_empty_noncanonical_reasons_leave_the_verdict_alone():
 
 
 def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
-    """The fallback runs on boxes where the package is not importable, i.e.
-    exactly where a silent divergence would go unnoticed."""
+    """The fallback runs on boxes where the package is not importable, i.e."""
     import importlib.util
     import sys
 
@@ -190,16 +168,15 @@ def test_vendored_asset_fallback_honours_noncanonical_reasons(monkeypatch):
 
 
 def test_vendored_asset_fallback_matches_package(monkeypatch):
-    """The deployed asset vendors a fallback map_aiperf for when the package is
-    not importable; guard it against drifting from the package implementation."""
+    """The deployed asset vendors a fallback map_aiperf for when the package is not importable; guard it against drifting from the package implementation."""
     import importlib.util
     import sys
 
     from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
 
     asset = agentx_asset_dir() / "map_aiperf.py"
-    # Force the asset's `from ...mapping import map_aiperf` to raise so the
-    # vendored fallback branch is the one exercised.
+    # Force the asset's `from ...mapping import map_aiperf` to raise so the vendored fallback branch is the one
+    # exercised.
     monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
     spec = importlib.util.spec_from_file_location("_asset_map_aiperf", str(asset))
     mod = importlib.util.module_from_spec(spec)

@@ -1,36 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""InferenceX-style concurrency sweep comparison chart.
-
-Renders a throughput-vs-interactivity curve for baseline vs optimised arms
-produced by :mod:`conc_sweep`.  The function is **best-effort**: any import
-failure (missing ``matplotlib``) or data / IO error is logged and ``None``
-is returned so callers can skip the chart without aborting the report.
-
-Axes follow the metric the payload's ``summary`` was graded on, so the chart
-shows the ranking the session was actually scored by -- read off the record
-rather than re-derived, because the grading rule consults the environment of
-the process that ran the sweep.
-
-Total token throughput — the pair InferenceX ranks a submission by:
-  x = e2e_norm_intvty_p90            (p90 slow-tail interactivity, tok/s/user)
-  y = total_token_throughput / tp    (tok/s per chip)
-
-Output throughput — no aiperf export, so interactivity is approximated from
-concurrency:
-  x = output_throughput / conc       (tok/s per user)
-  y = output_throughput / tp         (tok/s per GPU)
-
-``benchmark_mode`` stays a separate question: it says whether the workload was
-an agentic replay, which decides whether the session's ISL/OSL are real and so
-whether the roofline can be drawn at all.
-
-Rendered on a black background for a high-contrast dashboard look. Colours:
-  baseline  — red        ``#FF4C4C``
-  optimized — orange     ``#FF8C00``
-  ceiling   — grey       ``#888888`` dashed (off by default)
-"""
+"""InferenceX-style concurrency sweep comparison chart."""
 
 from __future__ import annotations
 
@@ -80,13 +51,7 @@ class _Axes:
 
 
 def _graded_metric_of(data: Mapping[str, Any]) -> str:
-    """The axis this sweep was graded on, as the sweep recorded it.
-
-    Read rather than re-derived: the grading rule consults the environment,
-    which describes the process that ran the sweep, not the one drawing the
-    chart. A summary that names no metric was taken on
-    ``conc_pair_comparison``'s default.
-    """
+    """The axis this sweep was graded on, as the sweep recorded it."""
     return str((data.get("summary") or {}).get("metric") or "").strip() or GRADED_OUTPUT
 
 
@@ -116,27 +81,7 @@ def render_conc_sweep_curve(
     osl: int = 0,
     draw_ceiling: bool = False,
 ) -> Path | None:
-    """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``.
-
-    Rendered on a dark (black) background for a high-contrast dashboard look.
-
-    Args:
-        payload: Either the already-parsed payload dict, or a file path to the
-            ``conc_sweep_summary.json`` to load.
-        out_path: Destination PNG path.
-        model_label: Model name shown in the chart title.
-        gpu_label: GPU label shown in the chart title.
-        tp: Tensor-parallel size used to normalise y-axis to tok/s/GPU.
-            When 0 the raw output_throughput is used (tp treated as 1).
-        isl: Input sequence length (informational, shown in title).
-        osl: Output sequence length (informational, shown in title).
-        draw_ceiling: When ``True`` and ``roofline_ceiling`` data is present,
-            draw a dashed theoretical peak line. Off by default.
-
-    Returns:
-        The resolved ``Path`` of the written PNG, or ``None`` on any failure
-        (missing matplotlib, bad data, IO error).
-    """
+    """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``."""
     try:
         return _render(
             payload=payload,
@@ -165,17 +110,7 @@ def _arm_series(
     tp_eff: float,
     axes: _Axes,
 ) -> tuple[list[float], list[float]]:
-    """Extract one arm's (x, y) series on *axes*, sorted ascending by x.
-
-    Args:
-        points: Conc-sweep point dicts.
-        tp_eff: Effective TP size for y-axis normalisation (must be >= 1).
-        axes: The pair to read.
-
-    Returns:
-        ``(xs, ys)``. A point missing either axis is dropped rather than
-        plotted at zero.
-    """
+    """Extract one arm's (x, y) series on *axes*, sorted ascending by x."""
     pairs: list[tuple[float, float]] = []
     for pt in points:
         xy = axes.point_xy(pt, tp_eff)
@@ -191,16 +126,7 @@ def _ceiling_series(
     ceiling_data: dict[str, Any],
     tp_eff: float,
 ) -> tuple[list[float], list[float]]:
-    """Extract ceiling (x, y) from ``roofline_ceiling`` payload rows.
-
-    Args:
-        ceiling_data: The ``roofline_ceiling`` sub-dict from the payload.
-        tp_eff: Effective TP size for y-axis normalisation.
-
-    Returns:
-        ``(xs, ys)`` for the theoretical peak line, sorted ascending by x.
-        Returns ``([], [])`` when data is missing or malformed.
-    """
+    """Extract ceiling (x, y) from ``roofline_ceiling`` payload rows."""
     rows = ceiling_data.get("rows") or []
     pairs: list[tuple[float, float]] = []
     for row in rows:
@@ -242,9 +168,8 @@ def _render(
 
     data = _load_payload(payload)
     tp_eff = float(max(tp, 1))
-    # Two independent facts the payload records separately: the axis the sweep
-    # was graded on, which an operator can pin against the workload's default,
-    # and whether the workload was an agentic replay at all.
+    # Two independent facts the payload records separately: the axis the sweep was graded on, which an operator can
+    # pin against the workload's default, and whether the workload was an agentic replay at all.
     metric = _graded_metric_of(data)
     agentic = is_agentx_mode(data.get("benchmark_mode"))
     axes = _axes_for_metric(metric, tp_eff)
@@ -272,10 +197,8 @@ def _render(
     fig.patch.set_facecolor(bg)
     ax.set_facecolor(bg)
 
-    # The roofline is a decode-only output_throughput bound computed from the
-    # session's ISL/OSL, and ``_ceiling_series`` returns it in that axis pair's
-    # units. It needs both: a workload whose ISL/OSL are real, and a chart whose
-    # y axis is the throughput the bound is on.
+    # The roofline is a decode-only output_throughput bound computed from the session's ISL/OSL, and
+    # ``_ceiling_series`` returns it in that axis pair's units.
     if draw_ceiling and not agentic and metric == GRADED_OUTPUT:
         ceiling_data = data.get("roofline_ceiling") or {}
         cx, cy = _ceiling_series(ceiling_data, tp_eff)
@@ -314,9 +237,8 @@ def _render(
     title_parts = [model_label or "Model"]
     if gpu_label:
         title_parts.append(gpu_label)
-    # An agentic replay takes its request shapes from the trace corpus, so the
-    # session's ISL/OSL are inert placeholders and naming them would misreport
-    # what was measured.
+    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
+    # placeholders and naming them would misreport what was measured.
     if agentic:
         title_parts.append("Agentic")
     elif isl or osl:

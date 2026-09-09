@@ -145,7 +145,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 
 
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the allowlisted source trees other than ``base``.
+    """Return the configured source trees other than ``base``.
 
     Grounding falls back to these when the worktree base does not hold a
     patch's targets, which is the normal case for a specialist that patches a
@@ -162,7 +162,7 @@ def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path,
         base: The checkout the specialist worktree branched off, if any.
 
     Returns:
-        The remaining roots that exist, in allowlist order.
+        The remaining roots that exist, in discovery order.
     """
     base_resolved = base.resolve() if base else None
     out: list[Path] = []
@@ -587,7 +587,9 @@ class SpecialistRunner:
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
+                session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
+                worktree_base=str(worktree_base or ""),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -1391,21 +1393,11 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
+        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
             explicit_root=explicit_root,
-        )
-        # A set dropped for targets no tree holds is a distinct outcome from
-        # "the specialist wrote none", and the next round has to be told which.
-        all_dropped_by_grounding = bool(
-            deduped
-            and not kept
-            and all(
-                d.get("verdict") in (_patch_safety.GROUND_MISSING_TARGET, _patch_safety.GROUND_AMBIGUOUS_ROOT)
-                for d in dropped
-            )
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
@@ -1414,7 +1406,7 @@ class SpecialistRunner:
         forbidden_fields = _patch_safety.strip_forbidden_proposal_fields(done_payload)
         safety = _patch_safety.PatchSafetyReport(
             kept_patches=kept,
-            dropped=dropped,
+            ungrounded=ungrounded,
             grounding=grounding,
             numeric_warnings=numeric_warnings,
             forbidden_fields=forbidden_fields,
@@ -1423,8 +1415,8 @@ class SpecialistRunner:
         done_payload["patch_grounding"] = grounding
         if collected_roots:
             done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
-        if all_dropped_by_grounding:
-            done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
+        if ungrounded:
+            done_payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
         if spans_roots:
             done_payload["patches_span_multiple_roots"] = True
         if not kept:

@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Guards for how the pre-release gate releases its runner and its GPUs.
-
-The gate owns the only self-hosted baremetal runner, so a run that will not finish
-blocks every later run: while the concurrency group is held, GitHub keeps the newer run
-at run-level ``pending`` with an EMPTY jobs array, so it has no job with which to
-reclaim anything. Two consequences are pinned here.
-
-A ``preempt`` job on a GitHub-hosted runner used to claim the reclaiming role. It could
-never work -- created too late to matter, and unable to reach ``SAFE_API_BASE``, which
-is an in-network NodePort: every observed run logged ``[preempt] could not list
-workloads; skipping reclaim`` after a 30s curl timeout, having stopped nothing. Nothing
-that talks to SaFE may run on a GitHub-hosted runner again.
-
-Teardown instead relies on the old run leaving promptly when superseded: the poll
-sleeps in short slices so a cancel lands in seconds instead of at the end of a full
-poll interval. After the gate is lost it keeps polling until every leg reports.
-
-There is no way to unit-test the scheduling itself short of running the workflow; these
-tests pin the invariants it depends on.
-"""
+"""Guards for how the pre-release gate releases its runner and its GPUs."""
 
 from __future__ import annotations
 
@@ -369,10 +350,8 @@ def test_the_env_file_does_not_claim_to_stay_off_nfs(dispatch_script: str, boots
         assert "only to pod-local" not in script
 
 
-# ---- trigger classification: what a PR costs in GPU hours ----
-# pyproject.toml must stay in on.pull_request.paths, or a PR that only bumps the version
-# would never start the workflow. So the scope decision cannot infer "not a version bump,
-# therefore CI logic changed" -- a dependency edit satisfies the path filter too.
+# ---- trigger classification: what a PR costs in GPU hours ---- pyproject.toml must stay in on.pull_request.paths, or
+# a PR that only bumps the version would never start the workflow.
 
 _PYPROJECT = '[project]\nname = "x"\nversion = "{version}"\ndependencies = [{deps}]\n'
 _CI_PATHS = (
@@ -517,11 +496,7 @@ def test_an_unreachable_api_is_not_mistaken_for_a_missing_phase(poll_script: str
 
 
 def test_nothing_is_dispatched_before_the_staged_artifacts_are_checked(workflow: dict) -> None:
-    """`reuse` skips the build job, so the wheel/bootstrap/prompts may not be there at all.
-
-    In-pod the wheel check sits behind an apt and an npm install, and a failed leg's pod
-    (with its stdout) is deleted, so the whole set fails slowly and says nothing useful.
-    """
+    """`reuse` skips the build job, so the wheel/bootstrap/prompts may not be there at all."""
     steps = workflow["jobs"]["run"]["steps"]
     names = [s.get("name") or s.get("uses") or "" for s in steps]
     verify = next(i for i, n in enumerate(names) if n.startswith("Verify the staged"))
@@ -544,8 +519,8 @@ def test_a_manual_run_still_gets_per_leg_checks(workflow: dict, poll_script: str
     sha = workflow["jobs"]["run"]["env"]["GH_STATUS_SHA"]
     assert "github.event.pull_request.head.sha" in sha
     assert "github.sha" in sha, "workflow_dispatch has no pull_request object"
-    # The gates that a missing SHA short-circuits, including the report's PR lookup that
-    # only becomes reachable once the SHA is populated.
+    # The gates that a missing SHA short-circuits, including the report's PR lookup that only becomes reachable once
+    # the SHA is populated.
     assert "gh_status_on || return 0" in poll_script
     assert "statuses/${GH_STATUS_SHA}" in poll_script
     assert "commits/${GH_STATUS_SHA}/pulls" in poll_script
@@ -558,8 +533,7 @@ def test_the_gpu_assignment_is_the_leg_order_not_a_second_copy_of_it(
     for script in (dispatch_script, bootstrap_script):
         assert "DOCKER_GPU_MAP" not in script
         assert "gpu_map" not in script
-    # Both sides number the same ordered list: dispatch for its summary, the host for the
-    # binding. Same list, same counting, so they cannot drift apart.
+    # Both sides number the same ordered list: dispatch for its summary, the host for the binding.
     assert "docker_leg_gpu_index() {" in dispatch_script
     assert "local pids=() leg idx=-1 backend hours model_path" in bootstrap_script
     assert "idx=$(( idx + 1 ))" in bootstrap_script
@@ -575,11 +549,8 @@ def test_the_poll_gives_up_on_a_total_api_outage(poll_script: str) -> None:
     assert "api_fail_streak=0" in poll_script
 
 
-# ---- reusing a CI_VERSION must not let the previous run's artifacts pass the gate ----
-# A reused CI_VERSION (workflow_dispatch reuse_ci_version, or a job re-run) puts this run
-# on the paths a finished run already wrote. Verdicts are recorded once and never revisited
-# and the loop breaks as soon as nothing is pending, so a single stale read on the first
-# tick is enough to declare the whole gate PASS before a pod has booted.
+# ---- reusing a CI_VERSION must not let the previous run's artifacts pass the gate ---- A reused CI_VERSION
+# (workflow_dispatch reuse_ci_version, or a job re-run) puts this run on the paths a finished run already wrote.
 
 
 def _leg_session_dir(poll_script: str, runs_dir: Path, leg: str, run_tag: str) -> str:
@@ -762,8 +733,7 @@ def test_pod_timeout_covers_the_whole_bootstrap_budget(
 ) -> None:
     """Setup is a separate budget; leaving it out of the pod cap gets legs killed mid-wait."""
     setup_s = _shell_default(bootstrap_script, "LEG_SETUP_DEADLINE_S")
-    # The workflow env wins over the script default, so the effective value is the one
-    # the ladder has to hold for.
+    # The workflow env wins over the script default, so the effective value is the one the ladder has to hold for.
     global_s = int(workflow["jobs"]["run"]["env"]["GLOBAL_TIMEOUT_S"])
     assert global_s == _shell_default(poll_script, "GLOBAL_TIMEOUT_S")
     assert global_s < int(workflow["jobs"]["run"]["timeout-minutes"]) * 60

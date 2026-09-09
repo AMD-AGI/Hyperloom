@@ -210,13 +210,7 @@ def test_context_window_known_and_unknown(monkeypatch):
 
 
 def test_default_orchestration_model_has_an_explicit_window(monkeypatch):
-    """The default model must be listed, not merely coincide with the fallback.
-
-    ``claude-opus-5`` shares the 200k value with
-    ``DEFAULT_MODEL_CONTEXT_WINDOW``, so asserting the number alone would pass
-    even with the entry deleted. Pin membership and re-read under a different
-    fallback so a dropped entry actually fails.
-    """
+    """The default model must be listed, not merely coincide with the fallback."""
     from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
 
     assert DEFAULT_CLAUDE_MODEL in om.MODEL_CONTEXT_WINDOWS
@@ -227,8 +221,8 @@ def test_default_orchestration_model_has_an_explicit_window(monkeypatch):
 
 
 def test_context_window_matches_gateway_model_spelling(monkeypatch):
-    # Gateways report the same model as "Claude-Opus-4.8"; an exact-match lookup
-    # missed every one of those and silently used the fallback window.
+    # Gateways report the same model as "Claude-Opus-4.8"; an exact-match lookup missed every one of those and
+    # silently used the fallback window.
     monkeypatch.setattr(om, "DEFAULT_MODEL_CONTEXT_WINDOW", 1)
     monkeypatch.setitem(om.MODEL_CONTEXT_WINDOWS, "unit-opus-4-8", 500_000)
     for spelling in ("Unit-Opus-4.8", "unit_opus_4_8", "  UNIT-OPUS-4-8  "):
@@ -459,10 +453,9 @@ def test_parse_checkpoint_reply_no_json_has_empty_directive():
 
 # ---- compaction-storm regression ----
 
-# Per-tick input-side totals (input + cache_read + cache_creation) reported by
-# the orchestration backend across the 32 ticks of session
-# vllm/Qwen3-30B-A3B/20260731T083332Z; 20 of them exceed the 200,000-token
-# window itself, so the figure sums one call's internal turns.
+# Per-tick input-side totals (input + cache_read + cache_creation) reported by the orchestration backend across the 32
+# ticks of session vllm/Qwen3-30B-A3B/20260731T083332Z; 20 of them exceed the 200,000-token window itself, so the
+# figure sums one call's internal turns.
 _QWEN30B_PER_TICK_CALL_TOTALS = [
     189428,
     145812,
@@ -545,15 +538,7 @@ def test_call_cumulative_usage_is_never_read_as_a_water_level():
 
 
 def test_a_provider_reported_window_replaces_the_table_default():
-    """Prefer the window the provider states for the model actually running.
-
-    MODEL_CONTEXT_WINDOWS lists the Claude models this project pins to 200k, and
-    anything else falls back to the same conservative default. Codex states its
-    own window per turn -- 258400 for the model in use -- and compacting at 70%
-    of 200k instead of 70% of that fires a fifth of the way early. Compaction
-    resets the conversation, so an early one costs exactly what holding the
-    conversation was for.
-    """
+    """Prefer the window the provider states for the model actually running."""
     policy = om.CheckpointPolicy(context_token_soft=int(200_000 * 0.70))
 
     policy.adopt_context_window(258_400, 0.70)

@@ -63,9 +63,7 @@ def _matched_state(*, tier: str = "exact", **overrides) -> dict:
     return state
 
 
-# ---------------------------------------------------------------------------
 # warm_start
-# ---------------------------------------------------------------------------
 
 
 def test_warm_start_absent_emits_no_event():
@@ -202,9 +200,7 @@ def test_warm_start_reads_absent_when_no_audit(tmp_path: Path):
     assert "reads" not in warm_start["ext"]
 
 
-# ---------------------------------------------------------------------------
 # warm_replay
-# ---------------------------------------------------------------------------
 
 
 def test_warm_replay_absent_emits_no_event():
@@ -408,9 +404,7 @@ def test_warm_replay_reproduced_without_params_is_named():
     assert event["ext"]["result_type"] == "reproduced_without_params"
 
 
-# ---------------------------------------------------------------------------
 # kb_write_back
-# ---------------------------------------------------------------------------
 
 
 def test_kb_write_back_absent_emits_no_event(tmp_path: Path):
@@ -469,8 +463,8 @@ def test_kb_write_back_counts_the_local_queue_depth(tmp_path: Path):
         ("disabled", "KB_STORE_URL/TOKEN not configured", "skipped", "kb_disabled"),
         ("skipped", "agentx", "skipped", "agentx_blocked"),
         ("failed", "configuration:KeyError", "failed", "configuration_failed"),
-        # ``agentx`` is a substring of the class name but must not shadow the
-        # more specific ``configuration:`` / ``RemoteRecipeValidationError`` rules.
+        # ``agentx`` is a substring of the class name but must not shadow the more specific ``configuration:`` /
+        # ``RemoteRecipeValidationError`` rules.
         ("failed", "configuration:AgentXConfigError", "failed", "configuration_failed"),
         ("failed", "RemoteRecipeValidationError: agentx path", "failed", "bundle_build_failed"),
         ("failed", "RemoteRecipeValidationError", "failed", "bundle_build_failed"),
@@ -511,9 +505,7 @@ def test_kb_write_back_pending_marker_is_not_reported_as_written(tmp_path: Path)
     assert collect_kb_write_back_event(tmp_path, state, [])["status"] == "failed"
 
 
-# ---------------------------------------------------------------------------
 # timeline integration
-# ---------------------------------------------------------------------------
 
 
 def test_kb_events_join_the_timeline_in_execution_order(tmp_path: Path):

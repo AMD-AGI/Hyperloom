@@ -25,17 +25,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-# NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only. The
-# infera (SSH) backend runs this script with ``--local`` on each GPU pod where
-# ray is not installed, so a top-level ``import ray`` would crash --local before
-# it can run. The ray fan-out path imports it on demand.
+# NOTE: ``ray`` is imported lazily inside ``_fanout_to_all_nodes`` only.
 
 
-# Pod-side subset check: scheduler_profiler_mixin.py + io_struct.py only, and a
-# pod counts as patched iff ALL markers are present. Intentionally weaker than
-# _server_patcher._discover_sglang_plan, which uses a different mixin marker
-# tuple and also requires kernel_shape_profiler.py, scheduler.py and
-# http_server.py sentinels — a pod skipped here may still be partially patched.
+# Pod-side subset check: scheduler_profiler_mixin.py + io_struct.py only, and a pod counts as patched iff ALL markers
+# are present.
 _SENTINEL_RELPATH = "python/sglang/srt/managers/scheduler_profiler_mixin.py"
 _SENTINEL_MARKERS: tuple[str, ...] = (
     "shape_discovery",
@@ -61,26 +55,14 @@ _GIT_TIMEOUT_SEC = 30
 
 
 def _log(msg: str) -> None:
-    """Stderr-only timestamped log line (stdout is reserved for the final JSON).
-
-    Args:
-        msg: The message text to emit.
-    """
+    """Stderr-only timestamped log line (stdout is reserved for the final JSON)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[tracelens_patch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _versioned_patches_subdir_name(version: str) -> str | None:
-    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes).
-
-    Args:
-        version: The sglang version string to convert.
-
-    Returns:
-        str | None: The versioned subdir name, or ``None`` if ``version`` is
-        empty or not a dotted numeric form.
-    """
+    """``0.5.11`` -> ``sglang_0_5_11`` (tolerates ``-rc1`` / ``+local`` suffixes)."""
     text = (version or "").strip()
     if not text:
         return None
@@ -92,16 +74,7 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
 
 
 def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None:
-    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised.
-
-    Args:
-        sglang_module_path: A path anchored in the sglang install (module
-            file, submodule file, or namespace dir).
-
-    Returns:
-        tuple[Path, int] | None: The ``(apply_root, strip_level)`` pair, or
-        ``None`` if the layout is not recognised.
-    """
+    """Decide ``(apply_root, -p<N> strip)`` from any sglang anchor (wheel/editable/namespace-dir layouts); ``None`` if unrecognised."""
     resolved = sglang_module_path.resolve()
     # Pass 1: walk up to the ``sglang/`` package dir (the one with a ``srt/`` subdir).
     pkg_dir: Path | None = None
@@ -131,16 +104,7 @@ def _resolve_sglang_install(sglang_module_path: Path) -> tuple[Path, int] | None
 
 
 def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
-    """Check whether a file contains every marker substring.
-
-    Args:
-        path (Path): File to inspect.
-        markers (tuple[str, ...]): Substrings that must all be present.
-
-    Returns:
-        bool: ``True`` iff ``path`` is readable and contains every marker;
-        ``False`` otherwise (including when the file cannot be read).
-    """
+    """Check whether a file contains every marker substring."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -149,11 +113,7 @@ def _all_markers_present(path: Path, markers: tuple[str, ...]) -> bool:
 
 
 def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
-    """Prepend a ``safe.directory`` exception for the checkout at ``cwd``.
-
-    The pod copy of this script is heredoc'd in and run by a bare ``python3``,
-    so the import is lazy and optional: without hyperloom the plain argv stands.
-    """
+    """Prepend a ``safe.directory`` exception for the checkout at ``cwd``."""
     try:
         from hyperloom.common.git_safety import safe_directory_args  # noqa: PLC0415 - standalone import-light
     except ImportError:
@@ -162,15 +122,7 @@ def _safe_directory_args(args: tuple[str, ...], cwd: Path) -> list[str]:
 
 
 def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
-    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit).
-
-    Args:
-        args: The git subcommand and arguments (without the leading ``git``).
-        cwd: Working directory to run git in.
-
-    Returns:
-        tuple[int, str, str]: The ``(returncode, stdout, stderr)`` triple.
-    """
+    """Run ``git <args>``; return ``(rc, stdout, stderr)`` (never raises on non-zero exit)."""
     proc = subprocess.run(  # noqa: S603
         ["git", *_safe_directory_args(args, cwd)],
         cwd=str(cwd),
@@ -188,19 +140,7 @@ def _apply_on_pod(
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> dict[str, Any]:
-    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``).
-
-    Args:
-        tracelens_root: Path to the public TraceLens checkout on the pod.
-        tracelens_internal_root: Path to the TraceLens-internal checkout
-            (reserved; not consumed by current patch logic).
-        sglang_version_pin: Optional advisory version pin, logged on mismatch.
-
-    Returns:
-        dict[str, Any]: The per-pod summary with ``status`` (``applied``,
-        ``skipped``, or ``failed``), resolved version, applied patches, and
-        elapsed time.
-    """
+    """Apply (or verify) the TraceLens SGLang patch set on this pod; never raises (failures become ``status=failed``)."""
     host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {
@@ -241,8 +181,7 @@ def _apply_on_pod(
         if sglang_version_pin and version and version != sglang_version_pin:
             _log(f"version pin {sglang_version_pin!r} != installed {version!r} — proceeding (pin is advisory)")
 
-        # Install-root anchor: sglang.__file__, else the
-        # scheduler_profiler_mixin file, else sglang.__path__[0].
+        # Install-root anchor: sglang.__file__, else the scheduler_profiler_mixin file, else sglang.__path__[0].
         anchor_path: Path | None = None
         if sglang.__file__:  # editable layout
             anchor_path = Path(sglang.__file__)
@@ -357,14 +296,7 @@ def _fanout_to_all_nodes(
     tracelens_internal_root: str,
     sglang_version_pin: str | None,
 ) -> list[dict[str, Any]]:
-    """Spawn one actor per alive node; collect all summaries.
-
-    ray is imported here (not at module top) so the ``--local`` infera path
-    runs on pods without ray installed.
-
-    Raises:
-        RuntimeError: If ``ray.nodes()`` reports no alive nodes.
-    """
+    """Spawn one actor per alive node; collect all summaries."""
     import ray
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -396,17 +328,7 @@ def _fanout_to_all_nodes(
 
 
 def main() -> int:
-    """Parse CLI arguments, fan out the patch to all pods, and aggregate.
-
-    Validates ``--tracelens-root`` and the presence of ``git``, fans the
-    patcher out to every alive node, then prints an aggregate JSON document
-    (overall status plus per-pod summaries) to stdout.
-
-    Returns:
-        int: ``0`` if every pod was applied or skipped; ``1`` on a per-pod
-        failure; ``2`` for invalid inputs / missing git; ``3`` if the Ray
-        fan-out itself aborted.
-    """
+    """Parse CLI arguments, fan out the patch to all pods, and aggregate."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracelens-root",
@@ -459,9 +381,7 @@ def main() -> int:
         )
         return 2
 
-    # --local: infera SSH backend. Patch only this pod (no ray). The caller
-    # fans this out over SSH to every GPU pod, so the NFS-shared trace dir ends
-    # up annotated the same as the ray path — only the dispatch differs.
+    # --local: infera SSH backend.
     if args.local:
         r = _apply_on_pod(
             tracelens_root=args.tracelens_root,

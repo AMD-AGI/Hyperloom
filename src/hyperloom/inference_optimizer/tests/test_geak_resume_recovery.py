@@ -47,13 +47,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A result written before a coordinator crash must be recovered on resume.
-
-    Recovery records the win as an unvalidated candidate (into ``geak_result`` +
-    ``geak_pending``) and enqueues the main-flow rebench; it does not promote the
-    self-reported value into current_best / the gain ledger. The headline is only
-    written once the rebench validates it.
-    """
+    """A result written before a coordinator crash must be recovered on resume."""
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
     result = {
@@ -120,13 +114,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A new cycle must rerun GEAK, not promote a stale prior-cycle result.
-
-    ``geak/`` is a fixed path, so a prior cycle's ``result.json`` survives into
-    the next KERNEL entry. When state already recorded that win the recovery
-    short-circuit must not fire, else every later cycle silently reuses the first
-    cycle's result.
-    """
+    """A new cycle must rerun GEAK, not promote a stale prior-cycle result."""
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir()
     result = {
@@ -166,8 +154,8 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
 
     await coord._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
 
-    # The recovery short-circuit must not have fired; the normal path resolves
-    # the runner (and here aborts via the injected error).
+    # The recovery short-circuit must not have fired; the normal path resolves the runner (and here aborts via the
+    # injected error).
     assert resolved, "new cycle must re-run GEAK, not reuse stale result.json"
 
 
@@ -176,12 +164,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GEAK must baseline the same engine Hyperloom measured.
-
-    A missing max-model-len or GPU memory-utilization handoff lets GEAK/e2e
-    launch a subtly different vLLM server than the Hyperloom baseline, which
-    turns kernel wins into non-reproducible E2E deltas.
-    """
+    """GEAK must baseline the same engine Hyperloom measured."""
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(

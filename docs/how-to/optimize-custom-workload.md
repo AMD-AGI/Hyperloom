@@ -53,10 +53,9 @@ than at the first benchmark.
 
 `--framework-path` is the **code** checkout, which is not the same thing as the
 weights under `--model`. It does more than tell your script where the code
-lives: it registers the tree as a framework source root, and PolicyGate requires
-that registration before any specialist patch against your code can land. The
-source probe discovers pip-installed packages on its own but never a git
-checkout, which is why this must be explicit.
+lives: it registers the tree as the framework source root a session searches and
+patches. The source probe discovers pip-installed packages on its own but never
+a git checkout, which is why this must be explicit.
 
 The equivalent environment variables resolve in this order:
 `<FRAMEWORK>_REPO_PATH` > `<FRAMEWORK>_DIR` > `FRAMEWORK_REPO_PATH`. Prefer the

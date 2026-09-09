@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The harness is authored in the framework tree and run from the output dir.
-
-Anything the author derived from ``__file__`` therefore points at the wrong
-place by the time the loop scores it, so the runner names the tree outright.
-"""
+"""The harness is authored in the framework tree and run from the output dir."""
 
 from __future__ import annotations
 

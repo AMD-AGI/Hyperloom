@@ -12,11 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
-    is_rocm_hip_writable_path,
     resolve_session_framework_root,
-    resolve_source_file_allowlist,
     resolved_within,
-    source_file_candidates,
 )
 from ..bus.gpu_pool import (
     resolve_gpu_specialist_devices,
@@ -412,7 +409,9 @@ _ROBUSTNESS_ONLY_INTENT_SOURCES: dict[IntentType, frozenset[str]] = {
 }
 
 
-# SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir or a framework source allowlist (checked recursively).
+# SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir
+# (checked recursively). SOURCE_LIKE_FIELDS are exempt -- they name framework
+# source, which lives outside it by construction.
 PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     {
         "trace_input",
@@ -435,12 +434,9 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# `source_file` and `framework_source_root` may point at trusted installed source
-# scopes outside the session directory. Real-path containment prevents escapes.
+# Exempt from path validation: where a patch may land is decided by the
+# integration step that applies it.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
-
-# Payload fields that name files modified by patch/install actions.
-ROCM_WRITE_PATH_FIELDS: frozenset[str] = frozenset({"patch_path", "target_file", "resolved_patch_targets"})
 
 # Coordinator-owned warm replay may deploy a KB patch into the active framework
 # checkout.  The exception is intentionally narrower than SOURCE_LIKE_FIELDS:
@@ -449,39 +445,6 @@ ROCM_WRITE_PATH_FIELDS: frozenset[str] = frozenset({"patch_path", "target_file",
 _WARM_REPLAY_ACTION = "replay_warm_recipe"
 _REMOTE_RECIPE_FILES_PARTS = ("runtime", "remote_recipe", "files")
 _MAX_POLICY_PATCH_BYTES = 4 * 1024 * 1024
-
-# Placeholder/not-found sentinels that upstream lookups (or an LLM restating
-# a miss as prose) can leave in a SOURCE_LIKE_FIELDS value instead of leaving
-# the field empty. Treated as an absent field, not a bogus path: a resolver
-# miss should degrade the delegate gracefully, not deny the whole intent.
-# Includes the vendor-label and TraceLens placeholder forms pinned by
-# reject_non_path_source()'s own test (test_source_resolution_guards.py
-# _SENTINELS) -- those reach here verbatim when a stale/cached candidate
-# still carries a placeholder TraceLens meant to zero at the producer.
-#
-# Not made redundant by tracelens_analysis.reject_non_path_source(): that
-# guard only runs inside _finalize_candidates(), so it only protects
-# source_file values that flowed through the TraceLens candidate pipeline. A
-# delegate request can still carry one of these placeholders some other way
-# (an LLM restating a miss as prose directly into a task field, or a resumed
-# session replaying kernel_candidates.json written before this producer guard
-# existed) and this is the last check before PolicyGate would otherwise deny
-# or admit it as a bogus path.
-_SOURCE_FILE_ABSENT_SENTINELS: frozenset[str] = frozenset(
-    {
-        "not found",
-        "none",
-        "n/a",
-        "null",
-        "unknown",
-        "unresolved",
-        "missing",
-        "tbd",
-        "<unresolved>",
-        "aiter (vendor)",
-        "triton (vendor)",
-    }
-)
 
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
@@ -671,7 +634,7 @@ class PolicyGate:
     """Validate every intent emitted by an agent reactor.
 
     ``strict_paths`` (or ``$INFERENCE_OPTIMIZER_STRICT_PATHS=1``) requires
-    PATH_LIKE_FIELDS to resolve under session_dir / the source-file allowlist.
+    PATH_LIKE_FIELDS to resolve under session_dir.
     """
 
     role_registry: dict[str, "AgentRole"]
@@ -1764,18 +1727,6 @@ class PolicyGate:
             return False
         return v == sd or v.is_relative_to(sd)
 
-    def _path_in_source_allowlist(self, value: str) -> bool:
-        """Return whether a path falls under a trusted installed source scope.
-
-        Args:
-            value (str): the path string to test.
-
-        Returns:
-            bool: True when ``value`` resolves to or under a configured editable
-            source root, active site/dist-packages root, or ROCm source root.
-        """
-        return any(resolved_within(value, p) for p in resolve_source_file_allowlist())
-
     def _path_in_trace_allowlist(self, value: str) -> bool:
         """Match a value against runtime-resolved trace path prefixes (multi-node shared profile dir outside session_dir).
 
@@ -1949,8 +1900,8 @@ class PolicyGate:
                 fields.
 
         Raises:
-            PolicyDenied: when a path-like value escapes session_dir and its
-                applicable allowlists.
+            PolicyDenied: when a path-like value escapes session_dir and the
+                trace allowlist that a trace field may also resolve under.
         """
         if self.session_dir is None or not self.strict_paths:
             return
@@ -1984,42 +1935,9 @@ class PolicyGate:
                 return
             key = path_keys[-1] if path_keys else ""
             if key in SOURCE_LIKE_FIELDS:
-                if node.strip().lower() in _SOURCE_FILE_ABSENT_SENTINELS:
-                    log.info(
-                        "role=%r %s payload field %r=%r is an absent-value "
-                        "sentinel; treating as omitted and admitting the delegate",
-                        role.name,
-                        intent_type.value,
-                        key,
-                        node,
-                    )
-                    return
-                if any(
-                    self._path_in_source_allowlist(c) or self._path_under_session(c)
-                    for c in source_file_candidates(node)
-                ):
-                    return
-                raise PolicyDenied(
-                    f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} is not under session_dir or a trusted "
-                    f"installed source scope from "
-                    f"{list(resolve_source_file_allowlist())!r}",
-                    rule="source_file_outside_trusted_scope",
-                    hint=(
-                        "source_file and framework_source_root must resolve under "
-                        "an active site/dist-packages, configured framework root, "
-                        "or session directory"
-                    ),
-                )
+                return
             if key not in PATH_LIKE_FIELDS:
                 return
-            if key in ROCM_WRITE_PATH_FIELDS and not is_rocm_hip_writable_path(node):
-                raise PolicyDenied(
-                    f"role={role.name!r} {intent_type.value} payload field "
-                    f"{key!r}={node!r} is a ROCm runtime path, not HIP source",
-                    rule="rocm_runtime_write_denied",
-                    hint="ROCm writes are limited to source, header, and CMake files",
-                )
             if not self._path_under_session(node):
                 if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
                     try:
@@ -2276,7 +2194,6 @@ __all__ = [
     "REQUEST_ROUTING",
     "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
-    "ROCM_WRITE_PATH_FIELDS",
     "ROBUSTNESS_ONLY_INTENTS",
     "ROBUSTNESS_ONLY_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",

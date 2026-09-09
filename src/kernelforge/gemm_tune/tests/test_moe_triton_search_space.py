@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the Triton MoE search space.
-
-Two defects are pinned here. The tuner used to pass one fixed eight-entry list
-in both modes, so ``--thorough`` changed nothing at all. And that list stopped
-at ``BLOCK_SIZE_K=128``, while the measured best config at M=32/256/1024 used
-``BK=256`` every time (1.0975x-1.1235x better) -- an axis a fixed list can never
-be wrong about, because it never contains the value.
-"""
+"""Tests for the Triton MoE search space."""
 
 from __future__ import annotations
 
@@ -16,9 +9,7 @@ from kernelforge.gemm_tune.tuners import vllm_moe_triton as mt
 
 
 def test_cap_below_the_seed_count_still_keeps_every_seed(monkeypatch):
-    # Seeds are ordered first so a capped run keeps the configs already measured
-    # to work. Slicing inside that prefix would make --thorough search LESS than
-    # the default does, which is the opposite of what the flag promises.
+    # Seeds are ordered first so a capped run keeps the configs already measured to work.
     monkeypatch.setenv(mt._THOROUGH_CAP_ENV, "2")
     space = mt.build_search_space(True)
     assert space == [dict(c) for c in mt._SEED_CONFIGS]
@@ -68,21 +59,18 @@ class TestBlockSizeK256:
         assert any(c["BLOCK_SIZE_K"] == 256 for c in mt._grid_configs())
 
     def test_thorough_actually_searches_bk256(self):
-        # The measured winners all sat here; a capped thorough run must still
-        # reach it rather than spend the whole budget on BK=64/128.
+        # The measured winners all sat here; a capped thorough run must still reach it rather than spend the whole
+        # budget on BK=64/128.
         assert any(c["BLOCK_SIZE_K"] == 256 for c in mt.build_search_space(True))
 
     def test_the_default_search_reaches_bk256_too(self):
-        # Widening --thorough was not enough on its own: Hyperloom only asks for
-        # thorough at session_max_min >= 1440 and mp >= 4, so almost every
-        # session runs the default list. With the measured winners absent from
-        # it, the axis that decided those measurements stayed unreachable in
-        # practice however wide the thorough grid became.
+        # Widening --thorough was not enough on its own: Hyperloom only asks for thorough at session_max_min >= 1440
+        # and mp >= 4, so almost every session runs the default list.
         assert any(c["BLOCK_SIZE_K"] == 256 for c in mt.build_search_space(False))
 
     def test_the_grid_still_covers_more_than_the_seeded_points(self):
-        # The seeds pin three measured winners; the grid is what finds the next
-        # one, so promoting them must not turn --thorough back into the seeds.
+        # The seeds pin three measured winners; the grid is what finds the next one, so promoting them must not turn
+        # --thorough back into the seeds.
         seeded = {tuple(sorted(c.items())) for c in mt._SEED_CONFIGS}
         grid_only = [c for c in mt.build_search_space(True) if tuple(sorted(c.items())) not in seeded]
         assert len(grid_only) > len(mt._SEED_CONFIGS)
